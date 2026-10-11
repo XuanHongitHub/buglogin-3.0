@@ -1,13 +1,24 @@
-use buglogin_domain::{errors::Problem, identity::SessionRecord};
+use std::collections::HashMap;
+
+use buglogin_domain::{errors::Problem, identity::SessionRecord, ids::AccountId};
 use buglogin_storage::control::{
     ControlAuditEntry, ControlPut, ExecuteControlCommand, HttpResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::control_persistence::ControlPersistence;
 
 const TENANT: &str = "identity";
 const RECORD_TYPE: &str = "session";
+const FAMILY_RECORD_TYPE: &str = "session_family";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionFamilyRecord {
+    account_id: AccountId,
+    revoked_at: Option<u64>,
+}
 
 #[derive(Clone)]
 pub struct SessionPersistence {
@@ -47,7 +58,168 @@ impl SessionPersistence {
     }
 
     pub fn create(&self, record: &SessionRecord) -> Result<u64, Problem> {
-        self.persist(record, 0, "session.issue", "issued")
+        let session_id = session_id(&record.token_hash);
+        let mut puts = vec![ControlPut {
+            tenant_id: TENANT.into(),
+            record_type: RECORD_TYPE.into(),
+            record_id: session_id.clone(),
+            expected_revision: Some(0),
+            value: serde_json::to_value(record).map_err(|_| corrupt())?,
+        }];
+        let family_record_id = record.family_id.as_deref();
+        if let Some(family_id) = family_record_id {
+            if !is_family_id(family_id) {
+                return Err(corrupt());
+            }
+            puts.push(ControlPut {
+                tenant_id: TENANT.into(),
+                record_type: FAMILY_RECORD_TYPE.into(),
+                record_id: family_id.into(),
+                expected_revision: Some(0),
+                value: serde_json::to_value(SessionFamilyRecord {
+                    account_id: record.account_id.clone(),
+                    revoked_at: None,
+                })
+                .map_err(|_| corrupt())?,
+            });
+        }
+        let result = self.store.execute(ExecuteControlCommand {
+            tenant_id: TENANT.into(),
+            command_id: "session.issue".into(),
+            idempotency_key: format!("session.issue-{session_id}"),
+            expected_revisions: Default::default(),
+            puts,
+            deletes: vec![],
+            audit: ControlAuditEntry {
+                tenant_id: TENANT.into(),
+                command_id: "session.issue".into(),
+                actor_id: record.account_id.as_str().into(),
+                allowed: true,
+                detail: json!({ "sessionId": session_id, "state": "issued" }),
+            },
+            response: HttpResponse {
+                status: 200,
+                headers: Default::default(),
+                body: Value::Null,
+            },
+        })?;
+        result
+            .records
+            .iter()
+            .find(|stored| stored.record_type == RECORD_TYPE && stored.record_id == session_id)
+            .map(|stored| stored.revision)
+            .ok_or_else(unavailable)
+    }
+
+    pub fn family_revoked_at(
+        &self,
+        family_id: &str,
+        account_id: &AccountId,
+    ) -> Result<Option<Option<u64>>, Problem> {
+        if !is_family_id(family_id) {
+            return Err(corrupt());
+        }
+        let Some((family, _)) = self.store.load_versioned::<SessionFamilyRecord>(
+            TENANT,
+            FAMILY_RECORD_TYPE,
+            family_id,
+        )?
+        else {
+            // Pre-family records are accepted until a replay creates the revocation record.
+            return Ok(None);
+        };
+        if &family.account_id != account_id {
+            return Err(corrupt());
+        }
+        Ok(Some(family.revoked_at))
+    }
+
+    pub fn family_revocations(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<HashMap<String, u64>, Problem> {
+        let mut revoked = HashMap::new();
+        for (family_id, family, _) in self
+            .store
+            .list_versioned::<SessionFamilyRecord>(TENANT, FAMILY_RECORD_TYPE)?
+        {
+            if &family.account_id != account_id {
+                continue;
+            }
+            if !is_family_id(&family_id) {
+                return Err(corrupt());
+            }
+            if let Some(at) = family.revoked_at {
+                revoked.insert(family_id, at);
+            }
+        }
+        Ok(revoked)
+    }
+
+    pub fn revoke_family(
+        &self,
+        family_id: &str,
+        account_id: &AccountId,
+        now: u64,
+    ) -> Result<(), Problem> {
+        if !is_family_id(family_id) {
+            return Err(corrupt());
+        }
+        let current = self.store.load_versioned::<SessionFamilyRecord>(
+            TENANT,
+            FAMILY_RECORD_TYPE,
+            family_id,
+        )?;
+        let (expected_revision, mut family) = match current {
+            Some((family, revision)) => (revision, family),
+            None => (
+                0,
+                SessionFamilyRecord {
+                    account_id: account_id.clone(),
+                    revoked_at: None,
+                },
+            ),
+        };
+        if &family.account_id != account_id {
+            return Err(corrupt());
+        }
+        if family.revoked_at.is_some() {
+            return Ok(());
+        }
+        family.revoked_at = Some(now);
+        let result = self.store.execute(ExecuteControlCommand {
+            tenant_id: TENANT.into(),
+            command_id: "session.family.revoke".into(),
+            idempotency_key: format!("session.family.revoke-{family_id}-{now}"),
+            expected_revisions: Default::default(),
+            puts: vec![ControlPut {
+                tenant_id: TENANT.into(),
+                record_type: FAMILY_RECORD_TYPE.into(),
+                record_id: family_id.into(),
+                expected_revision: Some(expected_revision),
+                value: serde_json::to_value(&family).map_err(|_| corrupt())?,
+            }],
+            deletes: vec![],
+            audit: ControlAuditEntry {
+                tenant_id: TENANT.into(),
+                command_id: "session.family.revoke".into(),
+                actor_id: account_id.as_str().into(),
+                allowed: true,
+                detail: json!({ "familyId": family_id, "state": "revoked" }),
+            },
+            response: HttpResponse {
+                status: 200,
+                headers: Default::default(),
+                body: Value::Null,
+            },
+        });
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) => match self.family_revoked_at(family_id, account_id)? {
+                Some(Some(_)) => Ok(()),
+                _ => Err(error),
+            },
+        }
     }
 
     pub fn revoke(&self, record: &SessionRecord, expected_revision: u64) -> Result<u64, Problem> {
@@ -174,6 +346,10 @@ fn session_id(hash: &[u8; 32]) -> String {
         let _ = write!(value, "{byte:02x}");
     }
     value
+}
+
+fn is_family_id(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn unavailable() -> Problem {

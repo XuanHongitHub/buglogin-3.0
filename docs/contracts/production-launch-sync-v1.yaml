@@ -64,8 +64,9 @@ endpoints:
     required_header: x-buglogin-actor-id
     response: SyncManifest
     invariants:
-      - current profile and proxy dependency revisions are checked before returning the active manifest
+      - current profile and proxy dependency revisions are checked before returning a non-empty active manifest
       - stale proxy dependencies fail closed with manifest_dependency_stale
+      - the empty generation-one bootstrap manifest is returned before profile data is first synced
 
   - id: profile.manifest.commit
     method: PUT

@@ -2132,7 +2132,12 @@ async fn get_resource_manifest(
     let manifest = state
         .current_sync_manifest(&workspace_id, &resource_id)
         .map_err(response_problem)?;
-    if let Some(manifest) = manifest.as_ref() {
+    if let Some(manifest) = manifest.as_ref().filter(|manifest| {
+        !(manifest.generation == 1
+            && manifest.objects.is_empty()
+            && manifest.tombstones.is_empty()
+            && manifest.dependencies.is_empty())
+    }) {
         validate_profile_proxy_dependencies(
             &state,
             &principal,

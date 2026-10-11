@@ -41,6 +41,7 @@ pub struct SessionSummary {
 #[derive(Default)]
 pub struct AuthService {
     sessions: HashMap<[u8; 32], StoredSession>,
+    revoked_families: HashMap<String, u64>,
     persistence: Option<SessionPersistence>,
     credentials: Option<CredentialService>,
 }
@@ -49,6 +50,7 @@ impl AuthService {
     pub fn persistent(persistence: SessionPersistence) -> Result<Self, Problem> {
         Ok(Self {
             sessions: HashMap::new(),
+            revoked_families: HashMap::new(),
             persistence: Some(persistence),
             credentials: None,
         })
@@ -206,6 +208,19 @@ impl AuthService {
 
         let hash = sha256(raw_token.as_bytes());
         let stored = self.load_stored(&hash)?.ok_or_else(invalid_session)?;
+        if stored.record.revoked_at.is_some() {
+            if let Some(family_id) = stored.record.family_id.as_deref() {
+                match &self.persistence {
+                    Some(persistence) => {
+                        persistence.revoke_family(family_id, &stored.record.account_id, now)?
+                    }
+                    None => {
+                        self.revoked_families.insert(family_id.to_owned(), now);
+                    }
+                }
+            }
+            return Err(session_revoked());
+        }
         self.verify_session(&stored.record, raw_token, now)?;
         let IssuedSession {
             raw_token: replacement,
@@ -218,10 +233,23 @@ impl AuthService {
         let mut revoked_record = stored.record;
         revoked_record.revoked_at = Some(now);
 
-        // ponytail: single-session rotation; add session-family/device binding with its schema.
+        // The store rotates the token pair atomically, preserving the family binding.
         let (revoked_revision, replacement_revision) = match &self.persistence {
             Some(persistence) => {
-                persistence.rotate(&revoked_record, stored.revision, &replacement_record)?
+                match persistence.rotate(&revoked_record, stored.revision, &replacement_record) {
+                    Ok(revisions) => revisions,
+                    Err(error) => {
+                        if let Some((latest, _)) = persistence.get(&hash)?
+                            && latest.revoked_at.is_some()
+                        {
+                            if let Some(family_id) = latest.family_id.as_deref() {
+                                persistence.revoke_family(family_id, &latest.account_id, now)?;
+                            }
+                            return Err(session_revoked());
+                        }
+                        return Err(error);
+                    }
+                }
             }
             None => (stored.revision, 0),
         };
@@ -308,23 +336,35 @@ impl AuthService {
                 .collect(),
             None => self.sessions.values().cloned().collect(),
         };
+        let family_revocations = match &self.persistence {
+            Some(persistence) => persistence.family_revocations(account_id)?,
+            None => self.revoked_families.clone(),
+        };
         let mut sessions: Vec<_> = records
             .into_iter()
             .filter(|stored| &stored.record.account_id == account_id)
-            .map(|stored| SessionSummary {
-                id: hex(&stored.record.token_hash),
-                kind: if stored.record.device_id.is_some() {
-                    SessionKind::Desktop
-                } else if stored.record.csrf_hash.is_some() {
-                    SessionKind::Browser
-                } else {
-                    SessionKind::Api
-                },
-                device_id: stored.record.device_id.clone(),
-                created_at: stored.record.created_at,
-                expires_at: stored.record.expires_at,
-                revoked_at: stored.record.revoked_at,
-                current: current_hash == Some(stored.record.token_hash),
+            .map(|stored| {
+                let family_revoked_at = stored
+                    .record
+                    .family_id
+                    .as_ref()
+                    .and_then(|family_id| family_revocations.get(family_id))
+                    .copied();
+                SessionSummary {
+                    id: hex(&stored.record.token_hash),
+                    kind: if stored.record.device_id.is_some() {
+                        SessionKind::Desktop
+                    } else if stored.record.csrf_hash.is_some() {
+                        SessionKind::Browser
+                    } else {
+                        SessionKind::Api
+                    },
+                    device_id: stored.record.device_id.clone(),
+                    created_at: stored.record.created_at,
+                    expires_at: stored.record.expires_at,
+                    revoked_at: stored.record.revoked_at.or(family_revoked_at),
+                    current: current_hash == Some(stored.record.token_hash),
+                }
             })
             .collect();
         sessions.sort_by_key(|session| (!session.current, std::cmp::Reverse(session.created_at)));
@@ -397,6 +437,18 @@ impl AuthService {
         now: u64,
     ) -> Result<(), Problem> {
         verify(record, raw_token, now)?;
+        if let Some(family_id) = record.family_id.as_deref() {
+            let revoked = match &self.persistence {
+                Some(persistence) => matches!(
+                    persistence.family_revoked_at(family_id, &record.account_id)?,
+                    Some(Some(_))
+                ),
+                None => self.revoked_families.contains_key(family_id),
+            };
+            if revoked {
+                return Err(session_revoked());
+            }
+        }
         let Some(issued_version) = record.credential_version else {
             return Ok(());
         };
@@ -452,6 +504,10 @@ fn session_not_found() -> Problem {
 
 fn invalid_session() -> Problem {
     Problem::new("invalid_session", "Invalid session", 401, "identity")
+}
+
+fn session_revoked() -> Problem {
+    Problem::new("session_revoked", "Session revoked", 401, "identity")
 }
 
 #[cfg(test)]
@@ -532,6 +588,31 @@ mod tests {
             "session_revoked"
         );
         assert_eq!(reopened.authenticate(&replacement, 50).unwrap(), account_id);
+    }
+
+    #[test]
+    fn refresh_token_reuse_revokes_the_persisted_session_family() {
+        let persistence =
+            SessionPersistence::new(ControlPersistence::new(MemoryControlRecordStore::default()));
+        let account_id = AccountId::new("acct_refresh_reuse").unwrap();
+        let mut issuer = AuthService::persistent(persistence.clone()).unwrap();
+        let original = issuer.issue(account_id, 500).unwrap();
+        let replacement = issuer.refresh(&original, 100, 600).unwrap();
+
+        let mut verifier = AuthService::persistent(persistence).unwrap();
+        assert_eq!(
+            verifier.refresh(&original, 150, 700).unwrap_err().code,
+            "session_revoked"
+        );
+        assert_eq!(
+            verifier.authenticate(&replacement, 160).unwrap_err().code,
+            "session_revoked"
+        );
+        let listed = verifier
+            .list_sessions(&AccountId::new("acct_refresh_reuse").unwrap(), None)
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|session| session.revoked_at.is_some()));
     }
 
     #[test]

@@ -81,7 +81,7 @@ pub fn issue_for_device(
             expires_at,
             revoked_at: None,
             device_id,
-            family_id: None,
+            family_id: Some(random_hex()?),
             csrf_hash: None,
             created_at: None,
             last_seen_at: None,
@@ -123,6 +123,10 @@ pub fn refresh(record: &SessionRecord, expires_at: u64) -> Result<IssuedSession,
         expires_at,
         record.device_id.clone(),
     )?;
+    issued.record.family_id = record.family_id.clone();
+    issued.record.csrf_hash = record.csrf_hash;
+    issued.record.created_at = record.created_at;
+    issued.record.last_seen_at = record.last_seen_at;
     issued.record.credential_version = record.credential_version;
     Ok(issued)
 }
@@ -237,6 +241,7 @@ mod tests {
         issued.record.credential_version = Some(4);
         let raw_token = issued.raw_token.clone();
         assert_eq!(issued.record.device_id.as_deref(), Some("device_windows_1"));
+        assert!(issued.record.family_id.is_some());
         let serialized = serde_json::to_string(&issued.record).unwrap();
         assert!(serialized.contains("device_windows_1"));
         assert!(!serialized.contains(&raw_token));
@@ -246,6 +251,7 @@ mod tests {
         assert_eq!(refreshed.record.account_id, issued.record.account_id);
         assert_eq!(refreshed.record.device_id, issued.record.device_id);
         assert_eq!(refreshed.record.credential_version, Some(4));
+        assert_eq!(refreshed.record.family_id, issued.record.family_id);
         assert_ne!(refreshed.raw_token, raw_token);
         assert!(
             !serde_json::to_string(&refreshed.record)
@@ -255,9 +261,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_issue_remains_unbound() {
+    fn issued_session_has_a_family_without_a_device_binding() {
         let issued = issue(account(), 100).unwrap();
         assert_eq!(issued.record.device_id, None);
+        assert!(issued.record.family_id.is_some());
     }
 
     #[test]

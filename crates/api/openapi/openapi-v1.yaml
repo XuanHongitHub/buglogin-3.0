@@ -133,6 +133,7 @@ paths:
   /v1/auth/refresh:
     post:
       operationId: auth.refresh
+      description: Reuse of a rotated bearer token revokes the token family.
       responses:
         "200": { description: Rotated bearer session, content: { application/json: { schema: { $ref: '#/components/schemas/AuthTokenResponse' } } } }
         "401": { $ref: '#/components/responses/Problem' }
