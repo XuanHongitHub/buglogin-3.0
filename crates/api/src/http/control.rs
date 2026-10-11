@@ -33,6 +33,7 @@ use buglogin_storage::control::{
 };
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationScope},
+    crypto::{AuthenticatedChunk, WorkspaceKeyEnvelope},
     manifest::{ManifestDependency, SyncManifest},
 };
 use serde::{Deserialize, Serialize};
@@ -2194,6 +2195,7 @@ async fn commit_resource_manifest(
         ))
         .into());
     }
+    let envelope_ref = validate_payload_encryption_contract(&manifest, &correlation(&headers))?;
     let auth = CoordinationAuth::new(owner_id, bearer_token(&headers).to_owned())
         .map_err(response_problem)?;
     for object in &manifest.objects {
@@ -2216,6 +2218,16 @@ async fn commit_resource_manifest(
                 correlation(&headers),
             ))
             .into());
+        }
+        if let Some(envelope_ref) = envelope_ref {
+            validate_payload_object_wire_format(
+                &workspace_id,
+                &manifest,
+                envelope_ref,
+                object,
+                &bytes,
+                &correlation(&headers),
+            )?;
         }
     }
     let backend = state.coordination().map_err(response_problem)?;
@@ -2266,6 +2278,101 @@ async fn commit_resource_manifest(
         },
     )
     .await
+}
+
+fn validate_payload_encryption_contract<'a>(
+    manifest: &'a SyncManifest,
+    correlation_id: &str,
+) -> Result<Option<&'a buglogin_sync::manifest::ManifestObjectReference>, Response> {
+    if manifest.objects.is_empty() {
+        return Ok(None);
+    }
+    let Some(encryption) = manifest.payload_encryption.as_ref() else {
+        return Err(problem_response(
+            "payload_encryption_required",
+            "Profile payloads must use client-side encryption",
+            409,
+            correlation_id.to_owned(),
+        ));
+    };
+    let envelope_ref = &encryption.workspace_key_envelope;
+    if envelope_ref.key != buglogin_sync::manifest::WORKSPACE_KEY_ENVELOPE_KEY {
+        return Err(problem_response(
+            "invalid_workspace_key_envelope_key",
+            "Workspace key envelope must use its canonical manifest key",
+            400,
+            correlation_id.to_owned(),
+        ));
+    }
+    Ok(Some(envelope_ref))
+}
+
+fn validate_payload_object_wire_format(
+    workspace_id: &WorkspaceId,
+    manifest: &SyncManifest,
+    envelope_ref: &buglogin_sync::manifest::ManifestObjectReference,
+    object: &buglogin_sync::manifest::ManifestObject,
+    bytes: &[u8],
+    correlation_id: &str,
+) -> Result<(), Response> {
+    if object.key == envelope_ref.key {
+        let envelope: WorkspaceKeyEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+            problem_response(
+                "workspace_key_envelope_invalid",
+                "Workspace key envelope is invalid",
+                409,
+                correlation_id.to_owned(),
+            )
+        })?;
+        if envelope.schema_version != 1 || &envelope.workspace_id != workspace_id {
+            return Err(problem_response(
+                "workspace_key_envelope_scope_mismatch",
+                "Workspace key envelope does not match the manifest workspace",
+                409,
+                correlation_id.to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if manifest
+        .dependencies
+        .iter()
+        .any(|dependency| match dependency {
+            ManifestDependency::Proxy {
+                metadata_object, ..
+            } => object.key == metadata_object.key,
+        })
+    {
+        let metadata: ProxyRecordView = serde_json::from_slice(bytes).map_err(|_| {
+            problem_response(
+                "proxy_metadata_object_invalid",
+                "Proxy metadata object is invalid",
+                409,
+                correlation_id.to_owned(),
+            )
+        })?;
+        if &metadata.workspace_id != workspace_id {
+            return Err(problem_response(
+                "api_scope_mismatch",
+                "Proxy metadata does not match the workspace",
+                409,
+                correlation_id.to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let authenticated = AuthenticatedChunk::decode(bytes).ok();
+    if !authenticated.is_some_and(|chunk| chunk.version == 1) {
+        return Err(problem_response(
+            "encrypted_payload_object_invalid",
+            "Profile payload object is not a supported encrypted chunk",
+            409,
+            correlation_id.to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_manifest_successor(
@@ -2604,6 +2711,7 @@ async fn put_resource_blob(
         )
         .await
         .map_err(response_problem)?;
+    validate_blob_wire_format(&workspace_id, &query.key, &body, &correlation(&headers))?;
     let storage_key = payload_object_key(&resource_id, generation, &query.key, expected_checksum);
     state
         .put_remote_chunk(&storage_key, &body, expected_checksum)
@@ -2638,6 +2746,66 @@ async fn put_resource_blob(
         },
     )
     .await
+}
+
+fn validate_blob_wire_format(
+    workspace_id: &WorkspaceId,
+    key: &str,
+    bytes: &[u8],
+    correlation_id: &str,
+) -> Result<(), Response> {
+    if key == buglogin_sync::manifest::WORKSPACE_KEY_ENVELOPE_KEY {
+        let envelope: WorkspaceKeyEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+            problem_response(
+                "workspace_key_envelope_invalid",
+                "Workspace key envelope is invalid",
+                400,
+                correlation_id.to_owned(),
+            )
+        })?;
+        if envelope.schema_version != 1 || &envelope.workspace_id != workspace_id {
+            return Err(problem_response(
+                "workspace_key_envelope_scope_mismatch",
+                "Workspace key envelope does not match the workspace",
+                409,
+                correlation_id.to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let is_proxy_metadata = key.ends_with("/metadata.json")
+        && (key.starts_with("proxy/") || key.starts_with(".buglogin/proxy-dependencies/"));
+    if is_proxy_metadata {
+        let metadata: ProxyRecordView = serde_json::from_slice(bytes).map_err(|_| {
+            problem_response(
+                "proxy_metadata_object_invalid",
+                "Proxy metadata object is invalid",
+                400,
+                correlation_id.to_owned(),
+            )
+        })?;
+        if &metadata.workspace_id != workspace_id {
+            return Err(problem_response(
+                "api_scope_mismatch",
+                "Proxy metadata does not match the workspace",
+                409,
+                correlation_id.to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let chunk = AuthenticatedChunk::decode(bytes).ok();
+    if !chunk.is_some_and(|chunk| chunk.version == 1) {
+        return Err(problem_response(
+            "encrypted_payload_object_invalid",
+            "Profile payload object is not a supported encrypted chunk",
+            409,
+            correlation_id.to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn payload_object_key(

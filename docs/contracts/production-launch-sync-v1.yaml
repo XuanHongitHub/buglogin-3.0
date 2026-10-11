@@ -191,6 +191,7 @@ schemas:
       rootChecksum: string
       objects: array
       tombstones: array
+      payloadEncryption: [ManifestPayloadEncryption, null]
       dependencies:
         type: array
         description: Draft additive dependency list; profile-plus-proxy activation is not enabled until the versioned contract is verified in staging.
@@ -204,6 +205,14 @@ schemas:
       revision: integer
       metadataObject: ManifestObjectReference
       credentialEnvelopeObject: [ManifestObjectReference, null]
+
+  ManifestPayloadEncryption:
+    required: [schemaVersion, algorithm, workspaceKeyEnvelope]
+    properties:
+      schemaVersion: { const: 1 }
+      algorithm: { const: aes-256-gcm-chunk-v1 }
+      workspaceKeyEnvelope: ManifestObjectReference
+    canonicalEnvelopeKey: .buglogin/workspace-key-envelope.json
 
   ManifestObjectReference:
     required: [key, size, checksum]
@@ -254,5 +263,11 @@ errors:
   - manifest_dependency_object_missing
   - proxy_metadata_object_mismatch
   - proxy_credential_envelope_required
+  - payload_encryption_required
+  - unsupported_payload_encryption_schema
+  - invalid_workspace_key_envelope_key
+  - workspace_key_envelope_invalid
+  - workspace_key_envelope_scope_mismatch
+  - encrypted_payload_object_invalid
   - production_api_unavailable
   - migration_sync_commit_outcome_unknown

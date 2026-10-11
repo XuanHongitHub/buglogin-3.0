@@ -27,7 +27,11 @@ use buglogin_sync::{
         CoordinationBackend, CoordinationEvent, CoordinationScope, LeaseGrant, Presence,
         PublishedEvent, StreamEvent,
     },
-    manifest::{ManifestDependency, ManifestObject, ManifestObjectReference, SyncManifest},
+    crypto::{AuthenticatedChunk, ClientKey, RecoveryKey, WorkspaceKeyEnvelope},
+    manifest::{
+        ManifestDependency, ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
+        PayloadEncryptionAlgorithm, SyncManifest,
+    },
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -474,12 +478,61 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     assert_eq!(persisted_runtime["state"], "running");
     assert!(persisted_runtime.get("ownerToken").is_none());
 
-    let blob = b"profile-payload";
-    let blob_checksum = checksum(blob);
+    let payload_key = ClientKey::from_bytes([0x41; 32]);
+    let recovery_key = RecoveryKey::from_bytes([0x52; 32]);
+    let envelope =
+        WorkspaceKeyEnvelope::wrap(workspace.clone(), &payload_key, &recovery_key).unwrap();
+    let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
+    let envelope_object =
+        ManifestObject::new(".buglogin/workspace-key-envelope.json", &envelope_bytes).unwrap();
+    let blob =
+        AuthenticatedChunk::encrypt(&payload_key, b"profile-payload", b"profile/payload.bin")
+            .unwrap()
+            .encoded();
+    let blob_checksum = checksum(&blob);
     let blob_path = format!(
         "/v1/workspaces/{}/resources/{}/blobs?key=profile%2Fpayload.bin",
         workspace.as_str(),
         resource.as_str()
+    );
+    let plaintext_blob = b"plaintext-cookie-values";
+    let plaintext_checksum = checksum(plaintext_blob);
+    let plaintext_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&blob_path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "plaintext-blob-rejected")
+                .header("content-type", "application/octet-stream")
+                .header("idempotency-key", "plaintext-blob-key-0001")
+                .header("x-buglogin-owner-id", "desktop-1")
+                .header(
+                    "x-buglogin-owner-token",
+                    first["ownerToken"].as_str().unwrap(),
+                )
+                .header(
+                    "x-buglogin-fencing-token",
+                    first["fencingToken"].as_u64().unwrap().to_string(),
+                )
+                .header("x-buglogin-generation", "1")
+                .header("x-content-sha256", &plaintext_checksum)
+                .body(Body::from(plaintext_blob.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(plaintext_response.status(), StatusCode::CONFLICT);
+    let plaintext_response: Value = serde_json::from_slice(
+        &to_bytes(plaintext_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        plaintext_response["code"],
+        "encrypted_payload_object_invalid"
     );
     let blob_put = Request::builder()
         .method("PUT")
@@ -499,7 +552,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         )
         .header("x-buglogin-generation", "1")
         .header("x-content-sha256", &blob_checksum)
-        .body(Body::from(blob.to_vec()))
+        .body(Body::from(blob.clone()))
         .unwrap();
     assert_eq!(
         app.clone().oneshot(blob_put).await.unwrap().status(),
@@ -523,7 +576,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         )
         .header("x-buglogin-generation", "1")
         .header("x-content-sha256", &blob_checksum)
-        .body(Body::from(blob.to_vec()))
+        .body(Body::from(blob.clone()))
         .unwrap();
     assert_eq!(
         app.clone().oneshot(blob_retry).await.unwrap().status(),
@@ -555,6 +608,39 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         app.clone().oneshot(blob_conflict).await.unwrap().status(),
         StatusCode::CONFLICT
     );
+
+    let envelope_path = format!(
+        "/v1/workspaces/{}/resources/{}/blobs?key=.buglogin%2Fworkspace-key-envelope.json",
+        workspace.as_str(),
+        resource.as_str()
+    );
+    let envelope_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(envelope_path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "workspace-key-envelope-put")
+                .header("content-type", "application/octet-stream")
+                .header("idempotency-key", "workspace-key-envelope-0001")
+                .header("x-buglogin-owner-id", "desktop-1")
+                .header(
+                    "x-buglogin-owner-token",
+                    first["ownerToken"].as_str().unwrap(),
+                )
+                .header(
+                    "x-buglogin-fencing-token",
+                    first["fencingToken"].as_u64().unwrap().to_string(),
+                )
+                .header("x-buglogin-generation", "1")
+                .header("x-content-sha256", checksum(&envelope_bytes))
+                .body(Body::from(envelope_bytes.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(envelope_response.status(), StatusCode::OK);
 
     let proxy_metadata = json!({
         "workspaceId": workspace.as_str(),
@@ -612,13 +698,19 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         first["fencingToken"].as_u64().unwrap(),
         1,
         None,
-        blob,
+        &blob,
         vec![
-            ManifestObject::new("profile/payload.bin", blob).unwrap(),
+            ManifestObject::new("profile/payload.bin", &blob).unwrap(),
             proxy_object.clone(),
+            envelope_object.clone(),
         ],
     )
     .unwrap();
+    manifest.payload_encryption = Some(ManifestPayloadEncryption {
+        schema_version: 1,
+        algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
+        workspace_key_envelope: ManifestObjectReference::from(&envelope_object),
+    });
     let rejected_missing_proxy = app
         .clone()
         .oneshot(manifest_request(
@@ -895,6 +987,36 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
         app.clone().oneshot(request).await.unwrap().status(),
         StatusCode::OK
     );
+    let unencrypted_object =
+        ManifestObject::new("Default/Cookies", b"plaintext-cookie-data").unwrap();
+    let unencrypted = SyncManifest::new(
+        workspace.clone(),
+        resource.clone(),
+        1,
+        2,
+        Some(1),
+        b"unencrypted profile root",
+        vec![unencrypted_object],
+    )
+    .unwrap();
+    let rejected = app
+        .clone()
+        .oneshot(manifest_request(
+            &workspace,
+            &resource,
+            &token,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+            "manifest-unencrypted-key-0001",
+            &unencrypted,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    let rejected: Value =
+        serde_json::from_slice(&to_bytes(rejected.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(rejected["code"], "payload_encryption_required");
+
     let get = Request::builder()
         .method("GET")
         .uri(&path)

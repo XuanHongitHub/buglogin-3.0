@@ -24,12 +24,14 @@ Status: contract/design gate; hosted implementation is blocked until the BugLogi
 ## Draft manifest dependency contract
 
 - `SyncManifest.dependencies` is an additive array; older manifests deserialize with an empty array.
+- `SyncManifest.payloadEncryption` is an optional versioned declaration for backward-readable manifests. New commits containing payload objects require `schemaVersion: 1`, `algorithm: "aes-256-gcm-chunk-v1"`, and the canonical workspace key-envelope reference at `.buglogin/workspace-key-envelope.json` in the same manifest object set.
+- Profile payload objects use the authenticated chunk wire format. The API rejects raw profile blobs before storing them, then checks the declared algorithm, envelope JSON shape/workspace scope, and chunk framing before activation. The server has no key and cannot verify an AES-GCM tag; clients must authenticate every chunk before use.
 - A proxy dependency contains `kind: "proxy"`, canonical `proxyId`, metadata `revision`, and immutable object references for the safe proxy configuration and optional encrypted credential envelope. Object references bind key, byte length, and SHA-256 checksum and must also appear in the manifest object set.
 - The API validates that every dependency belongs to the same workspace, is referenced by the profile's canonical `proxy_id`, is readable by the actor, and has complete verified objects before manifest activation.
 - A profile with no selected proxy must have no proxy dependency. A profile with a selected proxy must have exactly one matching dependency. Duplicate, stale, missing, unauthorized, and cross-workspace dependencies reject the entire generation.
 - Credential envelopes are opaque to the server. A missing, revoked, or wrong-device key must not be treated as a usable proxy credential.
 - Object bytes remain invisible until the PostgreSQL manifest activation commits. Retries with the same idempotency key and request hash return the original receipt; conflicts preserve the prior active generation.
-- This draft does not yet define device key enrollment, recovery, rotation, or revocation wire formats. Those are required before encrypted credential sync can ship.
+- This contract does not yet define device key enrollment, recovery, rotation, or revocation flows. Those are required before encrypted profile or proxy credential sync can ship.
 
 ## Authority and security
 

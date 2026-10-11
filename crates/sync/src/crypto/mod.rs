@@ -11,6 +11,7 @@ const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const ENCRYPTION_VERSION: u8 = 1;
+pub const AUTHENTICATED_CHUNK_VERSION: u8 = ENCRYPTION_VERSION;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ClientKey([u8; KEY_BYTES]);

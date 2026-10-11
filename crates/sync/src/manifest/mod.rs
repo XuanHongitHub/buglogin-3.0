@@ -8,6 +8,7 @@ use buglogin_storage::blob::checksum;
 use serde::{Deserialize, Serialize};
 
 pub const MANIFEST_SCHEMA_VERSION: u16 = 2;
+pub const WORKSPACE_KEY_ENVELOPE_KEY: &str = ".buglogin/workspace-key-envelope.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +52,21 @@ pub struct ManifestObjectReference {
     pub key: String,
     pub size: u64,
     pub checksum: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PayloadEncryptionAlgorithm {
+    #[serde(rename = "aes-256-gcm-chunk-v1")]
+    Aes256GcmChunkV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManifestPayloadEncryption {
+    pub schema_version: u8,
+    pub algorithm: PayloadEncryptionAlgorithm,
+    pub workspace_key_envelope: ManifestObjectReference,
 }
 
 impl From<&ManifestObject> for ManifestObjectReference {
@@ -134,6 +150,8 @@ pub struct SyncManifest {
     pub tombstones: Vec<ManifestTombstone>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<ManifestDependency>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_encryption: Option<ManifestPayloadEncryption>,
 }
 
 impl SyncManifest {
@@ -180,6 +198,7 @@ impl SyncManifest {
             objects,
             tombstones,
             dependencies: Vec::new(),
+            payload_encryption: None,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -258,6 +277,25 @@ impl SyncManifest {
             }
         }
         let mut dependency_ids = BTreeSet::new();
+        if let Some(encryption) = &self.payload_encryption {
+            if encryption.schema_version != 1 {
+                return Err(Problem::new(
+                    "unsupported_payload_encryption_schema",
+                    "Unsupported payload encryption schema",
+                    409,
+                    "sync",
+                ));
+            }
+            if encryption.workspace_key_envelope.key != WORKSPACE_KEY_ENVELOPE_KEY {
+                return Err(Problem::new(
+                    "invalid_workspace_key_envelope_key",
+                    "Workspace key envelope must use its canonical manifest key",
+                    400,
+                    "sync",
+                ));
+            }
+            validate_dependency_object(&encryption.workspace_key_envelope, &self.objects)?;
+        }
         for dependency in &self.dependencies {
             match dependency {
                 ManifestDependency::Proxy {

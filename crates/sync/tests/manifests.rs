@@ -5,7 +5,7 @@ use buglogin_sync::{
     },
     manifest::{
         MANIFEST_SCHEMA_VERSION, ManifestDependency, ManifestObject, ManifestObjectReference,
-        ManifestTombstone, SyncManifest,
+        ManifestPayloadEncryption, ManifestTombstone, PayloadEncryptionAlgorithm, SyncManifest,
     },
 };
 use serde_json::json;
@@ -143,6 +143,40 @@ fn proxy_dependency_must_reference_verified_manifest_objects() {
         },
         credential_envelope_object: None,
     };
+    assert_eq!(
+        value.validate().unwrap_err().code,
+        "manifest_dependency_object_missing"
+    );
+}
+
+#[test]
+fn payload_encryption_envelope_must_reference_an_uploaded_object() {
+    let envelope =
+        ManifestObject::new(".buglogin/workspace-key-envelope.json", b"opaque envelope").unwrap();
+    let profile_data = ManifestObject::new("profiles/p1/chunk-0001", b"encrypted chunk").unwrap();
+    let mut value = SyncManifest::new(
+        workspace(),
+        resource(),
+        1,
+        1,
+        None,
+        b"encrypted root",
+        vec![envelope.clone(), profile_data],
+    )
+    .unwrap();
+    value.payload_encryption = Some(ManifestPayloadEncryption {
+        schema_version: 1,
+        algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
+        workspace_key_envelope: ManifestObjectReference::from(&envelope),
+    });
+    assert!(value.validate().is_ok());
+
+    value
+        .payload_encryption
+        .as_mut()
+        .unwrap()
+        .workspace_key_envelope
+        .size += 1;
     assert_eq!(
         value.validate().unwrap_err().code,
         "manifest_dependency_object_missing"

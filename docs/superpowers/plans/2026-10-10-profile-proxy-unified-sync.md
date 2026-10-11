@@ -1,6 +1,6 @@
 # Profile and Proxy Unified Sync Plan
 
-Status: Rust API, metadata dependency validation, and the desktop BugLogin API transport are implemented locally; production hosted sync remains blocked on secret-envelope lifecycle, staging verification, incremental transfer, and release evidence.
+Status: Rust API, metadata dependency validation, desktop API transport, and a versioned payload-encryption manifest contract are implemented locally. The API rejects raw profile blob uploads and rejects non-empty commits without a workspace key envelope. Production hosted sync remains blocked because the desktop projection still uploads and hydrates raw profile files; workspace key enrollment/recovery, staging verification, incremental transfer, and release evidence are incomplete.
 
 ## Phase 0 — verify authority
 
@@ -17,6 +17,7 @@ Status: Rust API, metadata dependency validation, and the desktop BugLogin API t
 - [x] Implement Rust API services for profile/proxy CRUD, binding, authorization, audit, idempotency, and typed errors.
 - [ ] Implement atomic manifest activation including immutable proxy metadata and encrypted-envelope object references plus only changed profile data chunks.
 - [x] Add API validation that the manifest dependency set matches the selected proxy, current revision, same-workspace read grant, and canonical safe metadata object under the serialized manifest mutation.
+- [x] Add a versioned manifest encryption declaration; reject raw profile blob uploads and non-empty commits without a workspace key envelope and supported AES-GCM chunk wire format.
 - [x] Reject manifest reads when the selected proxy revision has changed since the active generation, so clients cannot treat stale profile/proxy state as current.
 - [ ] Implement encrypted credential-envelope lifecycle and workspace/device key rotation and revocation.
 - [x] Keep REST/OpenAPI/MCP coverage aligned with the canonical API command and resource contracts; local API and sync contract suites pass.
@@ -29,6 +30,7 @@ Status: Rust API, metadata dependency validation, and the desktop BugLogin API t
 - [ ] Add incremental change tracking, content hashing, chunk resume, bounded concurrency, coalescing, size limits, and reconciliation.
 - [ ] Sync a proxy only as a dependency of an explicitly synced profile; send one shared proxy payload once per revision/hash.
 - [ ] Keep proxy secrets in the OS vault and transfer only encrypted envelopes; prove missing/revoked keys fail closed with actionable errors.
+- [ ] Encrypt profile files before upload and decrypt only after download using workspace keys stored in the OS vault; hydrate/commit must bind associated data to workspace, resource, path, and generation.
 - [ ] Migrate old proxy sync flags without dropping local proxy data; produce an auditable report and rollback path.
 
 ## Phase 3 — UI and release evidence
