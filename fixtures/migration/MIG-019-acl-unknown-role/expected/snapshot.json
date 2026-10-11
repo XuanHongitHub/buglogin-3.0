@@ -1,0 +1,10 @@
+{
+  "snapshotId":"sha256:a8bcdc96511154457dce2c2681ac870dea8222fb5404f52a7617ae9d41237eb8",
+  "sourceTreeSha256":"a8bcdc96511154457dce2c2681ac870dea8222fb5404f52a7617ae9d41237eb8",
+  "totalBytes":2322,
+  "files":[
+    {"path":"control-plane-export.json","bytes":1099,"sha256":"3f3b973f704a3e9c7cf9851d4d3bf0947f225a29c7ae4a9935c8e109cd990b85"},
+    {"path":"control-plane-unknown-access-mode.json","bytes":1096,"sha256":"1f3efb34de754264154b98598ff7fa32a43393ee70d41b81a0a0212cc8f98c56"},
+    {"path":"version.json","bytes":127,"sha256":"ea02826c77d44c996a911ed651ad1404e35b6e3031c69c8d21b9d34c46cf9bd2"}
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@buglogin/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --dir ../.. dev",
+    "build": "vite build",
+
+    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.conf.json",
+    "tauri:build": "pnpm copy-migration-binary && tauri build --config src-tauri/tauri.conf.json",
+    "copy-migration-binary": "node copy-migration-binary.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "~2.11.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "~6.0.3",
+    "vite": "^7.0.0"
+  }
+}
+

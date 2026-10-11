@@ -1,0 +1,12 @@
+{
+  "snapshotId": "sha256:a0c0693b07dd091869f86ec10f200ebd60b39019e1cab0b36640b640b62271bd",
+  "sourceTreeSha256": "a0c0693b07dd091869f86ec10f200ebd60b39019e1cab0b36640b640b62271bd",
+  "totalBytes": 150,
+  "files": [
+    {
+      "path": "version.json",
+      "bytes": 150,
+      "sha256": "1e84ec874aa59a87d076faf5854428986734a36bd8fef04117385ed0c9b0fd34"
+    }
+  ]
+}

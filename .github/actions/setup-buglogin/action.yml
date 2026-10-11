@@ -1,0 +1,40 @@
+name: Setup BugLogin toolchain
+description: Install the pinned Node.js, pnpm, and Rust toolchains.
+inputs:
+  install-node-dependencies:
+    description: Install JavaScript dependencies from the lockfile.
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Configure Git checkout behavior
+      shell: bash
+      run: git config --global core.autocrlf false
+    - name: Setup pnpm
+      uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+      with:
+        version: 11.10.0
+        run_install: false
+    - name: Setup Node.js
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version-file: .node-version
+        cache: pnpm
+    - name: Assert Node.js and pnpm pins
+      shell: bash
+      run: |
+        test "$(node --version)" = "v24.18.0"
+        test "$(pnpm --version)" = "11.10.0"
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+      with:
+        toolchain: 1.95.0
+        components: rustfmt,clippy
+    - name: Assert Rust pin
+      shell: bash
+      run: rustc --version | grep -q '^rustc 1\.95\.0 '
+    - name: Install JavaScript dependencies
+      if: inputs.install-node-dependencies == 'true'
+      shell: bash
+      run: pnpm install --frozen-lockfile

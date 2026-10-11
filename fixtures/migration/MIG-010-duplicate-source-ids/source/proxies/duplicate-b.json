@@ -1,0 +1,1 @@
+{"id":"duplicate-proxy","proxy_settings":{"proxy_type":"socks5","host":"proxy-b.example.test","port":1080}}

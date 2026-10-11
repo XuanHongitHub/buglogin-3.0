@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "buglogin://contracts/domain/v1",
+  "title": "BugLogin Domain Contract v1",
+  "x-scope": {
+    "status": "bootstrap-slice",
+    "includedEntities": ["account", "profile", "group", "proxy", "runtimeInstall"],
+    "excludedEntities": ["workspace", "team", "member", "resource", "grant", "cookie", "extension", "syncObject", "migrationPackage", "auditEvent", "operation"],
+    "rule": "Excluded entities require a versioned contract before implementation; they are not implicitly represented by additionalProperties."
+  },
+  "type": "object",
+  "required": ["contractVersion", "entity", "data"],
+  "properties": {
+    "contractVersion": { "const": "1.0" },
+    "entity": { "enum": ["account", "profile", "group", "proxy", "runtimeInstall"] },
+    "data": {
+      "oneOf": [
+        { "$ref": "#/$defs/account" },
+        { "$ref": "#/$defs/profile" },
+        { "$ref": "#/$defs/group" },
+        { "$ref": "#/$defs/proxy" },
+        { "$ref": "#/$defs/runtimeInstall" }
+      ]
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "account": {
+      "type": "object",
+      "required": ["id", "status", "revision", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["active", "suspended", "disabled"] },
+        "revision": { "type": "integer", "minimum": 1 },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "required": ["id", "name", "runtime", "state", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "runtime": { "type": "string", "enum": ["wayfern", "bugox", "bugium", "bugmini", "bugthor", "bughelium"] },
+        "runtimeVersion": { "type": "string" },
+        "runtimeConfig": { "type": "object", "additionalProperties": true },
+        "state": { "enum": ["created", "ready", "launching", "running", "stopping", "failed", "recovering"] },
+        "archived": { "type": "boolean" },
+        "fingerprint": { "type": "object", "additionalProperties": true },
+        "note": { "type": "string" },
+        "proxyId": { "$ref": "#/$defs/id" },
+        "vpnId": { "$ref": "#/$defs/id" },
+        "groupIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "tags": { "type": "array", "items": { "type": "string", "maxLength": 80 }, "uniqueItems": true },
+        "extensionGroupId": { "$ref": "#/$defs/id" },
+        "syncMode": { "enum": ["local", "managed", "disabled"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "group": {
+      "type": "object",
+      "required": ["id", "name", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "appearance": { "type": "object", "additionalProperties": true },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "proxy": {
+      "type": "object",
+      "required": ["id", "protocol", "host", "port", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "protocol": { "enum": ["http", "https", "socks4", "socks5"] },
+        "host": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "credentialRef": { "$ref": "#/$defs/id" },
+        "rotationUrl": { "type": "string", "format": "uri" },
+        "bypassRules": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInstall": {
+      "type": "object",
+      "required": ["id", "runtime", "version", "platform", "architecture", "state", "checksum"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "runtime": { "type": "string", "enum": ["wayfern", "bugox", "bugium", "bugmini", "bugthor", "bughelium"] },
+        "version": { "type": "string" },
+        "platform": { "enum": ["windows", "macos", "linux"] },
+        "architecture": { "enum": ["x64", "arm64"] },
+        "state": { "enum": ["queued", "downloading", "verifying", "installing", "ready", "cancelled", "failed"] },
+        "checksum": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+        "source": { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
+
+
+

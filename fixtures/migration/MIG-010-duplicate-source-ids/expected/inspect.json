@@ -1,0 +1,15 @@
+{
+  "schema":"buglogin.inspect/1",
+  "source":{"system":"buglogin-legacy","version":"1.1.84","instanceId":"sha256:0a7a3029fad6d6615266a0969493c5d8ee3be3c9e87d96dead1140242ce6595e","os":"windows","architecture":"x86_64","root":"."},
+  "entityCounts":{"proxies":2},
+  "totalBytes":345,
+  "runtimeFindings":[],
+  "secretScan":{"filesWithSecretFields":0,"secretFieldsPresent":0},
+  "invalidRecords":[
+    {"sourceRef":"proxies/duplicate-a.json","code":"migration_proxy_duplicate_source_id"},
+    {"sourceRef":"proxies/duplicate-b.json","code":"migration_proxy_duplicate_source_id"}
+  ],
+  "danglingReferences":[],
+  "sourceTreeSha256":"b758ca32bdd61bf00cf3572b383de758ce26663901f6442d9f033c6ee8dc5d7f",
+  "cutoverEligibility":"blocked"
+}

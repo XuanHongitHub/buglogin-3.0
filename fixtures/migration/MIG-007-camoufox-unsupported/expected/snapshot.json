@@ -1,0 +1,27 @@
+{
+  "snapshotId": "sha256:32793ff73dec5c7ed5b9c6d7ccb72e8fc9100edcede38232676668882a0406f5",
+  "sourceTreeSha256": "32793ff73dec5c7ed5b9c6d7ccb72e8fc9100edcede38232676668882a0406f5",
+  "totalBytes": 296,
+  "files": [
+    {
+      "path": "profiles/77777777-7777-4777-8777-777777777777/metadata.json",
+      "bytes": 93,
+      "sha256": "77888c5d46aba7a0136cf2035f29168c1d6e5be8d40ec79070d9230e17a0d193"
+    },
+    {
+      "path": "profiles/77777777-7777-4777-8777-777777777777/profile/prefs.js",
+      "bytes": 42,
+      "sha256": "49cb0da80471ac07156f53dc8b581c7b1825179e8eb2f9e93e5dd5119ba4b557"
+    },
+    {
+      "path": "profiles/77777777-7777-4777-8777-777777777777/profile/storage.bin",
+      "bytes": 30,
+      "sha256": "ccfdbb0ca93a8d2f15cf8a6845993cce80bcf27d2d804be1a50951a8fde62c1d"
+    },
+    {
+      "path": "version.json",
+      "bytes": 131,
+      "sha256": "c43a13f352d832f6b21f7a62eef1949360816dc22cab402b334cfb96ebc88d9e"
+    }
+  ]
+}

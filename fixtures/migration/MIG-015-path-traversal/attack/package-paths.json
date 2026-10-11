@@ -1,0 +1,8 @@
+[
+  "../escape.txt",
+  "profiles/./escape.txt",
+  "profiles//escape.txt",
+  "C:/escape.txt",
+  "..\\escape.txt",
+  "/absolute/escape.txt"
+]

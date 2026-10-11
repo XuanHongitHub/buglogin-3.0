@@ -1,0 +1,34 @@
+[package]
+name = "buglogin-api"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+axum = "0.8"
+buglogin-browser = { path = "../browser" }
+buglogin-domain = { path = "../domain" }
+buglogin-migration = { path = "../migration" }
+buglogin-network = { path = "../network" }
+buglogin-storage = { path = "../storage" }
+buglogin-sync = { path = "../sync" }
+async-trait = "0.1"
+argon2 = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+getrandom = "0.3"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+time = { version = "0.3.54", features = ["formatting"] }
+tokio = { version = "1.53", features = ["macros", "net", "rt-multi-thread"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"

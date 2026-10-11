@@ -1,0 +1,19 @@
+{
+  "seed": 2800280028,
+  "profileCount": 10000,
+  "logicalObjectCount": 100000,
+  "objectShards": 100,
+  "budgets": {
+    "maxGeneratedFiles": 10101,
+    "maxSourceBytes": 16777216,
+    "maxGenerateMillis": 180000,
+    "maxPipelineMillis": 300000
+  },
+  "expected": {
+    "generatedFiles": 10101,
+    "sourceBytes": 9865703,
+    "sourceTreeSha256": "4a874b670c827f230978cc991e27f66b174b0941398fe27a94e0f73d50fead00",
+    "logicalObjectsSha256": "d9bc2f641487fc223c74e92df1458610a9fd7fe9b643afa3c3564bd14b2749b4",
+    "profilesJsonlSha256": "2cd18caf61b95ed2cb9f1ece94a63f59d7f09887355860a41a3ed8e0537fef46"
+  }
+}

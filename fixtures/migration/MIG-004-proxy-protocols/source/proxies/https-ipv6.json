@@ -1,0 +1,1 @@
+{"id":"https-ipv6","upstream_url":"https://[2001:db8::10]:8443","bypass_rules":["*.internal.test"]}

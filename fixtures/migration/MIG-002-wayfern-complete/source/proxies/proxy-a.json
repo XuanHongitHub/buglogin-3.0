@@ -1,0 +1,1 @@
+{"id":"proxy-a","proxy_settings":{"proxy_type":"socks5","host":"proxy.example.test","port":1080},"bypass_rules":["localhost"]}

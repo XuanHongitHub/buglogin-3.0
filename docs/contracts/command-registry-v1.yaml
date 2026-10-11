@@ -1,0 +1,715 @@
+version: "1.0"
+registryId: buglogin.commands.v1
+defaults:
+  timeoutMs: 30000
+  audit: required
+  auth: required
+  idempotency: required-for-command-and-long-running-operation
+  resultEnvelope: CommandResult
+  errorEnvelope: Problem
+commands:
+  - id: system.health.get
+    kind: query
+    capability: system.read
+    action: read
+    auth: optional-local
+    adapters: [tauri, rest, mcp]
+    input: Empty
+    output: Health
+    audit: metadata-only
+  - id: operation.get
+    kind: query
+    capability: operation.read
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: OperationIdInput
+    output: Operation
+  - id: events.stream
+    kind: subscription
+    capability: events.read
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: EventFilterInput
+    output: Event
+    audit: metadata-only
+  - id: profile.list
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: ProfileListInput
+    output: ProfilePage
+  - id: profile.get
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: ResourceIdInput
+    output: Profile
+  - id: profile.create
+    kind: command
+    capability: profile.create
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: ProfileCreateInput
+    output: Profile
+    idempotency: required
+  - id: profile.clone
+    kind: command
+    capability: profile.create
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: ProfileCloneInput
+    output: ProfileCloneReceipt
+    idempotency: required
+    preconditions: [source-profile-readable, source-revision-current, metadata-only]
+  - id: profile.share
+    kind: command
+    capability: CAP-SHARE-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: ProfileShareInput
+    output: ProfileShareReceipt
+    idempotency: required
+    preconditions: [active-workspace-member, profile-revision-current]
+  - id: profile.share.revoke
+    kind: command
+    capability: CAP-SHARE-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: ProfileShareRevokeInput
+    output: ProfileShareRevocationReceipt
+    idempotency: required
+    preconditions: [active-workspace-member, profile-revision-current]
+  - id: profile.launch
+    kind: operation
+    capability: profile.launch
+    action: execute
+    adapters: [tauri, rest, mcp]
+    input: ProfileLaunchInput
+    output: OperationAccepted
+    timeoutMs: 120000
+    idempotency: required
+    events: [operation.updated, profile.runtime.updated]
+  - id: profile.stop
+    kind: operation
+    capability: profile.stop
+    action: execute
+    adapters: [tauri, rest, mcp]
+    input: ResourceIdInput
+    output: OperationAccepted
+    timeoutMs: 60000
+    idempotency: required
+    events: [operation.updated, profile.runtime.updated]
+  - id: profile.runtime.get
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [rest]
+    input: ProfileIdInput
+    output: OptionalRuntimeProjection
+  - id: profile.runtime.started
+    kind: command
+    capability: profile.update
+    action: update
+    adapters: [rest]
+    input: RuntimeProjectionInput
+    output: RuntimeProjection
+    idempotency: required
+  - id: profile.runtime.stopped
+    kind: command
+    capability: profile.update
+    action: update
+    adapters: [rest]
+    input: RuntimeProjectionInput
+    output: RuntimeProjection
+    idempotency: required
+  - id: profile.delete
+    kind: command
+    capability: profile.delete
+    action: delete
+    adapters: [tauri, rest, mcp]
+    input: ProfileDeleteInput
+    output: DeleteReceipt
+    idempotency: required
+    preconditions: [profile-not-running, explicit-data-policy]
+  - id: profile.archive
+    kind: command
+    capability: profile.archive
+    action: update
+    adapters: [tauri, rest, mcp]
+    input: ProfileRevisionInput
+    output: Profile
+    idempotency: required
+    preconditions: [profile-not-running]
+  - id: profile.restore
+    kind: command
+    capability: profile.restore
+    action: update
+    adapters: [tauri, rest, mcp]
+    input: ProfileRevisionInput
+    output: Profile
+    idempotency: required
+  - id: cookie.list
+    kind: query
+    capability: CAP-COOK-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: CookieListInput
+    output: CookieListResult
+    audit: metadata-only
+    preconditions: [profile-not-running]
+  - id: cookie.stage
+    kind: command
+    capability: CAP-COOK-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: CookieStageInput
+    output: CookieStageReceipt
+    idempotency: required
+  - id: cookie.import
+    kind: command
+    capability: CAP-COOK-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: CookieImportInput
+    output: CookieMutationResult
+    idempotency: required
+    preconditions: [profile-not-running, destination-lease, expected-generation-current, staged-import-one-use]
+  - id: cookie.copy
+    kind: command
+    capability: CAP-COOK-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: CookieCopyInput
+    output: CookieMutationResult
+    idempotency: required
+    preconditions: [source-profile-not-running, destination-profile-not-running, destination-lease, expected-generation-current]
+  - id: proxy.parse
+    kind: query
+    capability: CAP-NET-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: ProxyParseInput
+    output: ProxyParseReport
+    audit: metadata-only
+  - id: proxy.list
+    kind: query
+    capability: CAP-NET-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: ProxyListInput
+    output: ProxyPage
+    audit: metadata-only
+  - id: proxy.get
+    kind: query
+    capability: CAP-NET-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: ProxyIdInput
+    output: ProxyRecord
+    audit: metadata-only
+  - id: proxy.create
+    kind: command
+    capability: CAP-NET-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: ProxyCreateInput
+    output: ProxyCreateResult
+    idempotency: required
+  - id: proxy.update
+    kind: command
+    capability: CAP-NET-001
+    action: update
+    adapters: [tauri, rest, mcp]
+    input: ProxyUpdateInput
+    output: ProxyRecord
+    idempotency: required
+  - id: proxy.delete
+    kind: command
+    capability: CAP-NET-001
+    action: delete
+    adapters: [tauri, rest, mcp]
+    input: ProxyDeleteInput
+    output: ProxyRecord
+    idempotency: required
+  - id: migration.inspect
+    kind: operation
+    capability: migration.read
+    action: read
+    adapters: [tauri, rest]
+    input: MigrationInspectInput
+    output: OperationAccepted
+    timeoutMs: 300000
+    idempotency: required
+    events: [operation.updated]
+  - id: migration.import
+    kind: operation
+    capability: migration.write
+    action: execute
+    adapters: [tauri, rest]
+    input: MigrationImportInput
+    output: OperationAccepted
+    timeoutMs: 0
+    idempotency: required
+    preconditions: [source-read-only, snapshot-present, dry-run-approved]
+    events: [operation.updated, migration.item.updated]
+  - id: migration.sync.import
+    kind: operation
+    capability: migration.write
+    action: execute
+    adapters: [rest]
+    input: SyncImportInput
+    output: SyncImportReceipt
+    timeoutMs: 0
+    idempotency: required
+    preconditions: [active-profile-resource-binding, destination-lease, verified-sync-export]
+  - id: migration.package.file.put
+    kind: command
+    capability: migration.write
+    action: execute
+    adapters: [rest]
+    input: MigrationPackageFileInput
+    output: MigrationPackageFileReceipt
+    idempotency: required
+  - id: migration.package.verify
+    kind: command
+    capability: migration.write
+    action: execute
+    adapters: [rest]
+    input: Empty
+    output: MigrationPackageVerifyReceipt
+    idempotency: required
+  - id: migration.package.activate
+    kind: command
+    capability: migration.write
+    action: execute
+    adapters: [rest]
+    input: Empty
+    output: MigrationPackageActivationReceipt
+    idempotency: required
+  - id: auth.device.start
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: DeviceAuthorizationStartInput
+    output: DeviceAuthorizationStartResponse
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    preconditions: [cryptographic-device-code-issuance]
+  - id: auth.login
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: WebLoginInput
+    output: WebSessionResponse
+    audit: required
+    preconditions: [same-origin-https, argon2id-credential-verification]
+  - id: auth.api.tokens.list
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    adapters: [rest]
+    input: Empty
+    output: ApiTokenPage
+    preconditions: [browser-session]
+  - id: auth.api.token.create
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    adapters: [rest]
+    input: ApiTokenCreateInput
+    output: ApiTokenCreated
+    audit: required
+    preconditions: [browser-session, raw-token-one-time]
+  - id: auth.api.token.revoke
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    adapters: [rest]
+    input: ApiTokenIdInput
+    output: Empty
+    audit: required
+    idempotency: required
+    preconditions: [browser-session, owner-scoped]
+  - id: auth.recovery.request
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: RecoveryRequestInput
+    output: Empty
+    audit: required
+    preconditions: [same-origin-https, generic-enumeration-response, configured-recovery-delivery]
+  - id: auth.recovery.complete
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    auth: optional-local
+    adapters: [rest]
+    input: RecoveryCompleteInput
+    output: Empty
+    audit: required
+    idempotency: required
+    preconditions: [same-origin-https, single-use-recovery-token, atomic-password-reset, session-family-revocation]
+  - id: auth.session
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    adapters: [rest]
+    input: Empty
+    output: WebSessionResponse
+    preconditions: [http-only-session-cookie]
+  - id: auth.sessions.list
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    adapters: [rest]
+    input: Empty
+    output: WebSessionPage
+    preconditions: [http-only-session-cookie]
+  - id: auth.sessions.revoke
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    adapters: [rest]
+    input: SessionIdInput
+    output: Empty
+    audit: required
+    idempotency: required
+    preconditions: [session-owner, csrf-token]
+  - id: desktop.auth.status
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    auth: optional-local
+    adapters: [tauri]
+    input: Empty
+    output: DesktopAuthStatus
+    audit: metadata-only
+    idempotency: required-for-command-and-long-running-operation
+  - id: desktop.auth.device.start
+    kind: command
+    capability: CAP-ID-001
+    action: execute
+    auth: optional-local
+    adapters: [tauri]
+    input: Empty
+    output: DesktopAuthStatus
+    idempotency: required-for-command-and-long-running-operation
+  - id: desktop.auth.device.poll
+    kind: command
+    capability: CAP-ID-001
+    action: execute
+    auth: optional-local
+    adapters: [tauri]
+    input: Empty
+    output: DesktopAuthStatus
+    idempotency: required-for-command-and-long-running-operation
+  - id: desktop.auth.logout
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    auth: optional-local
+    adapters: [tauri]
+    input: Empty
+    output: DesktopAuthStatus
+    idempotency: required-for-command-and-long-running-operation
+  - id: auth.device.approve
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    adapters: [rest]
+    input: DeviceAuthorizationApproveInput
+    output: DeviceAuthorizationApproveResponse
+    idempotency: required-for-command-and-long-running-operation
+    preconditions: [authenticated-account]
+  - id: auth.device.token
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: DeviceAuthorizationTokenInput
+    output: AuthTokenResponse
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    preconditions: [single-use-device-authorization]
+  - id: auth.refresh
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    adapters: [rest]
+    input: Empty
+    output: AuthTokenResponse
+    idempotency: required
+    preconditions: [single-use-session-rotation]
+  - id: auth.logout
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    adapters: [rest]
+    input: Empty
+    output: Empty
+    idempotency: required
+    preconditions: [session-revocation]
+  - id: account.get
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: Empty
+    output: Account
+  - id: organization.list
+    kind: query
+    capability: CAP-ORG-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: OrganizationListInput
+    output: OrganizationPage
+  - id: organization.get
+    kind: query
+    capability: CAP-ORG-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: OrganizationIdInput
+    output: Organization
+  - id: organization.create
+    kind: command
+    capability: CAP-ORG-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: OrganizationCreateInput
+    output: Organization
+    idempotency: required
+  - id: organization.update
+    kind: command
+    capability: CAP-ORG-001
+    action: update
+    adapters: [tauri, rest, mcp]
+    input: OrganizationUpdateInput
+    output: Organization
+    idempotency: required
+  - id: workspace.list
+    kind: query
+    capability: CAP-WS-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: WorkspaceListInput
+    output: WorkspacePage
+  - id: workspace.get
+    kind: query
+    capability: CAP-WS-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: WorkspaceIdInput
+    output: Workspace
+  - id: workspace.create
+    kind: command
+    capability: CAP-WS-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: WorkspaceCreateInput
+    output: Workspace
+    idempotency: required
+  - id: workspace.update
+    kind: command
+    capability: CAP-WS-001
+    action: update
+    adapters: [tauri, rest, mcp]
+    input: WorkspaceUpdateInput
+    output: Workspace
+    idempotency: required
+  - id: team.list
+    kind: query
+    capability: CAP-TEAM-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: TeamListInput
+    output: TeamPage
+  - id: team.get
+    kind: query
+    capability: CAP-TEAM-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: TeamIdInput
+    output: Team
+  - id: team.create
+    kind: command
+    capability: CAP-TEAM-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: TeamCreateInput
+    output: Team
+    idempotency: required
+  - id: team.update
+    kind: command
+    capability: CAP-TEAM-001
+    action: update
+    adapters: [tauri, rest, mcp]
+    input: TeamUpdateInput
+    output: Team
+    idempotency: required
+  - id: member.list
+    kind: query
+    capability: CAP-MEM-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: MemberListInput
+    output: MemberPage
+  - id: member.get
+    kind: query
+    capability: CAP-MEM-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: MemberIdInput
+    output: Member
+  - id: member.invite
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: MemberInviteInput
+    output: Member
+    idempotency: required
+  - id: member.activate
+    kind: command
+    capability: CAP-MEM-001
+    action: update
+    adapters: [tauri, rest, mcp]
+    input: MemberIdInput
+    output: Member
+    idempotency: required
+  - id: member.suspend
+    kind: command
+    capability: CAP-MEM-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: MemberIdInput
+    output: Member
+    idempotency: required
+  - id: member.role.update
+    kind: command
+    capability: CAP-MEM-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: MemberRoleUpdateInput
+    output: Member
+    idempotency: required
+  - id: resource.list
+    kind: query
+    capability: CAP-RES-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: ResourceListInput
+    output: ResourcePage
+  - id: resource.get
+    kind: query
+    capability: CAP-RES-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: ResourceIdInput
+    output: Resource
+  - id: resource.register
+    kind: command
+    capability: CAP-RES-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: ResourceRegisterInput
+    output: Resource
+    idempotency: required
+  - id: resource.lease.acquire
+    kind: command
+    capability: profile.launch
+    action: execute
+    adapters: [rest]
+    input: LeaseAcquireInput
+    output: LeaseGrant
+    idempotency: required
+  - id: resource.lease.renew
+    kind: command
+    capability: profile.launch
+    action: execute
+    adapters: [rest]
+    input: LeaseRenewInput
+    output: LeaseGrant
+    idempotency: required
+  - id: resource.lease.release
+    kind: command
+    capability: profile.stop
+    action: execute
+    adapters: [rest]
+    input: LeaseReleaseInput
+    output: LeaseReleaseReceipt
+    idempotency: required
+  - id: profile.manifest.get
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [rest]
+    input: ResourceIdInput
+    output: OptionalSyncManifest
+  - id: profile.manifest.commit
+    kind: command
+    capability: profile.update
+    action: update
+    adapters: [rest]
+    input: SyncManifest
+    output: SyncManifest
+    idempotency: required
+  - id: profile.blob.get
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [rest]
+    input: BlobQueryInput
+    output: BinaryBlob
+  - id: profile.blob.put
+    kind: command
+    capability: profile.update
+    action: update
+    adapters: [rest]
+    input: BlobPutInput
+    output: BlobReceipt
+    idempotency: required
+  - id: grant.list
+    kind: query
+    capability: CAP-SHARE-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: GrantListInput
+    output: GrantPage
+  - id: grant.create
+    kind: command
+    capability: CAP-SHARE-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: GrantCreateInput
+    output: Grant
+    idempotency: required
+  - id: grant.revoke
+    kind: command
+    capability: CAP-SHARE-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: GrantIdInput
+    output: GrantRevocationReceipt
+    idempotency: required
+adapterNaming:
+  tauri: snake_case
+  rest: operationId-equals-command-id
+  mcp: command-id-with-dots-replaced-by-underscores
+executionOrder:
+  - validate-schema
+  - authenticate
+  - resolve-scope
+  - authorize-capability
+  - claim-idempotency-key
+  - execute-domain-operation
+  - append-audit-event
+  - publish-domain-events

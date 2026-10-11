@@ -1,0 +1,30 @@
+[package]
+name = "buglogin-migration"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+buglogin-domain = { path = "../domain" }
+buglogin-storage = { path = "../storage" }
+buglogin-sync = { path = "../sync" }
+fs2 = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+uuid = { version = "1.18", features = ["serde", "v5"] }
+url = "2.5"
+percent-encoding = "2.3"
+time = { version = "0.3.54", features = ["formatting"] }
+unicode-normalization = "0.1.25"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "buglogin-migrate"
+path = "src/bin/buglogin-migrate.rs"

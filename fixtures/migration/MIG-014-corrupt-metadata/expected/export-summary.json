@@ -1,0 +1,6 @@
+{
+  "status": "blocked",
+  "stage": "inspect",
+  "cutoverEligibility": "blocked",
+  "sourceUnchanged": true
+}

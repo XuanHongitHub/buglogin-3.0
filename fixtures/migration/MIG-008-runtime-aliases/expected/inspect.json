@@ -1,0 +1,19 @@
+{
+  "schema":"buglogin.inspect/1",
+  "source":{"system":"buglogin-legacy","version":"1.1.84","instanceId":"sha256:290bda4263093389e681e34e5f5db109ed2df7673fba7c6acfccaae4de934d8d","os":"windows","architecture":"x86_64","root":"."},
+  "entityCounts":{"profiles":6},
+  "totalBytes":774,
+  "runtimeFindings":[
+    {"runtime":"bugium","class":"unsupported","reasonCode":"runtime_adapter_not_approved","records":1},
+    {"runtime":"bugmini","class":"partial","reasonCode":"runtime_adapter_available_artifact_pending","records":1},
+    {"runtime":"bugox","class":"unsupported","reasonCode":"runtime_adapter_not_approved","records":1},
+    {"runtime":"cloak","class":"unsupported","reasonCode":"runtime_adapter_not_approved","records":1},
+    {"runtime":"helium","class":"unsupported","reasonCode":"runtime_adapter_not_approved","records":1},
+    {"runtime":"thorium","class":"unsupported","reasonCode":"runtime_adapter_not_approved","records":1}
+  ],
+  "secretScan":{"filesWithSecretFields":0,"secretFieldsPresent":0},
+  "invalidRecords":[],
+  "danglingReferences":[],
+  "sourceTreeSha256":"f771adf42c5599bab649ba30b70a315a835a05ca4c24709d01a177575e0addc5",
+  "cutoverEligibility":"blocked"
+}

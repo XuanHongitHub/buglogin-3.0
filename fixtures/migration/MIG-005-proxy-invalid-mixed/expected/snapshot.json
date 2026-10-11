@@ -1,0 +1,13 @@
+{
+  "snapshotId": "sha256:8ebdf48fceca944f183840e9b409a7a96104817a69e996cf914b185b0b20bbc3",
+  "sourceTreeSha256": "8ebdf48fceca944f183840e9b409a7a96104817a69e996cf914b185b0b20bbc3",
+  "totalBytes": 636,
+  "files": [
+    {"path":"proxies/invalid-json.json","bytes":39,"sha256":"2c7fdc75fb172d2f995cbf84268dc11126be1a4b87719bae3590cf1147dc72af"},
+    {"path":"proxies/invalid-port.json","bytes":106,"sha256":"d70978f910c8a4f79572768abdbabc6c696140a93e7862d6906102a3e7e85576"},
+    {"path":"proxies/invalid-protocol.json","bytes":112,"sha256":"a1d720ef5ab489724651bc1ba393058a1cd783c9d225d438e948d71f6c564038"},
+    {"path":"proxies/valid-http.json","bytes":134,"sha256":"e4432688977c6ee6eb5c053c26d8d425b072f4bd96f50e51b92cee164f1b9897"},
+    {"path":"proxies/valid-socks5.json","bytes":115,"sha256":"a094a1c4472014d0433807d65975eaffee7e6f1d919d8d09685077db39c6a04c"},
+    {"path":"version.json","bytes":130,"sha256":"3178fa6c761e54f5beac3c5599674ccedfccf59c69ba7927a478e546cd58a570"}
+  ]
+}

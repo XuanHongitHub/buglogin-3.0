@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "buglogin://contracts/domain/v2",
+  "title": "BugLogin Domain Contract v2",
+  "x-scope": {
+    "status": "migration-and-control-slice",
+    "includedEntities": [
+      "account", "organization", "workspace", "team", "member", "resource", "grant",
+      "profile", "profileResource", "group", "proxy", "vpn", "extension", "extensionGroup", "runtimeInstall"
+    ],
+    "excludedEntities": ["cookie", "syncObject", "migrationPackage", "auditEvent", "operation", "hrRecord"],
+    "rule": "Excluded entities require another versioned contract. VPN configuration and extension packages are referenced objects, never inline secret or binary values."
+  },
+  "type": "object",
+  "required": ["contractVersion", "entity", "data"],
+  "properties": {
+    "contractVersion": { "const": "2.0" },
+    "entity": {
+      "enum": [
+        "account", "organization", "workspace", "team", "member", "resource", "grant",
+        "profile", "profileResource", "group", "proxy", "vpn", "extension", "extensionGroup", "runtimeInstall"
+      ]
+    },
+    "data": {
+      "oneOf": [
+        { "$ref": "#/$defs/account" },
+        { "$ref": "#/$defs/organization" },
+        { "$ref": "#/$defs/workspace" },
+        { "$ref": "#/$defs/team" },
+        { "$ref": "#/$defs/member" },
+        { "$ref": "#/$defs/resource" },
+        { "$ref": "#/$defs/grant" },
+        { "$ref": "#/$defs/profile" },
+        { "$ref": "#/$defs/profileResource" },
+        { "$ref": "#/$defs/group" },
+        { "$ref": "#/$defs/proxy" },
+        { "$ref": "#/$defs/vpn" },
+        { "$ref": "#/$defs/extension" },
+        { "$ref": "#/$defs/extensionGroup" },
+        { "$ref": "#/$defs/runtimeInstall" }
+      ]
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "account": {
+      "type": "object",
+      "required": ["id", "status", "revision", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["active", "suspended", "disabled"] },
+        "revision": { "type": "integer", "minimum": 1 },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "organization": {
+      "type": "object",
+      "required": ["id", "accountId", "name", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "accountId": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "createdAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "workspace": {
+      "type": "object",
+      "required": ["id", "organizationId", "name", "policy", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "organizationId": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "policy": {
+          "type": "object",
+          "required": ["maxProfiles", "maxMembers", "maxStorageBytes", "offlineEntitled"],
+          "properties": {
+            "maxProfiles": { "type": "integer", "minimum": 0 },
+            "maxMembers": { "type": "integer", "minimum": 0 },
+            "maxStorageBytes": { "type": "integer", "minimum": 0 },
+            "offlineEntitled": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "createdAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "team": {
+      "type": "object",
+      "required": ["id", "workspaceId", "name", "memberIds"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "memberIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true }
+      },
+      "additionalProperties": false
+    },
+    "member": {
+      "type": "object",
+      "required": ["id", "accountId", "workspaceId", "role", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "accountId": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" },
+        "teamId": { "$ref": "#/$defs/id" },
+        "role": { "enum": ["owner", "admin", "operator", "member"] },
+        "status": { "enum": ["invited", "active", "suspended"] },
+        "inviteExpiresAt": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "resource": {
+      "type": "object",
+      "required": ["id", "workspaceId", "kind", "state", "displayName"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["profile", "proxy", "vpn", "cookieSet", "extension", "runtime"] },
+        "state": { "enum": ["active", "archived", "locked"] },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 200 }
+      },
+      "additionalProperties": false
+    },
+    "grant": {
+      "type": "object",
+      "required": ["id", "workspaceId", "resourceId", "memberId", "action", "effect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" },
+        "resourceId": { "$ref": "#/$defs/id" },
+        "memberId": { "$ref": "#/$defs/id" },
+        "action": { "enum": ["read", "create", "update", "delete", "execute", "share", "manage"] },
+        "effect": { "enum": ["allow", "deny"] }
+      },
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "required": ["id", "name", "runtime", "state", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "runtime": { "enum": ["wayfern", "bugox", "bugium", "bugmini", "bugthor", "bughelium"] },
+        "runtimeVersion": { "type": "string" },
+        "runtimeConfig": { "type": "object", "additionalProperties": true },
+        "state": { "enum": ["created", "ready", "launching", "running", "stopping", "failed", "recovering"] },
+        "archived": { "type": "boolean" },
+        "fingerprint": { "type": "object", "additionalProperties": true },
+        "note": { "type": "string" },
+        "proxyId": { "$ref": "#/$defs/id" },
+        "vpnId": { "$ref": "#/$defs/id" },
+        "groupIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "tags": { "type": "array", "items": { "type": "string", "maxLength": 80 }, "uniqueItems": true },
+        "extensionGroupId": { "$ref": "#/$defs/id" },
+        "syncMode": { "enum": ["local", "managed", "disabled"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "profileResource": {
+      "type": "object",
+      "required": ["profileId", "resourceId", "workspaceId", "archiveState"],
+      "properties": {
+        "profileId": { "$ref": "#/$defs/id" },
+        "resourceId": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" },
+        "archiveState": { "enum": ["active", "archived"] }
+      },
+      "additionalProperties": false
+    },
+    "group": {
+      "type": "object",
+      "required": ["id", "name", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "appearance": { "type": "object", "additionalProperties": true },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "proxy": {
+      "type": "object",
+      "required": ["id", "protocol", "host", "port", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "protocol": { "enum": ["http", "https", "socks4", "socks5"] },
+        "host": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "credentialRef": { "$ref": "#/$defs/id" },
+        "rotationUrl": { "type": "string", "format": "uri" },
+        "bypassRules": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "vpn": {
+      "type": "object",
+      "required": ["id", "name", "kind", "configRef", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "enum": ["wireguard", "openvpn"] },
+        "configRef": { "$ref": "#/$defs/id" },
+        "lastUsedAt": { "$ref": "#/$defs/timestamp" },
+        "syncMode": { "enum": ["local", "managed", "disabled"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "extension": {
+      "type": "object",
+      "required": ["id", "name", "packageType", "artifactRef", "artifactSha256", "compatibility", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "packageType": { "enum": ["xpi", "crx", "zip"] },
+        "artifactRef": { "$ref": "#/$defs/id" },
+        "artifactSha256": { "$ref": "#/$defs/sha256" },
+        "compatibility": {
+          "type": "array",
+          "items": { "enum": ["firefox", "chromium"] },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "syncMode": { "enum": ["local", "managed", "disabled"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "extensionGroup": {
+      "type": "object",
+      "required": ["id", "name", "extensionIds", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "extensionIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "syncMode": { "enum": ["local", "managed", "disabled"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInstall": {
+      "type": "object",
+      "required": ["id", "runtime", "version", "platform", "architecture", "state", "checksum"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "runtime": { "enum": ["wayfern", "bugox", "bugium", "bugmini", "bugthor", "bughelium"] },
+        "version": { "type": "string" },
+        "platform": { "enum": ["windows", "macos", "linux"] },
+        "architecture": { "enum": ["x64", "arm64"] },
+        "state": { "enum": ["queued", "downloading", "verifying", "installing", "ready", "cancelled", "failed"] },
+        "checksum": { "$ref": "#/$defs/sha256" },
+        "source": { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

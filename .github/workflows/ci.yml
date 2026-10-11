@@ -1,0 +1,82 @@
+name: BugLogin CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buglogin-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    uses: ./.github/workflows/contracts.yml
+    permissions:
+      contents: read
+
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+        with:
+          install-node-dependencies: false
+      - name: Run scoped Rust checks
+        shell: bash
+        run: bash scripts/ci/check-rust.sh
+
+  javascript:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+      - name: Run scoped JavaScript checks
+        run: node scripts/ci/check-js.mjs
+
+  fixtures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+      - name: Verify sanitized deterministic fixtures
+        run: node scripts/ci/check-fixtures.mjs
+
+  platforms:
+    uses: ./.github/workflows/platform-workspace.yml
+    permissions:
+      contents: read
+
+  status:
+    if: always()
+    needs: [contracts, rust, javascript, fixtures, platforms]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all CI contracts
+        env:
+          CONTRACTS: ${{ needs.contracts.result }}
+          RUST: ${{ needs.rust.result }}
+          JAVASCRIPT: ${{ needs.javascript.result }}
+          FIXTURES: ${{ needs.fixtures.result }}
+          PLATFORMS: ${{ needs.platforms.result }}
+        run: |
+          for result in "$CONTRACTS" "$RUST" "$JAVASCRIPT" "$FIXTURES" "$PLATFORMS"; do
+            if [ "$result" != success ]; then
+              echo "CI contract failed: $result"
+              exit 1
+            fi
+          done
+
+

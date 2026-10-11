@@ -1,0 +1,30 @@
+{
+  "schema": "buglogin.live-infra-evidence/1",
+  "generatedAt": "2026-07-21T07:07:34.905Z",
+  "strict": true,
+  "results": [
+    {
+      "service": "postgres",
+      "status": "pass",
+      "evidence": "SELECT 1",
+      "durationMs": 224
+    },
+    {
+      "service": "redis",
+      "status": "pass",
+      "evidence": "PING/PONG",
+      "durationMs": 60
+    },
+    {
+      "service": "s3",
+      "status": "pass",
+      "evidence": "HTTP 200",
+      "durationMs": 113
+    }
+  ],
+  "summary": {
+    "pass": 3,
+    "skipped": 0,
+    "blocked": 0
+  }
+}

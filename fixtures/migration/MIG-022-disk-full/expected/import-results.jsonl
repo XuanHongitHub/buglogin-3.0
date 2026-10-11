@@ -1,0 +1,2 @@
+{"status":"blocked","case":"new_staging","code":"migration_staging_capacity_insufficient","stagingCreated":false,"destinationChanged":false,"sourceUnchanged":true}
+{"status":"blocked","case":"resume","code":"migration_staging_capacity_insufficient","stagingRetained":true,"destinationChanged":false,"sourceUnchanged":true}

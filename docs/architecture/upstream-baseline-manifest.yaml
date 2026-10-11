@@ -1,0 +1,24 @@
+schemaVersion: "1.0"
+product: buglogin
+source:
+  project: DonutBrowser
+  repository: https://github.com/zhom/donutbrowser
+  releaseReference: v0.28.2
+  commit: a4ed5c855afc4242b6c89c7d73ad767f2357c7f0
+  commitTimestamp: "2026-07-18T11:06:24+02:00"
+  sourceTreeHash: a0294adfdb92874f6ab915015744f1e470fe09347e422fb988c3ae9d3efe97d8
+  inspectedAt: "2026-07-20"
+destinationBaseline:
+  copiedPaths:
+    - src
+    - src-tauri
+    - donut-sync
+    - package.json
+    - pnpm-lock.yaml
+    - pnpm-workspace.yaml
+  sourceReferencesReadOnly: true
+  referenceRoot: .tmp/donutbrowser-upstream
+integrity:
+  method: sha256
+  sourceTreeHashInput: "sorted relative file path bytes followed by file content bytes"
+  updateRule: "Any upstream update requires a new commit, timestamp, tree hash, compatibility review, and patch-queue entry."

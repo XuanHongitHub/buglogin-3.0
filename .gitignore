@@ -1,0 +1,18 @@
+# BugLogin 2.0 local references and generated artifacts
+.tmp/
+node_modules/
+dist/
+.next/
+.next-web/
+target/
+.env
+.env.*
+!.env.example
+.envrc
+*.log
+*.tsbuildinfo
+
+.playwright-mcp/
+.gstack/
+apps/desktop/src-tauri/binaries/*
+!apps/desktop/src-tauri/binaries/.gitkeep

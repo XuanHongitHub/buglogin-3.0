@@ -1,0 +1,22 @@
+{
+  "snapshotId": "sha256:1326a75f4b04d41fd3cf9ff7aa9d02b0d8c83bbd39e6228fb16d8d13ed2100b6",
+  "sourceTreeSha256": "1326a75f4b04d41fd3cf9ff7aa9d02b0d8c83bbd39e6228fb16d8d13ed2100b6",
+  "totalBytes": 260,
+  "files": [
+    {
+      "path": "profiles/secret/metadata.json",
+      "bytes": 108,
+      "sha256": "redacted"
+    },
+    {
+      "path": "profiles/secret/profile/Preferences",
+      "bytes": 23,
+      "sha256": "redacted"
+    },
+    {
+      "path": "version.json",
+      "bytes": 129,
+      "sha256": "a9c98de99c25162eab42cb1d3f2d42a11ad2daf2d14da9b9ccd5a97160ed9154"
+    }
+  ]
+}

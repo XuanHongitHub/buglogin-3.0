@@ -1,0 +1,11 @@
+{
+  "snapshotId":"sha256:feda2b970881d3908c93abbb197fef8499f2151564f48a5ef8714cf040440a1d",
+  "sourceTreeSha256":"feda2b970881d3908c93abbb197fef8499f2151564f48a5ef8714cf040440a1d",
+  "totalBytes":415,
+  "files":[
+    {"path":"attack/path-policy.json","bytes":153,"sha256":"e49c9c790d114546ac64b4d4bc9ce748533b2b294355b52dfb5f90c17fe4e63e"},
+    {"path":"profiles/24000000-0000-4000-8000-000000000024/metadata.json","bytes":93,"sha256":"98102adb1569b849fdb70d3ef88c9cd16f1b237437e5558a77a29320f1ac5b3f"},
+    {"path":"profiles/24000000-0000-4000-8000-000000000024/profile/Preferences","bytes":48,"sha256":"98fc90b564839fd678988deebafcfaf06d53478011bf0cc65aa52e35d5c531a8"},
+    {"path":"version.json","bytes":121,"sha256":"b6ce3d92f60fad867a5148fc9087403ccec310766d8ab28a38054c816ab89379"}
+  ]
+}

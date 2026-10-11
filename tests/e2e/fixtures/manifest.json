@@ -1,0 +1,29 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureSet": "synthetic-core-v1",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "source": "synthetic",
+  "users": [
+    {"id":"00000000-0000-5000-8000-000000000001","email":"owner@example.test","displayName":"Avery Owner","roles":["owner"],"password":"E2E-only-owner-password-1"},
+    {"id":"00000000-0000-5000-8000-000000000002","email":"member@example.test","displayName":"Morgan Member","roles":["member"],"password":"E2E-only-member-password-2"}
+  ],
+  "workspaces": [
+    {"id":"00000000-0000-5000-8000-000000000101","slug":"acme-e2e","name":"Acme Synthetic Workspace","ownerId":"00000000-0000-5000-8000-000000000001"},
+    {"id":"00000000-0000-5000-8000-000000000102","slug":"isolated-e2e","name":"Isolated Synthetic Workspace","ownerId":"00000000-0000-5000-8000-000000000002"}
+  ],
+  "teams": [
+    {"id":"00000000-0000-5000-8000-000000000201","workspaceId":"00000000-0000-5000-8000-000000000101","name":"Operations","memberIds":["00000000-0000-5000-8000-000000000001","00000000-0000-5000-8000-000000000002"]},
+    {"id":"00000000-0000-5000-8000-000000000202","workspaceId":"00000000-0000-5000-8000-000000000102","name":"Private Team","memberIds":["00000000-0000-5000-8000-000000000002"]}
+  ],
+  "proxies": [
+    {"id":"00000000-0000-5000-8000-000000000301","protocol":"http","host":"proxy-a.example.test","port":8080,"username":"proxy-user-a","password":"E2E-only-proxy-password-a"},
+    {"id":"00000000-0000-5000-8000-000000000302","protocol":"socks5","host":"proxy-b.example.test","port":1080,"username":"proxy-user-b","password":"E2E-only-proxy-password-b"}
+  ],
+  "profiles": [
+    {"id":"00000000-0000-5000-8000-000000000401","workspaceId":"00000000-0000-5000-8000-000000000101","teamId":"00000000-0000-5000-8000-000000000201","ownerId":"00000000-0000-5000-8000-000000000001","name":"Synthetic Wayfern Profile","runtime":"wayfern","state":"ready","proxyId":"00000000-0000-5000-8000-000000000301","cookies":[{"name":"session","value":"synthetic-cookie","domain":"example.test"}]},
+    {"id":"00000000-0000-5000-8000-000000000402","workspaceId":"00000000-0000-5000-8000-000000000101","teamId":"00000000-0000-5000-8000-000000000201","ownerId":"00000000-0000-5000-8000-000000000002","name":"Synthetic Legacy Profile","runtime":"bugium","state":"created","proxyId":"00000000-0000-5000-8000-000000000302","cookies":[{"name":"legacy","value":"synthetic-legacy-cookie","domain":"legacy.example.test"}]}
+  ],
+  "legacyImports": [
+    {"id":"00000000-0000-5000-8000-000000000501","sourceVersion":"buglogin-1.x-sanitized","profileId":"00000000-0000-5000-8000-000000000402","sourcePath":"synthetic/legacy/profile-002","expectedOutcome":"importable-with-warning","unsupportedFeatures":["legacy-runtime-alias"]}
+  ]
+}

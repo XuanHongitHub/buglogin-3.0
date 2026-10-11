@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "BugLogin",
+  "version": "0.1.0",
+  "identifier": "com.buglogin.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm copy-migration-binary && pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm copy-migration-binary && pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "BugLogin", "width": 1440, "height": 900, "minWidth": 960, "minHeight": 640 }],
+    "security": { "csp": null }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["buglogin", "https"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/buglogin-migrate"],
+    "icon": ["icons/icon.ico"]
+  }
+}
+

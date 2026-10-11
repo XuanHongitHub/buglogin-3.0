@@ -1,0 +1,253 @@
+version: 1.0.0
+title: BugLogin Hosted Desktop Launch Sync
+status: draft
+
+purpose: >-
+  Hosted control-plane contract for desktop-owned browser launch. The API owns
+  profile/resource binding, lease fencing, and profile payload manifests. The
+  desktop owns the browser process. No endpoint authorizes a process by UI state.
+
+security:
+  bearer: Rust desktop bearer only
+  correlation: required x-correlation-id
+  mutations: required Idempotency-Key
+  secrets: lease token never enters React, logs, MCP, or audit detail
+
+endpoints:
+  - id: profile.binding.get
+    method: GET
+    path: /v1/profiles/{profileId}/binding
+    capability: profile.read
+    response: ProfileResourceBinding
+
+  - id: profile.binding.upsert
+    method: PUT
+    path: /v1/profiles/{profileId}/binding
+    capability: profile.update
+    idempotency: required
+    input: ProfileResourceBinding
+    response: ProfileResourceBinding
+    invariants:
+      - profileId path equals body profileId
+      - resource and workspace exist
+      - one active binding per profile
+      - archive is explicit and audited
+
+  - id: resource.lease.acquire
+    method: POST
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/lease
+    capability: profile.launch
+    idempotency: required
+    input: LeaseAcquireInput
+    response: LeaseGrant
+
+  - id: resource.lease.renew
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/lease
+    capability: profile.launch
+    idempotency: required
+    input: LeaseRenewInput
+    response: LeaseGrant
+
+  - id: resource.lease.release
+    method: DELETE
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/lease
+    capability: profile.stop
+    idempotency: required
+    input: LeaseReleaseInput
+    response: LeaseReleaseReceipt
+
+  - id: profile.manifest.get
+    method: GET
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/manifest
+    capability: profile.read
+    required_header: x-buglogin-actor-id
+    response: SyncManifest
+
+  - id: profile.manifest.commit
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/manifest
+    capability: profile.update
+    idempotency: required
+    required_headers:
+      - x-buglogin-owner-id
+      - x-buglogin-owner-token
+      - x-buglogin-fencing-token
+    input: SyncManifest
+    response: SyncManifest
+
+  - id: profile.blob.get
+    method: GET
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs?key={objectKey}
+    capability: profile.read
+    required_headers:
+      - x-buglogin-actor-id
+      - x-buglogin-generation
+      - x-content-sha256
+    response: immutable binary bytes
+
+  - id: migration.sync.import
+    method: POST
+    path: /v1/migrations/sync/import
+    capability: migration.write
+    idempotency: required
+    status: implementation-staging-not-release-ready
+    input: SyncImportInput
+    response: SyncImportReceipt
+    invariants:
+      - validates active profile-resource binding and ACL before object writes
+      - acquires destination lease and remaps source fencing token
+      - never calls Redis manifest commit
+      - PostgreSQL aggregate journal audit and receipt finalize in one transaction
+      - ambiguous commit probes durable receipt and never deletes blobs
+
+  - id: profile.blob.put
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs?key={objectKey}
+    capability: profile.update
+    idempotency: required
+    required_headers:
+      - x-buglogin-owner-id
+      - x-buglogin-owner-token
+      - x-buglogin-fencing-token
+      - x-buglogin-generation
+      - x-content-sha256
+    input: immutable binary bytes
+    response: BlobReceipt
+    invariants:
+      - lease and fencing token validated before storage write
+      - checksum verified before acknowledgement
+      - physical object key derived by Rust API
+      - no blob delete endpoint in v1
+
+schemas:
+  ProfileResourceBinding:
+    required: [profileId, resourceId, workspaceId, archiveState]
+    properties:
+      profileId: string
+      resourceId: string
+      workspaceId: string
+      archiveState: [active, archived]
+
+  LeaseAcquireInput:
+    required: [ownerId, ttlSeconds]
+    properties:
+      ownerId: string
+      ttlSeconds: integer
+
+  LeaseRenewInput:
+    required: [ownerId, ownerToken, ttlSeconds]
+    properties:
+      ownerId: string
+      ownerToken: string
+      ttlSeconds: integer
+
+  LeaseReleaseInput:
+    required: [ownerId, ownerToken]
+    properties:
+      ownerId: string
+      ownerToken: string
+
+  LeaseGrant:
+    required: [fencingToken, resourceId, workspaceId, ownerId, ownerToken, issuedAtMs, expiresAtMs]
+    redacted_fields: [ownerToken]
+
+  LeaseReleaseReceipt:
+    required: [resourceId, released]
+
+  BlobReceipt:
+    required: [resourceId, key, generation, checksum, size]
+    properties:
+      resourceId: string
+      key: string
+      generation: integer
+      checksum: string
+      size: integer
+
+  SyncImportInput:
+    required: [export]
+    properties:
+      export: SyncExport
+      dryRun: boolean
+
+  SyncImportReceipt:
+    required: [operationId, exportId, workspaceId, resourceId, generation, manifestSha256, replayed, dryRun, createdBlobs, resumedBlobs, state]
+    properties:
+      state: [planned, active]
+
+  SyncManifest:
+    required: [schemaVersion, resourceId, workspaceId, fencingToken, generation, rootChecksum, objects, tombstones]
+    properties:
+      schemaVersion: integer
+      resourceId: string
+      workspaceId: string
+      fencingToken: integer
+      generation: integer
+      parentGeneration: [integer, null]
+      rootChecksum: string
+      objects: array
+      tombstones: array
+      dependencies:
+        type: array
+        description: Draft additive dependency list; profile-plus-proxy activation is not enabled until the versioned contract is verified in staging.
+        items: ManifestDependency
+
+  ManifestDependency:
+    required: [kind, proxyId, revision, metadataObject, credentialEnvelopeObject]
+    properties:
+      kind: [proxy]
+      proxyId: string
+      revision: integer
+      metadataObject: ManifestObjectReference
+      credentialEnvelopeObject: [ManifestObjectReference, null]
+
+  ManifestObjectReference:
+    required: [key, size, checksum]
+    properties:
+      key: string
+      size: integer
+      checksum: string
+
+migrationEnvelope:
+  schema: buglogin.sync-export/1
+  implemented:
+    - canonical manifest SHA-256
+    - deterministic complete blob-set SHA-256
+    - ordered generation chain
+    - retained tombstones
+    - exact blob coverage and checksum verification
+    - source fencing token replaced by destination authority
+    - signed migration package preservation as sync/export.json
+  pendingReleaseBlockers:
+    - signed package upload/staging ingress for exports larger than JSON request limits
+    - MCP adapter invoking the same hosted sync import service
+    - PostgreSQL staging journal recovery worker and idempotent resume across process loss
+    - single-transaction PostgreSQL manifest promotion after every blob verifies
+    - ambiguous-commit reconciliation and orphan-blob retention/GC proof
+  invariants:
+    - generation is the canonical sync revision
+    - manifestSha256 canonicalizes scope, generation, objects, and tombstones with fencingToken set to zero
+    - source fencing tokens never authorize destination writes
+    - missing extra duplicate or tampered blobs block import
+    - failed import cannot replace the current destination manifest
+    - PostgreSQL is the only hosted manifest visibility authority
+    - Redis is lease/fencing/event infrastructure only and never migration manifest authority
+    - object-store blobs are immutable and invisible until PostgreSQL activation
+    - profile manifests with a selected proxy include exactly one matching proxy dependency
+    - proxy dependency revision and metadata object must match same-workspace Rust API authority
+    - proxy credential state requires a separate opaque encrypted envelope object
+
+errors:
+  - binding_not_found
+  - resource_lease_held
+  - lease_expired
+  - lease_not_owner
+  - fencing_token_stale
+  - sync_manifest_conflict
+  - manifest_dependency_mismatch
+  - manifest_dependency_stale
+  - manifest_dependency_object_missing
+  - proxy_metadata_object_mismatch
+  - proxy_credential_envelope_required
+  - production_api_unavailable
+  - migration_sync_commit_outcome_unknown

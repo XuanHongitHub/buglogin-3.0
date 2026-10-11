@@ -1,0 +1,1 @@
+{"id":"duplicate-proxy","proxy_settings":{"proxy_type":"http","host":"proxy-a.example.test","port":8080}}

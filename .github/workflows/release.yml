@@ -1,0 +1,73 @@
+name: BugLogin Release Verification
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Protected semantic-version tag to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buglogin-release-${{ github.event_name == 'push' && github.ref_name || inputs.release_ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    outputs:
+      release_ref: ${{ steps.release.outputs.release_ref }}
+      release_sha: ${{ steps.release.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: release
+        name: Validate immutable protected release tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.release_ref }}
+          PUSH_REF: ${{ github.ref_name }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -euo pipefail
+          RELEASE_REF="${PUSH_REF:-$INPUT_REF}"
+          [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Invalid release tag"; exit 1; }
+          if [[ "$EVENT_NAME" == "push" && "$REF_PROTECTED" != "true" ]]; then
+            echo "Release tags must be protected"
+            exit 1
+          fi
+          git fetch --force --tags origin "refs/tags/$RELEASE_REF:refs/tags/$RELEASE_REF"
+          RELEASE_SHA="$(git rev-parse "refs/tags/$RELEASE_REF^{commit}")"
+          [[ -n "$RELEASE_SHA" ]] || { echo "Release tag does not resolve to a commit"; exit 1; }
+          if [[ "$EVENT_NAME" == "push" && "$RELEASE_SHA" != "$GITHUB_SHA" ]]; then
+            echo "Tag commit differs from workflow commit"
+            exit 1
+          fi
+          VERSION="${RELEASE_REF#v}"
+          [[ "$(node -p "require('./apps/desktop/package.json').version")" == "$VERSION" ]] || { echo "desktop package version mismatch"; exit 1; }
+          [[ "$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")" == "$VERSION" ]] || { echo "Tauri version mismatch"; exit 1; }
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]] || { echo "Tracked checkout is dirty"; exit 1; }
+          echo "release_ref=$RELEASE_REF" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
+  sign-and-verify:
+    needs: validate
+    uses: ./.github/workflows/signing.yml
+    with:
+      source-ref: ${{ needs.validate.outputs.release_ref }}
+      source-sha: ${{ needs.validate.outputs.release_sha }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write

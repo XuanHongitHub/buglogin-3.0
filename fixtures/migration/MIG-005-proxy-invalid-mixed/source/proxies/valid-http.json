@@ -1,0 +1,1 @@
+{"id":"valid-http","proxy_settings":{"proxy_type":"http","host":"proxy-valid.example.test","port":8080},"bypass_rules":["localhost"]}
