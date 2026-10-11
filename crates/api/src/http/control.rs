@@ -2690,16 +2690,6 @@ async fn put_resource_blob(
         "profile.update",
         Action::Update,
     )?;
-    let body = axum::body::to_bytes(body, MAX_PROFILE_SYNC_OBJECT_BYTES as usize)
-        .await
-        .map_err(|_| {
-            problem_response(
-                "manifest_object_too_large",
-                "Manifest object exceeds the maximum size",
-                413,
-                correlation(&headers),
-            )
-        })?;
     let idempotency_key = require_idempotency(&headers)?.to_owned();
     let owner_id = required_header(&headers, "x-buglogin-owner-id")?;
     let owner_token = required_header(&headers, "x-buglogin-owner-token")?;
@@ -2710,14 +2700,16 @@ async fn put_resource_blob(
         .parse::<u64>()
         .map_err(|_| bad_header("x-buglogin-generation"))?;
     let expected_checksum = required_header(&headers, "x-content-sha256")?;
-    if body.len() as u64 > MAX_PROFILE_SYNC_OBJECT_BYTES {
-        return Err(problem_response(
-            "manifest_object_too_large",
-            "Manifest object exceeds the maximum size",
-            413,
-            correlation(&headers),
-        ));
-    }
+    let body = axum::body::to_bytes(body, MAX_PROFILE_SYNC_OBJECT_BYTES as usize)
+        .await
+        .map_err(|_| {
+            problem_response(
+                "manifest_object_too_large",
+                "Manifest object exceeds the maximum size",
+                413,
+                correlation(&headers),
+            )
+        })?;
     let actor_id = principal
         .account_id
         .as_ref()
