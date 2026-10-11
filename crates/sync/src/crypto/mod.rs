@@ -18,7 +18,10 @@ pub struct ClientKey([u8; KEY_BYTES]);
 impl ClientKey {
     pub fn generate() -> Result<Self, Problem> {
         let mut bytes = [0_u8; KEY_BYTES];
-        getrandom::fill(&mut bytes).map_err(|_| crypto_problem("key_generation_failed"))?;
+        if getrandom::fill(&mut bytes).is_err() {
+            bytes.fill(0);
+            return Err(crypto_problem("key_generation_failed"));
+        }
         Ok(Self(bytes))
     }
 
@@ -38,7 +41,10 @@ pub struct RecoveryKey([u8; KEY_BYTES]);
 impl RecoveryKey {
     pub fn generate() -> Result<Self, Problem> {
         let mut bytes = [0_u8; KEY_BYTES];
-        getrandom::fill(&mut bytes).map_err(|_| crypto_problem("key_generation_failed"))?;
+        if getrandom::fill(&mut bytes).is_err() {
+            bytes.fill(0);
+            return Err(crypto_problem("key_generation_failed"));
+        }
         Ok(Self(bytes))
     }
 
@@ -50,17 +56,19 @@ impl RecoveryKey {
         if code.len() != KEY_BYTES * 2 {
             return Err(crypto_problem("invalid_recovery_code"));
         }
-        let mut bytes = [0_u8; KEY_BYTES];
+        let mut key = Self([0_u8; KEY_BYTES]);
         let encoded = code.as_bytes();
-        for (index, byte) in bytes.iter_mut().enumerate() {
+        for (index, byte) in key.0.iter_mut().enumerate() {
             let start = index * 2;
-            let high =
-                hex_digit(encoded[start]).ok_or_else(|| crypto_problem("invalid_recovery_code"))?;
-            let low = hex_digit(encoded[start + 1])
-                .ok_or_else(|| crypto_problem("invalid_recovery_code"))?;
+            let Some(high) = hex_digit(encoded[start]) else {
+                return Err(crypto_problem("invalid_recovery_code"));
+            };
+            let Some(low) = hex_digit(encoded[start + 1]) else {
+                return Err(crypto_problem("invalid_recovery_code"));
+            };
             *byte = (high << 4) | low;
         }
-        Ok(Self(bytes))
+        Ok(key)
     }
 
     pub fn recovery_code(&self) -> String {
