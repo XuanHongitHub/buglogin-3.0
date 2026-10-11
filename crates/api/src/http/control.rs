@@ -2119,22 +2119,20 @@ async fn get_resource_manifest(
     headers: HeaderMap,
 ) -> Result<Json<Option<SyncManifest>>, Response> {
     let principal = authenticate(&state, &headers)?;
-    {
-        let _refresh = state.control_mutation.lock().map_err(|_| {
-            problem_response(
-                "control_unavailable",
-                "Control state unavailable",
-                503,
-                correlation(&headers),
-            )
-        })?;
-        if !state.local_authority_enabled() {
-            state.reload_control_aggregate().map_err(response_problem)?;
-        }
-    }
-    let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
+    let _snapshot = state.control_mutation.lock().map_err(|_| {
+        problem_response(
+            "control_unavailable",
+            "Control state unavailable",
+            503,
+            correlation(&headers),
+        )
+    })?;
+    if !state.local_authority_enabled() {
+        state.reload_control_aggregate().map_err(response_problem)?;
+    }
+    let grants = grants(&state)?;
     authorize_lease(
         &principal,
         &grants,
@@ -2144,14 +2142,6 @@ async fn get_resource_manifest(
         Action::Read,
     )?;
     let _ = required_header(&headers, "x-buglogin-actor-id")?;
-    let _snapshot = state.control_mutation.lock().map_err(|_| {
-        problem_response(
-            "control_unavailable",
-            "Control state unavailable",
-            503,
-            correlation(&headers),
-        )
-    })?;
     let manifest = state
         .current_sync_manifest(&workspace_id, &resource_id)
         .map_err(response_problem)?;
@@ -2182,9 +2172,9 @@ async fn commit_resource_manifest(
     Json(manifest): Json<SyncManifest>,
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
-    let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
+    let grants = grants(&state)?;
     authorize_lease(
         &principal,
         &grants,
@@ -2735,9 +2725,20 @@ async fn get_resource_blob(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
-    let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
+    let snapshot = state.control_mutation.lock().map_err(|_| {
+        problem_response(
+            "control_unavailable",
+            "Control state unavailable",
+            503,
+            correlation(&headers),
+        )
+    })?;
+    if !state.local_authority_enabled() {
+        state.reload_control_aggregate().map_err(response_problem)?;
+    }
+    let grants = grants(&state)?;
     authorize_lease(
         &principal,
         &grants,
@@ -2763,6 +2764,7 @@ async fn get_resource_blob(
                 correlation(&headers),
             )
         })?;
+    drop(snapshot);
     let object = manifest
         .objects
         .iter()
@@ -3599,11 +3601,151 @@ impl ResponseExt for Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
     use buglogin_browser::profile::ProfileService;
+    use buglogin_domain::account::Account;
+    use buglogin_storage::control::{
+        ControlRecordStore, MemoryControlRecordStore, PutControlRecord,
+    };
     use buglogin_sync::manifest::{
         ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
         PayloadEncryptionAlgorithm,
     };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn hosted_sync_reads_refresh_committed_state_from_another_instance() {
+        let account = AccountId::new("acct_blob_refresh").unwrap();
+        let workspace = WorkspaceId::new("ws_blob_refresh").unwrap();
+        let resource = ResourceId::new("res_blob_refresh").unwrap();
+        let manifest_resource = ResourceId::new("res_manifest_refresh").unwrap();
+        let mut store = MemoryControlRecordStore::default();
+        let account_value =
+            serde_json::to_value(Account::new(account.clone(), "2026-10-12")).unwrap();
+        store
+            .put(PutControlRecord {
+                tenant_id: "control",
+                record_type: "account",
+                record_id: account.as_str(),
+                expected_revision: Some(0),
+                idempotency_key: "seed-blob-refresh-account",
+                value: &account_value,
+            })
+            .unwrap();
+
+        let writer =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.clone()).unwrap();
+        let token = writer.issue_token(account.as_str()).unwrap();
+        let reader =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.reopen())
+                .unwrap();
+        let manifest_reader =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.reopen())
+                .unwrap();
+
+        let grant = buglogin_domain::permissions::Grant {
+            id: GrantId::new("grant_blob_refresh_read").unwrap(),
+            account_id: Some(account.clone()),
+            member_id: None,
+            capability: buglogin_domain::permissions::Capability::new("profile.read").unwrap(),
+            action: buglogin_domain::permissions::Action::Read,
+            scope: ResourceScope::workspace(workspace.clone()),
+            effect: buglogin_domain::permissions::Effect::Allow,
+        };
+        writer.grants.write().unwrap().push(grant);
+
+        let bytes = b"verified encrypted bytes";
+        let object = ManifestObject::new("Cookies", bytes).unwrap();
+        let manifest = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            1,
+            1,
+            None,
+            b"blob-refresh-manifest",
+            vec![object.clone()],
+        )
+        .unwrap();
+        writer.replace_sync_manifest(manifest).unwrap();
+        writer
+            .replace_sync_manifest(
+                SyncManifest::new(
+                    workspace.clone(),
+                    manifest_resource.clone(),
+                    1,
+                    1,
+                    None,
+                    b"manifest-refresh-genesis",
+                    Vec::new(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer
+            .persist_control_aggregate(
+                "test.sync.seed",
+                "test-blob-refresh-seed".into(),
+                account.as_str().to_owned(),
+                true,
+                &"a".repeat(64),
+                json!({"test": "blob-refresh"}),
+                200,
+                json!({"seeded": true}),
+            )
+            .unwrap();
+
+        let manifest_request = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/v1/workspaces/{}/resources/{}/manifest",
+                workspace.as_str(),
+                manifest_resource.as_str()
+            ))
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-correlation-id", "test-manifest-refresh")
+            .header("x-buglogin-actor-id", account.as_str())
+            .body(Body::empty())
+            .unwrap();
+        let manifest_response = crate::http::router(manifest_reader)
+            .oneshot(manifest_request)
+            .await
+            .unwrap();
+        assert_eq!(manifest_response.status(), StatusCode::OK);
+        let manifest_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(manifest_response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest_body["generation"], 1);
+
+        let object_key = payload_object_key(&resource, 1, &object.key, &object.checksum);
+        reader
+            .put_remote_chunk(&object_key, bytes, &object.checksum)
+            .unwrap();
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/v1/workspaces/{}/resources/{}/blobs?key=Cookies",
+                workspace.as_str(),
+                resource.as_str()
+            ))
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-correlation-id", "test-blob-refresh")
+            .header("x-buglogin-generation", "1")
+            .header("x-content-sha256", &object.checksum)
+            .header("x-buglogin-actor-id", account.as_str())
+            .body(Body::empty())
+            .unwrap();
+
+        let response = crate::http::router(reader).oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(body.as_ref(), bytes);
+    }
 
     #[test]
     fn active_v2_manifest_rejects_key_version_change() {

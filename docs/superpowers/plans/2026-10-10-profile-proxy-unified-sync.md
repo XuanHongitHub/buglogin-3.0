@@ -21,6 +21,7 @@ Status: Rust API, metadata dependency validation, desktop API transport, client-
 - [x] Add API validation that the manifest dependency set matches the selected proxy, current revision, same-workspace read grant, and canonical safe metadata object under the serialized manifest mutation.
 - [x] Add a versioned manifest encryption declaration; reject raw profile blob uploads and non-empty commits without a resource-scoped key envelope and supported AES-GCM chunk wire format.
 - [x] Reject manifest reads when the selected proxy revision has changed since the active generation, so clients cannot treat stale profile/proxy state as current.
+- [x] Make hosted manifest and blob reads refresh PostgreSQL authority and snapshot ACL/manifest/object state under one local mutation lock; add a multi-instance regression test.
 - [ ] Implement encrypted credential-envelope lifecycle and workspace/device key rotation and revocation.
 - [x] Keep REST/OpenAPI/MCP coverage aligned with the canonical API command and resource contracts; local API and sync contract suites pass.
 - [ ] Add staging integration tests; prove retries, conflicts, partial transfers, and outages preserve the prior active generation.
