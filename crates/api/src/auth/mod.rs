@@ -209,8 +209,12 @@ impl AuthService {
         self.verify_session(&stored.record, raw_token, now)?;
         let IssuedSession {
             raw_token: replacement,
-            record: replacement_record,
+            record: mut replacement_record,
         } = refresh_session(&stored.record, expires_at)?;
+        replacement_record.family_id = stored.record.family_id.clone();
+        replacement_record.csrf_hash = stored.record.csrf_hash;
+        replacement_record.created_at = stored.record.created_at;
+        replacement_record.last_seen_at = Some(now);
         let mut revoked_record = stored.record;
         revoked_record.revoked_at = Some(now);
 
