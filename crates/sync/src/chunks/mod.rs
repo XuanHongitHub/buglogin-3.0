@@ -21,7 +21,8 @@ impl EncryptedChunk {
             return Err(chunk_problem("encrypted_chunk_checksum_mismatch", false));
         }
         let authenticated = AuthenticatedChunk::decode(&self.bytes)?;
-        let plaintext = authenticated.decrypt(key, self.object_key.as_bytes())?;
+        let associated_data = logical_chunk_key(&self.object_key, &self.ciphertext_checksum)?;
+        let plaintext = authenticated.decrypt(key, associated_data.as_bytes())?;
         if plaintext.len() as u64 != self.plaintext_size
             || checksum(&plaintext) != self.plaintext_checksum
         {
@@ -46,19 +47,33 @@ pub fn encrypt_chunks(
         .enumerate()
         .map(|(index, chunk)| {
             let plaintext_checksum = checksum(chunk);
-            let object_key = format!("{object_prefix}/{index:016x}-{plaintext_checksum}");
-            let authenticated = AuthenticatedChunk::encrypt(key, chunk, object_key.as_bytes())?;
+            let logical_key = format!("{object_prefix}/{index:016x}-{plaintext_checksum}");
+            let authenticated = AuthenticatedChunk::encrypt(key, chunk, logical_key.as_bytes())?;
             let bytes = authenticated.encoded();
+            let ciphertext_checksum = checksum(&bytes);
+            // AES-GCM uses a random nonce, so identical plaintext can produce different
+            // ciphertext. Address the immutable blob by its ciphertext digest while keeping
+            // authenticated data stable for the logical chunk.
+            let object_key = format!("{logical_key}/{ciphertext_checksum}");
             Ok(EncryptedChunk {
                 index: index as u64,
                 object_key,
                 plaintext_checksum,
-                ciphertext_checksum: checksum(&bytes),
+                ciphertext_checksum,
                 plaintext_size: chunk.len() as u64,
                 bytes,
             })
         })
         .collect()
+}
+
+fn logical_chunk_key(object_key: &str, ciphertext_checksum: &str) -> Result<String, Problem> {
+    let suffix = format!("/{ciphertext_checksum}");
+    // Older manifests used the logical key itself as the remote object key. Keep those
+    // chunks readable while new writes use ciphertext-addressed object keys.
+    let logical_key = object_key.strip_suffix(&suffix).unwrap_or(object_key);
+    validate_prefix(logical_key)?;
+    Ok(logical_key.to_owned())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
