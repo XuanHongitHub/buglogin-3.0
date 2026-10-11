@@ -117,10 +117,12 @@ endpoints:
       - x-buglogin-generation
       - x-content-sha256
     input: immutable binary bytes
+    max_size_bytes: 67108864
     response: BlobReceipt
     invariants:
       - lease and fencing token validated before storage write
       - checksum verified before acknowledgement
+      - request and manifest object limits use the same 64 MiB maximum
       - physical object key derived by Rust API
       - no blob delete endpoint in v1
 
@@ -259,6 +261,7 @@ errors:
   - lease_not_owner
   - fencing_token_stale
   - sync_manifest_conflict
+  - manifest_object_too_large
   - manifest_dependency_mismatch
   - manifest_dependency_stale
   - manifest_dependency_object_missing

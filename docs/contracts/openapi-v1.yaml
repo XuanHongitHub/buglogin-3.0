@@ -438,7 +438,14 @@ paths:
     put:
       operationId: profile.manifest.commit
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
-      responses: { "200": { description: Committed durable sync manifest } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SyncManifest' }
+      responses:
+        "200": { description: Committed durable sync manifest, content: { application/json: { schema: { $ref: '#/components/schemas/SyncManifest' } } } }
+        "413": { $ref: '#/components/responses/Problem' }
   /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs:
     get:
       operationId: profile.blob.get
@@ -449,7 +456,14 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/IdempotencyKey' }
         - { name: key, in: query, required: true, schema: { type: string } }
-      responses: { "200": { description: Verified immutable blob receipt } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary, maxLength: 67108864 }
+      responses:
+        "200": { description: Verified immutable blob receipt }
+        "413": { $ref: '#/components/responses/Problem' }
   /v1/workspaces/{workspaceId}/grants:
     get:
       operationId: grant.list
@@ -527,7 +541,9 @@ components:
     RuntimeProjectionInput: { type: object, required: [deviceId, generation, rootChecksum], properties: { deviceId: { type: string, minLength: 1, maxLength: 128 }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }, additionalProperties: false }
     RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { type: string }, deviceId: { type: string }, ownerId: { type: string }, state: { enum: [running, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
     OptionalRuntimeProjection: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] }
-    SyncManifest: { type: object, required: [schemaVersion, workspaceId, resourceId, fencingToken, generation, rootChecksum, objects, tombstones], properties: { payloadEncryption: { oneOf: [{ $ref: '#/components/schemas/ManifestPayloadEncryption' }, { type: "null" }] }, dependencies: { type: array, items: { $ref: '#/components/schemas/ManifestDependency' } } }, additionalProperties: true }
+    SyncManifest: { type: object, required: [schemaVersion, workspaceId, resourceId, fencingToken, generation, parentGeneration, rootChecksum, objects, tombstones], properties: { schemaVersion: { const: 2 }, workspaceId: { type: string, minLength: 1 }, resourceId: { type: string, minLength: 1 }, fencingToken: { type: integer, minimum: 1 }, generation: { type: integer, minimum: 1 }, parentGeneration: { type: [integer, "null"], minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-f]{64}$' }, objects: { type: array, items: { $ref: '#/components/schemas/ManifestObject' } }, tombstones: { type: array, items: { $ref: '#/components/schemas/ManifestTombstone' } }, dependencies: { type: array, items: { $ref: '#/components/schemas/ManifestDependency' } }, payloadEncryption: { oneOf: [{ $ref: '#/components/schemas/ManifestPayloadEncryption' }, { type: "null" }] } }, additionalProperties: false }
+    ManifestObject: { type: object, required: [key, size, checksum], properties: { key: { type: string, minLength: 1 }, size: { type: integer, minimum: 0, maximum: 67108864 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
+    ManifestTombstone: { type: object, required: [key, deletedGeneration, deletedAtUnixMs, retentionDeadlineUnixMs], properties: { key: { type: string, minLength: 1 }, deletedGeneration: { type: integer, minimum: 1 }, deletedAtUnixMs: { type: integer, minimum: 1 }, retentionDeadlineUnixMs: { type: integer, minimum: 1 } }, additionalProperties: false }
     ManifestPayloadEncryption: { type: object, required: [schemaVersion, algorithm, resourceKeyEnvelope], properties: { schemaVersion: { const: 1 }, algorithm: { const: aes-256-gcm-chunk-v1 }, resourceKeyEnvelope: { allOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }], properties: { key: { const: .buglogin/resource-key-envelope.json } } } }, additionalProperties: false }
     ManifestDependency: { oneOf: [{ type: object, required: [kind, proxyId, revision, metadataObject, credentialEnvelopeObject], properties: { kind: { const: proxy }, proxyId: { type: string, minLength: 1 }, revision: { type: integer, minimum: 1 }, metadataObject: { $ref: '#/components/schemas/ManifestObjectReference' }, credentialEnvelopeObject: { oneOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }, { type: "null" }] } }, additionalProperties: false }] }
     ManifestObjectReference: { type: object, required: [key, size, checksum], properties: { key: { type: string, minLength: 1 }, size: { type: integer, minimum: 0 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }

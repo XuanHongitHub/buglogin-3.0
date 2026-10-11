@@ -17,8 +17,9 @@ use buglogin_sync::{
         AuthenticatedChunk, ClientKey, ProxyCredentialEnvelope, RecoveryKey, ResourceKeyEnvelope,
     },
     manifest::{
-        ManifestDependency, ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
-        ManifestTombstone, PayloadEncryptionAlgorithm, RESOURCE_KEY_ENVELOPE_KEY, SyncManifest,
+        MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject, ManifestObjectReference,
+        ManifestPayloadEncryption, ManifestTombstone, PayloadEncryptionAlgorithm,
+        RESOURCE_KEY_ENVELOPE_KEY, SyncManifest,
     },
     payload::{PAYLOAD_SCHEMA_VERSION, PayloadDescriptor, PayloadObject},
 };
@@ -27,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::remote_api::{RemoteApiClient, RemoteProxySyncSnapshot};
 
 const MARKER: &str = ".buglogin-projection.json";
-const MAX_ENCRYPTED_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ENCRYPTED_OBJECT_BYTES: usize = MAX_PROFILE_SYNC_OBJECT_BYTES as usize;
 
 pub struct HydratedProxyCredential {
     pub proxy_id: buglogin_domain::ids::ProxyId,

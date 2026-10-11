@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MANIFEST_SCHEMA_VERSION: u16 = 2;
 pub const RESOURCE_KEY_ENVELOPE_KEY: &str = ".buglogin/resource-key-envelope.json";
+pub const MAX_PROFILE_SYNC_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +23,14 @@ impl ManifestObject {
     pub fn new(key: impl Into<String>, bytes: &[u8]) -> Result<Self, Problem> {
         let key = key.into();
         validate_key(&key)?;
+        if bytes.len() as u64 > MAX_PROFILE_SYNC_OBJECT_BYTES {
+            return Err(Problem::new(
+                "manifest_object_too_large",
+                "Manifest object exceeds the maximum size",
+                413,
+                "sync",
+            ));
+        }
         Ok(Self {
             key,
             size: bytes.len() as u64,
@@ -254,6 +263,14 @@ impl SyncManifest {
             }
             if !is_checksum(&object.checksum) {
                 return Err(checksum_problem("invalid_manifest_object_checksum"));
+            }
+            if object.size > MAX_PROFILE_SYNC_OBJECT_BYTES {
+                return Err(Problem::new(
+                    "manifest_object_too_large",
+                    "Manifest object exceeds the maximum size",
+                    413,
+                    "sync",
+                ));
             }
         }
         let mut tombstone_keys = BTreeSet::new();

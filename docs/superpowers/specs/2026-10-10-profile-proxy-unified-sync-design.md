@@ -20,6 +20,7 @@ Status: contract/design gate; hosted implementation is blocked until the BugLogi
 - Coalesce rapid edits per profile, bound transfer concurrency and chunk size, and resume verified chunks after interruption.
 - Profile start/stop and proxy edits must not trigger redundant full scans. Maintain a local change journal or equivalent incremental manifest input, with periodic reconciliation as recovery.
 - Enforce per-file and per-profile size limits at the API boundary and return typed quota/validation errors before accepting partial state.
+- Use one shared 64 MiB encrypted object limit in the Rust manifest validator, HTTP upload body extractor, and desktop snapshot. Per-profile/workspace aggregate quotas remain enforced separately by workspace usage policy.
 - A profile and its proxy dependency become visible atomically at one manifest generation. Missing, unauthorized, stale, or cross-workspace proxy references reject the commit without changing the active profile revision.
 
 ## Draft manifest dependency contract

@@ -4,8 +4,9 @@ use buglogin_sync::{
         ApplyOutcome, ConflictKind, ConflictResolution, ConflictStatus, ManifestCoordinator,
     },
     manifest::{
-        MANIFEST_SCHEMA_VERSION, ManifestDependency, ManifestObject, ManifestObjectReference,
-        ManifestPayloadEncryption, ManifestTombstone, PayloadEncryptionAlgorithm, SyncManifest,
+        MANIFEST_SCHEMA_VERSION, MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject,
+        ManifestObjectReference, ManifestPayloadEncryption, ManifestTombstone,
+        PayloadEncryptionAlgorithm, SyncManifest,
     },
 };
 use serde_json::json;
@@ -58,6 +59,16 @@ fn rejects_duplicate_object_keys() {
         ],
     );
     assert_eq!(result.unwrap_err().code, "duplicate_manifest_object");
+}
+
+#[test]
+fn rejects_objects_above_the_shared_sync_limit() {
+    let mut value = manifest(1, None, b"one");
+    value.objects[0].size = MAX_PROFILE_SYNC_OBJECT_BYTES + 1;
+    assert_eq!(
+        value.validate().unwrap_err().code,
+        "manifest_object_too_large"
+    );
 }
 
 #[test]

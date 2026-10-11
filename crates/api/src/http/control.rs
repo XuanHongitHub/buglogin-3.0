@@ -1,7 +1,6 @@
 use axum::{
     Json, Router,
-    body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -34,7 +33,7 @@ use buglogin_storage::control::{
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationScope},
     crypto::{AuthenticatedChunk, ProxyCredentialEnvelope, ResourceKeyEnvelope},
-    manifest::{ManifestDependency, SyncManifest},
+    manifest::{MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, SyncManifest},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -2675,9 +2674,10 @@ async fn put_resource_blob(
     State(state): State<ApiState>,
     Path((workspace_id, resource_id)): Path<(String, String)>,
     Query(query): Query<BlobQuery>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Result<Response, Response> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
@@ -2690,6 +2690,16 @@ async fn put_resource_blob(
         "profile.update",
         Action::Update,
     )?;
+    let body = axum::body::to_bytes(body, MAX_PROFILE_SYNC_OBJECT_BYTES as usize)
+        .await
+        .map_err(|_| {
+            problem_response(
+                "manifest_object_too_large",
+                "Manifest object exceeds the maximum size",
+                413,
+                correlation(&headers),
+            )
+        })?;
     let idempotency_key = require_idempotency(&headers)?.to_owned();
     let owner_id = required_header(&headers, "x-buglogin-owner-id")?;
     let owner_token = required_header(&headers, "x-buglogin-owner-token")?;
@@ -2700,10 +2710,10 @@ async fn put_resource_blob(
         .parse::<u64>()
         .map_err(|_| bad_header("x-buglogin-generation"))?;
     let expected_checksum = required_header(&headers, "x-content-sha256")?;
-    if body.len() > 64 * 1024 * 1024 {
+    if body.len() as u64 > MAX_PROFILE_SYNC_OBJECT_BYTES {
         return Err(problem_response(
-            "blob_too_large",
-            "Blob exceeds upload limit",
+            "manifest_object_too_large",
+            "Manifest object exceeds the maximum size",
             413,
             correlation(&headers),
         ));
