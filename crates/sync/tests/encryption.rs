@@ -2,7 +2,7 @@ use buglogin_domain::errors::Problem;
 use buglogin_storage::remote::{MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore};
 use buglogin_sync::{
     chunks::{download_and_decrypt, encrypt_chunks, upload_resumable},
-    crypto::ClientKey,
+    crypto::{ClientKey, RecoveryKey, WorkspaceKeyEnvelope},
 };
 
 #[test]
@@ -59,6 +59,50 @@ fn retry_resumes_without_duplicate_upload() {
         download_and_decrypt(&remote.inner, &key, &chunks).unwrap(),
         b"abcdefghijkl"
     );
+}
+
+#[test]
+fn workspace_key_envelope_recovers_key_only_for_its_workspace() {
+    let workspace = buglogin_domain::ids::WorkspaceId::from_str("ws_alpha").unwrap();
+    let other_workspace = buglogin_domain::ids::WorkspaceId::from_str("ws_beta").unwrap();
+    let client_key = ClientKey::from_bytes([0x5a; 32]);
+    let recovery_key = RecoveryKey::from_bytes([0xa5; 32]);
+    let envelope =
+        WorkspaceKeyEnvelope::wrap(workspace.clone(), &client_key, &recovery_key).unwrap();
+
+    let json = serde_json::to_vec(&envelope).unwrap();
+    let decoded: WorkspaceKeyEnvelope = serde_json::from_slice(&json).unwrap();
+    let recovered = decoded.unwrap(&workspace, &recovery_key).unwrap();
+    assert_eq!(recovered.as_bytes(), client_key.as_bytes());
+    assert_eq!(
+        decoded
+            .unwrap(&other_workspace, &recovery_key)
+            .unwrap_err()
+            .code,
+        "workspace_key_envelope_scope_mismatch"
+    );
+
+    let wrong_recovery_key = RecoveryKey::from_bytes([0x33; 32]);
+    assert_eq!(
+        decoded
+            .unwrap(&workspace, &wrong_recovery_key)
+            .unwrap_err()
+            .code,
+        "chunk_authentication_failed"
+    );
+}
+
+#[test]
+fn recovery_code_round_trips_and_debug_redacts_secret() {
+    let key = RecoveryKey::from_bytes([0x2f; 32]);
+    let code = key.recovery_code();
+    assert_eq!(code.len(), 64);
+    assert_eq!(
+        RecoveryKey::parse_code(&code).unwrap().recovery_code(),
+        code
+    );
+    assert_eq!(format!("{key:?}"), "RecoveryKey(<redacted>)");
+    assert!(RecoveryKey::parse_code(&"é".repeat(32)).is_err());
 }
 
 #[derive(Default)]

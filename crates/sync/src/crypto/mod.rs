@@ -4,7 +4,8 @@ use aes_gcm::{
     Aes256Gcm, Nonce, Tag,
     aead::{AeadInPlace, KeyInit},
 };
-use buglogin_domain::errors::Problem;
+use buglogin_domain::{errors::Problem, ids::WorkspaceId};
+use serde::{Deserialize, Serialize};
 
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
@@ -15,12 +16,136 @@ const ENCRYPTION_VERSION: u8 = 1;
 pub struct ClientKey([u8; KEY_BYTES]);
 
 impl ClientKey {
+    pub fn generate() -> Result<Self, Problem> {
+        let mut bytes = [0_u8; KEY_BYTES];
+        getrandom::fill(&mut bytes).map_err(|_| crypto_problem("key_generation_failed"))?;
+        Ok(Self(bytes))
+    }
+
     pub fn from_bytes(bytes: [u8; KEY_BYTES]) -> Self {
         Self(bytes)
     }
 
     pub fn as_bytes(&self) -> &[u8; KEY_BYTES] {
         &self.0
+    }
+}
+
+/// A user-held secret used to recover a workspace key on another device.
+/// The caller must display the recovery code once and must not persist or log it.
+pub struct RecoveryKey([u8; KEY_BYTES]);
+
+impl RecoveryKey {
+    pub fn generate() -> Result<Self, Problem> {
+        let mut bytes = [0_u8; KEY_BYTES];
+        getrandom::fill(&mut bytes).map_err(|_| crypto_problem("key_generation_failed"))?;
+        Ok(Self(bytes))
+    }
+
+    pub fn from_bytes(bytes: [u8; KEY_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn parse_code(code: &str) -> Result<Self, Problem> {
+        if code.len() != KEY_BYTES * 2 {
+            return Err(crypto_problem("invalid_recovery_code"));
+        }
+        let mut bytes = [0_u8; KEY_BYTES];
+        let encoded = code.as_bytes();
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let start = index * 2;
+            let high =
+                hex_digit(encoded[start]).ok_or_else(|| crypto_problem("invalid_recovery_code"))?;
+            let low = hex_digit(encoded[start + 1])
+                .ok_or_else(|| crypto_problem("invalid_recovery_code"))?;
+            *byte = (high << 4) | low;
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn recovery_code(&self) -> String {
+        let mut code = String::with_capacity(KEY_BYTES * 2);
+        for byte in &self.0 {
+            use fmt::Write as _;
+            let _ = write!(code, "{byte:02x}");
+        }
+        code
+    }
+}
+
+impl fmt::Debug for RecoveryKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RecoveryKey(<redacted>)")
+    }
+}
+
+impl Drop for RecoveryKey {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+/// Server-storable envelope for a workspace key, encrypted with a client-held
+/// recovery key and authenticated against the workspace identity.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct WorkspaceKeyEnvelope {
+    pub schema_version: u8,
+    pub workspace_id: WorkspaceId,
+    pub encrypted_key: AuthenticatedChunk,
+}
+
+impl WorkspaceKeyEnvelope {
+    pub fn wrap(
+        workspace_id: WorkspaceId,
+        client_key: &ClientKey,
+        recovery_key: &RecoveryKey,
+    ) -> Result<Self, Problem> {
+        let recovery_key = ClientKey::from_bytes(recovery_key.0);
+        let encrypted_key = AuthenticatedChunk::encrypt(
+            &recovery_key,
+            client_key.as_bytes(),
+            &workspace_key_aad(&workspace_id),
+        )?;
+        Ok(Self {
+            schema_version: 1,
+            workspace_id,
+            encrypted_key,
+        })
+    }
+
+    pub fn unwrap(
+        &self,
+        expected_workspace_id: &WorkspaceId,
+        recovery_key: &RecoveryKey,
+    ) -> Result<ClientKey, Problem> {
+        if self.schema_version != 1 || &self.workspace_id != expected_workspace_id {
+            return Err(crypto_problem("workspace_key_envelope_scope_mismatch"));
+        }
+        let recovery_key = ClientKey::from_bytes(recovery_key.0);
+        let mut bytes = self
+            .encrypted_key
+            .decrypt(&recovery_key, &workspace_key_aad(expected_workspace_id))?;
+        if bytes.len() != KEY_BYTES {
+            bytes.fill(0);
+            return Err(crypto_problem("invalid_workspace_key_envelope"));
+        }
+        let mut key = [0_u8; KEY_BYTES];
+        key.copy_from_slice(&bytes);
+        bytes.fill(0);
+        Ok(ClientKey::from_bytes(key))
+    }
+}
+
+fn workspace_key_aad(workspace_id: &WorkspaceId) -> Vec<u8> {
+    format!("buglogin/workspace-key/v1/{}", workspace_id.as_str()).into_bytes()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -36,7 +161,7 @@ impl Drop for ClientKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct AuthenticatedChunk {
     pub version: u8,
     pub nonce: [u8; NONCE_BYTES],
