@@ -148,6 +148,14 @@ impl S3RemoteChunkStore {
 }
 
 impl RemoteChunkStore for S3RemoteChunkStore {
+    fn readiness(&self) -> Result<(), Problem> {
+        let key = self.config.namespaced_key("buglogin-readiness-probe")?;
+        match self.bucket.head_object(&key) {
+            Ok((_, 200..=299 | 404)) => Ok(()),
+            Ok(_) | Err(_) => Err(unavailable()),
+        }
+    }
+
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
         let key = self.config.namespaced_key(object_key)?;
         match self.bucket.head_object(&key) {

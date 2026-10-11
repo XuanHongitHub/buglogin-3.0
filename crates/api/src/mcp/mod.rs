@@ -971,7 +971,7 @@ impl McpExecutor for ProductionMcpExecutor {
                 let input_proxy: McpProxyMetadata =
                     serde_json::from_value(input.get("proxy").cloned().unwrap_or(Value::Null))
                         .map_err(serialization_problem)?;
-                let proxy = input_proxy.into_proxy();
+                let proxy = input_proxy.into_proxy()?;
                 let result = state
                     .proxies
                     .write()
@@ -997,7 +997,8 @@ impl McpExecutor for ProductionMcpExecutor {
                 let input_proxy: McpProxyMetadata =
                     serde_json::from_value(input.get("proxy").cloned().unwrap_or(Value::Null))
                         .map_err(serialization_problem)?;
-                let mut proxy = input_proxy.into_proxy();
+                let has_credential = input_proxy.has_credential;
+                let mut proxy = input_proxy.into_proxy()?;
                 if proxy.id != proxy_id {
                     return Err(problem("invalid_proxy", "Proxy identifier mismatch", 400));
                 }
@@ -1007,7 +1008,11 @@ impl McpExecutor for ProductionMcpExecutor {
                     .map_err(|_| problem("proxy_unavailable", "Proxy service unavailable", 503))?
                     .get(&workspace_id, &proxy_id, &principal, &grants)
                     .map_err(proxy_problem)?;
-                proxy.credential_ref = current.proxy.credential_ref;
+                proxy.credential_ref = match has_credential {
+                    None => current.proxy.credential_ref,
+                    Some(false) => None,
+                    Some(true) => Some(proxy_credential_id(&proxy.id)?),
+                };
                 proxy.rotation_url = current.proxy.rotation_url;
                 let record = state
                     .proxies
@@ -1965,26 +1970,47 @@ struct McpProxyMetadata {
     protocol: ProxyProtocol,
     host: String,
     port: u16,
+    #[serde(default)]
+    has_credential: Option<bool>,
     bypass_rules: Vec<String>,
     created_at: String,
     updated_at: String,
 }
 
 impl McpProxyMetadata {
-    fn into_proxy(self) -> Proxy {
-        Proxy {
+    fn into_proxy(self) -> Result<Proxy, Problem> {
+        let credential_ref = if self.has_credential.unwrap_or(false) {
+            Some(proxy_credential_id(&self.id)?)
+        } else {
+            None
+        };
+        Ok(Proxy {
             id: self.id,
             name: self.name,
             protocol: self.protocol,
             host: self.host,
             port: self.port,
-            credential_ref: None,
+            credential_ref,
             rotation_url: None,
             bypass_rules: self.bypass_rules,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
+}
+
+fn proxy_credential_id(
+    proxy_id: &buglogin_domain::ids::ProxyId,
+) -> Result<buglogin_domain::ids::CredentialId, Problem> {
+    buglogin_domain::ids::CredentialId::new(format!("credential-{}", proxy_id.as_str())).map_err(
+        |_| {
+            problem(
+                "invalid_proxy_credential_id",
+                "Proxy credential identifier is invalid",
+                400,
+            )
+        },
+    )
 }
 
 #[derive(serde::Serialize)]

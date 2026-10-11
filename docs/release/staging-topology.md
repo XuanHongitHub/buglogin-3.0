@@ -48,6 +48,8 @@ Desktop RC
 
 Artifacts embed only environment, API/sync bases, update channel, telemetry environment, commit, and feature manifest. Secrets are runtime-injected, never embedded.
 
+Server processes require an explicit `BUGLOGIN_ENV=local|production`; a missing or unknown mode must not silently start local in a release deployment. Hosted production must use the `buglogin-api` binary; the secondary `buglogin-control` harness rejects production because it does not configure the S3 and Redis adapters. The Rust API production process requires `BUGLOGIN_API_BIND` to be a valid non-loopback socket address with a nonzero port. Local development retains the loopback default. `/v1/health` is liveness only; ingress readiness must use `/v1/readyz`, which checks PostgreSQL, S3, and Redis. An unrelated `/health` or `/readyz` from a proxy is not evidence that the BugLogin v1 API routes are deployed.
+
 RC artifacts tested in staging are byte-identical to stable artifacts. Promotion changes signed channel metadata, not binaries.
 
 ## Data and failure injection

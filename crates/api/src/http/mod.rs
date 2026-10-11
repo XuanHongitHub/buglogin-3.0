@@ -228,6 +228,7 @@ pub struct ApiState {
     materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
     platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
     local_account_provisioning: bool,
+    external_object_storage: bool,
     pub lifecycles: Arc<RwLock<HashMap<String, Lifecycle>>>,
     pub runtime_binaries: Arc<RwLock<HashMap<String, RuntimeBinary>>>,
     migration_key: Arc<RwLock<Option<MigrationKey>>>,
@@ -341,6 +342,7 @@ impl ApiState {
             control_revision: Arc::new(RwLock::new(revision)),
             control_mutation: Arc::new(Mutex::new(())),
             local_account_provisioning,
+            external_object_storage: false,
             lifecycles: Arc::new(RwLock::new(HashMap::new())),
             runtime_binaries: Arc::new(RwLock::new(HashMap::new())),
             migration_key: Arc::new(RwLock::new(None)),
@@ -448,6 +450,50 @@ impl ApiState {
         self
     }
 
+    pub async fn readiness(&self) -> Result<(), Problem> {
+        self.control_persistence.readiness()?;
+        if !self.local_account_provisioning && !self.external_object_storage {
+            return Err(problem(
+                "object_storage_not_configured",
+                "Remote object storage is not configured",
+                503,
+            ));
+        }
+        self.remote_chunks
+            .lock()
+            .map_err(|_| {
+                problem(
+                    "readiness_unavailable",
+                    "Service readiness check failed",
+                    503,
+                )
+            })?
+            .readiness()?;
+        let coordination = self
+            .coordination
+            .read()
+            .map_err(|_| {
+                problem(
+                    "readiness_unavailable",
+                    "Service readiness check failed",
+                    503,
+                )
+            })?
+            .clone();
+        match coordination {
+            Some(backend) => backend.readiness().await?,
+            None if !self.local_account_provisioning => {
+                return Err(problem(
+                    "coordination_not_configured",
+                    "Redis coordination is not configured",
+                    503,
+                ));
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     pub fn with_recovery_delivery(mut self, delivery: Arc<dyn RecoveryDelivery>) -> Self {
         self.recovery = self.recovery.with_delivery(delivery);
         self
@@ -465,8 +511,9 @@ impl ApiState {
         }
     }
 
-    pub fn with_remote_chunks(self, store: Box<dyn RemoteChunkStore>) -> Self {
+    pub fn with_remote_chunks(mut self, store: Box<dyn RemoteChunkStore>) -> Self {
         *self.remote_chunks.lock().expect("remote chunk lock") = store;
+        self.external_object_storage = true;
         self
     }
 
@@ -1803,6 +1850,14 @@ struct Health {
     service: &'static str,
 }
 
+async fn readyz(State(state): State<ApiState>) -> Result<Json<Health>, Response> {
+    state.readiness().await.map_err(response)?;
+    Ok(Json(Health {
+        status: "ready",
+        service: "buglogin-api",
+    }))
+}
+
 pub fn coordination_authorizer(state: &ApiState) -> Arc<dyn CoordinationAuthorizer> {
     Arc::new(ApiCoordinationAuthorizer {
         auth: Arc::clone(&state.auth),
@@ -1956,6 +2011,7 @@ pub fn router(state: ApiState) -> Router {
                 })
             }),
         )
+        .route("/v1/readyz", get(readyz))
         .route("/v1/proxies/parse", post(parse_proxy))
         .route("/v1/profiles", get(list_profiles).post(create_profile))
         .route("/v1/profiles/{id}", get(get_profile).delete(delete_profile))
@@ -3953,7 +4009,9 @@ async fn require_correlation(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if headers.get("x-correlation-id").is_none() && request.uri().path() != "/v1/health" {
+    if headers.get("x-correlation-id").is_none()
+        && !matches!(request.uri().path(), "/v1/health" | "/v1/readyz")
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(next.run(request).await)

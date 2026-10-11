@@ -22,6 +22,10 @@ impl ControlPersistence {
         }
     }
 
+    pub fn readiness(&self) -> Result<(), Problem> {
+        self.store.lock().map_err(|_| unavailable())?.readiness()
+    }
+
     pub fn load<T>(
         &self,
         tenant_id: &str,

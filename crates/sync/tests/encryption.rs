@@ -2,7 +2,7 @@ use buglogin_domain::errors::Problem;
 use buglogin_storage::remote::{MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore};
 use buglogin_sync::{
     chunks::{download_and_decrypt, encrypt_chunks, upload_resumable},
-    crypto::{ClientKey, RecoveryKey, WorkspaceKeyEnvelope},
+    crypto::{ClientKey, ProxyCredentialEnvelope, RecoveryKey, ResourceKeyEnvelope},
 };
 
 #[test]
@@ -62,33 +62,97 @@ fn retry_resumes_without_duplicate_upload() {
 }
 
 #[test]
-fn workspace_key_envelope_recovers_key_only_for_its_workspace() {
+fn resource_key_envelope_recovers_key_only_for_its_resource() {
     let workspace = buglogin_domain::ids::WorkspaceId::from_str("ws_alpha").unwrap();
     let other_workspace = buglogin_domain::ids::WorkspaceId::from_str("ws_beta").unwrap();
+    let resource = buglogin_domain::ids::ResourceId::from_str("res_alpha").unwrap();
+    let other_resource = buglogin_domain::ids::ResourceId::from_str("res_beta").unwrap();
     let client_key = ClientKey::from_bytes([0x5a; 32]);
     let recovery_key = RecoveryKey::from_bytes([0xa5; 32]);
-    let envelope =
-        WorkspaceKeyEnvelope::wrap(workspace.clone(), &client_key, &recovery_key).unwrap();
+    let envelope = ResourceKeyEnvelope::wrap(
+        workspace.clone(),
+        resource.clone(),
+        &client_key,
+        &recovery_key,
+    )
+    .unwrap();
 
     let json = serde_json::to_vec(&envelope).unwrap();
-    let decoded: WorkspaceKeyEnvelope = serde_json::from_slice(&json).unwrap();
-    let recovered = decoded.unwrap(&workspace, &recovery_key).unwrap();
+    let decoded: ResourceKeyEnvelope = serde_json::from_slice(&json).unwrap();
+    let recovered = decoded
+        .unwrap(&workspace, &resource, &recovery_key)
+        .unwrap();
     assert_eq!(recovered.as_bytes(), client_key.as_bytes());
     assert_eq!(
         decoded
-            .unwrap(&other_workspace, &recovery_key)
+            .unwrap(&other_workspace, &resource, &recovery_key)
             .unwrap_err()
             .code,
-        "workspace_key_envelope_scope_mismatch"
+        "resource_key_envelope_scope_mismatch"
+    );
+    assert_eq!(
+        decoded
+            .unwrap(&workspace, &other_resource, &recovery_key)
+            .unwrap_err()
+            .code,
+        "resource_key_envelope_scope_mismatch"
     );
 
     let wrong_recovery_key = RecoveryKey::from_bytes([0x33; 32]);
     assert_eq!(
         decoded
-            .unwrap(&workspace, &wrong_recovery_key)
+            .unwrap(&workspace, &resource, &wrong_recovery_key)
             .unwrap_err()
             .code,
         "chunk_authentication_failed"
+    );
+}
+
+#[test]
+fn proxy_credential_envelope_is_bound_to_profile_proxy_and_revision() {
+    let workspace = buglogin_domain::ids::WorkspaceId::from_str("ws_alpha").unwrap();
+    let resource = buglogin_domain::ids::ResourceId::from_str("res_alpha").unwrap();
+    let proxy = buglogin_domain::ids::ProxyId::from_str("prx_alpha").unwrap();
+    let key = ClientKey::from_bytes([0x42; 32]);
+    let secret = br#"{"username":"user","password":"pass"}"#;
+    let envelope = ProxyCredentialEnvelope::seal(
+        workspace.clone(),
+        resource.clone(),
+        proxy.clone(),
+        7,
+        &key,
+        secret,
+    )
+    .unwrap();
+
+    let encoded = serde_json::to_vec(&envelope).unwrap();
+    assert!(!encoded.windows(4).any(|window| window == b"pass"));
+    let decoded: ProxyCredentialEnvelope = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        decoded
+            .open(&workspace, &resource, &proxy, 7, &key)
+            .unwrap(),
+        secret
+    );
+    assert_eq!(
+        decoded
+            .open(&workspace, &resource, &proxy, 8, &key)
+            .unwrap_err()
+            .code,
+        "proxy_credential_envelope_scope_mismatch"
+    );
+    assert_eq!(
+        decoded
+            .open(
+                &workspace,
+                &resource,
+                &buglogin_domain::ids::ProxyId::from_str("prx_beta").unwrap(),
+                7,
+                &key,
+            )
+            .unwrap_err()
+            .code,
+        "proxy_credential_envelope_scope_mismatch"
     );
 }
 

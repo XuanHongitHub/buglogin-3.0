@@ -8,7 +8,7 @@ use buglogin_storage::blob::checksum;
 use serde::{Deserialize, Serialize};
 
 pub const MANIFEST_SCHEMA_VERSION: u16 = 2;
-pub const WORKSPACE_KEY_ENVELOPE_KEY: &str = ".buglogin/workspace-key-envelope.json";
+pub const RESOURCE_KEY_ENVELOPE_KEY: &str = ".buglogin/resource-key-envelope.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,7 +66,7 @@ pub enum PayloadEncryptionAlgorithm {
 pub struct ManifestPayloadEncryption {
     pub schema_version: u8,
     pub algorithm: PayloadEncryptionAlgorithm,
-    pub workspace_key_envelope: ManifestObjectReference,
+    pub resource_key_envelope: ManifestObjectReference,
 }
 
 impl From<&ManifestObject> for ManifestObjectReference {
@@ -286,15 +286,15 @@ impl SyncManifest {
                     "sync",
                 ));
             }
-            if encryption.workspace_key_envelope.key != WORKSPACE_KEY_ENVELOPE_KEY {
+            if encryption.resource_key_envelope.key != RESOURCE_KEY_ENVELOPE_KEY {
                 return Err(Problem::new(
-                    "invalid_workspace_key_envelope_key",
-                    "Workspace key envelope must use its canonical manifest key",
+                    "invalid_resource_key_envelope_key",
+                    "Resource key envelope must use its canonical manifest key",
                     400,
                     "sync",
                 ));
             }
-            validate_dependency_object(&encryption.workspace_key_envelope, &self.objects)?;
+            validate_dependency_object(&encryption.resource_key_envelope, &self.objects)?;
         }
         for dependency in &self.dependencies {
             match dependency {

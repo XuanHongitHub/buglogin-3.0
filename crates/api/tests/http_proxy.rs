@@ -168,6 +168,7 @@ async fn hosted_proxy_inventory_replays_persists_and_enforces_acl_and_revision()
             "protocol": "http",
             "host": "proxy.example",
             "port": 8080,
+            "hasCredential": true,
             "bypassRules": ["localhost"],
             "createdAt": "2026-07-22T00:00:00Z",
             "updatedAt": "2026-07-22T00:00:00Z"
@@ -188,7 +189,7 @@ async fn hosted_proxy_inventory_replays_persists_and_enforces_acl_and_revision()
     let created_body = json_body(created).await;
     assert_eq!(created_body["record"]["revision"], 1);
     assert_eq!(created_body["deduplicated"], false);
-    assert_eq!(created_body["record"]["proxy"]["hasCredential"], false);
+    assert_eq!(created_body["record"]["proxy"]["hasCredential"], true);
     assert!(
         created_body["record"]["proxy"]
             .get("credentialRef")

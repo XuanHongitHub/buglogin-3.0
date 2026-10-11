@@ -201,6 +201,10 @@ pub struct StreamEvent {
 
 #[async_trait]
 pub trait CoordinationBackend: Send + Sync {
+    async fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
+    }
+
     async fn acquire_lease(
         &self,
         scope: CoordinationScope<'_>,

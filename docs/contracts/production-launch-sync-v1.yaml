@@ -207,12 +207,13 @@ schemas:
       credentialEnvelopeObject: [ManifestObjectReference, null]
 
   ManifestPayloadEncryption:
-    required: [schemaVersion, algorithm, workspaceKeyEnvelope]
+    required: [schemaVersion, algorithm, resourceKeyEnvelope]
     properties:
       schemaVersion: { const: 1 }
       algorithm: { const: aes-256-gcm-chunk-v1 }
-      workspaceKeyEnvelope: ManifestObjectReference
-    canonicalEnvelopeKey: .buglogin/workspace-key-envelope.json
+      resourceKeyEnvelope: ManifestObjectReference
+    canonicalEnvelopeKey: .buglogin/resource-key-envelope.json
+    keyScope: workspaceId+resourceId
 
   ManifestObjectReference:
     required: [key, size, checksum]
@@ -265,9 +266,9 @@ errors:
   - proxy_credential_envelope_required
   - payload_encryption_required
   - unsupported_payload_encryption_schema
-  - invalid_workspace_key_envelope_key
-  - workspace_key_envelope_invalid
-  - workspace_key_envelope_scope_mismatch
+  - invalid_resource_key_envelope_key
+  - resource_key_envelope_invalid
+  - resource_key_envelope_scope_mismatch
   - encrypted_payload_object_invalid
   - production_api_unavailable
   - migration_sync_commit_outcome_unknown

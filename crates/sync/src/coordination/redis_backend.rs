@@ -396,6 +396,24 @@ impl RedisCoordination {
 
 #[async_trait]
 impl CoordinationBackend for RedisCoordination {
+    async fn readiness(&self) -> Result<(), Problem> {
+        let mut connection = self.connection.clone();
+        let response: String = redis::cmd("PING")
+            .query_async(&mut connection)
+            .await
+            .map_err(redis_problem)?;
+        if response == "PONG" {
+            Ok(())
+        } else {
+            Err(Problem::new(
+                "redis_unavailable",
+                "Redis coordination is unavailable",
+                503,
+                "readiness",
+            ))
+        }
+    }
+
     async fn acquire_lease(
         &self,
         scope: CoordinationScope<'_>,

@@ -14,7 +14,7 @@ use buglogin_browser::process::SystemProcessController;
 use buglogin_domain::{
     entities::{ProfileState, SyncMode},
     errors::Problem,
-    ids::{GrantId, ProfileId},
+    ids::{GrantId, ProfileId, ProxyId, WorkspaceId},
     permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope},
     profile::ProfileArchiveState,
 };
@@ -29,12 +29,15 @@ use tokio::sync::Notify;
 use crate::{
     adapter::{AdapterState, RuntimeTargets, push_or_replace_arg},
     auth_vault::AuthVault,
-    profile_projection::ProfileProjection,
+    profile_projection::{HydratedProxyCredential, ProfileProjection},
     profile_runtime::{
         LaunchRequest, LeaseScope, ManagedCoordination, ProfileRuntimeHandle, spawn_profile_runtime,
     },
+    proxy_bridge::{ProxyBridgeHandle, ProxyBridgeSpec},
+    proxy_credential_vault::ProxyCredentialVault,
     proxy_store::{ImportedProxy, ProxyImportReport},
     remote_api::{DeviceAuthorizationStart, RemoteApiClient},
+    sync_key_vault::SyncKeyVault,
 };
 
 pub enum DesktopState {
@@ -52,6 +55,8 @@ pub struct ProductionDesktopState {
     auth_vault: Arc<Mutex<AuthVault>>,
     auth_vault_version: Arc<Mutex<Option<SecretVersion>>>,
     projection: ProfileProjection,
+    sync_key_vault: Arc<SyncKeyVault>,
+    proxy_credential_vault: Arc<ProxyCredentialVault>,
     profile_runtime: ProfileRuntimeHandle,
     runtime_targets: RuntimeTargets,
     operations: Arc<RwLock<OperationService>>,
@@ -66,6 +71,13 @@ struct PendingDeviceAuthorization {
     verification_uri: String,
     expires_at: u64,
     interval: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProxyCredentialInput {
+    username: String,
+    password: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -150,6 +162,8 @@ impl ProductionDesktopState {
             auth_vault: Arc::new(Mutex::new(auth_vault)),
             auth_vault_version: Arc::new(Mutex::new(auth_vault_version)),
             projection: ProfileProjection::open(profiles_root)?,
+            sync_key_vault: Arc::new(SyncKeyVault::native()),
+            proxy_credential_vault: Arc::new(ProxyCredentialVault::native()),
             profile_runtime,
             runtime_targets,
             operations: Arc::new(RwLock::new(OperationService::default())),
@@ -378,6 +392,49 @@ impl ProductionDesktopState {
         payload: Value,
     ) -> Result<CommandResult<Value>, Problem> {
         match invoke_name {
+            "proxy_create" | "proxy_update" | "proxy_delete" => {
+                self.invoke_proxy_mutation(invoke_name, correlation_id, idempotency_key, payload)
+                    .await
+            }
+            "profile_sync_recovery_code_get" => {
+                let input: ProfileRecoveryCodeInput = parse_payload(payload, correlation_id)?;
+                let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
+                let code = self
+                    .profile_sync_recovery_code_get(&profile_id, correlation_id)
+                    .await?;
+                Ok(result(
+                    "profile.sync.recovery.code.get",
+                    correlation_id,
+                    json!({ "recoveryCode": code }),
+                ))
+            }
+            "profile_sync_recover" => {
+                let key = validate_idempotency_key(idempotency_key, correlation_id)?;
+                let hash = payload_hash(&payload)?;
+                let input: ProfileSyncRecoveryInput = parse_payload(payload, correlation_id)?;
+                let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
+                let action_correlation = correlation_id.to_owned();
+                let recovery_code = input.recovery_code;
+                let data = self
+                    .run_operation(
+                        "profile.sync.recover",
+                        key,
+                        &hash,
+                        correlation_id,
+                        move |state| async move {
+                            state
+                                .profile_sync_recover(
+                                    &profile_id,
+                                    &recovery_code,
+                                    &action_correlation,
+                                )
+                                .await?;
+                            Ok(json!({ "recovered": true }))
+                        },
+                    )
+                    .await?;
+                Ok(result("profile.sync.recover", correlation_id, data))
+            }
             "profile_launch" => {
                 let key = validate_idempotency_key(idempotency_key, correlation_id)?;
                 let hash = payload_hash(&payload)?;
@@ -434,6 +491,345 @@ impl ProductionDesktopState {
                     .await
             }
         }
+    }
+
+    async fn invoke_proxy_mutation(
+        &self,
+        invoke_name: &str,
+        correlation_id: &str,
+        idempotency_key: Option<&str>,
+        mut payload: Value,
+    ) -> Result<CommandResult<Value>, Problem> {
+        let workspace_id = payload
+            .get("workspaceId")
+            .and_then(Value::as_str)
+            .and_then(|value| WorkspaceId::new(value.to_owned()).ok())
+            .ok_or_else(|| invalid_input("workspaceId", correlation_id))?;
+        let proxy_id_value = if invoke_name == "proxy_create" {
+            payload.pointer("/proxy/id").and_then(Value::as_str)
+        } else {
+            payload.get("proxyId").and_then(Value::as_str)
+        };
+        let proxy_id = proxy_id_value
+            .and_then(|value| ProxyId::new(value.to_owned()).ok())
+            .ok_or_else(|| invalid_input("proxyId", correlation_id))?;
+
+        if payload.pointer("/proxy/credential").is_some() {
+            return Err(invalid_input("credential", correlation_id));
+        }
+        let credential = payload
+            .as_object_mut()
+            .and_then(|object| object.remove("credential"));
+        let clear_credential = match payload
+            .as_object_mut()
+            .and_then(|object| object.remove("clearCredential"))
+        {
+            Some(Value::Bool(value)) => value,
+            Some(_) => return Err(invalid_input("clearCredential", correlation_id)),
+            None => false,
+        };
+        let secret = match credential {
+            Some(value) => {
+                let input: ProxyCredentialInput = serde_json::from_value(value)
+                    .map_err(|_| invalid_input("credential", correlation_id))?;
+                if input.username.trim().is_empty() || input.password.is_empty() {
+                    return Err(invalid_input("credential", correlation_id));
+                }
+                let encoded = serde_json::to_vec(&json!({
+                    "username": input.username,
+                    "password": input.password
+                }))
+                .map_err(|_| serialization(correlation_id))?;
+                Some(
+                    buglogin_storage::secrets::SecretValue::new(encoded)
+                        .map_err(|_| serialization(correlation_id))?,
+                )
+            }
+            None => None,
+        };
+        if clear_credential && secret.is_some() {
+            return Err(invalid_input("credential", correlation_id));
+        }
+        if let Some(proxy) = payload.get_mut("proxy").and_then(Value::as_object_mut) {
+            match (&secret, clear_credential) {
+                (Some(_), _) => {
+                    proxy.insert("hasCredential".into(), Value::Bool(true));
+                }
+                (None, true) => {
+                    proxy.insert("hasCredential".into(), Value::Bool(false));
+                }
+                (None, false) => {
+                    proxy.remove("hasCredential");
+                }
+            }
+        }
+
+        let previous_revision = payload.get("expectedRevision").and_then(Value::as_u64);
+        let previous = match previous_revision {
+            Some(revision) => self.proxy_credential_vault.load(
+                &workspace_id,
+                &proxy_id,
+                revision,
+                correlation_id,
+            )?,
+            None => None,
+        };
+        if let Some(secret) = secret.as_ref() {
+            self.proxy_credential_vault.store(
+                &workspace_id,
+                &proxy_id,
+                0,
+                secret.clone(),
+                correlation_id,
+            )?;
+        }
+        let result = self
+            .client
+            .invoke(invoke_name, correlation_id, idempotency_key, payload)
+            .await;
+        match result {
+            Ok(result) => {
+                if invoke_name == "proxy_delete" || clear_credential {
+                    if let Some(revision) = previous_revision {
+                        self.proxy_credential_vault.remove(
+                            &workspace_id,
+                            &proxy_id,
+                            revision,
+                            correlation_id,
+                        )?;
+                    }
+                } else {
+                    let revision = if invoke_name == "proxy_create" {
+                        result
+                            .data
+                            .pointer("/record/revision")
+                            .and_then(Value::as_u64)
+                    } else {
+                        result.data.get("revision").and_then(Value::as_u64)
+                    }
+                    .ok_or_else(|| {
+                        Problem::new(
+                            "proxy_revision_missing",
+                            "BugLogin API did not return the updated proxy revision",
+                            502,
+                            correlation_id,
+                        )
+                    })?;
+                    if let Some(secret) = secret.as_ref().or(previous.as_ref()) {
+                        self.proxy_credential_vault.store(
+                            &workspace_id,
+                            &proxy_id,
+                            revision,
+                            secret.clone(),
+                            correlation_id,
+                        )?;
+                    }
+                    if let Some(previous_revision) = previous_revision {
+                        if previous_revision != revision {
+                            self.proxy_credential_vault.remove(
+                                &workspace_id,
+                                &proxy_id,
+                                previous_revision,
+                                correlation_id,
+                            )?;
+                        }
+                    }
+                }
+                if secret.is_some() {
+                    self.proxy_credential_vault.remove(
+                        &workspace_id,
+                        &proxy_id,
+                        0,
+                        correlation_id,
+                    )?;
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                if secret.is_some() {
+                    self.proxy_credential_vault.remove(
+                        &workspace_id,
+                        &proxy_id,
+                        0,
+                        correlation_id,
+                    )?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn profile_sync_recovery_code_get(
+        &self,
+        profile_id: &ProfileId,
+        correlation_id: &str,
+    ) -> Result<String, Problem> {
+        let auth = self.auth(correlation_id)?;
+        let binding = self
+            .client
+            .profile_binding(profile_id, correlation_id)
+            .await?;
+        if binding.profile_id != *profile_id || binding.archive_state != ProfileArchiveState::Active
+        {
+            return Err(Problem::new(
+                "managed_profile_binding_required",
+                "Managed profile requires an active binding",
+                409,
+                correlation_id,
+            ));
+        }
+        let scope = CoordinationScope {
+            workspace_id: &binding.workspace_id,
+            auth: &auth,
+        };
+        let manifest = self
+            .client
+            .current_manifest(scope.clone(), &binding.resource_id)
+            .await?
+            .ok_or_else(|| {
+                Problem::new(
+                    "production_manifest_not_found",
+                    "Production profile manifest not found",
+                    409,
+                    correlation_id,
+                )
+            })?;
+        let keys = if let Some(encryption) = manifest.payload_encryption.as_ref() {
+            let keys = self
+                .sync_key_vault
+                .load(&binding.workspace_id, &binding.resource_id, correlation_id)?
+                .ok_or_else(|| {
+                    Problem::new(
+                        "sync_key_recovery_required",
+                        "This device does not have this profile's recovery key",
+                        409,
+                        correlation_id,
+                    )
+                })?;
+            let envelope_bytes = self
+                .client
+                .download_blob(
+                    scope,
+                    &binding.resource_id,
+                    &encryption.resource_key_envelope.key,
+                    manifest.generation,
+                    &encryption.resource_key_envelope.checksum,
+                    encryption.resource_key_envelope.size,
+                    correlation_id,
+                )
+                .await?;
+            let envelope: buglogin_sync::crypto::ResourceKeyEnvelope =
+                serde_json::from_slice(&envelope_bytes).map_err(|_| {
+                    Problem::new(
+                        "resource_key_envelope_invalid",
+                        "Resource key envelope is invalid",
+                        409,
+                        correlation_id,
+                    )
+                })?;
+            let unwrapped =
+                envelope.unwrap(&binding.workspace_id, &binding.resource_id, &keys.recovery)?;
+            if unwrapped != keys.client {
+                return Err(Problem::new(
+                    "resource_key_vault_mismatch",
+                    "Stored profile key does not match the active manifest",
+                    409,
+                    correlation_id,
+                ));
+            }
+            keys
+        } else {
+            if !manifest.objects.is_empty() {
+                return Err(Problem::new(
+                    "profile_payload_encryption_required",
+                    "This profile has no supported client-side encryption metadata",
+                    409,
+                    correlation_id,
+                ));
+            }
+            self.sync_key_vault.load_or_create(
+                &binding.workspace_id,
+                &binding.resource_id,
+                correlation_id,
+            )?
+        };
+        Ok(keys.recovery.recovery_code())
+    }
+
+    async fn profile_sync_recover(
+        &self,
+        profile_id: &ProfileId,
+        recovery_code: &str,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let auth = self.auth(correlation_id)?;
+        let binding = self
+            .client
+            .profile_binding(profile_id, correlation_id)
+            .await?;
+        if binding.profile_id != *profile_id || binding.archive_state != ProfileArchiveState::Active
+        {
+            return Err(Problem::new(
+                "managed_profile_binding_required",
+                "Managed profile requires an active binding",
+                409,
+                correlation_id,
+            ));
+        }
+        let scope = CoordinationScope {
+            workspace_id: &binding.workspace_id,
+            auth: &auth,
+        };
+        let manifest = self
+            .client
+            .current_manifest(scope.clone(), &binding.resource_id)
+            .await?
+            .ok_or_else(|| {
+                Problem::new(
+                    "production_manifest_not_found",
+                    "Production profile manifest not found",
+                    409,
+                    correlation_id,
+                )
+            })?;
+        let encryption = manifest.payload_encryption.as_ref().ok_or_else(|| {
+            Problem::new(
+                "profile_payload_encryption_required",
+                "This profile has no supported client-side encryption metadata",
+                409,
+                correlation_id,
+            )
+        })?;
+        let envelope_bytes = self
+            .client
+            .download_blob(
+                scope,
+                &binding.resource_id,
+                &encryption.resource_key_envelope.key,
+                manifest.generation,
+                &encryption.resource_key_envelope.checksum,
+                encryption.resource_key_envelope.size,
+                correlation_id,
+            )
+            .await?;
+        let envelope: buglogin_sync::crypto::ResourceKeyEnvelope =
+            serde_json::from_slice(&envelope_bytes).map_err(|_| {
+                Problem::new(
+                    "resource_key_envelope_invalid",
+                    "Resource key envelope is invalid",
+                    409,
+                    correlation_id,
+                )
+            })?;
+        let recovery = buglogin_sync::crypto::RecoveryKey::parse_code(recovery_code)?;
+        let client = envelope.unwrap(&binding.workspace_id, &binding.resource_id, &recovery)?;
+        self.sync_key_vault.store_recovered(
+            &binding.workspace_id,
+            &binding.resource_id,
+            client,
+            recovery,
+            correlation_id,
+        )
     }
 
     fn operation_get(
@@ -540,10 +936,34 @@ impl ProductionDesktopState {
                     &correlation_id,
                 )
             })?;
+        let workspace_keys = if manifest.payload_encryption.is_some() {
+            Some(
+                self.sync_key_vault
+                    .load(&binding.workspace_id, &binding.resource_id, &correlation_id)?
+                    .ok_or_else(|| {
+                        Problem::new(
+                            "sync_key_recovery_required",
+                            "Enter this profile's recovery code on this device to open it",
+                            409,
+                            &correlation_id,
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         for attempt in 0..2 {
-            let projection = self
+            let (projection, mut proxy_credentials) = self
                 .projection
-                .hydrate(&self.client, &auth, &profile_id, &manifest, &correlation_id)
+                .hydrate_encrypted_with_proxy_credentials(
+                    &self.client,
+                    &auth,
+                    &profile_id,
+                    &manifest,
+                    workspace_keys.as_ref().map(|keys| &keys.client),
+                    workspace_keys.as_ref().map(|keys| &keys.recovery),
+                    &correlation_id,
+                )
                 .await?;
             let lease_key = lease_idempotency_key(&idempotency_key, manifest.generation);
             let lease = self
@@ -613,10 +1033,76 @@ impl ProductionDesktopState {
                     return Err(error);
                 }
             };
+            let mut proxy_bridge = None;
             if let Some(proxy) = proxy_launch.as_ref() {
+                let proxy_server = if proxy.has_credential {
+                    let local_credential = self.proxy_credential_vault.load(
+                        &binding.workspace_id,
+                        &proxy.proxy_id,
+                        proxy.revision,
+                        &correlation_id,
+                    )?;
+                    let credential = match local_credential {
+                        Some(credential) => credential,
+                        None => {
+                            let Some(index) = proxy_credentials.iter().position(|credential| {
+                                credential.proxy_id == proxy.proxy_id
+                                    && credential.revision == proxy.revision
+                            }) else {
+                                let _ = self
+                                    .client
+                                    .release_lease(
+                                        scope.clone(),
+                                        &binding.resource_id,
+                                        &lease.owner_token,
+                                    )
+                                    .await;
+                                return Err(Problem::new(
+                                    "proxy_credential_envelope_missing",
+                                    "This device has no credential matching the current proxy revision",
+                                    409,
+                                    &correlation_id,
+                                ));
+                            };
+                            let hydrated: HydratedProxyCredential = proxy_credentials.remove(index);
+                            hydrated.secret
+                        }
+                    };
+                    let bridge = ProxyBridgeHandle::start(ProxyBridgeSpec {
+                        protocol: proxy.protocol.clone(),
+                        host: proxy.host.clone(),
+                        port: proxy.port,
+                        credential: Some(credential),
+                    })
+                    .await
+                    .map_err(|mut error| {
+                        error.correlation_id = correlation_id.clone();
+                        error
+                    });
+                    match bridge {
+                        Ok(bridge) => {
+                            let server = bridge.proxy_url().to_owned();
+                            proxy_bridge = Some(bridge);
+                            server
+                        }
+                        Err(error) => {
+                            let _ = self
+                                .client
+                                .release_lease(
+                                    scope.clone(),
+                                    &binding.resource_id,
+                                    &lease.owner_token,
+                                )
+                                .await;
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    proxy.server.clone()
+                };
                 push_or_replace_arg(
                     &mut specification.args,
-                    format!("--proxy-server={}", proxy.server),
+                    format!("--proxy-server={proxy_server}"),
                 );
                 if !proxy.bypass_rules.is_empty() {
                     push_or_replace_arg(
@@ -641,7 +1127,7 @@ impl ProductionDesktopState {
                         resource_id: binding.resource_id.clone(),
                     }),
                     preacquired_lease: Some(lease),
-                    proxy_bridge: None,
+                    proxy_bridge,
                 })
                 .await
                 .map_err(|mut error| {
@@ -731,11 +1217,29 @@ impl ProductionDesktopState {
         };
         let profile = self.client.profile(&profile_id, &correlation_id).await?;
         let proxy_snapshot = match profile.value.proxy_id.as_ref() {
-            Some(proxy_id) => Some(
-                self.client
-                    .proxy_for_sync(&binding.workspace_id, proxy_id, &correlation_id)
-                    .await?,
-            ),
+            Some(proxy_id) => {
+                let proxy_info = self
+                    .client
+                    .proxy_for_launch(&binding.workspace_id, proxy_id, &correlation_id)
+                    .await?;
+                let credential = self.proxy_credential_vault.load(
+                    &binding.workspace_id,
+                    proxy_id,
+                    proxy_info.revision,
+                    &correlation_id,
+                )?;
+                Some(
+                    self.client
+                        .proxy_for_sync(
+                            &binding.workspace_id,
+                            proxy_id,
+                            proxy_info.revision,
+                            credential,
+                            &correlation_id,
+                        )
+                        .await?,
+                )
+            }
             None => None,
         };
         let previous = self
@@ -750,11 +1254,18 @@ impl ProductionDesktopState {
                     &correlation_id,
                 )
             })?;
-        let (descriptor, files, manifest) = self.projection.snapshot_with_proxy(
+        let workspace_keys = self.sync_key_vault.load_or_create(
+            &binding.workspace_id,
+            &binding.resource_id,
+            &correlation_id,
+        )?;
+        let (descriptor, files, manifest) = self.projection.snapshot_with_proxy_encryption(
             &stopped.profile_path,
             &previous,
             lease.fencing_token,
             proxy_snapshot,
+            &workspace_keys.client,
+            &workspace_keys.recovery,
         )?;
         let object_map: BTreeMap<_, _> = descriptor
             .objects
@@ -1157,6 +1668,19 @@ struct ProfileStopInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileRecoveryCodeInput {
+    profile_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileSyncRecoveryInput {
+    profile_id: String,
+    recovery_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OperationIdInput {
     operation_id: String,
 }
@@ -1270,6 +1794,16 @@ fn serialization(correlation_id: &str) -> Problem {
         500,
         correlation_id,
     )
+}
+
+fn invalid_input(field: &'static str, correlation_id: &str) -> Problem {
+    Problem::new(
+        "invalid_command_input",
+        "Invalid command input",
+        400,
+        correlation_id,
+    )
+    .with_field("field", field)
 }
 
 fn production_sync_not_ready() -> Problem {

@@ -152,7 +152,7 @@ fn proxy_dependency_must_reference_verified_manifest_objects() {
 #[test]
 fn payload_encryption_envelope_must_reference_an_uploaded_object() {
     let envelope =
-        ManifestObject::new(".buglogin/workspace-key-envelope.json", b"opaque envelope").unwrap();
+        ManifestObject::new(".buglogin/resource-key-envelope.json", b"opaque envelope").unwrap();
     let profile_data = ManifestObject::new("profiles/p1/chunk-0001", b"encrypted chunk").unwrap();
     let mut value = SyncManifest::new(
         workspace(),
@@ -167,7 +167,7 @@ fn payload_encryption_envelope_must_reference_an_uploaded_object() {
     value.payload_encryption = Some(ManifestPayloadEncryption {
         schema_version: 1,
         algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
-        workspace_key_envelope: ManifestObjectReference::from(&envelope),
+        resource_key_envelope: ManifestObjectReference::from(&envelope),
     });
     assert!(value.validate().is_ok());
 
@@ -175,7 +175,7 @@ fn payload_encryption_envelope_must_reference_an_uploaded_object() {
         .payload_encryption
         .as_mut()
         .unwrap()
-        .workspace_key_envelope
+        .resource_key_envelope
         .size += 1;
     assert_eq!(
         value.validate().unwrap_err().code,

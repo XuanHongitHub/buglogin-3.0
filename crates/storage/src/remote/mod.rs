@@ -22,6 +22,10 @@ pub struct RemoteChunk {
 }
 
 pub trait RemoteChunkStore: Send {
+    fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
+    }
+
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem>;
 
     fn put(

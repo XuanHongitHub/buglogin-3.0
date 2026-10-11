@@ -8,9 +8,11 @@ mod migration_commands;
 mod profile_projection;
 pub mod profile_runtime;
 mod proxy_bridge;
+mod proxy_credential_vault;
 mod proxy_store;
 mod remote_api;
 mod runtime_config;
+mod sync_key_vault;
 
 use adapter::AdapterState;
 use buglogin_api::commands::CommandResult;
@@ -58,6 +60,8 @@ pub fn run() {
             profile_share_revoke,
             profile_launch,
             profile_stop,
+            profile_sync_recovery_code_get,
+            profile_sync_recover,
             cookie_list,
             cookie_stage,
             cookie_import,
@@ -457,6 +461,33 @@ async fn profile_stop(
             idempotency_key.as_deref(),
             payload,
         )
+        .await
+}
+
+#[tauri::command]
+async fn profile_sync_recovery_code_get(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "profile_sync_recovery_code_get",
+            &correlation_id,
+            None,
+            payload,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn profile_sync_recover(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke("profile_sync_recover", &correlation_id, None, payload)
         .await
 }
 

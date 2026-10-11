@@ -1085,7 +1085,8 @@ fn production_proxy_crud_replays_and_redacts_inventory() {
     for action in [Action::Read, Action::Create, Action::Update, Action::Delete] {
         grant_proxy(&state, account_id, workspace_id, action);
     }
-    let create_input = proxy_input(workspace_id, proxy_id, "Primary");
+    let mut create_input = proxy_input(workspace_id, proxy_id, "Primary");
+    create_input["proxy"]["hasCredential"] = json!(true);
     let created = production_dispatcher(&state)
         .dispatch(production_request(
             "proxy_create",
@@ -1107,7 +1108,7 @@ fn production_proxy_crud_replays_and_redacts_inventory() {
     assert_eq!(replay, created);
     assert_eq!(created["record"]["revision"], 1);
     assert_eq!(created["record"]["proxy"]["host"], "proxy.example.com");
-    assert_eq!(created["record"]["proxy"]["hasCredential"], false);
+    assert_eq!(created["record"]["proxy"]["hasCredential"], true);
     assert_eq!(created["record"]["proxy"]["rotationConfigured"], false);
 
     let listed = production_dispatcher(&state)

@@ -1,12 +1,10 @@
 openapi: 3.1.0
 info:
-  title: BugLogin Local API
+  title: BugLogin REST API
   version: 1.0.0
-  description: Localhost-only adapter over the canonical command registry.
+  description: Versioned Rust control, authentication, and sync API.
 servers:
-  - url: http://127.0.0.1:{port}
-    variables:
-      port: { default: "47821" }
+  - url: https://api.buglogin.com
 security:
   - bearerAuth: []
 tags:
@@ -20,6 +18,12 @@ paths:
       security: []
       responses:
         "200": { description: Healthy, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+  /v1/readyz:
+    get:
+      security: []
+      responses:
+        "200": { description: Required service dependencies are ready, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+        "503": { $ref: '#/components/responses/Problem' }
   /v1/auth/device/start:
     post:
       operationId: auth.device.start

@@ -4,7 +4,6 @@ use axum::{Json, Router, routing::get};
 use buglogin_api::http::ApiState;
 use buglogin_browser::profile::ProfileService;
 use buglogin_domain::errors::Problem;
-use buglogin_storage::control::PostgresConfig;
 use buglogin_storage::local::LocalRepository;
 use serde::Serialize;
 
@@ -24,17 +23,6 @@ pub fn router_with_data_dir(data_dir: impl AsRef<Path>) -> Result<Router, Proble
     let repository = LocalRepository::open(data_dir.as_ref().join("local"))?;
     let state =
         ApiState::new(ProfileService::new(repository)).with_recovery_delivery_from_env(false)?;
-    let router = Router::new()
-        .route("/health", get(health))
-        .merge(buglogin_api::http::router(state.clone()));
-    with_optional_mcp(router, state)
-}
-
-pub fn router_with_data_dir_and_postgres(
-    _data_dir: impl AsRef<Path>,
-    config: PostgresConfig,
-) -> Result<Router, Problem> {
-    let state = ApiState::production(config)?.with_recovery_delivery_from_env(true)?;
     let router = Router::new()
         .route("/health", get(health))
         .merge(buglogin_api::http::router(state.clone()));
@@ -73,21 +61,16 @@ fn with_optional_mcp(router: Router, state: ApiState) -> Result<Router, Problem>
 pub fn router_with_startup_config(
     data_dir: impl AsRef<Path>,
     environment: Option<&str>,
-    postgres_url: Option<String>,
+    _postgres_url: Option<String>,
 ) -> Result<Router, Problem> {
     match environment {
         None | Some("local") => router_with_data_dir(data_dir),
-        Some("production") => {
-            let database_url = postgres_url.ok_or_else(|| {
-                Problem::new(
-                    "missing_postgres_config",
-                    "PostgreSQL configuration is missing",
-                    500,
-                    "control-startup",
-                )
-            })?;
-            router_with_data_dir_and_postgres(data_dir, PostgresConfig::new(database_url)?)
-        }
+        Some("production") => Err(Problem::new(
+            "production_api_entrypoint_unsupported",
+            "Hosted production must run the buglogin-api entrypoint that requires PostgreSQL, S3, Redis, and an explicit ingress bind",
+            409,
+            "control-startup",
+        )),
         Some(_) => Err(Problem::new(
             "invalid_environment",
             "BugLogin environment is invalid",
@@ -102,22 +85,18 @@ mod tests {
     use super::router_with_startup_config;
 
     #[test]
-    fn production_startup_requires_tls_postgres_config() {
+    fn secondary_control_entrypoint_cannot_run_hosted_production() {
         let data = tempfile::tempdir().unwrap();
         assert_eq!(
-            router_with_startup_config(data.path(), Some("production"), None)
-                .err()
-                .unwrap()
-                .code,
-            "missing_postgres_config"
-        );
-        assert!(
             router_with_startup_config(
                 data.path(),
                 Some("production"),
-                Some("postgres://db/app?sslmode=disable".into()),
+                Some("postgres://db/app?sslmode=verify-full".into()),
             )
-            .is_err()
+            .err()
+            .unwrap()
+            .code,
+            "production_api_entrypoint_unsupported"
         );
     }
 

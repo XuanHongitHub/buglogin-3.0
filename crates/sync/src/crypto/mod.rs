@@ -4,7 +4,10 @@ use aes_gcm::{
     Aes256Gcm, Nonce, Tag,
     aead::{AeadInPlace, KeyInit},
 };
-use buglogin_domain::{errors::Problem, ids::WorkspaceId};
+use buglogin_domain::{
+    errors::Problem,
+    ids::{ProxyId, ResourceId, WorkspaceId},
+};
 use serde::{Deserialize, Serialize};
 
 const KEY_BYTES: usize = 32;
@@ -35,7 +38,7 @@ impl ClientKey {
     }
 }
 
-/// A user-held secret used to recover a workspace key on another device.
+/// A user-held secret used to recover one resource key on another device.
 /// The caller must display the recovery code once and must not persist or log it.
 pub struct RecoveryKey([u8; KEY_BYTES]);
 
@@ -51,6 +54,10 @@ impl RecoveryKey {
 
     pub fn from_bytes(bytes: [u8; KEY_BYTES]) -> Self {
         Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; KEY_BYTES] {
+        &self.0
     }
 
     pub fn parse_code(code: &str) -> Result<Self, Problem> {
@@ -94,18 +101,20 @@ impl Drop for RecoveryKey {
     }
 }
 
-/// Server-storable envelope for a workspace key, encrypted with a client-held
-/// recovery key and authenticated against the workspace identity.
+/// Server-storable envelope for one resource key, encrypted with a client-held
+/// recovery key and authenticated against workspace and resource.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct WorkspaceKeyEnvelope {
+pub struct ResourceKeyEnvelope {
     pub schema_version: u8,
     pub workspace_id: WorkspaceId,
+    pub resource_id: ResourceId,
     pub encrypted_key: AuthenticatedChunk,
 }
 
-impl WorkspaceKeyEnvelope {
+impl ResourceKeyEnvelope {
     pub fn wrap(
         workspace_id: WorkspaceId,
+        resource_id: ResourceId,
         client_key: &ClientKey,
         recovery_key: &RecoveryKey,
     ) -> Result<Self, Problem> {
@@ -113,11 +122,12 @@ impl WorkspaceKeyEnvelope {
         let encrypted_key = AuthenticatedChunk::encrypt(
             &recovery_key,
             client_key.as_bytes(),
-            &workspace_key_aad(&workspace_id),
+            &resource_key_aad(&workspace_id, &resource_id),
         )?;
         Ok(Self {
             schema_version: 1,
             workspace_id,
+            resource_id,
             encrypted_key,
         })
     }
@@ -125,18 +135,23 @@ impl WorkspaceKeyEnvelope {
     pub fn unwrap(
         &self,
         expected_workspace_id: &WorkspaceId,
+        expected_resource_id: &ResourceId,
         recovery_key: &RecoveryKey,
     ) -> Result<ClientKey, Problem> {
-        if self.schema_version != 1 || &self.workspace_id != expected_workspace_id {
-            return Err(crypto_problem("workspace_key_envelope_scope_mismatch"));
+        if self.schema_version != 1
+            || &self.workspace_id != expected_workspace_id
+            || &self.resource_id != expected_resource_id
+        {
+            return Err(crypto_problem("resource_key_envelope_scope_mismatch"));
         }
         let recovery_key = ClientKey::from_bytes(recovery_key.0);
-        let mut bytes = self
-            .encrypted_key
-            .decrypt(&recovery_key, &workspace_key_aad(expected_workspace_id))?;
+        let mut bytes = self.encrypted_key.decrypt(
+            &recovery_key,
+            &resource_key_aad(expected_workspace_id, expected_resource_id),
+        )?;
         if bytes.len() != KEY_BYTES {
             bytes.fill(0);
-            return Err(crypto_problem("invalid_workspace_key_envelope"));
+            return Err(crypto_problem("invalid_resource_key_envelope"));
         }
         let mut key = [0_u8; KEY_BYTES];
         key.copy_from_slice(&bytes);
@@ -145,8 +160,94 @@ impl WorkspaceKeyEnvelope {
     }
 }
 
-fn workspace_key_aad(workspace_id: &WorkspaceId) -> Vec<u8> {
-    format!("buglogin/workspace-key/v1/{}", workspace_id.as_str()).into_bytes()
+/// Encrypted proxy credentials scoped to the profile resource that references
+/// them. The server may store this envelope as an opaque manifest object, but
+/// cannot move it across workspaces, profile resources, proxies, or revisions.
+#[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProxyCredentialEnvelope {
+    pub schema_version: u8,
+    pub workspace_id: WorkspaceId,
+    pub resource_id: ResourceId,
+    pub proxy_id: ProxyId,
+    pub proxy_revision: u64,
+    pub encrypted_secret: AuthenticatedChunk,
+}
+
+impl ProxyCredentialEnvelope {
+    pub fn seal(
+        workspace_id: WorkspaceId,
+        resource_id: ResourceId,
+        proxy_id: ProxyId,
+        proxy_revision: u64,
+        client_key: &ClientKey,
+        secret: &[u8],
+    ) -> Result<Self, Problem> {
+        if proxy_revision == 0 || secret.is_empty() {
+            return Err(crypto_problem("invalid_proxy_credential_envelope"));
+        }
+        let encrypted_secret = AuthenticatedChunk::encrypt(
+            client_key,
+            secret,
+            &proxy_credential_aad(&workspace_id, &resource_id, &proxy_id, proxy_revision),
+        )?;
+        Ok(Self {
+            schema_version: 1,
+            workspace_id,
+            resource_id,
+            proxy_id,
+            proxy_revision,
+            encrypted_secret,
+        })
+    }
+
+    pub fn open(
+        &self,
+        workspace_id: &WorkspaceId,
+        resource_id: &ResourceId,
+        proxy_id: &ProxyId,
+        proxy_revision: u64,
+        client_key: &ClientKey,
+    ) -> Result<Vec<u8>, Problem> {
+        if self.schema_version != 1
+            || &self.workspace_id != workspace_id
+            || &self.resource_id != resource_id
+            || &self.proxy_id != proxy_id
+            || self.proxy_revision != proxy_revision
+            || proxy_revision == 0
+        {
+            return Err(crypto_problem("proxy_credential_envelope_scope_mismatch"));
+        }
+        self.encrypted_secret.decrypt(
+            client_key,
+            &proxy_credential_aad(workspace_id, resource_id, proxy_id, proxy_revision),
+        )
+    }
+}
+
+fn proxy_credential_aad(
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+    proxy_id: &ProxyId,
+    proxy_revision: u64,
+) -> Vec<u8> {
+    format!(
+        "buglogin/proxy-credential/v1/{}/{}/{}/{}",
+        workspace_id.as_str(),
+        resource_id.as_str(),
+        proxy_id.as_str(),
+        proxy_revision
+    )
+    .into_bytes()
+}
+
+fn resource_key_aad(workspace_id: &WorkspaceId, resource_id: &ResourceId) -> Vec<u8> {
+    format!(
+        "buglogin/resource-key/v1/{}/{}",
+        workspace_id.as_str(),
+        resource_id.as_str()
+    )
+    .into_bytes()
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {

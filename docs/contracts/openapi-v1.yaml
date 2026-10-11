@@ -1,12 +1,10 @@
 openapi: 3.1.0
 info:
-  title: BugLogin Local API
+  title: BugLogin REST API
   version: 1.0.0
-  description: Localhost-only adapter over the canonical command registry.
+  description: Versioned Rust control, authentication, and sync API.
 servers:
-  - url: http://127.0.0.1:{port}
-    variables:
-      port: { default: "47821" }
+  - url: https://api.buglogin.com
 security:
   - bearerAuth: []
 tags:
@@ -20,6 +18,12 @@ paths:
       security: []
       responses:
         "200": { description: Healthy, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+  /v1/readyz:
+    get:
+      security: []
+      responses:
+        "200": { description: Required service dependencies are ready, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+        "503": { $ref: '#/components/responses/Problem' }
   /v1/auth/device/start:
     post:
       operationId: auth.device.start
@@ -494,7 +498,7 @@ components:
     ProxyCreateInput: { type: object, required: [workspaceId, proxy], properties: { workspaceId: { type: string, minLength: 1 }, proxy: { $ref: '#/components/schemas/ProxyMetadataInput' } }, additionalProperties: false }
     ProxyUpdateInput: { type: object, required: [workspaceId, proxyId, expectedRevision, proxy], properties: { workspaceId: { type: string, minLength: 1 }, proxyId: { type: string, minLength: 1 }, expectedRevision: { type: integer, minimum: 1 }, proxy: { $ref: '#/components/schemas/ProxyMetadataInput' } }, additionalProperties: false }
     ProxyDeleteInput: { type: object, required: [workspaceId, proxyId, expectedRevision], properties: { workspaceId: { type: string, minLength: 1 }, proxyId: { type: string, minLength: 1 }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
-    ProxyMetadataInput: { type: object, required: [id, protocol, host, port, bypassRules, createdAt, updatedAt], properties: { id: { type: string, minLength: 1 }, name: { type: string }, protocol: { enum: [http, https, socks4, socks5] }, host: { type: string, minLength: 1 }, port: { type: integer, minimum: 1, maximum: 65535 }, bypassRules: { type: array, items: { type: string } }, createdAt: { type: string }, updatedAt: { type: string } }, additionalProperties: false }
+    ProxyMetadataInput: { type: object, required: [id, protocol, host, port, bypassRules, createdAt, updatedAt], properties: { id: { type: string, minLength: 1 }, name: { type: string }, protocol: { enum: [http, https, socks4, socks5] }, host: { type: string, minLength: 1 }, port: { type: integer, minimum: 1, maximum: 65535 }, hasCredential: { type: boolean, description: "Whether client-held credentials exist; no credential value is accepted by this API." }, bypassRules: { type: array, items: { type: string } }, createdAt: { type: string }, updatedAt: { type: string } }, additionalProperties: false }
     ProxyRecord: { type: object, required: [workspaceId, proxy, revision], properties: { workspaceId: { type: string }, proxy: { $ref: '#/components/schemas/ProxyView' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     ProxyView: { type: object, required: [id, protocol, host, port, hasCredential, rotationConfigured, bypassRules, createdAt, updatedAt], properties: { id: { type: string }, name: { type: string }, protocol: { enum: [http, https, socks4, socks5] }, host: { type: string }, port: { type: integer }, hasCredential: { type: boolean }, rotationConfigured: { type: boolean }, bypassRules: { type: array, items: { type: string } }, createdAt: { type: string }, updatedAt: { type: string } }, additionalProperties: false }
     ProxyPage: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ProxyRecord' } } }, additionalProperties: false }
@@ -524,7 +528,7 @@ components:
     RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { type: string }, deviceId: { type: string }, ownerId: { type: string }, state: { enum: [running, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
     OptionalRuntimeProjection: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] }
     SyncManifest: { type: object, required: [schemaVersion, workspaceId, resourceId, fencingToken, generation, rootChecksum, objects, tombstones], properties: { payloadEncryption: { oneOf: [{ $ref: '#/components/schemas/ManifestPayloadEncryption' }, { type: "null" }] }, dependencies: { type: array, items: { $ref: '#/components/schemas/ManifestDependency' } } }, additionalProperties: true }
-    ManifestPayloadEncryption: { type: object, required: [schemaVersion, algorithm, workspaceKeyEnvelope], properties: { schemaVersion: { const: 1 }, algorithm: { const: aes-256-gcm-chunk-v1 }, workspaceKeyEnvelope: { allOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }], properties: { key: { const: .buglogin/workspace-key-envelope.json } } } }, additionalProperties: false }
+    ManifestPayloadEncryption: { type: object, required: [schemaVersion, algorithm, resourceKeyEnvelope], properties: { schemaVersion: { const: 1 }, algorithm: { const: aes-256-gcm-chunk-v1 }, resourceKeyEnvelope: { allOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }], properties: { key: { const: .buglogin/resource-key-envelope.json } } } }, additionalProperties: false }
     ManifestDependency: { oneOf: [{ type: object, required: [kind, proxyId, revision, metadataObject, credentialEnvelopeObject], properties: { kind: { const: proxy }, proxyId: { type: string, minLength: 1 }, revision: { type: integer, minimum: 1 }, metadataObject: { $ref: '#/components/schemas/ManifestObjectReference' }, credentialEnvelopeObject: { oneOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }, { type: "null" }] } }, additionalProperties: false }] }
     ManifestObjectReference: { type: object, required: [key, size, checksum], properties: { key: { type: string, minLength: 1 }, size: { type: integer, minimum: 0 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
     OptionalSyncManifest: { oneOf: [{ $ref: '#/components/schemas/SyncManifest' }, { type: "null" }] }

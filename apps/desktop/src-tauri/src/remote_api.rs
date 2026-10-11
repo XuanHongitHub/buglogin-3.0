@@ -12,6 +12,7 @@ use buglogin_domain::{
     profile::ProfileResource,
 };
 use buglogin_storage::local::Versioned;
+use buglogin_storage::secrets::SecretValue;
 use buglogin_sync::{
     coordination::{
         CoordinationAuth, CoordinationBackend, CoordinationEvent, CoordinationScope, LeaseGrant,
@@ -84,6 +85,12 @@ struct ProxyView {
 pub struct RemoteProxyLaunch {
     pub server: String,
     pub bypass_rules: Vec<String>,
+    pub proxy_id: ProxyId,
+    pub revision: u64,
+    pub protocol: ProxyProtocol,
+    pub host: String,
+    pub port: u16,
+    pub has_credential: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +98,9 @@ pub struct RemoteProxySyncSnapshot {
     pub proxy_id: ProxyId,
     pub revision: u64,
     pub metadata: Vec<u8>,
+    /// Plaintext exists only in Rust memory until ProfileProjection seals it
+    /// with the selected profile resource key.
+    pub credential: Option<SecretValue>,
 }
 
 #[derive(Deserialize)]
@@ -441,14 +451,6 @@ impl RemoteApiClient {
         if record.workspace_id != *workspace || record.proxy.id != *id {
             return Err(client_problem("api_scope_mismatch", 502));
         }
-        if record.proxy.has_credential {
-            return Err(Problem::new(
-                "proxy_credentials_unavailable",
-                "This proxy requires credentials that are not available to the desktop runtime",
-                409,
-                correlation,
-            ));
-        }
         let protocol = match record.proxy.protocol {
             ProxyProtocol::Http => "http",
             ProxyProtocol::Https => "https",
@@ -458,6 +460,12 @@ impl RemoteApiClient {
         Ok(RemoteProxyLaunch {
             server: format!("{protocol}://{}:{}", record.proxy.host, record.proxy.port),
             bypass_rules: record.proxy.bypass_rules,
+            proxy_id: record.proxy.id,
+            revision: record.revision,
+            protocol: record.proxy.protocol,
+            host: record.proxy.host,
+            port: record.proxy.port,
+            has_credential: record.proxy.has_credential,
         })
     }
 
@@ -465,6 +473,8 @@ impl RemoteApiClient {
         &self,
         workspace: &WorkspaceId,
         id: &ProxyId,
+        expected_revision: u64,
+        credential: Option<SecretValue>,
         correlation: &str,
     ) -> Result<RemoteProxySyncSnapshot, Problem> {
         let record: ProxyRecordView = self
@@ -480,10 +490,27 @@ impl RemoteApiClient {
         if record.workspace_id != *workspace || record.proxy.id != *id {
             return Err(client_problem("api_scope_mismatch", 502));
         }
-        if record.proxy.has_credential {
+        if record.revision != expected_revision {
+            return Err(Problem::new(
+                "proxy_revision_changed",
+                "Proxy changed while its profile snapshot was being prepared",
+                409,
+                correlation,
+            )
+            .retryable(true));
+        }
+        if record.proxy.has_credential && credential.is_none() {
             return Err(Problem::new(
                 "proxy_secret_sync_unavailable",
-                "Proxy credentials cannot be synchronized until the workspace secret-envelope contract is enabled",
+                "This device does not have the selected proxy credentials in its operating system vault",
+                409,
+                correlation,
+            ));
+        }
+        if !record.proxy.has_credential && credential.is_some() {
+            return Err(Problem::new(
+                "proxy_credential_state_mismatch",
+                "Proxy credential state does not match the API record",
                 409,
                 correlation,
             ));
@@ -498,6 +525,7 @@ impl RemoteApiClient {
             proxy_id: id.clone(),
             revision: record.revision,
             metadata,
+            credential,
         })
     }
 

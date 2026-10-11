@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let production = env::var("BUGLOGIN_ENV").as_deref() == Ok("production");
+    let production = production_mode()?;
     if production && env::var_os("BUGLOGIN_DATA_ROOT").is_some() {
         return Err("BUGLOGIN_DATA_ROOT is forbidden in production".into());
     }
@@ -89,11 +89,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             recovery.scanned, recovery.recovered, recovery.deferred, recovery.failed
         );
     }
-    let address: SocketAddr = env::var("BUGLOGIN_API_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:12343".to_owned())
-        .parse()?;
+    let address = bind_address(production, env::var("BUGLOGIN_API_BIND").ok())?;
     let listener = TcpListener::bind(address).await?;
-    eprintln!("BugLogin API listening on http://{address}");
+    eprintln!("BugLogin API listening on {address}");
     serve(listener, router(state)).await?;
     Ok(())
+}
+
+fn bind_address(production: bool, configured: Option<String>) -> Result<SocketAddr, String> {
+    let raw = match configured {
+        Some(value) => value,
+        None if production => {
+            return Err("BUGLOGIN_API_BIND is required in production".to_owned());
+        }
+        None => "127.0.0.1:12343".to_owned(),
+    };
+    let address = raw
+        .parse::<SocketAddr>()
+        .map_err(|_| "BUGLOGIN_API_BIND must be a valid socket address".to_owned())?;
+    if address.port() == 0 {
+        return Err("BUGLOGIN_API_BIND must use a nonzero port".to_owned());
+    }
+    if production && address.ip().is_loopback() {
+        return Err("BUGLOGIN_API_BIND must be reachable by the production ingress".to_owned());
+    }
+    Ok(address)
+}
+
+fn production_mode() -> Result<bool, String> {
+    production_mode_from(env::var("BUGLOGIN_ENV"))
+}
+
+fn production_mode_from(value: Result<String, env::VarError>) -> Result<bool, String> {
+    match value {
+        Ok(value) if value == "production" => Ok(true),
+        Ok(value) if value == "local" => Ok(false),
+        Ok(_) => Err("BUGLOGIN_ENV must be either local or production".to_owned()),
+        Err(env::VarError::NotPresent) => {
+            Err("BUGLOGIN_ENV is required; set local or production".to_owned())
+        }
+        Err(env::VarError::NotUnicode(_)) => Err("BUGLOGIN_ENV must be valid Unicode".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use std::env;
+
+    use super::{bind_address, production_mode_from};
+
+    #[test]
+    fn local_mode_keeps_loopback_default() {
+        assert_eq!(
+            bind_address(false, None).unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12343)
+        );
+    }
+
+    #[test]
+    fn production_requires_explicit_non_loopback_binding() {
+        assert!(bind_address(true, None).is_err());
+        assert!(bind_address(true, Some("127.0.0.1:12343".to_owned())).is_err());
+        assert!(bind_address(true, Some("0.0.0.0:12343".to_owned())).is_ok());
+        assert!(bind_address(true, Some("0.0.0.0:0".to_owned())).is_err());
+    }
+
+    #[test]
+    fn invalid_environment_never_silently_selects_local_mode() {
+        assert!(production_mode_from(Ok("prod".to_owned())).is_err());
+        assert!(production_mode_from(Err(env::VarError::NotPresent)).is_err());
+        assert!(production_mode_from(Ok("production".to_owned())).unwrap());
+    }
 }

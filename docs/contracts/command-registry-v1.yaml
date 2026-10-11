@@ -101,6 +101,25 @@ commands:
     timeoutMs: 60000
     idempotency: required
     events: [operation.updated, profile.runtime.updated]
+  - id: profile.sync.recovery.code.get
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [tauri]
+    input: ProfileIdInput
+    output: ProfileRecoveryCode
+    audit: metadata-only
+    preconditions: [active-profile-binding, local-profile-key-present]
+  - id: profile.sync.recover
+    kind: command
+    capability: profile.read
+    action: read
+    adapters: [tauri]
+    input: ProfileSyncRecoveryInput
+    output: ProfileSyncRecoveryReceipt
+    audit: required
+    idempotency: required
+    preconditions: [active-profile-binding, recovery-code-valid, local-vault-write]
   - id: profile.runtime.get
     kind: query
     capability: profile.read

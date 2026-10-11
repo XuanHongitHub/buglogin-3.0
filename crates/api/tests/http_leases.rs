@@ -15,7 +15,7 @@ use buglogin_browser::profile::ProfileService;
 use buglogin_domain::{
     entities::{Profile, ProfileState, Proxy, ProxyProtocol, Runtime, SyncMode},
     errors::Problem,
-    ids::{AccountId, GrantId, ProfileId, ProxyId, ResourceId, WorkspaceId},
+    ids::{AccountId, CredentialId, GrantId, ProfileId, ProxyId, ResourceId, WorkspaceId},
     permissions::{Action, Capability, Effect, Grant, ResourceScope},
     profile::{ProfileArchiveState, ProfileResource},
     resource::{Resource, ResourceKind, ResourceState},
@@ -27,7 +27,9 @@ use buglogin_sync::{
         CoordinationBackend, CoordinationEvent, CoordinationScope, LeaseGrant, Presence,
         PublishedEvent, StreamEvent,
     },
-    crypto::{AuthenticatedChunk, ClientKey, RecoveryKey, WorkspaceKeyEnvelope},
+    crypto::{
+        AuthenticatedChunk, ClientKey, ProxyCredentialEnvelope, RecoveryKey, ResourceKeyEnvelope,
+    },
     manifest::{
         ManifestDependency, ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
         PayloadEncryptionAlgorithm, SyncManifest,
@@ -347,7 +349,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
                 protocol: ProxyProtocol::Http,
                 host: "proxy.example".into(),
                 port: 8080,
-                credential_ref: None,
+                credential_ref: Some(CredentialId::new("credential-proxy_lease_1").unwrap()),
                 rotation_url: None,
                 bypass_rules: Vec::new(),
                 created_at: "2026-07-22T00:00:00Z".into(),
@@ -480,11 +482,16 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
 
     let payload_key = ClientKey::from_bytes([0x41; 32]);
     let recovery_key = RecoveryKey::from_bytes([0x52; 32]);
-    let envelope =
-        WorkspaceKeyEnvelope::wrap(workspace.clone(), &payload_key, &recovery_key).unwrap();
+    let envelope = ResourceKeyEnvelope::wrap(
+        workspace.clone(),
+        resource.clone(),
+        &payload_key,
+        &recovery_key,
+    )
+    .unwrap();
     let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
     let envelope_object =
-        ManifestObject::new(".buglogin/workspace-key-envelope.json", &envelope_bytes).unwrap();
+        ManifestObject::new(".buglogin/resource-key-envelope.json", &envelope_bytes).unwrap();
     let blob =
         AuthenticatedChunk::encrypt(&payload_key, b"profile-payload", b"profile/payload.bin")
             .unwrap()
@@ -610,7 +617,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     );
 
     let envelope_path = format!(
-        "/v1/workspaces/{}/resources/{}/blobs?key=.buglogin%2Fworkspace-key-envelope.json",
+        "/v1/workspaces/{}/resources/{}/blobs?key=.buglogin%2Fresource-key-envelope.json",
         workspace.as_str(),
         resource.as_str()
     );
@@ -621,9 +628,9 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
                 .method("PUT")
                 .uri(envelope_path)
                 .header("authorization", format!("Bearer {token}"))
-                .header("x-correlation-id", "workspace-key-envelope-put")
+                .header("x-correlation-id", "resource-key-envelope-put")
                 .header("content-type", "application/octet-stream")
-                .header("idempotency-key", "workspace-key-envelope-0001")
+                .header("idempotency-key", "resource-key-envelope-0001")
                 .header("x-buglogin-owner-id", "desktop-1")
                 .header(
                     "x-buglogin-owner-token",
@@ -650,7 +657,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
             "protocol": "http",
             "host": "proxy.example",
             "port": 8080,
-            "hasCredential": false,
+            "hasCredential": true,
             "rotationConfigured": false,
             "bypassRules": [],
             "createdAt": "2026-07-22T00:00:00Z",
@@ -691,6 +698,58 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         StatusCode::OK
     );
 
+    let proxy_credential = ProxyCredentialEnvelope::seal(
+        workspace.clone(),
+        resource.clone(),
+        proxy_id.clone(),
+        1,
+        &payload_key,
+        br#"{"username":"user","password":"secret"}"#,
+    )
+    .unwrap();
+    let credential_bytes = serde_json::to_vec(&proxy_credential).unwrap();
+    let credential_object = ManifestObject::new(
+        ".buglogin/proxy-dependencies/proxy_lease_1/1/credential-envelope.json",
+        &credential_bytes,
+    )
+    .unwrap();
+    let credential_checksum = checksum(&credential_bytes);
+    let credential_key = credential_object.key.clone();
+    let credential_blob_path = format!(
+        "/v1/workspaces/{}/resources/{}/blobs?key={}",
+        workspace.as_str(),
+        resource.as_str(),
+        credential_key.replace('/', "%2F")
+    );
+    let credential_blob_put = Request::builder()
+        .method("PUT")
+        .uri(&credential_blob_path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-correlation-id", "proxy-credential-envelope-put")
+        .header("content-type", "application/octet-stream")
+        .header("idempotency-key", "proxy-credential-envelope-put-0001")
+        .header("x-buglogin-owner-id", "desktop-1")
+        .header(
+            "x-buglogin-owner-token",
+            first["ownerToken"].as_str().unwrap(),
+        )
+        .header(
+            "x-buglogin-fencing-token",
+            first["fencingToken"].as_u64().unwrap().to_string(),
+        )
+        .header("x-buglogin-generation", "1")
+        .header("x-content-sha256", &credential_checksum)
+        .body(Body::from(credential_bytes.clone()))
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(credential_blob_put)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
     let proxy_object = ManifestObject::new(proxy_key, &proxy_bytes).unwrap();
     let mut manifest = SyncManifest::new(
         workspace.clone(),
@@ -702,6 +761,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         vec![
             ManifestObject::new("profile/payload.bin", &blob).unwrap(),
             proxy_object.clone(),
+            credential_object.clone(),
             envelope_object.clone(),
         ],
     )
@@ -709,7 +769,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     manifest.payload_encryption = Some(ManifestPayloadEncryption {
         schema_version: 1,
         algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
-        workspace_key_envelope: ManifestObjectReference::from(&envelope_object),
+        resource_key_envelope: ManifestObjectReference::from(&envelope_object),
     });
     let rejected_missing_proxy = app
         .clone()
@@ -752,7 +812,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         proxy_id: proxy_id.clone(),
         revision: 1,
         metadata_object: ManifestObjectReference::from(&proxy_object),
-        credential_envelope_object: None,
+        credential_envelope_object: Some(ManifestObjectReference::from(&credential_object)),
     });
     let proxy_read_grant = {
         let mut current_grants = state.grants.write().unwrap();

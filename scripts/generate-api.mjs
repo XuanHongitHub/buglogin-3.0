@@ -262,7 +262,7 @@ function normalizeCommand(command, defaults, index) {
   assertOneOf(auth, ["required", "optional-local"], `${id}.auth`);
   assertOneOf(
     idempotency,
-    ["required", "required-for-command-and-long-running-operation"],
+    ["none", "required", "required-for-command-and-long-running-operation"],
     `${id}.idempotency`,
   );
   return {

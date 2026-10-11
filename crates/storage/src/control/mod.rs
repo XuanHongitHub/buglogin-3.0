@@ -207,6 +207,10 @@ enum StoredIdempotencyResponse {
 }
 
 pub trait ControlRecordStore {
+    fn readiness(&mut self) -> Result<(), Problem> {
+        Ok(())
+    }
+
     fn get(
         &mut self,
         tenant_id: &str,
@@ -521,6 +525,13 @@ impl PostgresControlRecordStore {
     }
 }
 impl ControlRecordStore for PostgresControlRecordStore {
+    fn readiness(&mut self) -> Result<(), Problem> {
+        self.client
+            .query_one("SELECT 1", &[])
+            .map(|_| ())
+            .map_err(|_| unavailable())
+    }
+
     fn get(
         &mut self,
         tenant_id: &str,

@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: 33b75c3b61c11fadaaeab327141f4f550ac585b9dcf16d868ee645f4e4478081
-projectionCount: 83
+sourceSha256: 3d1cdfc5077c6d44c938bad958b74f5ec7964dff0f6c02848b7b365fd7537388
+projectionCount: 85
 projections:
   - commandId: system.health.get
     kind: query
@@ -219,6 +219,41 @@ projections:
       tauri: profile_stop
       rest: profile.stop
       mcp: profile_stop
+  - commandId: profile.sync.recovery.code.get
+    kind: query
+    capability: profile.read
+    action: read
+    inputSchema: ProfileIdInput
+    outputSchema: ProfileRecoveryCode
+    auth: required
+    audit: metadata-only
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    preconditions: &a29
+      - active-profile-binding
+      - local-profile-key-present
+    adapters:
+      - tauri
+    names:
+      tauri: profile_sync_recovery_code_get
+  - commandId: profile.sync.recover
+    kind: command
+    capability: profile.read
+    action: read
+    inputSchema: ProfileSyncRecoveryInput
+    outputSchema: ProfileSyncRecoveryReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    preconditions: &a30
+      - active-profile-binding
+      - recovery-code-valid
+      - local-vault-write
+    adapters:
+      - tauri
+    names:
+      tauri: profile_sync_recover
   - commandId: profile.runtime.get
     kind: query
     capability: profile.read
@@ -3902,6 +3937,41 @@ tauri:
       idempotency: required
       timeoutMs: 60000
       events: *a5
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: profile_sync_recovery_code_get
+      commandId: profile.sync.recovery.code.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileRecoveryCode
+      auth: required
+      audit: metadata-only
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      preconditions: *a29
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: profile_sync_recover
+      commandId: profile.sync.recover
+      kind: command
+      capability: profile.read
+      action: read
+      inputSchema: ProfileSyncRecoveryInput
+      outputSchema: ProfileSyncRecoveryReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      preconditions: *a30
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl

@@ -34,6 +34,8 @@ fn every_registered_command_has_canonical_action() {
         ("profile.share.revoke", Action::Manage),
         ("profile.launch", Action::Execute),
         ("profile.stop", Action::Execute),
+        ("profile.sync.recovery.code.get", Action::Read),
+        ("profile.sync.recover", Action::Read),
         ("profile.delete", Action::Delete),
         ("profile.archive", Action::Update),
         ("profile.restore", Action::Update),

@@ -13,8 +13,8 @@ use buglogin_domain::{
     errors::Problem,
     grant::ResourceGrant,
     ids::{
-        AccountId, GrantId, MemberId, OrganizationId, ProfileId, ProxyId, ResourceId, TeamId,
-        WorkspaceId,
+        AccountId, CredentialId, GrantId, MemberId, OrganizationId, ProfileId, ProxyId, ResourceId,
+        TeamId, WorkspaceId,
     },
     member::{Member, MemberRole},
     organization::{Organization, OrganizationPolicy},
@@ -33,7 +33,7 @@ use buglogin_storage::control::{
 };
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationScope},
-    crypto::{AuthenticatedChunk, WorkspaceKeyEnvelope},
+    crypto::{AuthenticatedChunk, ProxyCredentialEnvelope, ResourceKeyEnvelope},
     manifest::{ManifestDependency, SyncManifest},
 };
 use serde::{Deserialize, Serialize};
@@ -382,6 +382,8 @@ struct ProxyMetadataInput {
     protocol: ProxyProtocol,
     host: String,
     port: u16,
+    #[serde(default)]
+    has_credential: Option<bool>,
     bypass_rules: Vec<String>,
     created_at: String,
     updated_at: String,
@@ -621,7 +623,7 @@ async fn create_proxy(
         WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
     ensure_workspace_input(&workspace_id, &input.workspace_id)?;
     let input_value = serde_json::to_value(&input).map_err(internal)?;
-    let proxy = proxy_from_metadata(input.proxy);
+    let proxy = proxy_from_metadata(input.proxy).map_err(response_problem)?;
     let proxy_id = proxy.id.clone();
     mutate(
         &state,
@@ -675,8 +677,13 @@ async fn update_proxy(
         .get(&workspace_id, &proxy_id, &principal, &grants)
         .map_err(proxy_response_problem)?;
     let input_value = serde_json::to_value(&input).map_err(internal)?;
-    let mut proxy = proxy_from_metadata(input.proxy.clone());
-    proxy.credential_ref = current.proxy.credential_ref;
+    let has_credential = input.proxy.has_credential;
+    let mut proxy = proxy_from_metadata(input.proxy.clone()).map_err(response_problem)?;
+    proxy.credential_ref = match has_credential {
+        None => current.proxy.credential_ref,
+        Some(false) => None,
+        Some(true) => Some(proxy_credential_id(&proxy.id).map_err(response_problem)?),
+    };
     proxy.rotation_url = current.proxy.rotation_url;
     let expected_revision = input.expected_revision;
     mutate(
@@ -773,19 +780,35 @@ async fn delete_proxy(
     .await
 }
 
-fn proxy_from_metadata(input: ProxyMetadataInput) -> Proxy {
-    Proxy {
+fn proxy_from_metadata(input: ProxyMetadataInput) -> Result<Proxy, Problem> {
+    let credential_ref = if input.has_credential.unwrap_or(false) {
+        Some(proxy_credential_id(&input.id)?)
+    } else {
+        None
+    };
+    Ok(Proxy {
         id: input.id,
         name: input.name,
         protocol: input.protocol,
         host: input.host,
         port: input.port,
-        credential_ref: None,
+        credential_ref,
         rotation_url: None,
         bypass_rules: input.bypass_rules,
         created_at: input.created_at,
         updated_at: input.updated_at,
-    }
+    })
+}
+
+fn proxy_credential_id(proxy_id: &ProxyId) -> Result<CredentialId, Problem> {
+    CredentialId::new(format!("credential-{}", proxy_id.as_str())).map_err(|_| {
+        Problem::new(
+            "invalid_proxy_credential_id",
+            "Proxy credential identifier is invalid",
+            400,
+            "proxy",
+        )
+    })
 }
 
 fn proxy_record_view(record: ProxyRecord) -> ProxyRecordView {
@@ -2295,11 +2318,11 @@ fn validate_payload_encryption_contract<'a>(
             correlation_id.to_owned(),
         ));
     };
-    let envelope_ref = &encryption.workspace_key_envelope;
-    if envelope_ref.key != buglogin_sync::manifest::WORKSPACE_KEY_ENVELOPE_KEY {
+    let envelope_ref = &encryption.resource_key_envelope;
+    if envelope_ref.key != buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY {
         return Err(problem_response(
-            "invalid_workspace_key_envelope_key",
-            "Workspace key envelope must use its canonical manifest key",
+            "invalid_resource_key_envelope_key",
+            "Resource key envelope must use its canonical manifest key",
             400,
             correlation_id.to_owned(),
         ));
@@ -2316,18 +2339,21 @@ fn validate_payload_object_wire_format(
     correlation_id: &str,
 ) -> Result<(), Response> {
     if object.key == envelope_ref.key {
-        let envelope: WorkspaceKeyEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+        let envelope: ResourceKeyEnvelope = serde_json::from_slice(bytes).map_err(|_| {
             problem_response(
-                "workspace_key_envelope_invalid",
-                "Workspace key envelope is invalid",
+                "resource_key_envelope_invalid",
+                "Resource key envelope is invalid",
                 409,
                 correlation_id.to_owned(),
             )
         })?;
-        if envelope.schema_version != 1 || &envelope.workspace_id != workspace_id {
+        if envelope.schema_version != 1
+            || &envelope.workspace_id != workspace_id
+            || envelope.resource_id != manifest.resource_id
+        {
             return Err(problem_response(
-                "workspace_key_envelope_scope_mismatch",
-                "Workspace key envelope does not match the manifest workspace",
+                "resource_key_envelope_scope_mismatch",
+                "Resource key envelope does not match the manifest scope",
                 409,
                 correlation_id.to_owned(),
             ));
@@ -2356,6 +2382,45 @@ fn validate_payload_object_wire_format(
             return Err(problem_response(
                 "api_scope_mismatch",
                 "Proxy metadata does not match the workspace",
+                409,
+                correlation_id.to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if let Some((proxy_id, revision)) =
+        manifest
+            .dependencies
+            .iter()
+            .find_map(|dependency| match dependency {
+                ManifestDependency::Proxy {
+                    proxy_id,
+                    revision,
+                    credential_envelope_object: Some(reference),
+                    ..
+                } if object.key == reference.key => Some((proxy_id, revision)),
+                _ => None,
+            })
+    {
+        let envelope: ProxyCredentialEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+            problem_response(
+                "proxy_credential_envelope_invalid",
+                "Proxy credential envelope is invalid",
+                409,
+                correlation_id.to_owned(),
+            )
+        })?;
+        if envelope.schema_version != 1
+            || &envelope.workspace_id != workspace_id
+            || envelope.resource_id != manifest.resource_id
+            || &envelope.proxy_id != proxy_id
+            || &envelope.proxy_revision != revision
+            || envelope.encrypted_secret.version != 1
+        {
+            return Err(problem_response(
+                "proxy_credential_envelope_scope_mismatch",
+                "Proxy credential envelope does not match the manifest dependency",
                 409,
                 correlation_id.to_owned(),
             ));
@@ -2711,7 +2776,13 @@ async fn put_resource_blob(
         )
         .await
         .map_err(response_problem)?;
-    validate_blob_wire_format(&workspace_id, &query.key, &body, &correlation(&headers))?;
+    validate_blob_wire_format(
+        &workspace_id,
+        &resource_id,
+        &query.key,
+        &body,
+        &correlation(&headers),
+    )?;
     let storage_key = payload_object_key(&resource_id, generation, &query.key, expected_checksum);
     state
         .put_remote_chunk(&storage_key, &body, expected_checksum)
@@ -2750,23 +2821,27 @@ async fn put_resource_blob(
 
 fn validate_blob_wire_format(
     workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
     key: &str,
     bytes: &[u8],
     correlation_id: &str,
 ) -> Result<(), Response> {
-    if key == buglogin_sync::manifest::WORKSPACE_KEY_ENVELOPE_KEY {
-        let envelope: WorkspaceKeyEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+    if key == buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY {
+        let envelope: ResourceKeyEnvelope = serde_json::from_slice(bytes).map_err(|_| {
             problem_response(
-                "workspace_key_envelope_invalid",
-                "Workspace key envelope is invalid",
+                "resource_key_envelope_invalid",
+                "Resource key envelope is invalid",
                 400,
                 correlation_id.to_owned(),
             )
         })?;
-        if envelope.schema_version != 1 || &envelope.workspace_id != workspace_id {
+        if envelope.schema_version != 1
+            || &envelope.workspace_id != workspace_id
+            || &envelope.resource_id != resource_id
+        {
             return Err(problem_response(
-                "workspace_key_envelope_scope_mismatch",
-                "Workspace key envelope does not match the workspace",
+                "resource_key_envelope_scope_mismatch",
+                "Resource key envelope does not match the resource scope",
                 409,
                 correlation_id.to_owned(),
             ));
@@ -2789,6 +2864,44 @@ fn validate_blob_wire_format(
             return Err(problem_response(
                 "api_scope_mismatch",
                 "Proxy metadata does not match the workspace",
+                409,
+                correlation_id.to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if key.starts_with(".buglogin/proxy-dependencies/")
+        && key.ends_with("/credential-envelope.json")
+    {
+        let envelope: ProxyCredentialEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+            problem_response(
+                "proxy_credential_envelope_invalid",
+                "Proxy credential envelope is invalid",
+                400,
+                correlation_id.to_owned(),
+            )
+        })?;
+        let key_scope = key
+            .strip_prefix(".buglogin/proxy-dependencies/")
+            .and_then(|value| value.strip_suffix("/credential-envelope.json"))
+            .and_then(|value| value.split_once('/'));
+        let key_scope_matches = key_scope.is_some_and(|(proxy_id, revision)| {
+            proxy_id == envelope.proxy_id.as_str()
+                && revision
+                    .parse::<u64>()
+                    .is_ok_and(|revision| revision == envelope.proxy_revision)
+        });
+        if envelope.schema_version != 1
+            || &envelope.workspace_id != workspace_id
+            || &envelope.resource_id != resource_id
+            || envelope.proxy_revision == 0
+            || envelope.encrypted_secret.version != 1
+            || !key_scope_matches
+        {
+            return Err(problem_response(
+                "proxy_credential_envelope_scope_mismatch",
+                "Proxy credential envelope does not match its object key or resource scope",
                 409,
                 correlation_id.to_owned(),
             ));
