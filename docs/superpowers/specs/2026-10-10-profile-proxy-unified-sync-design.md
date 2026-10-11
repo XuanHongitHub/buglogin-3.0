@@ -17,6 +17,8 @@ Status: contract/design gate; hosted implementation is blocked until the BugLogi
 
 - Use manifest generations, ETags/revisions, idempotency keys, and content hashes to skip unchanged metadata and blobs.
 - Send only changed profile metadata, proxy configuration, and browser-data chunks. Do not re-upload an entire browser-data directory when a small set of files changed.
+- The current profile projection is not incremental: its AES-GCM associated data includes the manifest generation, encryption uses a fresh nonce, and the API's physical blob key includes that generation. Re-encrypting unchanged file bytes therefore creates a new object and a full upload. The standalone `sync::chunks` utility uses stable logical chunk associated data and ciphertext-addressed keys, but the profile projection does not use it.
+- Before enabling reuse across generations, version the profile payload contract while preserving v1 reads. A manifest reference must identify the immutable source object and its checksum; the API may accept reuse only when that exact object was committed for the same resource and remains under the same resource-key version. Never let a client reference an arbitrary object-store key. Resource-key rotation invalidates reuse under the previous key until clients re-encrypt.
 - Coalesce rapid edits per profile, bound transfer concurrency and chunk size, and resume verified chunks after interruption.
 - Profile start/stop and proxy edits must not trigger redundant full scans. Maintain a local change journal or equivalent incremental manifest input, with periodic reconciliation as recovery.
 - Enforce per-file and per-profile size limits at the API boundary and return typed quota/validation errors before accepting partial state.
