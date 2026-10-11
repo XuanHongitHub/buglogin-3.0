@@ -2949,14 +2949,17 @@ where
         .map(AccountId::as_str)
         .unwrap_or("anonymous");
     let store_key = format!("{actor}:{workspace}:{command}:{key}");
+    let hash_input = idempotency_input(command, &input);
     let input_hash = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&input).map_err(|_| problem_response(
-            "invalid_input",
-            "Input is invalid",
-            400,
-            correlation.clone()
-        ))?)
+        Sha256::digest(
+            serde_json::to_vec(&hash_input).map_err(|_| problem_response(
+                "invalid_input",
+                "Input is invalid",
+                400,
+                correlation.clone()
+            ))?
+        )
     );
     if let Some(response) = state
         .replay_control_response(&store_key, &input_hash)
@@ -3063,6 +3066,21 @@ where
             response_problem(error)
         })?;
     Ok((status, Json(body)).into_response())
+}
+
+fn idempotency_input(command: &str, input: &serde_json::Value) -> serde_json::Value {
+    if command != "profile.provision" {
+        return input.clone();
+    }
+    let mut canonical = input.clone();
+    if let Some(profile) = canonical
+        .get_mut("profile")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        profile.remove("createdAt");
+        profile.remove("updatedAt");
+    }
+    canonical
 }
 
 #[derive(Debug)]

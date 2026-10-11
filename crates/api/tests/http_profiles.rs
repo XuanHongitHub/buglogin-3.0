@@ -401,6 +401,30 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
     assert_eq!(created_body["value"]["state"], "ready");
     assert_eq!(created_body["value"]["proxyId"], "proxy_managed_1");
 
+    let mut retry_profile = managed.clone();
+    retry_profile.created_at = "2026-10-12T01:00:00Z".to_owned();
+    retry_profile.updated_at = retry_profile.created_at.clone();
+    let mut retry = lifecycle_request(
+        "POST",
+        "/v1/profiles",
+        &token,
+        "managed-provision-key-0001",
+        Some(serde_json::to_string(&retry_profile).unwrap()),
+    );
+    retry.headers_mut().insert(
+        "x-buglogin-workspace-id",
+        workspace.as_str().parse().unwrap(),
+    );
+    let replayed = app.clone().oneshot(retry).await.unwrap();
+    assert_eq!(replayed.status(), StatusCode::OK);
+    let replayed_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(replayed.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(replayed_body, created_body);
+
     let binding_response = app
         .clone()
         .oneshot(request(

@@ -523,7 +523,6 @@ mod tests {
         let projection = ProfileProjection::open(&root).unwrap();
         let workspace = WorkspaceId::new("ws_projection").unwrap();
         let resource = ResourceId::new("res_projection").unwrap();
-        let profile = ProfileId::new("prf_projection").unwrap();
         let proxy_id = ProxyId::new("proxy_projection").unwrap();
         let profile_path = root.join("browser-profile");
         fs::create_dir_all(&profile_path).unwrap();

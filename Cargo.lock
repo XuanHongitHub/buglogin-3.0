@@ -736,6 +736,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",
+ "time",
  "tokio",
  "tokio-native-tls",
  "url",
