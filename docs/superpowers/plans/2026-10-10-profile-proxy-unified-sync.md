@@ -17,6 +17,7 @@ Status: Rust API, metadata dependency validation, and the desktop BugLogin API t
 - [x] Implement Rust API services for profile/proxy CRUD, binding, authorization, audit, idempotency, and typed errors.
 - [ ] Implement atomic manifest activation including immutable proxy metadata and encrypted-envelope object references plus only changed profile data chunks.
 - [x] Add API validation that the manifest dependency set matches the selected proxy, current revision, same-workspace read grant, and canonical safe metadata object under the serialized manifest mutation.
+- [x] Reject manifest reads when the selected proxy revision has changed since the active generation, so clients cannot treat stale profile/proxy state as current.
 - [ ] Implement encrypted credential-envelope lifecycle and workspace/device key rotation and revocation.
 - [x] Keep REST/OpenAPI/MCP coverage aligned with the canonical API command and resource contracts; local API and sync contract suites pass.
 - [ ] Add staging integration tests; prove retries, conflicts, partial transfers, and outages preserve the prior active generation.

@@ -2096,6 +2096,19 @@ async fn get_resource_manifest(
     headers: HeaderMap,
 ) -> Result<Json<Option<SyncManifest>>, Response> {
     let principal = authenticate(&state, &headers)?;
+    {
+        let _refresh = state.control_mutation.lock().map_err(|_| {
+            problem_response(
+                "control_unavailable",
+                "Control state unavailable",
+                503,
+                correlation(&headers),
+            )
+        })?;
+        if !state.local_authority_enabled() {
+            state.reload_control_aggregate().map_err(response_problem)?;
+        }
+    }
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
@@ -2108,9 +2121,29 @@ async fn get_resource_manifest(
         Action::Read,
     )?;
     let _ = required_header(&headers, "x-buglogin-actor-id")?;
+    let _snapshot = state.control_mutation.lock().map_err(|_| {
+        problem_response(
+            "control_unavailable",
+            "Control state unavailable",
+            503,
+            correlation(&headers),
+        )
+    })?;
     let manifest = state
         .current_sync_manifest(&workspace_id, &resource_id)
         .map_err(response_problem)?;
+    if let Some(manifest) = manifest.as_ref() {
+        validate_profile_proxy_dependencies(
+            &state,
+            &principal,
+            &grants,
+            &workspace_id,
+            &resource_id,
+            manifest,
+            false,
+        )
+        .map_err(Response::from)?;
+    }
     Ok(Json(manifest))
 }
 
@@ -2219,6 +2252,7 @@ async fn commit_resource_manifest(
                 &workspace_id,
                 &resource_id,
                 &manifest,
+                true,
             )?;
             state
                 .replace_sync_manifest(manifest.clone())
@@ -2271,6 +2305,7 @@ fn validate_profile_proxy_dependencies(
     workspace_id: &WorkspaceId,
     resource_id: &ResourceId,
     manifest: &SyncManifest,
+    verify_metadata_object: bool,
 ) -> Result<(), ResponseProblem> {
     let profiles = state.list_profile_records().map_err(response_problem)?;
     let mut bound_profile = None;
@@ -2362,33 +2397,35 @@ fn validate_profile_proxy_dependencies(
                     "sync",
                 )));
             }
-            let metadata_bytes = state
-                .get_remote_chunk(
-                    &payload_object_key(
-                        resource_id,
-                        manifest.generation,
-                        &metadata_object.key,
+            if verify_metadata_object {
+                let metadata_bytes = state
+                    .get_remote_chunk(
+                        &payload_object_key(
+                            resource_id,
+                            manifest.generation,
+                            &metadata_object.key,
+                            &metadata_object.checksum,
+                        ),
                         &metadata_object.checksum,
-                    ),
-                    &metadata_object.checksum,
-                )
-                .map_err(response_problem)?;
-            let metadata: ProxyRecordView =
-                serde_json::from_slice(&metadata_bytes).map_err(|_| {
-                    response_problem(Problem::new(
-                        "proxy_metadata_object_invalid",
-                        "Proxy metadata object is invalid",
-                        400,
+                    )
+                    .map_err(response_problem)?;
+                let metadata: ProxyRecordView =
+                    serde_json::from_slice(&metadata_bytes).map_err(|_| {
+                        response_problem(Problem::new(
+                            "proxy_metadata_object_invalid",
+                            "Proxy metadata object is invalid",
+                            400,
+                            "sync",
+                        ))
+                    })?;
+                if metadata != proxy_record_view(record) {
+                    return Err(response_problem(Problem::new(
+                        "proxy_metadata_object_mismatch",
+                        "Proxy metadata object does not match the authorized proxy revision",
+                        409,
                         "sync",
-                    ))
-                })?;
-            if metadata != proxy_record_view(record) {
-                return Err(response_problem(Problem::new(
-                    "proxy_metadata_object_mismatch",
-                    "Proxy metadata object does not match the authorized proxy revision",
-                    409,
-                    "sync",
-                )));
+                    )));
+                }
             }
             Ok(())
         }

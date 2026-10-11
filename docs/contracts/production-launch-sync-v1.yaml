@@ -63,6 +63,9 @@ endpoints:
     capability: profile.read
     required_header: x-buglogin-actor-id
     response: SyncManifest
+    invariants:
+      - current profile and proxy dependency revisions are checked before returning the active manifest
+      - stale proxy dependencies fail closed with manifest_dependency_stale
 
   - id: profile.manifest.commit
     method: PUT
@@ -235,6 +238,7 @@ migrationEnvelope:
     - object-store blobs are immutable and invisible until PostgreSQL activation
     - profile manifests with a selected proxy include exactly one matching proxy dependency
     - proxy dependency revision and metadata object must match same-workspace Rust API authority
+    - manifest reads reject a proxy dependency whose revision is no longer current
     - proxy credential state requires a separate opaque encrypted envelope object
 
 errors:
