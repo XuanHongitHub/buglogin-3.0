@@ -13,7 +13,8 @@
       "!**/node_modules",
       "!**/dist",
       "!**/.next",
-      "!**/out"
+      "!**/out",
+      "!frontend/src/generated/command-registry.ts"
     ]
   },
   "formatter": {

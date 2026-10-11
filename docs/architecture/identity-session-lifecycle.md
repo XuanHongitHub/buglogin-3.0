@@ -20,6 +20,7 @@ Status: partial implementation contract, 2026-07-22.
 
 - Account credential and verified-identity schema.
 - Browser HttpOnly Secure SameSite cookie transport and CSRF policy.
+- Cross-origin browser transport uses an exact configured web origin, credentialed CORS, and preflight support for canonical API headers. Wildcard origins are forbidden with credentials.
 - Desktop device-code authorization carries the approved credential version into the issued device session. Device-level list/revoke and web screenshot QA remain future work.
 - Login credential flow, browser HttpOnly cookie/CSRF transport, session list/revoke, device list/revoke, recovery, and scoped API tokens are implemented in Rust and REST with targeted HTTP tests. Recovery tokens and API tokens persist only SHA-256 hashes; password reset consumes the recovery token atomically with the credential update and revokes existing sessions. Production recovery delivery uses a required HTTPS webhook with a Rust-only bearer secret. API token capability/action scopes are an additional deny boundary inside the canonical domain ACL. Account Security and recovery UI are implemented; browser screenshot QA and hosted provider evidence remain pending. Bearer logout/refresh are implemented.
 - Rate limits, abuse lockout, recovery audit, key rotation, and web E2E.

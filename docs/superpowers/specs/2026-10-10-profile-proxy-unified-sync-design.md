@@ -39,6 +39,7 @@ Status: contract/design gate; hosted implementation is blocked until the BugLogi
 
 - Rust owns sync scheduling, proxy/profile serialization, hashing, chunk transfer, retries, conflict decisions, secret encryption/decryption, and API credentials.
 - The hosted API owns workspace ACL, canonical profile/proxy IDs, resource bindings, leases/fencing, revisions, quotas, audit, and atomic manifest activation.
+- Browser clients use one configured web origin. The API answers credentialed CORS and preflight only for that exact origin and canonical API methods/headers; wildcard origins are forbidden.
 - The server must validate the actor's access to both profile and proxy in the same workspace on every read/write; client-side UI state is not authorization.
 - Production mode never falls back to Donut endpoints or local files as authority when BugLogin API is unavailable. Existing local/self-host mode remains explicit and isolated.
 - Proxy credentials are not silently copied between workspaces or devices. A device lacking the required secret key reports an actionable missing-secret state and cannot launch through that proxy.

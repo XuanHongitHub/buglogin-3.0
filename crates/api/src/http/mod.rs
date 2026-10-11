@@ -59,6 +59,8 @@ use buglogin_sync::{
     manifest::SyncManifest,
 };
 use serde::{Deserialize, Serialize};
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use url::Url;
 
 use crate::{
     auth::AuthService,
@@ -1655,12 +1657,23 @@ impl ApiState {
 
     pub fn with_web_origin(mut self, origin: impl Into<String>) -> Result<Self, Problem> {
         let origin = origin.into();
-        if origin.trim() != origin
-            || origin.is_empty()
-            || origin.ends_with('/')
-            || origin.bytes().any(|byte| byte.is_ascii_whitespace())
-            || !(origin.starts_with("https://") || origin.starts_with("http://127.0.0.1"))
-        {
+        let parsed = Url::parse(&origin).ok();
+        let valid_origin = parsed.as_ref().is_some_and(|url| {
+            let local_http = url.scheme() == "http"
+                && url
+                    .host_str()
+                    .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                    .is_some_and(|address| address.is_loopback());
+            let secure_web = url.scheme() == "https";
+            url.origin().ascii_serialization() == origin
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && (secure_web || local_http)
+        });
+        if !valid_origin {
             return Err(problem("web_origin_invalid", "Web origin is invalid", 500));
         }
         self.web_origin = Arc::from(origin);
@@ -1976,6 +1989,37 @@ struct CookieJobWorkspaceQuery {
 }
 
 pub fn router(state: ApiState) -> Router {
+    let allowed_web_origin = state
+        .web_origin
+        .parse::<HeaderValue>()
+        .expect("configured web origin must be a valid HTTP header value");
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origin == &allowed_web_origin
+        }))
+        .allow_credentials(true)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            axum::http::HeaderName::from_static("idempotency-key"),
+            axum::http::HeaderName::from_static("x-buglogin-actor-id"),
+            axum::http::HeaderName::from_static("x-buglogin-fencing-token"),
+            axum::http::HeaderName::from_static("x-buglogin-generation"),
+            axum::http::HeaderName::from_static("x-buglogin-owner-id"),
+            axum::http::HeaderName::from_static("x-buglogin-owner-token"),
+            axum::http::HeaderName::from_static("x-content-sha256"),
+            axum::http::HeaderName::from_static("x-correlation-id"),
+            axum::http::HeaderName::from_static("x-csrf-token"),
+        ]);
     Router::new()
         .route("/v1/auth/login", post(web_login))
         .route("/v1/auth/recovery/request", post(request_recovery))
@@ -2062,6 +2106,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .merge(control::routes())
         .layer(middleware::from_fn(require_correlation))
+        .layer(cors)
         .with_state(state)
 }
 

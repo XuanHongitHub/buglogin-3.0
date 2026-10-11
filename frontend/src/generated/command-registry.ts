@@ -98,13 +98,7 @@ export type CommandMetadata = {
   readonly id: CommandId;
   readonly kind: CommandKind;
   readonly capability: string;
-  readonly action:
-    | "read"
-    | "create"
-    | "update"
-    | "delete"
-    | "execute"
-    | "manage";
+  readonly action: "read" | "create" | "update" | "delete" | "execute" | "manage";
   readonly adapters: readonly string[];
   readonly input: string;
   readonly output: string;
@@ -220,11 +214,7 @@ export const COMMANDS = {
     auth: "required",
     idempotency: "required",
     events: [],
-    preconditions: [
-      "source-profile-readable",
-      "source-revision-current",
-      "metadata-only",
-    ],
+    preconditions: ["source-profile-readable", "source-revision-current", "metadata-only"],
   },
   "profile.share": {
     id: "profile.share",
@@ -314,11 +304,7 @@ export const COMMANDS = {
     auth: "required",
     idempotency: "required",
     events: [],
-    preconditions: [
-      "active-profile-binding",
-      "recovery-code-valid",
-      "local-vault-write",
-    ],
+    preconditions: ["active-profile-binding", "recovery-code-valid", "local-vault-write"],
   },
   "profile.runtime.get": {
     id: "profile.runtime.get",
@@ -453,12 +439,7 @@ export const COMMANDS = {
     auth: "required",
     idempotency: "required",
     events: [],
-    preconditions: [
-      "profile-not-running",
-      "destination-lease",
-      "expected-generation-current",
-      "staged-import-one-use",
-    ],
+    preconditions: ["profile-not-running", "destination-lease", "expected-generation-current", "staged-import-one-use"],
   },
   "cookie.copy": {
     id: "cookie.copy",
@@ -473,12 +454,7 @@ export const COMMANDS = {
     auth: "required",
     idempotency: "required",
     events: [],
-    preconditions: [
-      "source-profile-not-running",
-      "destination-profile-not-running",
-      "destination-lease",
-      "expected-generation-current",
-    ],
+    preconditions: ["source-profile-not-running", "destination-profile-not-running", "destination-lease", "expected-generation-current"],
   },
   "proxy.parse": {
     id: "proxy.parse",
@@ -613,11 +589,7 @@ export const COMMANDS = {
     auth: "required",
     idempotency: "required",
     events: [],
-    preconditions: [
-      "active-profile-resource-binding",
-      "destination-lease",
-      "verified-sync-export",
-    ],
+    preconditions: ["active-profile-resource-binding", "destination-lease", "verified-sync-export"],
   },
   "migration.package.file.put": {
     id: "migration.package.file.put",
@@ -752,11 +724,7 @@ export const COMMANDS = {
     auth: "optional-local",
     idempotency: "required-for-command-and-long-running-operation",
     events: [],
-    preconditions: [
-      "same-origin-https",
-      "generic-enumeration-response",
-      "configured-recovery-delivery",
-    ],
+    preconditions: ["same-origin-https", "generic-enumeration-response", "configured-recovery-delivery"],
   },
   "auth.recovery.complete": {
     id: "auth.recovery.complete",
@@ -771,12 +739,7 @@ export const COMMANDS = {
     auth: "optional-local",
     idempotency: "required",
     events: [],
-    preconditions: [
-      "same-origin-https",
-      "single-use-recovery-token",
-      "atomic-password-reset",
-      "session-family-revocation",
-    ],
+    preconditions: ["same-origin-https", "single-use-recovery-token", "atomic-password-reset", "session-family-revocation"],
   },
   "auth.session": {
     id: "auth.session",

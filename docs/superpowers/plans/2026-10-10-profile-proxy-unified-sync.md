@@ -8,6 +8,7 @@ Status: Rust API, metadata dependency validation, desktop API transport, client-
 - [x] Confirm the current app still has a per-proxy `sync_enabled` field and command/UI toggle.
 - [x] Record that the current hosted launch/sync contract is draft and lacks proxy CRUD, proxy-secret envelopes, and atomic profile-plus-proxy commits.
 - [ ] Verify `api.buglogin.com` OpenAPI contract and staging behavior with owner-approved credentials. Read-only probe on 2026-10-12: `/health` returned `200 {"status":"ok"}` and `/readyz` returned `200 {"status":"ready","s3":true}`, but `/v1/health`, `/openapi.json`, `/v1/openapi.json`, `/api/openapi.json`, and `/.well-known/openapi.json` returned `404`. The host is reachable, but the deployed routes do not prove compatibility with this repository's v1 contract; no authenticated/staging write was attempted.
+- [x] Add exact-origin credentialed CORS and browser preflight support to the Rust API; verify with cross-origin router tests.
 - [ ] Approve versioned workspace/ACL, profile, proxy, secret-envelope, sync-manifest, chunk, conflict, and quota contracts.
 - [x] Define the draft manifest dependency shape and identify why a mutable proxy revision alone cannot provide atomic sync.
 - [x] Add a backward-readable Rust manifest dependency model that binds proxy metadata/envelope references to checksummed manifest objects.
