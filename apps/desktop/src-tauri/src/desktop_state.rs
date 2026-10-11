@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
@@ -1272,7 +1272,16 @@ impl ProductionDesktopState {
             .iter()
             .map(|object| (object.path.as_str(), object))
             .collect();
+        let reused_object_keys: BTreeSet<_> = manifest
+            .objects
+            .iter()
+            .filter(|object| object.source_generation.is_some())
+            .map(|object| object.key.as_str())
+            .collect();
         for (path, bytes) in files {
+            if reused_object_keys.contains(path.as_str()) {
+                continue;
+            }
             let object = object_map.get(path.as_str()).ok_or_else(|| {
                 Problem::new(
                     "profile_snapshot_incomplete",

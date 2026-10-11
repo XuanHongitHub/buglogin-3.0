@@ -17,6 +17,8 @@ pub struct ManifestObject {
     pub key: String,
     pub size: u64,
     pub checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_generation: Option<u64>,
 }
 
 impl ManifestObject {
@@ -35,6 +37,7 @@ impl ManifestObject {
             key,
             size: bytes.len() as u64,
             checksum: checksum(bytes),
+            source_generation: None,
         })
     }
 
@@ -257,6 +260,16 @@ impl SyncManifest {
         let mut keys = BTreeSet::new();
         for object in &self.objects {
             validate_key(&object.key)?;
+            if object.source_generation.is_some_and(|source_generation| {
+                source_generation == 0 || source_generation >= self.generation
+            }) {
+                return Err(Problem::new(
+                    "invalid_manifest_source_generation",
+                    "Reused object source generation must precede this manifest",
+                    400,
+                    "sync",
+                ));
+            }
             if !keys.insert(&object.key) {
                 return Err(Problem::new(
                     "duplicate_manifest_object",
@@ -339,6 +352,21 @@ impl SyncManifest {
                 ));
             }
             validate_dependency_object(&encryption.resource_key_envelope, &self.objects)?;
+        }
+        if self
+            .objects
+            .iter()
+            .any(|object| object.source_generation.is_some())
+            && !self.payload_encryption.as_ref().is_some_and(|encryption| {
+                encryption.algorithm == PayloadEncryptionAlgorithm::Aes256GcmChunkV2
+            })
+        {
+            return Err(Problem::new(
+                "manifest_object_reuse_requires_v2",
+                "Object reuse requires versioned payload encryption",
+                400,
+                "sync",
+            ));
         }
         for dependency in &self.dependencies {
             match dependency {

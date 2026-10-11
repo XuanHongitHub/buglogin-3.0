@@ -191,13 +191,21 @@ schemas:
       generation: integer
       parentGeneration: [integer, null]
       rootChecksum: string
-      objects: array
+      objects: [ManifestObject]
       tombstones: array
       payloadEncryption: [ManifestPayloadEncryption, null]
       dependencies:
         type: array
         description: Draft additive dependency list; profile-plus-proxy activation is not enabled until the versioned contract is verified in staging.
         items: ManifestDependency
+
+  ManifestObject:
+    required: [key, size, checksum]
+    properties:
+      key: string
+      size: integer
+      checksum: sha256
+      sourceGeneration: integer (optional; v2 reuse from immediately previous manifest only)
 
   ManifestDependency:
     required: [kind, proxyId, revision, metadataObject, credentialEnvelopeObject]
@@ -254,6 +262,7 @@ migrationEnvelope:
     - Redis is lease/fencing/event infrastructure only and never migration manifest authority
     - object-store blobs are immutable and invisible until PostgreSQL activation
     - profile manifests with a selected proxy include exactly one matching proxy dependency
+    - sourceGeneration reuses only an exact object in the immediately previous active manifest under the same resource key version
     - proxy dependency revision and metadata object must match same-workspace Rust API authority
     - manifest reads reject a proxy dependency whose revision is no longer current
     - proxy credential state requires a separate opaque encrypted envelope object

@@ -2220,12 +2220,13 @@ async fn commit_resource_manifest(
     let envelope_ref = validate_payload_encryption_contract(&manifest, &correlation(&headers))?;
     let auth = CoordinationAuth::new(owner_id, bearer_token(&headers).to_owned())
         .map_err(response_problem)?;
+    validate_manifest_source_references(&state, &workspace_id, &resource_id, &manifest)?;
     for object in &manifest.objects {
         let bytes = state
             .get_remote_chunk(
                 &payload_object_key(
                     &resource_id,
-                    manifest.generation,
+                    object_storage_generation(manifest.generation, object),
                     &object.key,
                     &object.checksum,
                 ),
@@ -2482,7 +2483,14 @@ fn validate_manifest_successor(
                 "sync",
             )));
         }
-    } else if manifest.generation != 1 || manifest.parent_generation.is_some() {
+        validate_reused_manifest_objects(current, manifest)?;
+    } else if manifest.generation != 1
+        || manifest.parent_generation.is_some()
+        || manifest
+            .objects
+            .iter()
+            .any(|object| object.source_generation.is_some())
+    {
         return Err(response_problem(Problem::new(
             "manifest_base_missing",
             "Manifest base is missing",
@@ -2491,6 +2499,91 @@ fn validate_manifest_successor(
         )));
     }
     Ok(())
+}
+
+fn validate_manifest_source_references(
+    state: &ApiState,
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+    manifest: &SyncManifest,
+) -> Result<(), Response> {
+    let current = state
+        .current_sync_manifest(workspace_id, resource_id)
+        .map_err(response_problem)?;
+    if let Some(current) = current.as_ref() {
+        validate_reused_manifest_objects(current, manifest).map_err(Response::from)?;
+    } else if manifest
+        .objects
+        .iter()
+        .any(|object| object.source_generation.is_some())
+    {
+        return Err(response_problem(Problem::new(
+            "manifest_object_reuse_not_authorized",
+            "Objects can only be reused from an active manifest",
+            409,
+            "sync",
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_reused_manifest_objects(
+    current: &SyncManifest,
+    candidate: &SyncManifest,
+) -> Result<(), ResponseProblem> {
+    for object in candidate
+        .objects
+        .iter()
+        .filter(|object| object.source_generation.is_some())
+    {
+        let source_generation = object.source_generation.unwrap_or_default();
+        let found_in_current = current.objects.iter().any(|previous| {
+            previous.key == object.key
+                && previous.size == object.size
+                && previous.checksum == object.checksum
+                && object_storage_generation(current.generation, previous) == source_generation
+        });
+        let current_key_version = current
+            .payload_encryption
+            .as_ref()
+            .and_then(|encryption| encryption.key_version.as_deref());
+        let candidate_key_version = candidate
+            .payload_encryption
+            .as_ref()
+            .and_then(|encryption| encryption.key_version.as_deref());
+        if !found_in_current || current_key_version != candidate_key_version {
+            return Err(response_problem(Problem::new(
+                "manifest_object_reuse_not_authorized",
+                "Object reuse must match the active manifest and resource key version",
+                409,
+                "sync",
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn object_storage_generation(
+    manifest_generation: u64,
+    object: &buglogin_sync::manifest::ManifestObject,
+) -> u64 {
+    object.source_generation.unwrap_or(manifest_generation)
+}
+
+fn referenced_object_storage_generation(
+    manifest: &SyncManifest,
+    reference: &buglogin_sync::manifest::ManifestObjectReference,
+) -> Option<u64> {
+    manifest
+        .objects
+        .iter()
+        .find(|object| {
+            object.key == reference.key
+                && object.size == reference.size
+                && object.checksum == reference.checksum
+        })
+        .map(|object| object_storage_generation(manifest.generation, object))
 }
 
 fn validate_profile_proxy_dependencies(
@@ -2597,7 +2690,15 @@ fn validate_profile_proxy_dependencies(
                     .get_remote_chunk(
                         &payload_object_key(
                             resource_id,
-                            manifest.generation,
+                            referenced_object_storage_generation(manifest, metadata_object)
+                                .ok_or_else(|| {
+                                    response_problem(Problem::new(
+                                        "manifest_dependency_object_missing",
+                                        "Proxy metadata object is not in the manifest",
+                                        409,
+                                        "sync",
+                                    ))
+                                })?,
                             &metadata_object.key,
                             &metadata_object.checksum,
                         ),
@@ -2677,7 +2778,12 @@ async fn get_resource_blob(
     let _ = actor_id;
     let bytes = state
         .get_remote_chunk(
-            &payload_object_key(&resource_id, generation, &object.key, &object.checksum),
+            &payload_object_key(
+                &resource_id,
+                object_storage_generation(generation, object),
+                &object.key,
+                &object.checksum,
+            ),
             &object.checksum,
         )
         .map_err(response_problem)?;
@@ -3545,5 +3651,59 @@ mod tests {
         let error = validate_manifest_successor(&state, &workspace_id, &resource_id, &candidate)
             .unwrap_err();
         assert_eq!(error.1["code"], "sync_key_rotation_not_supported");
+    }
+
+    #[test]
+    fn object_reuse_must_match_the_previous_manifest_and_key_version() {
+        let workspace_id = WorkspaceId::new("ws_object_reuse").unwrap();
+        let resource_id = ResourceId::new("res_object_reuse").unwrap();
+        let envelope = ManifestObject::new(
+            buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY,
+            b"encrypted-resource-key",
+        )
+        .unwrap();
+        let payload = ManifestObject::new("Default/Cookies", b"ciphertext").unwrap();
+        let key_version = "a".repeat(64);
+        let encryption = |object: &ManifestObject| ManifestPayloadEncryption {
+            schema_version: 1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
+            key_version: Some(key_version.clone()),
+            resource_key_envelope: ManifestObjectReference::from(object),
+        };
+        let mut current = SyncManifest::new(
+            workspace_id.clone(),
+            resource_id.clone(),
+            1,
+            1,
+            None,
+            b"generation-one",
+            vec![envelope.clone(), payload.clone()],
+        )
+        .unwrap();
+        current.payload_encryption = Some(encryption(&envelope));
+        current.validate().unwrap();
+
+        let mut candidate = SyncManifest::new(
+            workspace_id.clone(),
+            resource_id.clone(),
+            1,
+            2,
+            Some(1),
+            b"generation-two",
+            vec![envelope.clone(), payload.clone()],
+        )
+        .unwrap();
+        candidate.objects[1].source_generation = Some(1);
+        candidate.payload_encryption = Some(encryption(&envelope));
+        candidate.validate().unwrap();
+        assert!(validate_reused_manifest_objects(&current, &candidate).is_ok());
+
+        candidate.objects[1].checksum = "b".repeat(64);
+        assert_eq!(
+            validate_reused_manifest_objects(&current, &candidate)
+                .unwrap_err()
+                .1["code"],
+            "manifest_object_reuse_not_authorized"
+        );
     }
 }

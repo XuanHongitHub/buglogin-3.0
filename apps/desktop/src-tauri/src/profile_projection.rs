@@ -117,9 +117,10 @@ impl ProfileProjection {
                     "Resource key envelope is invalid",
                 )
             })?;
-        if ManifestObject::new(RESOURCE_KEY_ENVELOPE_KEY, envelope_bytes)?
-            != manifest_object(&encryption.resource_key_envelope)
-        {
+        if !matches_manifest_object(
+            &ManifestObject::new(RESOURCE_KEY_ENVELOPE_KEY, envelope_bytes)?,
+            &encryption.resource_key_envelope,
+        ) {
             return Err(problem(
                 "resource_key_envelope_mismatch",
                 "Resource key envelope does not match the manifest",
@@ -159,7 +160,10 @@ impl ProfileProjection {
                     "Proxy credential envelope is missing",
                 )
             })?;
-            if ManifestObject::new(reference.key.clone(), bytes)? != manifest_object(reference) {
+            if !matches_manifest_object(
+                &ManifestObject::new(reference.key.clone(), bytes)?,
+                reference,
+            ) {
                 return Err(problem(
                     "proxy_credential_envelope_mismatch",
                     "Proxy credential envelope does not match the manifest",
@@ -444,6 +448,7 @@ impl ProfileProjection {
                     key: object.path.clone(),
                     size: object.size,
                     checksum: object.checksum.clone(),
+                    source_generation: None,
                 })
                 .collect(),
             tombstones,
@@ -490,16 +495,90 @@ impl ProfileProjection {
         });
         let clear_metadata = proxy_metadata_keys(&plaintext_manifest);
         let mut files = Vec::with_capacity(plaintext_files.len() + 1);
+        let key_version = checksum(client_key.as_bytes());
+        let previous_objects: BTreeMap<_, _> = previous
+            .objects
+            .iter()
+            .map(|object| (object.key.as_str(), object))
+            .collect();
+        let mut reused_sources = BTreeMap::new();
+        let cache_scope = checksum(
+            format!(
+                "{}/{}/{}",
+                previous.workspace_id.as_str(),
+                previous.resource_id.as_str(),
+                key_version
+            )
+            .as_bytes(),
+        );
+        let mut active_cache_files = std::collections::BTreeSet::new();
         for (path, plaintext) in plaintext_files {
             let bytes = if clear_metadata.contains(&path) {
                 plaintext
             } else {
-                let encrypted = AuthenticatedChunk::encrypt(
-                    client_key,
-                    &plaintext,
-                    &profile_object_aad_v2(&previous.workspace_id, &previous.resource_id, &path),
-                )?
-                .encoded();
+                let plaintext_checksum = checksum(&plaintext);
+                let cache_identity = format!(
+                    "{}/{}/{}/{}",
+                    previous.workspace_id.as_str(),
+                    previous.resource_id.as_str(),
+                    key_version,
+                    path
+                );
+                let cache_name = format!("{}.bin", checksum(cache_identity.as_bytes()));
+                let cache_path =
+                    PathBuf::from(format!(".sync-cache/{}/{}", cache_scope, cache_name));
+                active_cache_files.insert(cache_name);
+                let prior = previous_objects.get(path.as_str()).copied();
+                let cached = prior.and_then(|prior| {
+                    let cached = read_verified(&self.root, &cache_path, &prior.checksum).ok()?;
+                    if cached.len() as u64 != prior.size {
+                        return None;
+                    }
+                    let chunk = AuthenticatedChunk::decode(&cached).ok()?;
+                    let decrypted = chunk
+                        .decrypt(
+                            client_key,
+                            &profile_object_aad_v2(
+                                &previous.workspace_id,
+                                &previous.resource_id,
+                                &path,
+                            ),
+                        )
+                        .ok()?;
+                    (checksum(&decrypted) == plaintext_checksum && decrypted == plaintext)
+                        .then_some((
+                            cached,
+                            prior.source_generation.unwrap_or(previous.generation),
+                        ))
+                });
+                let (encrypted, source_generation) = match cached {
+                    Some((cached, source_generation)) => (cached, Some(source_generation)),
+                    None => {
+                        let encrypted = AuthenticatedChunk::encrypt(
+                            client_key,
+                            &plaintext,
+                            &profile_object_aad_v2(
+                                &previous.workspace_id,
+                                &previous.resource_id,
+                                &path,
+                            ),
+                        )?
+                        .encoded();
+                        if encrypted.len() <= MAX_ENCRYPTED_OBJECT_BYTES {
+                            let cache_checksum = checksum(&encrypted);
+                            let _ = write_verified(
+                                &self.root,
+                                &cache_path,
+                                &encrypted,
+                                &cache_checksum,
+                            );
+                        }
+                        (encrypted, None)
+                    }
+                };
+                if let Some(source_generation) = source_generation {
+                    reused_sources.insert(path.clone(), source_generation);
+                }
                 if encrypted.len() > MAX_ENCRYPTED_OBJECT_BYTES {
                     return Err(problem(
                         "profile_object_too_large",
@@ -595,6 +674,7 @@ impl ProfileProjection {
                     key: object.path.clone(),
                     size: object.size,
                     checksum: object.checksum.clone(),
+                    source_generation: None,
                 })
                 .collect(),
             plaintext_manifest
@@ -612,10 +692,26 @@ impl ProfileProjection {
         manifest.payload_encryption = Some(ManifestPayloadEncryption {
             schema_version: 1,
             algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
-            key_version: Some(checksum(client_key.as_bytes())),
+            key_version: Some(key_version),
             resource_key_envelope: ManifestObjectReference::from(envelope_object),
         });
+        for object in &mut manifest.objects {
+            object.source_generation = reused_sources.get(&object.key).copied();
+        }
         manifest.validate()?;
+        let cache_directory = PathBuf::from(format!(".sync-cache/{cache_scope}"));
+        if let Ok(directory) = confined_path(&self.root, &cache_directory) {
+            if let Ok(entries) = fs::read_dir(directory) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if !active_cache_files.contains(&name)
+                        && entry.file_type().is_ok_and(|kind| kind.is_file())
+                    {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
         Ok((descriptor, files, manifest))
     }
 }
@@ -679,12 +775,10 @@ fn verify_decrypted_generation(
     })
 }
 
-fn manifest_object(reference: &ManifestObjectReference) -> ManifestObject {
-    ManifestObject {
-        key: reference.key.clone(),
-        size: reference.size,
-        checksum: reference.checksum.clone(),
-    }
+fn matches_manifest_object(object: &ManifestObject, reference: &ManifestObjectReference) -> bool {
+    object.key == reference.key
+        && object.size == reference.size
+        && object.checksum == reference.checksum
 }
 
 fn proxy_metadata_keys(manifest: &SyncManifest) -> std::collections::BTreeSet<String> {
@@ -1213,6 +1307,46 @@ mod tests {
                 .unwrap(&workspace, &resource, &recovery_key)
                 .unwrap(),
             client_key
+        );
+
+        let (next_descriptor, next_files, next_manifest) = projection
+            .snapshot_with_proxy_encryption(
+                &profile_path,
+                &manifest,
+                3,
+                None,
+                &client_key,
+                &recovery_key,
+            )
+            .unwrap();
+        let reused = next_manifest
+            .objects
+            .iter()
+            .find(|object| object.key == "Preferences")
+            .unwrap();
+        assert_eq!(reused.source_generation, Some(manifest.generation));
+        assert_eq!(
+            next_descriptor
+                .objects
+                .iter()
+                .find(|object| object.path == "Preferences")
+                .unwrap()
+                .checksum,
+            reused.checksum
+        );
+        assert!(
+            next_files.iter().any(|(path, bytes)| {
+                path == "Preferences" && checksum(bytes) == reused.checksum
+            })
+        );
+        assert_eq!(
+            next_manifest
+                .objects
+                .iter()
+                .find(|object| object.key == RESOURCE_KEY_ENVELOPE_KEY)
+                .unwrap()
+                .source_generation,
+            None
         );
         let _ = fs::remove_dir_all(root);
     }
