@@ -178,8 +178,17 @@ fn payload_encryption_envelope_must_reference_an_uploaded_object() {
     value.payload_encryption = Some(ManifestPayloadEncryption {
         schema_version: 1,
         algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
+        key_version: None,
         resource_key_envelope: ManifestObjectReference::from(&envelope),
     });
+    assert!(value.validate().is_ok());
+    value.payload_encryption.as_mut().unwrap().algorithm =
+        PayloadEncryptionAlgorithm::Aes256GcmChunkV2;
+    assert_eq!(
+        value.validate().unwrap_err().code,
+        "invalid_payload_key_version"
+    );
+    value.payload_encryption.as_mut().unwrap().key_version = Some("a".repeat(64));
     assert!(value.validate().is_ok());
 
     value

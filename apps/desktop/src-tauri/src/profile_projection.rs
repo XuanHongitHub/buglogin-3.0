@@ -140,6 +140,15 @@ impl ProfileProjection {
             ));
         }
         let key = client_key.unwrap_or(&unwrapped_key);
+        if let PayloadEncryptionAlgorithm::Aes256GcmChunkV2 = encryption.algorithm {
+            let expected_key_version = checksum(key.as_bytes());
+            if encryption.key_version.as_deref() != Some(expected_key_version.as_str()) {
+                return Err(problem(
+                    "profile_payload_key_version_mismatch",
+                    "Profile payload key version does not match the recovery key",
+                ));
+            }
+        }
         let clear_metadata = proxy_metadata_keys(manifest);
         let proxy_envelopes = proxy_credential_keys(manifest);
         let mut credentials = Vec::with_capacity(proxy_envelopes.len());
@@ -199,15 +208,25 @@ impl ProfileProjection {
                 )
             })?;
             let chunk = AuthenticatedChunk::decode(bytes)?;
-            let plaintext = chunk.decrypt(
-                key,
-                &profile_object_aad(
-                    &manifest.workspace_id,
-                    &manifest.resource_id,
-                    manifest.generation,
-                    &object.path,
-                ),
-            )?;
+            let plaintext = match encryption.algorithm {
+                PayloadEncryptionAlgorithm::Aes256GcmChunkV1 => chunk.decrypt(
+                    key,
+                    &profile_object_aad(
+                        &manifest.workspace_id,
+                        &manifest.resource_id,
+                        manifest.generation,
+                        &object.path,
+                    ),
+                )?,
+                PayloadEncryptionAlgorithm::Aes256GcmChunkV2 => chunk.decrypt(
+                    key,
+                    &profile_object_aad_v2(
+                        &manifest.workspace_id,
+                        &manifest.resource_id,
+                        &object.path,
+                    ),
+                )?,
+            };
             profile_files.push((object.path.clone(), plaintext));
         }
         self.publish_decrypted(profile_id, manifest, profile_files)
@@ -478,12 +497,7 @@ impl ProfileProjection {
                 let encrypted = AuthenticatedChunk::encrypt(
                     client_key,
                     &plaintext,
-                    &profile_object_aad(
-                        &previous.workspace_id,
-                        &previous.resource_id,
-                        plaintext_manifest.generation,
-                        &path,
-                    ),
+                    &profile_object_aad_v2(&previous.workspace_id, &previous.resource_id, &path),
                 )?
                 .encoded();
                 if encrypted.len() > MAX_ENCRYPTED_OBJECT_BYTES {
@@ -597,7 +611,8 @@ impl ProfileProjection {
             .ok_or_else(|| unavailable())?;
         manifest.payload_encryption = Some(ManifestPayloadEncryption {
             schema_version: 1,
-            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
+            key_version: Some(checksum(client_key.as_bytes())),
             resource_key_envelope: ManifestObjectReference::from(envelope_object),
         });
         manifest.validate()?;
@@ -716,6 +731,20 @@ fn profile_object_aad(
         workspace_id.as_str(),
         resource_id.as_str(),
         generation,
+        path
+    )
+    .into_bytes()
+}
+
+fn profile_object_aad_v2(
+    workspace_id: &buglogin_domain::ids::WorkspaceId,
+    resource_id: &buglogin_domain::ids::ResourceId,
+    path: &str,
+) -> Vec<u8> {
+    format!(
+        "buglogin/profile-object/v2/{}/{}/{}",
+        workspace_id.as_str(),
+        resource_id.as_str(),
         path
     )
     .into_bytes()
@@ -876,6 +905,24 @@ mod tests {
         let error = validate_profile_file_size(MAX_PROFILE_PLAINTEXT_BYTES + 1).unwrap_err();
         assert_eq!(error.code, "profile_object_too_large");
         assert_eq!(error.status, 413);
+    }
+
+    #[test]
+    fn v2_profile_aad_is_stable_across_generations_while_v1_remains_generation_bound() {
+        let workspace = WorkspaceId::new("ws_projection").unwrap();
+        let resource = ResourceId::new("res_projection").unwrap();
+        let key = ClientKey::from_bytes([0x27; 32]);
+        let v2_aad = profile_object_aad_v2(&workspace, &resource, "Default/Cookies");
+        let encrypted = AuthenticatedChunk::encrypt(&key, b"cookie-data", &v2_aad).unwrap();
+        assert_eq!(encrypted.decrypt(&key, &v2_aad).unwrap(), b"cookie-data");
+        assert_eq!(
+            v2_aad,
+            b"buglogin/profile-object/v2/ws_projection/res_projection/Default/Cookies"
+        );
+        assert_ne!(
+            profile_object_aad(&workspace, &resource, 3, "Default/Cookies"),
+            profile_object_aad(&workspace, &resource, 4, "Default/Cookies")
+        );
     }
 
     #[test]
@@ -1130,10 +1177,19 @@ mod tests {
             .unwrap()
             .decrypt(
                 &client_key,
-                &profile_object_aad(&workspace, &resource, 2, "Preferences"),
+                &profile_object_aad_v2(&workspace, &resource, "Preferences"),
             )
             .unwrap();
         assert_eq!(decrypted, b"private-profile-data");
+        assert_eq!(
+            manifest
+                .payload_encryption
+                .as_ref()
+                .unwrap()
+                .key_version
+                .as_deref(),
+            Some(checksum(client_key.as_bytes()).as_str())
+        );
 
         let envelope_ref = &manifest
             .payload_encryption

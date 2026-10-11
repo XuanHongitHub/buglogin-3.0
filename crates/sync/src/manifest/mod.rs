@@ -68,6 +68,8 @@ pub struct ManifestObjectReference {
 pub enum PayloadEncryptionAlgorithm {
     #[serde(rename = "aes-256-gcm-chunk-v1")]
     Aes256GcmChunkV1,
+    #[serde(rename = "aes-256-gcm-chunk-v2")]
+    Aes256GcmChunkV2,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -75,6 +77,8 @@ pub enum PayloadEncryptionAlgorithm {
 pub struct ManifestPayloadEncryption {
     pub schema_version: u8,
     pub algorithm: PayloadEncryptionAlgorithm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_version: Option<String>,
     pub resource_key_envelope: ManifestObjectReference,
 }
 
@@ -302,6 +306,29 @@ impl SyncManifest {
                     409,
                     "sync",
                 ));
+            }
+            match encryption.algorithm {
+                PayloadEncryptionAlgorithm::Aes256GcmChunkV1
+                    if encryption.key_version.is_some() =>
+                {
+                    return Err(Problem::new(
+                        "invalid_payload_key_version",
+                        "Legacy payload encryption must not declare a key version",
+                        400,
+                        "sync",
+                    ));
+                }
+                PayloadEncryptionAlgorithm::Aes256GcmChunkV2
+                    if !encryption.key_version.as_deref().is_some_and(is_checksum) =>
+                {
+                    return Err(Problem::new(
+                        "invalid_payload_key_version",
+                        "Versioned payload encryption requires a valid key version",
+                        400,
+                        "sync",
+                    ));
+                }
+                _ => {}
             }
             if encryption.resource_key_envelope.key != RESOURCE_KEY_ENVELOPE_KEY {
                 return Err(Problem::new(

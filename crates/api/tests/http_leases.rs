@@ -492,8 +492,13 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
     let envelope_object =
         ManifestObject::new(".buglogin/resource-key-envelope.json", &envelope_bytes).unwrap();
+    let payload_aad = format!(
+        "buglogin/profile-object/v2/{}/{}/profile/payload.bin",
+        workspace.as_str(),
+        resource.as_str()
+    );
     let blob =
-        AuthenticatedChunk::encrypt(&payload_key, b"profile-payload", b"profile/payload.bin")
+        AuthenticatedChunk::encrypt(&payload_key, b"profile-payload", payload_aad.as_bytes())
             .unwrap()
             .encoded();
     let blob_checksum = checksum(&blob);
@@ -768,7 +773,8 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     .unwrap();
     manifest.payload_encryption = Some(ManifestPayloadEncryption {
         schema_version: 1,
-        algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
+        algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
+        key_version: Some(checksum(payload_key.as_bytes())),
         resource_key_envelope: ManifestObjectReference::from(&envelope_object),
     });
     let rejected_missing_proxy = app

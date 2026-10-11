@@ -2452,6 +2452,25 @@ fn validate_manifest_successor(
         if current == manifest {
             return Ok(());
         }
+        if let Some(current_encryption) = current.payload_encryption.as_ref()
+            && current_encryption.algorithm
+                == buglogin_sync::manifest::PayloadEncryptionAlgorithm::Aes256GcmChunkV2
+            && manifest
+                .payload_encryption
+                .as_ref()
+                .is_none_or(|candidate| {
+                    candidate.algorithm
+                        != buglogin_sync::manifest::PayloadEncryptionAlgorithm::Aes256GcmChunkV2
+                        || candidate.key_version != current_encryption.key_version
+                })
+        {
+            return Err(response_problem(Problem::new(
+                "sync_key_rotation_not_supported",
+                "The active profile key version cannot change without a key rotation",
+                409,
+                "sync",
+            )));
+        }
         if manifest.fencing_token < current.fencing_token
             || manifest.generation != current.generation + 1
             || manifest.parent_generation != Some(current.generation)
@@ -3468,5 +3487,63 @@ trait ResponseExt {
 impl ResponseExt for Response {
     fn with_field(self, _: &str) -> Self {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buglogin_browser::profile::ProfileService;
+    use buglogin_sync::manifest::{
+        ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
+        PayloadEncryptionAlgorithm,
+    };
+
+    #[test]
+    fn active_v2_manifest_rejects_key_version_change() {
+        let state = ApiState::local(ProfileService::disabled());
+        let workspace_id = WorkspaceId::new("ws_key_version").unwrap();
+        let resource_id = ResourceId::new("res_key_version").unwrap();
+        let envelope = ManifestObject::new(
+            buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY,
+            b"encrypted-resource-key",
+        )
+        .unwrap();
+        let encryption = |key_version: &str| ManifestPayloadEncryption {
+            schema_version: 1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
+            key_version: Some(key_version.to_owned()),
+            resource_key_envelope: ManifestObjectReference::from(&envelope),
+        };
+        let mut current = SyncManifest::new(
+            workspace_id.clone(),
+            resource_id.clone(),
+            1,
+            1,
+            None,
+            b"generation-one",
+            vec![envelope.clone()],
+        )
+        .unwrap();
+        current.payload_encryption = Some(encryption(&"a".repeat(64)));
+        current.validate().unwrap();
+        state.replace_sync_manifest(current).unwrap();
+
+        let mut candidate = SyncManifest::new(
+            workspace_id.clone(),
+            resource_id.clone(),
+            1,
+            2,
+            Some(1),
+            b"generation-two",
+            vec![envelope.clone()],
+        )
+        .unwrap();
+        candidate.payload_encryption = Some(encryption(&"b".repeat(64)));
+        candidate.validate().unwrap();
+
+        let error = validate_manifest_successor(&state, &workspace_id, &resource_id, &candidate)
+            .unwrap_err();
+        assert_eq!(error.1["code"], "sync_key_rotation_not_supported");
     }
 }
