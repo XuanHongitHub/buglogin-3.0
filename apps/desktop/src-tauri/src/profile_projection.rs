@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,7 +15,8 @@ use buglogin_storage::{
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationScope},
     crypto::{
-        AuthenticatedChunk, ClientKey, ProxyCredentialEnvelope, RecoveryKey, ResourceKeyEnvelope,
+        AUTHENTICATED_CHUNK_OVERHEAD_BYTES, AuthenticatedChunk, ClientKey, ProxyCredentialEnvelope,
+        RecoveryKey, ResourceKeyEnvelope,
     },
     manifest::{
         MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject, ManifestObjectReference,
@@ -29,6 +31,8 @@ use crate::remote_api::{RemoteApiClient, RemoteProxySyncSnapshot};
 
 const MARKER: &str = ".buglogin-projection.json";
 const MAX_ENCRYPTED_OBJECT_BYTES: usize = MAX_PROFILE_SYNC_OBJECT_BYTES as usize;
+const MAX_PROFILE_PLAINTEXT_BYTES: u64 =
+    MAX_PROFILE_SYNC_OBJECT_BYTES - AUTHENTICATED_CHUNK_OVERHEAD_BYTES as u64;
 
 pub struct HydratedProxyCredential {
     pub proxy_id: buglogin_domain::ids::ProxyId,
@@ -819,7 +823,8 @@ fn collect_files(
         if relative == MARKER {
             continue;
         }
-        output.push((relative, fs::read(&path).map_err(|_| unavailable())?));
+        validate_profile_file_size(metadata.len())?;
+        output.push((relative, read_profile_file(&path)?));
     }
     Ok(())
 }
@@ -829,6 +834,29 @@ fn unavailable() -> Problem {
         "profile_projection_unavailable",
         "Profile projection is unavailable",
     )
+}
+
+fn validate_profile_file_size(size: u64) -> Result<(), Problem> {
+    if size > MAX_PROFILE_PLAINTEXT_BYTES {
+        return Err(Problem::new(
+            "profile_object_too_large",
+            "A profile file exceeds the encrypted sync object limit",
+            413,
+            "desktop-projection",
+        ));
+    }
+    Ok(())
+}
+
+fn read_profile_file(path: &Path) -> Result<Vec<u8>, Problem> {
+    let file = fs::File::open(path).map_err(|_| unavailable())?;
+    validate_profile_file_size(file.metadata().map_err(|_| unavailable())?.len())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PROFILE_PLAINTEXT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| unavailable())?;
+    validate_profile_file_size(bytes.len() as u64)?;
+    Ok(bytes)
 }
 
 fn problem(code: &'static str, title: &'static str) -> Problem {
@@ -841,6 +869,14 @@ mod tests {
     use buglogin_domain::ids::{ProxyId, ResourceId, WorkspaceId};
     use buglogin_sync::crypto::{AuthenticatedChunk, ClientKey, RecoveryKey};
     use buglogin_sync::manifest::ManifestObject;
+
+    #[test]
+    fn rejects_profile_file_size_that_would_exceed_encrypted_object_limit() {
+        assert!(validate_profile_file_size(MAX_PROFILE_PLAINTEXT_BYTES).is_ok());
+        let error = validate_profile_file_size(MAX_PROFILE_PLAINTEXT_BYTES + 1).unwrap_err();
+        assert_eq!(error.code, "profile_object_too_large");
+        assert_eq!(error.status, 413);
+    }
 
     #[test]
     fn publishes_complete_generation_and_reuses_verified_cache() {

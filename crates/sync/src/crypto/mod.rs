@@ -14,6 +14,7 @@ const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const ENCRYPTION_VERSION: u8 = 1;
+pub const AUTHENTICATED_CHUNK_OVERHEAD_BYTES: usize = 1 + NONCE_BYTES + TAG_BYTES;
 pub const AUTHENTICATED_CHUNK_VERSION: u8 = ENCRYPTION_VERSION;
 
 #[derive(Clone, Eq, PartialEq)]
@@ -320,7 +321,8 @@ impl AuthenticatedChunk {
     }
 
     pub fn encoded(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(1 + NONCE_BYTES + TAG_BYTES + self.ciphertext.len());
+        let mut bytes =
+            Vec::with_capacity(AUTHENTICATED_CHUNK_OVERHEAD_BYTES + self.ciphertext.len());
         bytes.push(self.version);
         bytes.extend_from_slice(&self.nonce);
         bytes.extend_from_slice(&self.tag);
