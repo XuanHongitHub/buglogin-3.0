@@ -1,5 +1,5 @@
-use std::env;
 use std::fmt;
+use std::{env, sync::Mutex};
 
 use buglogin_domain::errors::Problem;
 use http::{HeaderMap, HeaderName, HeaderValue};
@@ -7,7 +7,10 @@ use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
 
-use super::{RemoteChunk, RemoteChunkStore, checksum_problem, validate_object_key};
+use super::{
+    ConcurrentRemoteChunkStore, RemoteChunk, RemoteChunkStore, checksum_problem,
+    validate_object_key,
+};
 use crate::blob::checksum;
 
 const CHECKSUM_METADATA: &str = "sha256";
@@ -121,6 +124,7 @@ impl fmt::Debug for S3Config {
 pub struct S3RemoteChunkStore {
     bucket: Box<Bucket>,
     config: S3Config,
+    object_locks: [Mutex<()>; 128],
 }
 
 impl S3RemoteChunkStore {
@@ -143,12 +147,16 @@ impl S3RemoteChunkStore {
         } else {
             bucket
         };
-        Ok(Self { bucket, config })
+        Ok(Self {
+            bucket,
+            config,
+            object_locks: std::array::from_fn(|_| Mutex::new(())),
+        })
     }
 }
 
-impl RemoteChunkStore for S3RemoteChunkStore {
-    fn readiness(&self) -> Result<(), Problem> {
+impl S3RemoteChunkStore {
+    fn store_readiness(&self) -> Result<(), Problem> {
         let key = self.config.namespaced_key("buglogin-readiness-probe")?;
         match self.bucket.head_object(&key) {
             Ok((_, 200..=299 | 404)) => Ok(()),
@@ -156,7 +164,12 @@ impl RemoteChunkStore for S3RemoteChunkStore {
         }
     }
 
-    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+    fn store_checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+        let _lock = self.lock_object(object_key)?;
+        self.read_checksum(object_key)
+    }
+
+    fn read_checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
         let key = self.config.namespaced_key(object_key)?;
         match self.bucket.head_object(&key) {
             Ok((_, 404)) => Ok(None),
@@ -169,17 +182,18 @@ impl RemoteChunkStore for S3RemoteChunkStore {
         }
     }
 
-    fn put(
-        &mut self,
+    fn store_put(
+        &self,
         object_key: &str,
         bytes: &[u8],
         expected_checksum: &str,
     ) -> Result<(), Problem> {
+        let _lock = self.lock_object(object_key)?;
         let key = self.config.namespaced_key(object_key)?;
         if checksum(bytes) != expected_checksum {
             return Err(checksum_problem());
         }
-        match self.checksum(object_key)? {
+        match self.read_checksum(object_key)? {
             Some(existing) if existing == expected_checksum => return Ok(()),
             Some(_) => {
                 return Err(Problem::new(
@@ -210,7 +224,7 @@ impl RemoteChunkStore for S3RemoteChunkStore {
             )
             .map_err(|_| unavailable())?;
         if matches!(response.status_code(), 409 | 412) {
-            return match self.checksum(object_key)? {
+            return match self.read_checksum(object_key)? {
                 Some(stored) if stored == expected_checksum => Ok(()),
                 Some(_) => Err(Problem::new(
                     "remote_chunk_conflict",
@@ -224,13 +238,14 @@ impl RemoteChunkStore for S3RemoteChunkStore {
         if !(200..=299).contains(&response.status_code()) {
             return Err(unavailable());
         }
-        match self.checksum(object_key)? {
+        match self.read_checksum(object_key)? {
             Some(stored) if stored == expected_checksum => Ok(()),
             _ => Err(checksum_problem()),
         }
     }
 
-    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+    fn store_get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+        let _lock = self.lock_object(object_key)?;
         let key = self.config.namespaced_key(object_key)?;
         let response = self.bucket.get_object(&key).map_err(|_| unavailable())?;
         if response.status_code() == 404 {
@@ -254,13 +269,14 @@ impl RemoteChunkStore for S3RemoteChunkStore {
         })
     }
 
-    fn delete_if_checksum(
-        &mut self,
+    fn store_delete_if_checksum(
+        &self,
         object_key: &str,
         expected_checksum: &str,
     ) -> Result<bool, Problem> {
+        let _lock = self.lock_object(object_key)?;
         let key = self.config.namespaced_key(object_key)?;
-        let Some(existing) = self.checksum(object_key)? else {
+        let Some(existing) = self.read_checksum(object_key)? else {
             return Ok(false);
         };
         if existing != expected_checksum {
@@ -279,6 +295,77 @@ impl RemoteChunkStore for S3RemoteChunkStore {
             return Err(unavailable());
         }
         Ok(true)
+    }
+
+    fn lock_object(&self, object_key: &str) -> Result<std::sync::MutexGuard<'_, ()>, Problem> {
+        let index = object_lock_index(object_key);
+        self.object_locks[index].lock().map_err(|_| unavailable())
+    }
+}
+
+fn object_lock_index(object_key: &str) -> usize {
+    let hash = object_key
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    (hash as usize) % 128
+}
+
+impl RemoteChunkStore for S3RemoteChunkStore {
+    fn readiness(&self) -> Result<(), Problem> {
+        self.store_readiness()
+    }
+
+    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+        self.store_checksum(object_key)
+    }
+
+    fn put(
+        &mut self,
+        object_key: &str,
+        bytes: &[u8],
+        expected_checksum: &str,
+    ) -> Result<(), Problem> {
+        self.store_put(object_key, bytes, expected_checksum)
+    }
+
+    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+        self.store_get(object_key, expected_checksum)
+    }
+
+    fn delete_if_checksum(
+        &mut self,
+        object_key: &str,
+        expected_checksum: &str,
+    ) -> Result<bool, Problem> {
+        self.store_delete_if_checksum(object_key, expected_checksum)
+    }
+}
+
+impl ConcurrentRemoteChunkStore for S3RemoteChunkStore {
+    fn readiness(&self) -> Result<(), Problem> {
+        self.store_readiness()
+    }
+
+    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+        self.store_checksum(object_key)
+    }
+
+    fn put(&self, object_key: &str, bytes: &[u8], expected_checksum: &str) -> Result<(), Problem> {
+        self.store_put(object_key, bytes, expected_checksum)
+    }
+
+    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+        self.store_get(object_key, expected_checksum)
+    }
+
+    fn delete_if_checksum(
+        &self,
+        object_key: &str,
+        expected_checksum: &str,
+    ) -> Result<bool, Problem> {
+        self.store_delete_if_checksum(object_key, expected_checksum)
     }
 }
 

@@ -47,7 +47,10 @@ use buglogin_network::proxy::{
 };
 use buglogin_storage::{
     local::Versioned,
-    remote::{MemoryRemoteChunkStore, RemoteChunkStore},
+    remote::{
+        ConcurrentRemoteChunkStore, MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore,
+        SerializedRemoteChunkStore,
+    },
     vault::NativeVault,
 };
 use buglogin_sync::coordination::{
@@ -237,7 +240,40 @@ pub struct ApiState {
     migration_key: Arc<RwLock<Option<MigrationKey>>>,
     migration_signing_key: Arc<RwLock<Option<buglogin_storage::secrets::SecretValue>>>,
     coordination: Arc<RwLock<Option<Arc<dyn CoordinationBackend>>>>,
-    remote_chunks: Arc<Mutex<Box<dyn RemoteChunkStore>>>,
+    remote_chunks: Arc<dyn ConcurrentRemoteChunkStore>,
+}
+
+struct ConcurrentChunkStoreAdapter<'a>(&'a dyn ConcurrentRemoteChunkStore);
+
+impl RemoteChunkStore for ConcurrentChunkStoreAdapter<'_> {
+    fn readiness(&self) -> Result<(), Problem> {
+        self.0.readiness()
+    }
+
+    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+        self.0.checksum(object_key)
+    }
+
+    fn put(
+        &mut self,
+        object_key: &str,
+        bytes: &[u8],
+        expected_checksum: &str,
+    ) -> Result<(), Problem> {
+        self.0.put(object_key, bytes, expected_checksum)
+    }
+
+    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+        self.0.get(object_key, expected_checksum)
+    }
+
+    fn delete_if_checksum(
+        &mut self,
+        object_key: &str,
+        expected_checksum: &str,
+    ) -> Result<bool, Problem> {
+        self.0.delete_if_checksum(object_key, expected_checksum)
+    }
 }
 
 impl ApiState {
@@ -352,7 +388,7 @@ impl ApiState {
             migration_key: Arc::new(RwLock::new(None)),
             migration_signing_key: Arc::new(RwLock::new(None)),
             coordination: Arc::new(RwLock::new(None)),
-            remote_chunks: Arc::new(Mutex::new(Box::new(MemoryRemoteChunkStore::default()))),
+            remote_chunks: Arc::new(MemoryRemoteChunkStore::default()),
         })
     }
 
@@ -463,16 +499,13 @@ impl ApiState {
                 503,
             ));
         }
-        self.remote_chunks
-            .lock()
-            .map_err(|_| {
-                problem(
-                    "readiness_unavailable",
-                    "Service readiness check failed",
-                    503,
-                )
-            })?
-            .readiness()?;
+        self.remote_chunks.readiness().map_err(|_| {
+            problem(
+                "readiness_unavailable",
+                "Service readiness check failed",
+                503,
+            )
+        })?;
         let coordination = self
             .coordination
             .read()
@@ -516,7 +549,16 @@ impl ApiState {
     }
 
     pub fn with_remote_chunks(mut self, store: Box<dyn RemoteChunkStore>) -> Self {
-        *self.remote_chunks.lock().expect("remote chunk lock") = store;
+        self.remote_chunks = Arc::new(SerializedRemoteChunkStore::new(store));
+        self.external_object_storage = true;
+        self
+    }
+
+    pub fn with_concurrent_remote_chunks(
+        mut self,
+        store: Box<dyn ConcurrentRemoteChunkStore>,
+    ) -> Self {
+        self.remote_chunks = Arc::from(store);
         self.external_object_storage = true;
         self
     }
@@ -535,33 +577,20 @@ impl ApiState {
         bytes: &[u8],
         expected_checksum: &str,
     ) -> Result<(), Problem> {
-        self.remote_chunks
-            .lock()
-            .map_err(|_| problem("storage_unavailable", "Remote storage unavailable", 503))?
-            .put(object_key, bytes, expected_checksum)
+        self.remote_chunks.put(object_key, bytes, expected_checksum)
     }
 
     pub(crate) fn stage_sync_import(
         &self,
         plan: &buglogin_sync::import::SyncImportPlan,
     ) -> Result<SyncStageReceipt, Problem> {
-        stage_sync_import(
-            &mut **self
-                .remote_chunks
-                .lock()
-                .map_err(|_| problem("storage_unavailable", "Remote storage unavailable", 503))?,
-            plan,
-        )
+        let mut adapter = ConcurrentChunkStoreAdapter(self.remote_chunks.as_ref());
+        stage_sync_import(&mut adapter, plan)
     }
 
     pub(crate) fn rollback_sync_import(&self, receipt: &SyncStageReceipt) -> Result<(), Problem> {
-        rollback_staged_sync_import(
-            &mut **self
-                .remote_chunks
-                .lock()
-                .map_err(|_| problem("storage_unavailable", "Remote storage unavailable", 503))?,
-            &receipt.objects,
-        )
+        let mut adapter = ConcurrentChunkStoreAdapter(self.remote_chunks.as_ref());
+        rollback_staged_sync_import(&mut adapter, &receipt.objects)
     }
 
     pub(crate) fn get_remote_chunk(
@@ -569,22 +598,14 @@ impl ApiState {
         object_key: &str,
         expected_checksum: &str,
     ) -> Result<Vec<u8>, Problem> {
-        Ok(self
-            .remote_chunks
-            .lock()
-            .map_err(|_| problem("storage_unavailable", "Remote storage unavailable", 503))?
-            .get(object_key, expected_checksum)?
-            .bytes)
+        Ok(self.remote_chunks.get(object_key, expected_checksum)?.bytes)
     }
 
     pub(crate) fn remote_chunk_checksum(
         &self,
         object_key: &str,
     ) -> Result<Option<String>, Problem> {
-        self.remote_chunks
-            .lock()
-            .map_err(|_| problem("storage_unavailable", "Remote storage unavailable", 503))?
-            .checksum(object_key)
+        self.remote_chunks.checksum(object_key)
     }
 
     fn delete_remote_chunk(
@@ -593,8 +614,6 @@ impl ApiState {
         expected_checksum: &str,
     ) -> Result<(), Problem> {
         self.remote_chunks
-            .lock()
-            .map_err(|_| problem("storage_unavailable", "Remote storage unavailable", 503))?
             .delete_if_checksum(object_key, expected_checksum)?;
         Ok(())
     }
@@ -4209,15 +4228,18 @@ mod persistence_tests {
             ControlIdempotencyClaim, ControlRecord, ControlRecordStore, ExecuteControlCommand,
             MemoryControlRecordStore, PutControlRecord,
         },
-        remote::{MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore},
+        remote::{
+            ConcurrentRemoteChunkStore, MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore,
+        },
     };
     use std::{
         fs,
         path::PathBuf,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     fn test_root(label: &str) -> PathBuf {
@@ -4231,9 +4253,52 @@ mod persistence_tests {
         inner: MemoryRemoteChunkStore,
     }
 
+    struct OverlapProbeStore {
+        inner: MemoryRemoteChunkStore,
+        active: Arc<AtomicUsize>,
+        maximum: Arc<AtomicUsize>,
+    }
+
+    impl ConcurrentRemoteChunkStore for OverlapProbeStore {
+        fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+            ConcurrentRemoteChunkStore::checksum(&self.inner, object_key)
+        }
+
+        fn put(
+            &self,
+            object_key: &str,
+            bytes: &[u8],
+            expected_checksum: &str,
+        ) -> Result<(), Problem> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(active, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(80));
+            let result =
+                ConcurrentRemoteChunkStore::put(&self.inner, object_key, bytes, expected_checksum);
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+            ConcurrentRemoteChunkStore::get(&self.inner, object_key, expected_checksum)
+        }
+
+        fn delete_if_checksum(
+            &self,
+            object_key: &str,
+            expected_checksum: &str,
+        ) -> Result<bool, Problem> {
+            ConcurrentRemoteChunkStore::delete_if_checksum(
+                &self.inner,
+                object_key,
+                expected_checksum,
+            )
+        }
+    }
+
     impl RemoteChunkStore for DeleteFailStore {
         fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
-            self.inner.checksum(object_key)
+            RemoteChunkStore::checksum(&self.inner, object_key)
         }
 
         fn put(
@@ -4242,11 +4307,11 @@ mod persistence_tests {
             bytes: &[u8],
             expected_checksum: &str,
         ) -> Result<(), Problem> {
-            self.inner.put(object_key, bytes, expected_checksum)
+            RemoteChunkStore::put(&mut self.inner, object_key, bytes, expected_checksum)
         }
 
         fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
-            self.inner.get(object_key, expected_checksum)
+            RemoteChunkStore::get(&self.inner, object_key, expected_checksum)
         }
 
         fn delete_if_checksum(
@@ -4261,6 +4326,35 @@ mod persistence_tests {
                 "test",
             ))
         }
+    }
+
+    #[test]
+    fn concurrent_storage_adapter_does_not_serialize_distinct_blob_puts() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let state = ApiState::local(ProfileService::disabled()).with_concurrent_remote_chunks(
+            Box::new(OverlapProbeStore {
+                inner: MemoryRemoteChunkStore::default(),
+                active,
+                maximum: Arc::clone(&maximum),
+            }),
+        );
+        let workers: Vec<_> = (0..2)
+            .map(|index| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    let key = format!("profiles/res_parallel/1/checksum/object-{index}");
+                    let bytes = format!("blob-{index}").into_bytes();
+                    state
+                        .put_remote_chunk(&key, &bytes, &checksum(&bytes))
+                        .unwrap();
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(maximum.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -4317,7 +4411,7 @@ mod persistence_tests {
             .unwrap();
         drop(first);
 
-        let mut remote = MemoryRemoteChunkStore::default();
+        let remote = MemoryRemoteChunkStore::default();
         remote
             .put(object_key, object_bytes, &object_checksum)
             .unwrap();
@@ -4384,7 +4478,7 @@ mod persistence_tests {
         let object_key = "profiles/res_recovery_failure/1/checksum/profile-state";
         let object_bytes = b"preserve-on-delete-failure";
         let object_checksum = checksum(object_bytes);
-        let mut remote = MemoryRemoteChunkStore::default();
+        let remote = MemoryRemoteChunkStore::default();
         remote
             .put(object_key, object_bytes, &object_checksum)
             .unwrap();
@@ -4467,7 +4561,7 @@ mod persistence_tests {
         let object_key = "profiles/res_recovery_referenced/1/checksum/profile-state";
         let object_bytes = b"active-profile-state";
         let object_checksum = checksum(object_bytes);
-        let mut remote = MemoryRemoteChunkStore::default();
+        let remote = MemoryRemoteChunkStore::default();
         remote
             .put(object_key, object_bytes, &object_checksum)
             .unwrap();

@@ -58,9 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => state,
     };
     let state = match env::var_os("BUGLOGIN_S3_ENDPOINT") {
-        Some(_) => {
-            state.with_remote_chunks(Box::new(S3RemoteChunkStore::new(S3Config::from_env()?)?))
-        }
+        Some(_) => state.with_concurrent_remote_chunks(Box::new(S3RemoteChunkStore::new(
+            S3Config::from_env()?,
+        )?)),
         None if production => return Err("BUGLOGIN_S3_ENDPOINT is required in production".into()),
         None => state,
     };

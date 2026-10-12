@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, RwLock},
+};
 
 use buglogin_domain::errors::Problem;
 use sha2::{Digest, Sha256};
@@ -52,18 +55,91 @@ pub trait RemoteChunkStore: Send {
     }
 }
 
+/// Shared adapter surface for servers that can run object operations concurrently.
+/// Legacy `RemoteChunkStore` implementations remain usable through
+/// `SerializedRemoteChunkStore` without changing their public method signatures.
+pub trait ConcurrentRemoteChunkStore: Send + Sync {
+    fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
+    }
+
+    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem>;
+
+    fn put(&self, object_key: &str, bytes: &[u8], expected_checksum: &str) -> Result<(), Problem>;
+
+    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem>;
+
+    fn delete_if_checksum(
+        &self,
+        object_key: &str,
+        expected_checksum: &str,
+    ) -> Result<bool, Problem> {
+        let _ = (object_key, expected_checksum);
+        Err(Problem::new(
+            "remote_chunk_delete_unsupported",
+            "Remote chunk delete is unsupported",
+            501,
+            "storage",
+        ))
+    }
+}
+
+pub struct SerializedRemoteChunkStore {
+    inner: Mutex<Box<dyn RemoteChunkStore>>,
+}
+
+impl SerializedRemoteChunkStore {
+    pub fn new(inner: Box<dyn RemoteChunkStore>) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    fn with<T>(
+        &self,
+        operation: impl FnOnce(&mut dyn RemoteChunkStore) -> Result<T, Problem>,
+    ) -> Result<T, Problem> {
+        let mut inner = self.inner.lock().map_err(|_| storage_unavailable())?;
+        operation(inner.as_mut())
+    }
+}
+
+impl ConcurrentRemoteChunkStore for SerializedRemoteChunkStore {
+    fn readiness(&self) -> Result<(), Problem> {
+        self.with(|inner| inner.readiness())
+    }
+
+    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+        self.with(|inner| inner.checksum(object_key))
+    }
+
+    fn put(&self, object_key: &str, bytes: &[u8], expected_checksum: &str) -> Result<(), Problem> {
+        self.with(|inner| inner.put(object_key, bytes, expected_checksum))
+    }
+
+    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+        self.with(|inner| inner.get(object_key, expected_checksum))
+    }
+
+    fn delete_if_checksum(
+        &self,
+        object_key: &str,
+        expected_checksum: &str,
+    ) -> Result<bool, Problem> {
+        self.with(|inner| inner.delete_if_checksum(object_key, expected_checksum))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MemoryRemoteChunkStore {
-    chunks: BTreeMap<String, RemoteChunk>,
+    chunks: std::sync::Arc<RwLock<BTreeMap<String, RemoteChunk>>>,
 }
 
 impl RemoteChunkStore for MemoryRemoteChunkStore {
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
         validate_object_key(object_key)?;
-        Ok(self
-            .chunks
-            .get(object_key)
-            .map(|chunk| chunk.checksum.clone()))
+        let chunks = self.chunks.read().map_err(|_| storage_unavailable())?;
+        Ok(chunks.get(object_key).map(|chunk| chunk.checksum.clone()))
     }
 
     fn put(
@@ -77,7 +153,8 @@ impl RemoteChunkStore for MemoryRemoteChunkStore {
         if actual_checksum != expected_checksum {
             return Err(checksum_problem());
         }
-        if let Some(existing) = self.chunks.get(object_key) {
+        let mut chunks = self.chunks.write().map_err(|_| storage_unavailable())?;
+        if let Some(existing) = chunks.get(object_key) {
             if existing.checksum == expected_checksum {
                 return Ok(());
             }
@@ -88,7 +165,7 @@ impl RemoteChunkStore for MemoryRemoteChunkStore {
                 "storage",
             ));
         }
-        self.chunks.insert(
+        chunks.insert(
             object_key.to_owned(),
             RemoteChunk {
                 bytes: bytes.to_vec(),
@@ -100,7 +177,8 @@ impl RemoteChunkStore for MemoryRemoteChunkStore {
 
     fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
         validate_object_key(object_key)?;
-        let chunk = self.chunks.get(object_key).ok_or_else(|| {
+        let chunks = self.chunks.read().map_err(|_| storage_unavailable())?;
+        let chunk = chunks.get(object_key).ok_or_else(|| {
             Problem::new(
                 "remote_chunk_not_found",
                 "Remote chunk not found",
@@ -120,7 +198,8 @@ impl RemoteChunkStore for MemoryRemoteChunkStore {
         expected_checksum: &str,
     ) -> Result<bool, Problem> {
         validate_object_key(object_key)?;
-        let Some(existing) = self.chunks.get(object_key) else {
+        let mut chunks = self.chunks.write().map_err(|_| storage_unavailable())?;
+        let Some(existing) = chunks.get(object_key) else {
             return Ok(false);
         };
         if existing.checksum != expected_checksum {
@@ -131,8 +210,32 @@ impl RemoteChunkStore for MemoryRemoteChunkStore {
                 "storage",
             ));
         }
-        self.chunks.remove(object_key);
+        chunks.remove(object_key);
         Ok(true)
+    }
+}
+
+impl ConcurrentRemoteChunkStore for MemoryRemoteChunkStore {
+    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
+        RemoteChunkStore::checksum(self, object_key)
+    }
+
+    fn put(&self, object_key: &str, bytes: &[u8], expected_checksum: &str) -> Result<(), Problem> {
+        let mut adapter = self.clone();
+        RemoteChunkStore::put(&mut adapter, object_key, bytes, expected_checksum)
+    }
+
+    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+        RemoteChunkStore::get(self, object_key, expected_checksum)
+    }
+
+    fn delete_if_checksum(
+        &self,
+        object_key: &str,
+        expected_checksum: &str,
+    ) -> Result<bool, Problem> {
+        let mut adapter = self.clone();
+        RemoteChunkStore::delete_if_checksum(&mut adapter, object_key, expected_checksum)
     }
 }
 
@@ -158,6 +261,15 @@ pub(crate) fn checksum_problem() -> Problem {
         "remote_chunk_checksum_mismatch",
         "Remote chunk checksum mismatch",
         409,
+        "storage",
+    )
+}
+
+fn storage_unavailable() -> Problem {
+    Problem::new(
+        "storage_unavailable",
+        "Remote storage unavailable",
+        503,
         "storage",
     )
 }

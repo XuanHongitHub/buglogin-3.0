@@ -25,7 +25,7 @@ Status: Rust API, metadata dependency validation, desktop API transport, client-
 - [ ] Implement encrypted credential-envelope lifecycle and workspace/device key rotation and revocation.
 - [x] Keep REST/OpenAPI/MCP coverage aligned with the canonical API command and resource contracts; local API and sync contract suites pass.
 - [ ] Add staging integration tests; prove retries, conflicts, partial transfers, and outages preserve the prior active generation.
-- [ ] Remove or measure the hosted API's global remote-object-store mutex before claiming parallel backend transfer throughput; keep per-object immutability and idempotency when enabling safe concurrent storage operations.
+- [x] Remove the hosted API-wide remote-object-store mutex for production S3 operations. S3 uses the thread-safe object-store contract directly; legacy adapters retain a serialized compatibility wrapper, and concurrent distinct-blob writes have a regression test. Per-key writes still use conditional immutable PUT and checksum replay checks.
 
 ## Phase 2 — desktop sync engine
 
