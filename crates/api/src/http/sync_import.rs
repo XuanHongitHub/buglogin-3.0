@@ -17,7 +17,10 @@ use buglogin_storage::control::{
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationBackend, CoordinationScope},
     export::SyncExport,
-    import::{SyncImportPlan, plan_sync_import, sync_object_storage_key},
+    import::{
+        SyncImportPlan, SyncStageReceipt, SyncStagedObject, plan_sync_import,
+        sync_object_storage_key,
+    },
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -250,25 +253,38 @@ pub(super) async fn import_sync_authorized(
             return Err(response(error));
         }
     };
-    let staged = match state.stage_sync_import(&plan) {
-        Ok(staged) => staged,
-        Err(error) => {
-            journal.state = SyncMigrationJournalState::CleanupPending;
-            journal.error_code = Some(error.code.clone());
-            journal.updated_at_ms = now().saturating_mul(1_000);
-            let _ = state.persist_sync_migration_journal(
+    let (staged, next_journal_revision) = match stage_import_objects(
+        state,
+        &plan,
+        &journal_id,
+        journal_revision,
+        &actor_id,
+        &mut journal,
+    ) {
+        Ok(result) => result,
+        Err((error, revision)) => {
+            persist_stage_failure(
+                state,
                 &journal_id,
-                journal_revision,
-                journal_write_key(&journal_id, "cleanup", journal_revision),
-                actor_id.clone(),
-                &journal,
+                revision,
+                &actor_id,
+                &mut journal,
+                &error,
             );
             release(&*backend, &input.export, &auth, &lease.owner_token).await;
             return Err(response(error));
         }
     };
+    journal_revision = next_journal_revision;
     if let Err(error) = verify_staged(&state, &staged) {
-        let _ = state.rollback_sync_import(&staged);
+        persist_stage_failure(
+            state,
+            &journal_id,
+            journal_revision,
+            &actor_id,
+            &mut journal,
+            &error,
+        );
         release(&*backend, &input.export, &auth, &lease.owner_token).await;
         return Err(response(error));
     }
@@ -466,6 +482,156 @@ fn verify_binding(state: &ApiState, export: &SyncExport) -> Result<(), Response>
     }
 }
 
+fn stage_import_objects(
+    state: &ApiState,
+    plan: &SyncImportPlan,
+    journal_id: &str,
+    mut journal_revision: u64,
+    actor_id: &str,
+    journal: &mut SyncMigrationJournal,
+) -> Result<(SyncStageReceipt, u64), (Problem, u64)> {
+    let mut staged = Vec::with_capacity(plan.blobs.len());
+    journal.state = SyncMigrationJournalState::Staging;
+    for blob in &plan.blobs {
+        let storage_key = sync_object_storage_key(&plan.manifest, blob);
+        let already_created = journal
+            .created_objects
+            .iter()
+            .any(|object| object.storage_key == storage_key && object.checksum == blob.checksum);
+        let existing = match state.remote_chunk_checksum(&storage_key) {
+            Ok(existing) => existing,
+            Err(error) => return Err((error, journal_revision)),
+        };
+        match existing {
+            Some(existing) if existing == blob.checksum => {
+                if already_created {
+                    staged.push(SyncStagedObject {
+                        storage_key,
+                        checksum: blob.checksum.clone(),
+                        created: true,
+                    });
+                } else {
+                    remember_journal_object(
+                        &mut journal.resumed_objects,
+                        &storage_key,
+                        &blob.checksum,
+                        blob.size,
+                    );
+                    staged.push(SyncStagedObject {
+                        storage_key,
+                        checksum: blob.checksum.clone(),
+                        created: false,
+                    });
+                }
+            }
+            Some(_) => {
+                return Err((
+                    Problem::new(
+                        "sync_import_blob_collision",
+                        "Sync import blob collides with destination",
+                        409,
+                        "sync-import",
+                    ),
+                    journal_revision,
+                ));
+            }
+            None => {
+                remember_journal_object(
+                    &mut journal.created_objects,
+                    &storage_key,
+                    &blob.checksum,
+                    blob.size,
+                );
+                journal
+                    .resumed_objects
+                    .retain(|object| object.storage_key != storage_key);
+                journal.error_code = None;
+                if let Err(error) = persist_staging_checkpoint(
+                    state,
+                    journal_id,
+                    &mut journal_revision,
+                    actor_id,
+                    journal,
+                ) {
+                    return Err((error, journal_revision));
+                }
+                if let Err(error) = state.put_remote_chunk(&storage_key, &blob.data, &blob.checksum)
+                {
+                    return Err((error, journal_revision));
+                }
+                staged.push(SyncStagedObject {
+                    storage_key,
+                    checksum: blob.checksum.clone(),
+                    created: true,
+                });
+            }
+        }
+        journal.error_code = None;
+        if let Err(error) =
+            persist_staging_checkpoint(state, journal_id, &mut journal_revision, actor_id, journal)
+        {
+            return Err((error, journal_revision));
+        }
+    }
+    Ok((SyncStageReceipt { objects: staged }, journal_revision))
+}
+
+fn remember_journal_object(
+    objects: &mut Vec<SyncMigrationJournalObject>,
+    storage_key: &str,
+    checksum: &str,
+    size: u64,
+) {
+    if let Some(object) = objects
+        .iter_mut()
+        .find(|object| object.storage_key == storage_key)
+    {
+        object.checksum = checksum.to_owned();
+        object.size = size;
+        return;
+    }
+    objects.push(SyncMigrationJournalObject {
+        storage_key: storage_key.to_owned(),
+        checksum: checksum.to_owned(),
+        size,
+    });
+}
+
+fn persist_staging_checkpoint(
+    state: &ApiState,
+    journal_id: &str,
+    journal_revision: &mut u64,
+    actor_id: &str,
+    journal: &mut SyncMigrationJournal,
+) -> Result<(), Problem> {
+    journal.updated_at_ms = now().saturating_mul(1_000);
+    *journal_revision = state.persist_sync_migration_journal(
+        journal_id,
+        *journal_revision,
+        journal_write_key(journal_id, "staging", *journal_revision),
+        actor_id.to_owned(),
+        journal,
+    )?;
+    Ok(())
+}
+
+fn persist_stage_failure(
+    state: &ApiState,
+    journal_id: &str,
+    mut journal_revision: u64,
+    actor_id: &str,
+    journal: &mut SyncMigrationJournal,
+    error: &Problem,
+) {
+    journal.state = if error.retryable {
+        SyncMigrationJournalState::Staging
+    } else {
+        SyncMigrationJournalState::CleanupPending
+    };
+    journal.error_code = Some(error.code.clone());
+    let _ = persist_staging_checkpoint(state, journal_id, &mut journal_revision, actor_id, journal);
+}
+
 fn verify_staged(
     state: &ApiState,
     staged: &buglogin_sync::import::SyncStageReceipt,
@@ -615,7 +781,205 @@ fn lease_attempt_idempotency_key(operation_id: &str) -> Result<String, Problem> 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
     use super::lease_attempt_idempotency_key;
+    use crate::http::{ApiState, SyncMigrationJournal, SyncMigrationJournalState};
+    use buglogin_browser::profile::ProfileService;
+    use buglogin_domain::ids::{ResourceId, WorkspaceId};
+    use buglogin_storage::{
+        control::MemoryControlRecordStore,
+        remote::{ConcurrentRemoteChunkStore, MemoryRemoteChunkStore, RemoteChunk},
+    };
+    use buglogin_sync::{
+        export::{SyncExport, SyncExportBlob, SyncRevision, canonical_manifest_checksum},
+        import::plan_sync_import,
+        manifest::{ManifestObject, SyncManifest},
+    };
+    use sha2::{Digest, Sha256};
+
+    #[derive(Clone)]
+    struct AmbiguousPutStore {
+        inner: MemoryRemoteChunkStore,
+        fail_next_put_after_write: Arc<AtomicBool>,
+        put_calls: Arc<AtomicUsize>,
+    }
+
+    impl ConcurrentRemoteChunkStore for AmbiguousPutStore {
+        fn checksum(
+            &self,
+            object_key: &str,
+        ) -> Result<Option<String>, buglogin_domain::errors::Problem> {
+            ConcurrentRemoteChunkStore::checksum(&self.inner, object_key)
+        }
+
+        fn put(
+            &self,
+            object_key: &str,
+            bytes: &[u8],
+            expected_checksum: &str,
+        ) -> Result<(), buglogin_domain::errors::Problem> {
+            self.put_calls.fetch_add(1, Ordering::SeqCst);
+            ConcurrentRemoteChunkStore::put(&self.inner, object_key, bytes, expected_checksum)?;
+            if self.fail_next_put_after_write.swap(false, Ordering::SeqCst) {
+                return Err(buglogin_domain::errors::Problem::new(
+                    "remote_timeout_after_write",
+                    "Remote write result was interrupted",
+                    503,
+                    "test",
+                )
+                .retryable(true));
+            }
+            Ok(())
+        }
+
+        fn get(
+            &self,
+            object_key: &str,
+            expected_checksum: &str,
+        ) -> Result<RemoteChunk, buglogin_domain::errors::Problem> {
+            ConcurrentRemoteChunkStore::get(&self.inner, object_key, expected_checksum)
+        }
+
+        fn delete_if_checksum(
+            &self,
+            object_key: &str,
+            expected_checksum: &str,
+        ) -> Result<bool, buglogin_domain::errors::Problem> {
+            ConcurrentRemoteChunkStore::delete_if_checksum(
+                &self.inner,
+                object_key,
+                expected_checksum,
+            )
+        }
+    }
+
+    #[test]
+    fn staging_checkpoint_resumes_ambiguous_put_after_state_reopen() {
+        let workspace = WorkspaceId::new("ws_checkpoint").unwrap();
+        let resource = ResourceId::new("res_checkpoint").unwrap();
+        let bytes = b"encrypted-profile-object";
+        let manifest = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            8,
+            1,
+            None,
+            b"checkpoint-root",
+            vec![ManifestObject::new("profile/state", bytes).unwrap()],
+        )
+        .unwrap();
+        let export = SyncExport::new(
+            "checkpoint-export-0001",
+            "legacy-production",
+            manifest.clone(),
+            None,
+            vec![SyncRevision {
+                generation: 1,
+                parent_generation: None,
+                manifest_sha256: canonical_manifest_checksum(&manifest).unwrap(),
+            }],
+            vec![SyncExportBlob {
+                key: "profile/state".into(),
+                size: bytes.len() as u64,
+                checksum: format!("{:x}", Sha256::digest(bytes)),
+                data: bytes.to_vec(),
+            }],
+            1_753_142_400_000,
+            "0.1.0",
+        )
+        .unwrap();
+        let plan = plan_sync_import(&export, None, 41).unwrap();
+        let control_store = MemoryControlRecordStore::default();
+        let put_calls = Arc::new(AtomicUsize::new(0));
+        let remote = AmbiguousPutStore {
+            inner: MemoryRemoteChunkStore::default(),
+            fail_next_put_after_write: Arc::new(AtomicBool::new(true)),
+            put_calls: Arc::clone(&put_calls),
+        };
+        let state =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), control_store.clone())
+                .unwrap()
+                .with_concurrent_remote_chunks(Box::new(remote.clone()));
+        let mut journal = SyncMigrationJournal {
+            schema: "buglogin.migration-sync-journal/1".into(),
+            operation_id: "op_checkpoint".into(),
+            export_id: export.export_id.clone(),
+            export_sha256: "a".repeat(64),
+            manifest_sha256: export.manifest_sha256.clone(),
+            blob_set_sha256: export.blob_set_sha256.clone(),
+            workspace_id: workspace.as_str().into(),
+            resource_id: resource.as_str().into(),
+            base_generation: None,
+            target_generation: 1,
+            state: SyncMigrationJournalState::Staging,
+            created_objects: Vec::new(),
+            resumed_objects: Vec::new(),
+            destination_fencing_token: None,
+            control_revision_before: 0,
+            control_revision_after: None,
+            updated_at_ms: 1,
+            error_code: None,
+        };
+        let journal_id = "msi_checkpoint";
+        let revision = state
+            .persist_sync_migration_journal(
+                journal_id,
+                0,
+                "checkpoint-journal-initial".into(),
+                "acct_checkpoint".into(),
+                &journal,
+            )
+            .unwrap();
+
+        let (error, revision) = super::stage_import_objects(
+            &state,
+            &plan,
+            journal_id,
+            revision,
+            "acct_checkpoint",
+            &mut journal,
+        )
+        .unwrap_err();
+        assert!(error.retryable);
+        assert_eq!(journal.created_objects.len(), 1);
+        assert_eq!(put_calls.load(Ordering::SeqCst), 1);
+        super::persist_stage_failure(
+            &state,
+            journal_id,
+            revision,
+            "acct_checkpoint",
+            &mut journal,
+            &error,
+        );
+
+        let reopened =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), control_store.reopen())
+                .unwrap()
+                .with_concurrent_remote_chunks(Box::new(remote));
+        let (mut recovered_journal, recovered_revision) = reopened
+            .load_sync_migration_journal(journal_id)
+            .unwrap()
+            .unwrap();
+        let (receipt, _) = super::stage_import_objects(
+            &reopened,
+            &plan,
+            journal_id,
+            recovered_revision,
+            "acct_checkpoint",
+            &mut recovered_journal,
+        )
+        .unwrap();
+
+        assert_eq!(receipt.objects.len(), 1);
+        assert!(receipt.objects[0].created);
+        assert_eq!(put_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(recovered_journal.created_objects.len(), 1);
+        assert_eq!(recovered_journal.state, SyncMigrationJournalState::Staging);
+    }
 
     #[test]
     fn lease_retry_gets_a_fresh_coordination_idempotency_key() {

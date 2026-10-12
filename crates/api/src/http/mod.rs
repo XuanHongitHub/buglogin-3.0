@@ -58,7 +58,7 @@ use buglogin_sync::coordination::{
     CoordinationOperation,
 };
 use buglogin_sync::{
-    import::{SyncStageReceipt, rollback_staged_sync_import, stage_sync_import},
+    import::{SyncStageReceipt, rollback_staged_sync_import},
     manifest::SyncManifest,
 };
 use serde::{Deserialize, Serialize};
@@ -578,14 +578,6 @@ impl ApiState {
         expected_checksum: &str,
     ) -> Result<(), Problem> {
         self.remote_chunks.put(object_key, bytes, expected_checksum)
-    }
-
-    pub(crate) fn stage_sync_import(
-        &self,
-        plan: &buglogin_sync::import::SyncImportPlan,
-    ) -> Result<SyncStageReceipt, Problem> {
-        let mut adapter = ConcurrentChunkStoreAdapter(self.remote_chunks.as_ref());
-        stage_sync_import(&mut adapter, plan)
     }
 
     pub(crate) fn rollback_sync_import(&self, receipt: &SyncStageReceipt) -> Result<(), Problem> {
