@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::serve;
@@ -92,8 +92,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = bind_address(production, env::var("BUGLOGIN_API_BIND").ok())?;
     let listener = TcpListener::bind(address).await?;
     eprintln!("BugLogin API listening on {address}");
+    start_sync_migration_recovery_worker(state.clone());
     serve(listener, router(state)).await?;
     Ok(())
+}
+
+fn start_sync_migration_recovery_worker(state: ApiState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let state = state.clone();
+            let recovery = tokio::task::spawn_blocking(move || {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                state.recover_stale_sync_migrations(now_ms.saturating_sub(15 * 60 * 1_000))
+            })
+            .await;
+            match recovery {
+                Ok(Ok(report)) if report.recovered > 0 || report.failed > 0 => {
+                    eprintln!(
+                        "Migration recovery worker: scanned={}, recovered={}, deferred={}, failed={}",
+                        report.scanned, report.recovered, report.deferred, report.failed
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    eprintln!("Migration recovery worker unavailable: {}", error.code)
+                }
+                Err(_) => eprintln!("Migration recovery worker task failed"),
+            }
+        }
+    });
 }
 
 fn bind_address(production: bool, configured: Option<String>) -> Result<SocketAddr, String> {

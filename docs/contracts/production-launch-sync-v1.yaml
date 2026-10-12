@@ -261,10 +261,12 @@ migrationEnvelope:
     - exact blob coverage and checksum verification
     - source fencing token replaced by destination authority
     - signed migration package preservation as sync/export.json
+    - startup recovery and a 60-second retry worker for stale finalizing and cleanup-pending journals
   pendingReleaseBlockers:
     - signed package upload/staging ingress for exports larger than JSON request limits
     - MCP adapter invoking the same hosted sync import service
-    - PostgreSQL staging journal recovery worker and idempotent resume across process loss
+    - per-object PostgreSQL staging checkpoints and autonomous safe recovery after process loss during staging
+    - idempotent end-to-end process-loss rehearsal for retried signed exports
     - single-transaction PostgreSQL manifest promotion after every blob verifies
     - ambiguous-commit reconciliation and orphan-blob retention/GC proof
   invariants:
