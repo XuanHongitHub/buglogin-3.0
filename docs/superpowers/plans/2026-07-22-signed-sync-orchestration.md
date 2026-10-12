@@ -10,7 +10,7 @@ Status: implemented locally; production release gates remain open.
 6. [x] Checkpoint per-object create intent before immutable PUT and resume exact checksum matches after restart.
 7. [x] Preserve staged blobs when the `Finalizing` journal write acknowledgement is ambiguous.
 8. [x] Persist lease/preflight failures so non-retryable plan conflicts enter the cleanup lifecycle.
-9. [x] Renew the destination lease after staging and revalidate write authority before manifest activation.
+9. [x] Run blocking object-store staging on the blocking pool, renew the destination lease during long transfers, and revalidate write authority before manifest activation.
 10. [ ] Run a process-loss rehearsal against trusted PostgreSQL, Redis, and S3 staging adapters.
 11. [ ] Prove safe stale-staging recovery and orphan-blob retention/GC behavior.
 12. [ ] Run Windows/macOS release evidence.

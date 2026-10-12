@@ -283,6 +283,7 @@ migrationEnvelope:
     - ambiguous staging or finalizing journal acknowledgements preserve immutable blobs until durable journal and receipt state is reconciled
     - lease and import-plan failures after journal creation persist retryable or cleanup-pending state instead of leaving an unclassified staging journal
     - destination write authority is renewed after blob staging and validated immediately before manifest activation
+    - long-running object staging renews the destination lease independently of blocking storage I/O; lease loss prevents manifest activation
     - profile manifests with a selected proxy include exactly one matching proxy dependency
     - sourceGeneration reuses only an exact object in the immediately previous active manifest under the same resource key version
     - proxy dependency revision and metadata object must match same-workspace Rust API authority

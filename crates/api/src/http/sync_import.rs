@@ -1,4 +1,11 @@
-use std::time::Duration;
+use std::{
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use axum::{
     Json,
@@ -24,6 +31,11 @@ use buglogin_sync::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::{
+    sync::oneshot,
+    task::JoinHandle,
+    time::{interval, timeout},
+};
 
 use super::{
     ApiState, SyncMigrationJournal, SyncMigrationJournalObject, SyncMigrationJournalState,
@@ -31,6 +43,106 @@ use super::{
 };
 
 const JOURNAL_SCHEMA: &str = "buglogin.migration-sync-journal/1";
+const IMPORT_LEASE_TTL: Duration = Duration::from_secs(300);
+const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(60);
+
+struct LeaseHeartbeat {
+    stop: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+    failure: Arc<Mutex<Option<Problem>>>,
+    healthy: Arc<AtomicBool>,
+}
+
+impl LeaseHeartbeat {
+    fn start(
+        backend: Arc<dyn CoordinationBackend>,
+        workspace_id: buglogin_domain::ids::WorkspaceId,
+        resource_id: buglogin_domain::ids::ResourceId,
+        auth: CoordinationAuth,
+        owner_token: String,
+    ) -> Self {
+        spawn_lease_heartbeat(
+            move || {
+                let backend = Arc::clone(&backend);
+                let workspace_id = workspace_id.clone();
+                let resource_id = resource_id.clone();
+                let auth = auth.clone();
+                let owner_token = owner_token.clone();
+                async move {
+                    backend
+                        .renew_lease(
+                            CoordinationScope {
+                                workspace_id: &workspace_id,
+                                auth: &auth,
+                            },
+                            &resource_id,
+                            &owner_token,
+                            IMPORT_LEASE_TTL,
+                        )
+                        .await
+                        .map(|_| ())
+                }
+            },
+            IMPORT_LEASE_HEARTBEAT,
+        )
+    }
+
+    async fn stop(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if timeout(Duration::from_secs(2), &mut self.task)
+            .await
+            .is_err()
+        {
+            self.task.abort();
+        }
+    }
+}
+
+fn spawn_lease_heartbeat<F, Fut>(mut renew: F, period: Duration) -> LeaseHeartbeat
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), Problem>> + Send + 'static,
+{
+    let (stop, mut stop_rx) = oneshot::channel();
+    let failure = Arc::new(Mutex::new(None));
+    let healthy = Arc::new(AtomicBool::new(true));
+    let task_failure = Arc::clone(&failure);
+    let task_healthy = Arc::clone(&healthy);
+    let task = tokio::spawn(async move {
+        let mut ticks = interval(period);
+        ticks.tick().await;
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = ticks.tick() => {
+                    if let Err(error) = renew().await {
+                        task_healthy.store(false, Ordering::SeqCst);
+                        if let Ok(mut failure) = task_failure.lock() {
+                            *failure = Some(error);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    LeaseHeartbeat {
+        stop: Some(stop),
+        task,
+        failure,
+        healthy,
+    }
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -241,7 +353,7 @@ pub(super) async fn import_sync_authorized(
                 auth: &auth,
             },
             &input.export.resource_id,
-            Duration::from_secs(300),
+            IMPORT_LEASE_TTL,
             &lease_idempotency_key,
         )
         .await
@@ -272,14 +384,74 @@ pub(super) async fn import_sync_authorized(
             return Err(response(error));
         }
     };
-    let (staged, next_journal_revision) = match stage_import_objects(
-        state,
-        &plan,
-        &journal_id,
-        journal_revision,
-        &actor_id,
-        &mut journal,
-    ) {
+    let heartbeat = LeaseHeartbeat::start(
+        Arc::clone(&backend),
+        input.export.workspace_id.clone(),
+        input.export.resource_id.clone(),
+        auth.clone(),
+        lease.owner_token.clone(),
+    );
+    let stage_state = state.clone();
+    let stage_plan = plan;
+    let stage_journal_id = journal_id.clone();
+    let stage_actor_id = actor_id.clone();
+    let stage_journal = journal.clone();
+    let stage_result = tokio::task::spawn_blocking(move || {
+        let mut stage_journal = stage_journal;
+        let result = stage_import_objects(
+            &stage_state,
+            &stage_plan,
+            &stage_journal_id,
+            journal_revision,
+            &stage_actor_id,
+            &mut stage_journal,
+        )
+        .and_then(|(receipt, revision)| {
+            verify_staged(&stage_state, &receipt)
+                .map(|()| (receipt, revision))
+                .map_err(|error| (error, revision))
+        });
+        (result, stage_journal, stage_plan)
+    })
+    .await;
+    let heartbeat_failure_state = Arc::clone(&heartbeat.failure);
+    let heartbeat_health_state = Arc::clone(&heartbeat.healthy);
+    heartbeat.stop().await;
+    let heartbeat_failure = heartbeat_failure_state
+        .lock()
+        .ok()
+        .and_then(|failure| failure.clone());
+    let heartbeat_healthy = heartbeat_health_state.load(Ordering::SeqCst);
+    let (stage_result, stage_journal, plan) = match stage_result {
+        Ok(result) => result,
+        Err(_) => {
+            if let Ok(Some((durable_journal, durable_revision))) =
+                state.load_sync_migration_journal(&journal_id)
+            {
+                journal = durable_journal;
+                journal_revision = durable_revision;
+            }
+            let error = Problem::new(
+                "sync_import_staging_task_failed",
+                "Sync import staging task failed",
+                503,
+                "sync-import",
+            )
+            .retryable(true);
+            persist_stage_failure(
+                state,
+                &journal_id,
+                journal_revision,
+                &actor_id,
+                &mut journal,
+                &error,
+            );
+            release(&*backend, &input.export, &auth, &lease.owner_token).await;
+            return Err(response(error));
+        }
+    };
+    journal = stage_journal;
+    let (staged, next_journal_revision) = match stage_result {
         Ok(result) => result,
         Err((error, revision)) => {
             persist_stage_failure(
@@ -295,7 +467,17 @@ pub(super) async fn import_sync_authorized(
         }
     };
     journal_revision = next_journal_revision;
-    if let Err(error) = verify_staged(&state, &staged) {
+    if !heartbeat_healthy {
+        let error = heartbeat_failure
+            .unwrap_or_else(|| {
+                Problem::new(
+                    "sync_import_lease_lost",
+                    "Sync import lease was lost during staging",
+                    503,
+                    "sync-import",
+                )
+            })
+            .retryable(true);
         persist_stage_failure(
             state,
             &journal_id,
@@ -307,7 +489,6 @@ pub(super) async fn import_sync_authorized(
         release(&*backend, &input.export, &auth, &lease.owner_token).await;
         return Err(response(error));
     }
-
     lease = match backend
         .renew_lease(
             CoordinationScope {
@@ -847,12 +1028,15 @@ fn lease_attempt_idempotency_key(operation_id: &str) -> Result<String, Problem> 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
-    use super::lease_attempt_idempotency_key;
+    use super::{lease_attempt_idempotency_key, spawn_lease_heartbeat};
     use crate::http::{ApiState, SyncMigrationJournal, SyncMigrationJournalState};
     use buglogin_browser::profile::ProfileService;
     use buglogin_domain::ids::{ResourceId, WorkspaceId};
@@ -866,6 +1050,55 @@ mod tests {
         manifest::{ManifestObject, SyncManifest},
     };
     use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn lease_heartbeat_renews_periodically_and_stops_cleanly() {
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let heartbeat_renewals = Arc::clone(&renewals);
+        let heartbeat = spawn_lease_heartbeat(
+            move || {
+                let renewals = Arc::clone(&heartbeat_renewals);
+                async move {
+                    renewals.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+            Duration::from_millis(10),
+        );
+
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        heartbeat.stop().await;
+        let stopped_at = renewals.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert!(stopped_at >= 2);
+        assert_eq!(renewals.load(Ordering::SeqCst), stopped_at);
+    }
+
+    #[tokio::test]
+    async fn lease_heartbeat_stops_when_authority_renewal_fails() {
+        let heartbeat = spawn_lease_heartbeat(
+            || async {
+                Err(buglogin_domain::errors::Problem::new(
+                    "test_lease_lost",
+                    "Lease renewal failed",
+                    503,
+                    "test",
+                ))
+            },
+            Duration::from_millis(10),
+        );
+        let healthy = Arc::clone(&heartbeat.healthy);
+        let failure = Arc::clone(&heartbeat.failure);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        heartbeat.stop().await;
+
+        assert!(!healthy.load(Ordering::SeqCst));
+        assert_eq!(
+            failure.lock().unwrap().as_ref().unwrap().code,
+            "test_lease_lost"
+        );
+    }
 
     #[derive(Clone)]
     struct AmbiguousPutStore {
