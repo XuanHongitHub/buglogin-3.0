@@ -87,37 +87,55 @@ impl ProfileProjection {
             )
         })?;
         let remote_descriptor = descriptor_from_manifest(manifest)?;
-        let encrypted_objects =
-            stream::iter(remote_descriptor.objects.clone().into_iter().map(|object| {
-                let client = client.clone();
-                let scope = CoordinationScope {
-                    workspace_id: &manifest.workspace_id,
-                    auth,
-                };
-                let resource_id = manifest.resource_id.clone();
-                let path = object.path;
-                let checksum = object.checksum;
-                let generation = manifest.generation;
-                let size = object.size;
-                let correlation_id = correlation_id.to_owned();
-                async move {
-                    let bytes = client
-                        .download_blob(
-                            scope,
-                            &resource_id,
-                            &path,
-                            generation,
-                            &checksum,
-                            size,
-                            &correlation_id,
-                        )
-                        .await?;
-                    Ok::<_, Problem>((path, bytes))
-                }
-            }))
-            .buffer_unordered(MAX_CONCURRENT_BLOB_DOWNLOADS)
-            .try_collect::<Vec<_>>()
-            .await?;
+        let generation_path = decrypted_generation_path(&self.root, profile_id, manifest)?;
+        let cached_generation = generation_path.exists()
+            && verify_decrypted_generation(profile_id, manifest, &generation_path).is_ok();
+        let clear_metadata = proxy_metadata_keys(manifest);
+        let proxy_envelopes = proxy_credential_keys(manifest);
+        let encrypted_objects = stream::iter(
+            remote_descriptor
+                .objects
+                .clone()
+                .into_iter()
+                .filter(|object| {
+                    should_download_manifest_object(
+                        cached_generation,
+                        &object.path,
+                        &clear_metadata,
+                        &proxy_envelopes,
+                    )
+                })
+                .map(|object| {
+                    let client = client.clone();
+                    let scope = CoordinationScope {
+                        workspace_id: &manifest.workspace_id,
+                        auth,
+                    };
+                    let resource_id = manifest.resource_id.clone();
+                    let path = object.path;
+                    let checksum = object.checksum;
+                    let generation = manifest.generation;
+                    let size = object.size;
+                    let correlation_id = correlation_id.to_owned();
+                    async move {
+                        let bytes = client
+                            .download_blob(
+                                scope,
+                                &resource_id,
+                                &path,
+                                generation,
+                                &checksum,
+                                size,
+                                &correlation_id,
+                            )
+                            .await?;
+                        Ok::<_, Problem>((path, bytes))
+                    }
+                }),
+        )
+        .buffer_unordered(MAX_CONCURRENT_BLOB_DOWNLOADS)
+        .try_collect::<Vec<_>>()
+        .await?;
         let supplied: BTreeMap<_, _> = encrypted_objects.into_iter().collect();
         let envelope_bytes = supplied.get(RESOURCE_KEY_ENVELOPE_KEY).ok_or_else(|| {
             problem(
@@ -165,8 +183,6 @@ impl ProfileProjection {
                 ));
             }
         }
-        let clear_metadata = proxy_metadata_keys(manifest);
-        let proxy_envelopes = proxy_credential_keys(manifest);
         let mut credentials = Vec::with_capacity(proxy_envelopes.len());
         for (proxy_id, revision, reference) in &proxy_envelopes {
             let bytes = supplied.get(&reference.key).ok_or_else(|| {
@@ -211,42 +227,44 @@ impl ProfileProjection {
             });
         }
         let mut profile_files = Vec::new();
-        for object in &remote_descriptor.objects {
-            if object.path == RESOURCE_KEY_ENVELOPE_KEY
-                || clear_metadata.contains(&object.path)
-                || proxy_envelopes
-                    .iter()
-                    .any(|(_, _, reference)| reference.key == object.path)
-            {
-                continue;
+        if !cached_generation {
+            for object in &remote_descriptor.objects {
+                if object.path == RESOURCE_KEY_ENVELOPE_KEY
+                    || clear_metadata.contains(&object.path)
+                    || proxy_envelopes
+                        .iter()
+                        .any(|(_, _, reference)| reference.key == object.path)
+                {
+                    continue;
+                }
+                let bytes = supplied.get(&object.path).ok_or_else(|| {
+                    problem(
+                        "profile_projection_incomplete",
+                        "Profile projection is incomplete",
+                    )
+                })?;
+                let chunk = AuthenticatedChunk::decode(bytes)?;
+                let plaintext = match encryption.algorithm {
+                    PayloadEncryptionAlgorithm::Aes256GcmChunkV1 => chunk.decrypt(
+                        key,
+                        &profile_object_aad(
+                            &manifest.workspace_id,
+                            &manifest.resource_id,
+                            manifest.generation,
+                            &object.path,
+                        ),
+                    )?,
+                    PayloadEncryptionAlgorithm::Aes256GcmChunkV2 => chunk.decrypt(
+                        key,
+                        &profile_object_aad_v2(
+                            &manifest.workspace_id,
+                            &manifest.resource_id,
+                            &object.path,
+                        ),
+                    )?,
+                };
+                profile_files.push((object.path.clone(), plaintext));
             }
-            let bytes = supplied.get(&object.path).ok_or_else(|| {
-                problem(
-                    "profile_projection_incomplete",
-                    "Profile projection is incomplete",
-                )
-            })?;
-            let chunk = AuthenticatedChunk::decode(bytes)?;
-            let plaintext = match encryption.algorithm {
-                PayloadEncryptionAlgorithm::Aes256GcmChunkV1 => chunk.decrypt(
-                    key,
-                    &profile_object_aad(
-                        &manifest.workspace_id,
-                        &manifest.resource_id,
-                        manifest.generation,
-                        &object.path,
-                    ),
-                )?,
-                PayloadEncryptionAlgorithm::Aes256GcmChunkV2 => chunk.decrypt(
-                    key,
-                    &profile_object_aad_v2(
-                        &manifest.workspace_id,
-                        &manifest.resource_id,
-                        &object.path,
-                    ),
-                )?,
-            };
-            profile_files.push((object.path.clone(), plaintext));
         }
         self.publish_decrypted(profile_id, manifest, profile_files)
             .map(|receipt| (receipt, credentials))
@@ -267,13 +285,9 @@ impl ProfileProjection {
                 .map(|(path, bytes)| PayloadObject::new(path.clone(), bytes))
                 .collect::<Result<Vec<_>, _>>()?,
         )?;
+        let generation_path = decrypted_generation_path(&self.root, profile_id, manifest)?;
         let profile_root = confined_path(&self.root, Path::new(profile_id.as_str()))?;
         fs::create_dir_all(&profile_root).map_err(|_| unavailable())?;
-        let generation_name = format!(
-            "generations/{}-{}",
-            manifest.generation, manifest.root_checksum
-        );
-        let generation_path = confined_path(&profile_root, Path::new(&generation_name))?;
         if generation_path.exists() {
             return verify_decrypted_generation(profile_id, manifest, &generation_path);
         }
@@ -796,6 +810,19 @@ fn verify_decrypted_generation(
     })
 }
 
+fn decrypted_generation_path(
+    root: &Path,
+    profile_id: &ProfileId,
+    manifest: &SyncManifest,
+) -> Result<PathBuf, Problem> {
+    let profile_root = confined_path(root, Path::new(profile_id.as_str()))?;
+    let generation_name = format!(
+        "generations/{}-{}",
+        manifest.generation, manifest.root_checksum
+    );
+    confined_path(&profile_root, Path::new(&generation_name))
+}
+
 fn matches_manifest_object(object: &ManifestObject, reference: &ManifestObjectReference) -> bool {
     object.key == reference.key
         && object.size == reference.size
@@ -833,6 +860,20 @@ fn proxy_credential_keys(
             } => None,
         })
         .collect()
+}
+
+fn should_download_manifest_object(
+    cached_generation: bool,
+    path: &str,
+    clear_metadata: &std::collections::BTreeSet<String>,
+    proxy_envelopes: &[(buglogin_domain::ids::ProxyId, u64, ManifestObjectReference)],
+) -> bool {
+    !cached_generation
+        || path == RESOURCE_KEY_ENVELOPE_KEY
+        || clear_metadata.contains(path)
+        || proxy_envelopes
+            .iter()
+            .any(|(_, _, reference)| reference.key == path)
 }
 
 fn profile_object_aad(
@@ -1012,7 +1053,56 @@ mod tests {
     use super::*;
     use buglogin_domain::ids::{ProxyId, ResourceId, WorkspaceId};
     use buglogin_sync::crypto::{AuthenticatedChunk, ClientKey, RecoveryKey};
-    use buglogin_sync::manifest::ManifestObject;
+    use buglogin_sync::manifest::{ManifestObject, ManifestObjectReference};
+
+    #[test]
+    fn verified_generation_skips_profile_blobs_but_keeps_sync_metadata_downloads() {
+        let proxy_id = ProxyId::new("prx_projection_cache").unwrap();
+        let metadata_key = ".buglogin/proxy-dependencies/prx_projection_cache/4/metadata.json";
+        let credential_key =
+            ".buglogin/proxy-dependencies/prx_projection_cache/4/credential-envelope.json";
+        let metadata = std::collections::BTreeSet::from([metadata_key.to_owned()]);
+        let credentials = vec![(
+            proxy_id,
+            4,
+            ManifestObjectReference {
+                key: credential_key.to_owned(),
+                size: 64,
+                checksum: "a".repeat(64),
+            },
+        )];
+
+        assert!(!should_download_manifest_object(
+            true,
+            "Default/Cookies",
+            &metadata,
+            &credentials,
+        ));
+        assert!(should_download_manifest_object(
+            true,
+            RESOURCE_KEY_ENVELOPE_KEY,
+            &metadata,
+            &credentials,
+        ));
+        assert!(should_download_manifest_object(
+            true,
+            metadata_key,
+            &metadata,
+            &credentials,
+        ));
+        assert!(should_download_manifest_object(
+            true,
+            credential_key,
+            &metadata,
+            &credentials,
+        ));
+        assert!(should_download_manifest_object(
+            false,
+            "Default/Cookies",
+            &metadata,
+            &credentials,
+        ));
+    }
 
     #[test]
     fn rejects_profile_file_size_that_would_exceed_encrypted_object_limit() {
