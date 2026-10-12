@@ -147,6 +147,8 @@ async fn hosted_proxy_inventory_replays_persists_and_enforces_acl_and_revision()
     let reopen = store.reopen();
     let state = ApiState::hosted_with_control_store(ProfileService::disabled(), store).unwrap();
     let token = state.issue_token(account.as_str()).unwrap();
+    let stale_reader =
+        ApiState::hosted_with_control_store(ProfileService::disabled(), reopen.reopen()).unwrap();
     for action in [Action::Read, Action::Create, Action::Update, Action::Delete] {
         let grant_id = format!("grant_proxy_inventory_{action:?}");
         state.grants.write().unwrap().push(Grant {
@@ -194,6 +196,25 @@ async fn hosted_proxy_inventory_replays_persists_and_enforces_acl_and_revision()
         created_body["record"]["proxy"]
             .get("credentialRef")
             .is_none()
+    );
+
+    let cross_instance_list = router(stale_reader)
+        .oneshot(api_request(
+            "GET",
+            "/v1/workspaces/ws_proxy_inventory/proxies",
+            &token,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cross_instance_list.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(cross_instance_list).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
 
     let replay = app

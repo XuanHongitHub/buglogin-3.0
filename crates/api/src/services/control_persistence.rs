@@ -26,6 +26,18 @@ impl ControlPersistence {
         self.store.lock().map_err(|_| unavailable())?.readiness()
     }
 
+    pub fn revision(
+        &self,
+        tenant_id: &str,
+        record_type: &str,
+        record_id: &str,
+    ) -> Result<Option<u64>, Problem> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .revision(tenant_id, record_type, record_id)
+    }
+
     pub fn load<T>(
         &self,
         tenant_id: &str,

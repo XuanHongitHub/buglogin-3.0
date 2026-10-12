@@ -217,6 +217,16 @@ pub trait ControlRecordStore {
         record_type: &str,
         record_id: &str,
     ) -> Result<Option<ControlRecord>, Problem>;
+    fn revision(
+        &mut self,
+        tenant_id: &str,
+        record_type: &str,
+        record_id: &str,
+    ) -> Result<Option<u64>, Problem> {
+        Ok(self
+            .get(tenant_id, record_type, record_id)?
+            .map(|record| record.revision))
+    }
     fn list(&mut self, tenant_id: &str, record_type: &str) -> Result<Vec<ControlRecord>, Problem>;
     fn replay(
         &mut self,
@@ -540,6 +550,25 @@ impl ControlRecordStore for PostgresControlRecordStore {
     ) -> Result<Option<ControlRecord>, Problem> {
         let key = key(tenant_id, record_type, record_id)?;
         load_record(&mut self.client, &key)
+    }
+    fn revision(
+        &mut self,
+        tenant_id: &str,
+        record_type: &str,
+        record_id: &str,
+    ) -> Result<Option<u64>, Problem> {
+        key(tenant_id, record_type, record_id)?;
+        self.client
+            .query_opt(
+                "SELECT revision FROM buglogin_control_records WHERE tenant_id = $1 AND record_type = $2 AND record_id = $3",
+                &[&tenant_id, &record_type, &record_id],
+            )
+            .map_err(|_| unavailable())?
+            .map(|row| {
+                let revision: i64 = row.get(0);
+                u64::try_from(revision).map_err(|_| corrupt_record())
+            })
+            .transpose()
     }
     fn list(&mut self, tenant_id: &str, record_type: &str) -> Result<Vec<ControlRecord>, Problem> {
         validate_scope(tenant_id, record_type, "list")?;

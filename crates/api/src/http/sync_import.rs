@@ -294,6 +294,9 @@ pub(super) async fn import_sync_authorized(
     };
 
     let finalize_result = {
+        let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
+            .write_owned()
+            .await;
         let _mutation = state.control_mutation().lock().map_err(|_| {
             response(problem(
                 "control_unavailable",

@@ -220,6 +220,9 @@ pub(super) async fn import_control(
         })?;
     validate_package_id(&input.package_id).map_err(response)?;
     let package_sha256 = package_checksum(&input).map_err(response)?;
+    let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
+        .write_owned()
+        .await;
     let _mutation = state.control_mutation.lock().map_err(|_| {
         response(problem(
             "control_unavailable",
@@ -557,6 +560,9 @@ pub(super) async fn rollback_control(
         .expect("authenticated account")
         .as_str()
         .to_owned();
+    let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
+        .write_owned()
+        .await;
     let receipt = rollback_package_control(&state, &input.package_id, idempotency_key, &actor_id)
         .map_err(response)?;
     Ok((StatusCode::OK, Json(receipt)).into_response())

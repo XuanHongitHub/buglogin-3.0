@@ -11,6 +11,7 @@ use axum::{
     routing::post,
 };
 use buglogin_domain::errors::Problem;
+use buglogin_domain::permissions::Action;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -126,6 +127,7 @@ struct ProductionTransportState {
     config: McpTransportConfig,
     control: McpTransportControl,
     dispatcher: Arc<Mutex<ProductionMcpDispatcher>>,
+    control_state: crate::http::ApiState,
 }
 
 pub fn production_router(
@@ -135,7 +137,7 @@ pub fn production_router(
 ) -> Router {
     let dispatcher = McpDispatcher::new(
         ProductionMcpPolicy::new(state.clone()),
-        ProductionMcpExecutor::new(state),
+        ProductionMcpExecutor::new(state.clone()),
         config.enabled,
     );
     Router::new()
@@ -144,6 +146,7 @@ pub fn production_router(
             config,
             control,
             dispatcher: Arc::new(Mutex::new(dispatcher)),
+            control_state: state,
         })
 }
 
@@ -236,7 +239,7 @@ async fn handle(
             "capabilities": { "tools": { "listChanged": false } },
         })),
         "tools/list" => Ok(json!({ "tools": tool_list(tools()) })),
-        "tools/call" => call_tool(&state, request.params),
+        "tools/call" => call_tool_with_snapshot(&state, request.params).await,
         _ => Err(problem(
             "mcp_method_not_found",
             "JSON-RPC method not found",
@@ -257,11 +260,36 @@ async fn handle(
     }
 }
 
-fn call_tool(state: &ProductionTransportState, params: Value) -> Result<Value, Problem> {
+async fn call_tool_with_snapshot(
+    state: &ProductionTransportState,
+    params: Value,
+) -> Result<Value, Problem> {
     let params: ToolCallParams = serde_json::from_value(params)
         .map_err(|_| problem("mcp_invalid_params", "MCP tool parameters are invalid", 400))?;
-    let mut dispatcher = state
-        .dispatcher
+    let action = tools()
+        .into_iter()
+        .find(|tool| tool.name == params.name)
+        .map_or(Action::Manage, |tool| tool.action);
+    if action == Action::Read {
+        let _snapshot = Arc::clone(&state.control_state.control_snapshot_gate)
+            .read_owned()
+            .await;
+        state.control_state.refresh_control_aggregate()?;
+        dispatch_tool(&state.dispatcher, params)
+    } else {
+        let _snapshot = Arc::clone(&state.control_state.control_snapshot_gate)
+            .write_owned()
+            .await;
+        state.control_state.refresh_control_aggregate()?;
+        dispatch_tool(&state.dispatcher, params)
+    }
+}
+
+fn dispatch_tool(
+    dispatcher: &Arc<Mutex<ProductionMcpDispatcher>>,
+    params: ToolCallParams,
+) -> Result<Value, Problem> {
+    let mut dispatcher = dispatcher
         .lock()
         .map_err(|_| problem("mcp_unavailable", "MCP dispatcher unavailable", 503))?;
     dispatcher.dispatch(McpRequest {

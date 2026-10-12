@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
@@ -571,6 +572,30 @@ pub(super) fn routes() -> Router<ApiState> {
             "/v1/workspaces/{workspace_id}/audit-events",
             get(read_audit),
         )
+}
+
+pub(super) async fn refresh_hosted_snapshot(
+    State(state): State<ApiState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let control_backed_read = request.method() == Method::GET
+        && !matches!(path, "/v1/health" | "/v1/readyz")
+        && !path.starts_with("/v1/auth/")
+        && !path.starts_with("/v1/operations/")
+        && path != "/v1/events"
+        && !path.starts_with("/v1/cookie-jobs/");
+    if !control_backed_read {
+        return next.run(request).await;
+    }
+    let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
+        .read_owned()
+        .await;
+    if let Err(error) = state.refresh_control_aggregate() {
+        return response(error);
+    }
+    next.run(request).await
 }
 
 async fn list_proxies(
@@ -2121,17 +2146,6 @@ async fn get_resource_manifest(
     let principal = authenticate(&state, &headers)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
-    let _snapshot = state.control_mutation.lock().map_err(|_| {
-        problem_response(
-            "control_unavailable",
-            "Control state unavailable",
-            503,
-            correlation(&headers),
-        )
-    })?;
-    if !state.local_authority_enabled() {
-        state.reload_control_aggregate().map_err(response_problem)?;
-    }
     let grants = grants(&state)?;
     authorize_lease(
         &principal,
@@ -2727,17 +2741,6 @@ async fn get_resource_blob(
     let principal = authenticate(&state, &headers)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
-    let snapshot = state.control_mutation.lock().map_err(|_| {
-        problem_response(
-            "control_unavailable",
-            "Control state unavailable",
-            503,
-            correlation(&headers),
-        )
-    })?;
-    if !state.local_authority_enabled() {
-        state.reload_control_aggregate().map_err(response_problem)?;
-    }
     let grants = grants(&state)?;
     authorize_lease(
         &principal,
@@ -2764,7 +2767,6 @@ async fn get_resource_blob(
                 correlation(&headers),
             )
         })?;
-    drop(snapshot);
     let object = manifest
         .objects
         .iter()
@@ -3374,6 +3376,9 @@ where
     T: Serialize,
     F: FnOnce() -> Result<T, ResponseProblem>,
 {
+    let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
+        .write_owned()
+        .await;
     let _mutation = state.control_mutation.lock().map_err(|_| {
         problem_response(
             "control_unavailable",

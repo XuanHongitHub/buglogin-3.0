@@ -227,6 +227,7 @@ pub struct ApiState {
     pub(crate) control_persistence: ControlPersistence,
     control_revision: Arc<RwLock<u64>>,
     control_mutation: Arc<Mutex<()>>,
+    pub(crate) control_snapshot_gate: Arc<tokio::sync::RwLock<()>>,
     materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
     platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
     local_account_provisioning: bool,
@@ -343,6 +344,7 @@ impl ApiState {
             control_persistence,
             control_revision: Arc::new(RwLock::new(revision)),
             control_mutation: Arc::new(Mutex::new(())),
+            control_snapshot_gate: Arc::new(tokio::sync::RwLock::new(())),
             local_account_provisioning,
             external_object_storage: false,
             lifecycles: Arc::new(RwLock::new(HashMap::new())),
@@ -1566,6 +1568,31 @@ impl ApiState {
         Ok(())
     }
 
+    pub(crate) fn refresh_control_aggregate(&self) -> Result<(), Problem> {
+        if self.local_authority_enabled() {
+            return Ok(());
+        }
+        let _mutation = self
+            .control_mutation
+            .lock()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        let local_revision = *self
+            .control_revision
+            .read()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        let durable_revision = self.control_persistence.revision(
+            CONTROL_TENANT,
+            CONTROL_STATE_TYPE,
+            CONTROL_STATE_ID,
+        )?;
+        if durable_revision == Some(local_revision)
+            || (durable_revision.is_none() && local_revision == 0)
+        {
+            return Ok(());
+        }
+        self.reload_control_aggregate()
+    }
+
     pub(crate) fn persist_control_aggregate(
         &self,
         command: &str,
@@ -2105,6 +2132,10 @@ pub fn router(state: ApiState) -> Router {
             post(control_import::rollback_control),
         )
         .merge(control::routes())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            control::refresh_hosted_snapshot,
+        ))
         .layer(middleware::from_fn(require_correlation))
         .layer(cors)
         .with_state(state)
