@@ -278,6 +278,7 @@ migrationEnvelope:
     - PostgreSQL is the only hosted manifest visibility authority
     - Redis is lease/fencing/event infrastructure only and never migration manifest authority
     - object-store blobs are immutable and invisible until PostgreSQL activation
+    - retrying a pending import uses a fresh resource-lease attempt key so an expired Redis grant cannot be replayed as current authority
     - profile manifests with a selected proxy include exactly one matching proxy dependency
     - sourceGeneration reuses only an exact object in the immediately previous active manifest under the same resource key version
     - proxy dependency revision and metadata object must match same-workspace Rust API authority

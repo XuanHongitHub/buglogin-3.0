@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use buglogin_domain::errors::Problem;
 use buglogin_domain::{
     permissions::{Action, Capability, ResourceScope, is_allowed},
     profile::ProfileArchiveState,
@@ -23,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ApiState, SyncMigrationJournal, SyncMigrationJournalObject, SyncMigrationJournalState,
-    authenticate, grants, now, problem, response,
+    authenticate, grants, hex_encode, now, problem, response,
 };
 
 const JOURNAL_SCHEMA: &str = "buglogin.migration-sync-journal/1";
@@ -229,6 +230,7 @@ pub(super) async fn import_sync_authorized(
     let auth =
         CoordinationAuth::new(actor_id.clone(), bearer_token(&headers)?).map_err(response)?;
     let backend = state.coordination().map_err(response)?;
+    let lease_idempotency_key = lease_attempt_idempotency_key(&operation_id).map_err(response)?;
     let lease = backend
         .acquire_lease_idempotent(
             CoordinationScope {
@@ -237,7 +239,7 @@ pub(super) async fn import_sync_authorized(
             },
             &input.export.resource_id,
             Duration::from_secs(300),
-            idempotency_key,
+            &lease_idempotency_key,
         )
         .await
         .map_err(response)?;
@@ -594,4 +596,36 @@ fn sha256_parts(parts: &[&str]) -> String {
         digest.update(part.as_bytes());
     }
     format!("{:x}", digest.finalize())
+}
+
+fn lease_attempt_idempotency_key(operation_id: &str) -> Result<String, Problem> {
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| {
+        problem(
+            "lease_attempt_id_unavailable",
+            "Lease attempt could not be initialized",
+            503,
+        )
+    })?;
+    Ok(format!(
+        "migration-sync-lease-{operation_id}-{}",
+        hex_encode(nonce)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lease_attempt_idempotency_key;
+
+    #[test]
+    fn lease_retry_gets_a_fresh_coordination_idempotency_key() {
+        let first = lease_attempt_idempotency_key("op_0123456789abcdef0123456789abcdef").unwrap();
+        let retry = lease_attempt_idempotency_key("op_0123456789abcdef0123456789abcdef").unwrap();
+
+        assert_ne!(first, retry);
+        assert!(first.starts_with("migration-sync-lease-op_"));
+        assert!(retry.starts_with("migration-sync-lease-op_"));
+        assert!(first.len() < 256);
+        assert!(retry.len() < 256);
+    }
 }
