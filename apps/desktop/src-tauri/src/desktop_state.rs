@@ -1037,36 +1037,48 @@ impl ProductionDesktopState {
             let mut proxy_bridge = None;
             if let Some(proxy) = proxy_launch.as_ref() {
                 let proxy_server = if proxy.has_credential {
-                    let local_credential = self.proxy_credential_vault.load(
-                        &binding.workspace_id,
-                        &proxy.proxy_id,
-                        proxy.revision,
-                        &correlation_id,
-                    )?;
-                    let credential = match local_credential {
-                        Some(credential) => credential,
-                        None => {
-                            let Some(index) = proxy_credentials.iter().position(|credential| {
-                                credential.proxy_id == proxy.proxy_id
-                                    && credential.revision == proxy.revision
-                            }) else {
-                                let _ = self
-                                    .client
-                                    .release_lease(
-                                        scope.clone(),
-                                        &binding.resource_id,
-                                        &lease.owner_token,
-                                    )
-                                    .await;
-                                return Err(Problem::new(
-                                    "proxy_credential_envelope_missing",
-                                    "This device has no credential matching the current proxy revision",
-                                    409,
-                                    &correlation_id,
-                                ));
-                            };
-                            let hydrated: HydratedProxyCredential = proxy_credentials.remove(index);
-                            hydrated.secret
+                    let credential_result = (|| {
+                        if let Some(credential) = self.proxy_credential_vault.load(
+                            &binding.workspace_id,
+                            &proxy.proxy_id,
+                            proxy.revision,
+                            &correlation_id,
+                        )? {
+                            return Ok(credential);
+                        }
+                        let Some(index) = proxy_credentials.iter().position(|credential| {
+                            credential.proxy_id == proxy.proxy_id
+                                && credential.revision == proxy.revision
+                        }) else {
+                            return Err(Problem::new(
+                                "proxy_credential_envelope_missing",
+                                "This device has no credential matching the current proxy revision",
+                                409,
+                                &correlation_id,
+                            ));
+                        };
+                        let hydrated: HydratedProxyCredential = proxy_credentials.remove(index);
+                        self.proxy_credential_vault.store(
+                            &binding.workspace_id,
+                            &proxy.proxy_id,
+                            proxy.revision,
+                            hydrated.secret.clone(),
+                            &correlation_id,
+                        )?;
+                        Ok(hydrated.secret)
+                    })();
+                    let credential = match credential_result {
+                        Ok(credential) => credential,
+                        Err(error) => {
+                            let _ = self
+                                .client
+                                .release_lease(
+                                    scope.clone(),
+                                    &binding.resource_id,
+                                    &lease.owner_token,
+                                )
+                                .await;
+                            return Err(error);
                         }
                     };
                     let bridge = ProxyBridgeHandle::start(ProxyBridgeSpec {
