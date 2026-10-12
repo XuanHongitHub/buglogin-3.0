@@ -815,12 +815,13 @@ fn decrypted_generation_path(
     profile_id: &ProfileId,
     manifest: &SyncManifest,
 ) -> Result<PathBuf, Problem> {
-    let profile_root = confined_path(root, Path::new(profile_id.as_str()))?;
-    let generation_name = format!(
-        "generations/{}-{}",
-        manifest.generation, manifest.root_checksum
-    );
-    confined_path(&profile_root, Path::new(&generation_name))
+    let relative = PathBuf::from(profile_id.as_str())
+        .join("generations")
+        .join(format!(
+            "{}-{}",
+            manifest.generation, manifest.root_checksum
+        ));
+    confined_path(root, &relative)
 }
 
 fn matches_manifest_object(object: &ManifestObject, reference: &ManifestObjectReference) -> bool {
@@ -1050,10 +1051,130 @@ fn problem(code: &'static str, title: &'static str) -> Problem {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use buglogin_domain::ids::{ProxyId, ResourceId, WorkspaceId};
+    use buglogin_sync::coordination::CoordinationAuth;
     use buglogin_sync::crypto::{AuthenticatedChunk, ClientKey, RecoveryKey};
     use buglogin_sync::manifest::{ManifestObject, ManifestObjectReference};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn hydration_reuses_verified_generation_without_fetching_profile_blobs() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-hydrate-cache-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_hydration_cache").unwrap();
+        let resource = ResourceId::new("res_hydration_cache").unwrap();
+        let profile = ProfileId::new("prf_hydration_cache").unwrap();
+        let source = root.join("source-profile");
+        fs::create_dir_all(source.join("Default")).unwrap();
+        fs::write(source.join("Default/Preferences"), b"remote profile bytes").unwrap();
+        let previous = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            1,
+            1,
+            None,
+            b"",
+            Vec::new(),
+        )
+        .unwrap();
+        let client_key = ClientKey::from_bytes([0x71; 32]);
+        let recovery_key = RecoveryKey::from_bytes([0x81; 32]);
+        let (descriptor, encrypted_objects, manifest) = projection
+            .snapshot_with_proxy_encryption(&source, &previous, 2, None, &client_key, &recovery_key)
+            .unwrap();
+        let profile_bytes = b"remote profile bytes".to_vec();
+        projection
+            .publish_decrypted(
+                &profile,
+                &manifest,
+                vec![("Default/Preferences".to_owned(), profile_bytes)],
+            )
+            .unwrap();
+        assert!(
+            descriptor
+                .objects
+                .iter()
+                .any(|object| object.path == "Default/Preferences")
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let objects: BTreeMap<_, _> = encrypted_objects.into_iter().collect();
+        let server = tokio::spawn(async move {
+            let mut paths = Vec::new();
+            loop {
+                let accepted =
+                    tokio::time::timeout(Duration::from_millis(250), listener.accept()).await;
+                let Ok(Ok((mut stream, _))) = accepted else {
+                    break;
+                };
+                let request = read_http_request(&mut stream).await;
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                let object_key = if path.contains("resource-key-envelope.json") {
+                    RESOURCE_KEY_ENVELOPE_KEY
+                } else if path.contains("Default%2FPreferences") {
+                    "Default/Preferences"
+                } else {
+                    panic!("unexpected blob request: {path}");
+                };
+                let body = objects.get(object_key).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+                paths.push(path);
+            }
+            paths
+        });
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        let auth = CoordinationAuth::new("desktop-cache", "lease-token").unwrap();
+        let (receipt, credentials) = projection
+            .hydrate_encrypted_with_proxy_credentials(
+                &client,
+                &auth,
+                &profile,
+                &manifest,
+                Some(&client_key),
+                Some(&recovery_key),
+                "hydration-cache-test",
+            )
+            .await
+            .unwrap();
+        let requested_paths = server.await.unwrap();
+        assert_eq!(receipt.generation, manifest.generation);
+        assert!(credentials.is_empty());
+        assert_eq!(requested_paths.len(), 1);
+        assert!(requested_paths[0].contains("resource-key-envelope.json"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 2048];
+        loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "client closed before sending request");
+            bytes.extend_from_slice(&chunk[..count]);
+            if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                return String::from_utf8(bytes).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn verified_generation_skips_profile_blobs_but_keeps_sync_metadata_downloads() {
