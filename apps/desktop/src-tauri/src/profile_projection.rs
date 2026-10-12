@@ -529,11 +529,13 @@ impl ProfileProjection {
                     PathBuf::from(format!(".sync-cache/{}/{}", cache_scope, cache_name));
                 active_cache_files.insert(cache_name);
                 let prior = previous_objects.get(path.as_str()).copied();
-                let cached = prior.and_then(|prior| {
-                    let cached = read_verified(&self.root, &cache_path, &prior.checksum).ok()?;
-                    if cached.len() as u64 != prior.size {
+                let cached = (|| {
+                    let cache_path = confined_path(&self.root, &cache_path).ok()?;
+                    let metadata = fs::metadata(&cache_path).ok()?;
+                    if metadata.len() > MAX_ENCRYPTED_OBJECT_BYTES as u64 {
                         return None;
                     }
+                    let cached = fs::read(cache_path).ok()?;
                     let chunk = AuthenticatedChunk::decode(&cached).ok()?;
                     let decrypted = chunk
                         .decrypt(
@@ -545,14 +547,18 @@ impl ProfileProjection {
                             ),
                         )
                         .ok()?;
-                    (checksum(&decrypted) == plaintext_checksum && decrypted == plaintext)
-                        .then_some((
-                            cached,
-                            prior.source_generation.unwrap_or(previous.generation),
-                        ))
-                });
+                    if checksum(&decrypted) != plaintext_checksum || decrypted != plaintext {
+                        return None;
+                    }
+                    let source_generation = prior
+                        .filter(|prior| {
+                            prior.size == cached.len() as u64 && prior.checksum == checksum(&cached)
+                        })
+                        .map(|prior| prior.source_generation.unwrap_or(previous.generation));
+                    Some((cached, source_generation))
+                })();
                 let (encrypted, source_generation) = match cached {
-                    Some((cached, source_generation)) => (cached, Some(source_generation)),
+                    Some((cached, source_generation)) => (cached, source_generation),
                     None => {
                         let encrypted = AuthenticatedChunk::encrypt(
                             client_key,
@@ -1347,6 +1353,83 @@ mod tests {
                 .unwrap()
                 .source_generation,
             None
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn encrypted_snapshot_reuses_authenticated_cache_before_manifest_activation() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-retry-cache-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_retry_cache").unwrap();
+        let resource = ResourceId::new("res_retry_cache").unwrap();
+        let profile_path = root.join("browser-profile");
+        fs::create_dir_all(&profile_path).unwrap();
+        fs::write(profile_path.join("Preferences"), b"retry-me").unwrap();
+        let previous = SyncManifest::new(workspace, resource, 1, 1, None, b"", Vec::new()).unwrap();
+        let client_key = ClientKey::from_bytes([0x51; 32]);
+        let recovery_key = RecoveryKey::from_bytes([0x61; 32]);
+        let snapshot = || {
+            projection
+                .snapshot_with_proxy_encryption(
+                    &profile_path,
+                    &previous,
+                    2,
+                    None,
+                    &client_key,
+                    &recovery_key,
+                )
+                .unwrap()
+        };
+
+        let (_, first_files, first_manifest) = snapshot();
+        let first = first_files
+            .iter()
+            .find(|(path, _)| path == "Preferences")
+            .unwrap();
+        let first_checksum = checksum(&first.1);
+        assert_eq!(
+            first_manifest
+                .objects
+                .iter()
+                .find(|object| object.key == "Preferences")
+                .unwrap()
+                .source_generation,
+            None
+        );
+
+        let (_, retry_files, retry_manifest) = snapshot();
+        let retry = retry_files
+            .iter()
+            .find(|(path, _)| path == "Preferences")
+            .unwrap();
+        assert_eq!(checksum(&retry.1), first_checksum);
+        assert_eq!(
+            retry_manifest
+                .objects
+                .iter()
+                .find(|object| object.key == "Preferences")
+                .unwrap()
+                .source_generation,
+            None
+        );
+        assert_eq!(
+            AuthenticatedChunk::decode(&retry.1)
+                .unwrap()
+                .decrypt(
+                    &client_key,
+                    &profile_object_aad_v2(
+                        &previous.workspace_id,
+                        &previous.resource_id,
+                        "Preferences"
+                    ),
+                )
+                .unwrap(),
+            b"retry-me"
         );
         let _ = fs::remove_dir_all(root);
     }
