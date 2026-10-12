@@ -109,11 +109,22 @@ impl CoordinationBackend for FakeCoordination {
     async fn renew_lease(
         &self,
         _scope: CoordinationScope<'_>,
-        _resource_id: &ResourceId,
-        _owner_token: &str,
-        _ttl: Duration,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        ttl: Duration,
     ) -> Result<LeaseGrant, Problem> {
-        Err(unsupported())
+        let mut current = self.lease.lock().unwrap();
+        let lease = current.as_mut().ok_or_else(lease_missing)?;
+        if lease.resource_id != *resource_id || lease.owner_token != owner_token {
+            return Err(Problem::new(
+                "lease_not_owner",
+                "Lease owner mismatch",
+                409,
+                "test",
+            ));
+        }
+        lease.expires_at_ms = lease.expires_at_ms.saturating_add(ttl.as_millis() as u64);
+        Ok(lease.clone())
     }
 
     async fn release_lease(
@@ -139,10 +150,23 @@ impl CoordinationBackend for FakeCoordination {
     async fn validate_write_authority(
         &self,
         _scope: CoordinationScope<'_>,
-        _resource_id: &ResourceId,
-        _owner_token: &str,
-        _fencing_token: u64,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        fencing_token: u64,
     ) -> Result<(), Problem> {
+        let lease = self.lease.lock().unwrap();
+        let current = lease.as_ref().ok_or_else(lease_missing)?;
+        if current.resource_id != *resource_id
+            || current.owner_token != owner_token
+            || current.fencing_token != fencing_token
+        {
+            return Err(Problem::new(
+                "lease_not_owner",
+                "Lease owner mismatch",
+                409,
+                "test",
+            ));
+        }
         Ok(())
     }
 

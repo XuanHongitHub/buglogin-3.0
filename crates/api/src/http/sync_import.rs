@@ -234,7 +234,7 @@ pub(super) async fn import_sync_authorized(
         CoordinationAuth::new(actor_id.clone(), bearer_token(&headers)?).map_err(response)?;
     let backend = state.coordination().map_err(response)?;
     let lease_idempotency_key = lease_attempt_idempotency_key(&operation_id).map_err(response)?;
-    let lease = backend
+    let mut lease = backend
         .acquire_lease_idempotent(
             CoordinationScope {
                 workspace_id: &input.export.workspace_id,
@@ -246,6 +246,7 @@ pub(super) async fn import_sync_authorized(
         )
         .await
         .map_err(|error| {
+            let error = error.retryable(true);
             persist_stage_failure(
                 state,
                 &journal_id,
@@ -307,6 +308,34 @@ pub(super) async fn import_sync_authorized(
         return Err(response(error));
     }
 
+    lease = match backend
+        .renew_lease(
+            CoordinationScope {
+                workspace_id: &input.export.workspace_id,
+                auth: &auth,
+            },
+            &input.export.resource_id,
+            &lease.owner_token,
+            Duration::from_secs(300),
+        )
+        .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            let error = error.retryable(true);
+            persist_stage_failure(
+                state,
+                &journal_id,
+                journal_revision,
+                &actor_id,
+                &mut journal,
+                &error,
+            );
+            release(&*backend, &input.export, &auth, &lease.owner_token).await;
+            return Err(response(error));
+        }
+    };
+
     let (created_objects, resumed_objects) = journal_objects(&plan, &staged);
     journal.state = SyncMigrationJournalState::Finalizing;
     journal.created_objects = created_objects;
@@ -330,31 +359,54 @@ pub(super) async fn import_sync_authorized(
         }
     };
 
-    let finalize_result = {
-        let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
-            .write_owned()
-            .await;
-        let _mutation = state.control_mutation().lock().map_err(|_| {
-            response(problem(
-                "control_unavailable",
-                "Control state unavailable",
-                503,
-            ))
-        })?;
-        let mut target = state.control_aggregate().map_err(response)?;
+    let snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
+        .write_owned()
+        .await;
+    if let Err(error) = backend
+        .validate_write_authority(
+            CoordinationScope {
+                workspace_id: &input.export.workspace_id,
+                auth: &auth,
+            },
+            &input.export.resource_id,
+            &lease.owner_token,
+            lease.fencing_token,
+        )
+        .await
+    {
+        let error = error.retryable(true);
+        persist_stage_failure(
+            state,
+            &journal_id,
+            journal_revision,
+            &actor_id,
+            &mut journal,
+            &error,
+        );
+        drop(snapshot);
+        release(&*backend, &input.export, &auth, &lease.owner_token).await;
+        return Err(response(error));
+    }
+
+    let finalize_result: Result<SyncImportReceipt, Problem> = (|| {
+        let _snapshot = snapshot;
+        let _mutation = state
+            .control_mutation()
+            .lock()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        let mut target = state.control_aggregate()?;
         let key = format!(
             "{}:{}",
             input.export.workspace_id.as_str(),
             input.export.resource_id.as_str()
         );
         let current = target.sync_manifests.get(&key).cloned();
-        let final_plan = plan_sync_import(&input.export, current.as_ref(), lease.fencing_token)
-            .map_err(response)?;
+        let final_plan = plan_sync_import(&input.export, current.as_ref(), lease.fencing_token)?;
         target
             .sync_manifests
             .insert(key, final_plan.manifest.clone());
         journal.state = SyncMigrationJournalState::Active;
-        journal.control_revision_before = state.control_revision().map_err(response)?;
+        journal.control_revision_before = state.control_revision()?;
         journal.control_revision_after = Some(journal.control_revision_before.saturating_add(1));
         journal.updated_at_ms = now().saturating_mul(1_000);
         let created = staged
@@ -372,13 +424,8 @@ pub(super) async fn import_sync_authorized(
             resumed,
             "active",
         );
-        let body = serde_json::to_value(&receipt).map_err(|_| {
-            response(problem(
-                "serialization_failed",
-                "Response serialization failed",
-                500,
-            ))
-        })?;
+        let body = serde_json::to_value(&receipt)
+            .map_err(|_| problem("serialization_failed", "Response serialization failed", 500))?;
         state
             .finalize_sync_import(
                 claim,
@@ -401,7 +448,7 @@ pub(super) async fn import_sync_authorized(
                 body.clone(),
             )
             .map(|_| receipt.clone())
-    };
+    })();
 
     release(&*backend, &input.export, &auth, &lease.owner_token).await;
     match finalize_result {

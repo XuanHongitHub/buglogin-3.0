@@ -3,7 +3,7 @@ use std::{
     fs,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -44,6 +44,7 @@ struct FakeCoordination {
     replays: Mutex<BTreeMap<String, LeaseGrant>>,
     lease_acquires: AtomicUsize,
     manifest_commits: AtomicUsize,
+    fail_validation: AtomicBool,
 }
 
 #[async_trait]
@@ -92,11 +93,22 @@ impl CoordinationBackend for FakeCoordination {
     async fn renew_lease(
         &self,
         _scope: CoordinationScope<'_>,
-        _resource_id: &ResourceId,
-        _owner_token: &str,
-        _ttl: Duration,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        ttl: Duration,
     ) -> Result<LeaseGrant, Problem> {
-        Err(unsupported())
+        let mut current = self.lease.lock().unwrap();
+        let lease = current.as_mut().ok_or_else(lease_missing)?;
+        if lease.resource_id != *resource_id || lease.owner_token != owner_token {
+            return Err(Problem::new(
+                "lease_not_owner",
+                "Lease owner mismatch",
+                409,
+                "test",
+            ));
+        }
+        lease.expires_at_ms = lease.expires_at_ms.saturating_add(ttl.as_millis() as u64);
+        Ok(lease.clone())
     }
 
     async fn release_lease(
@@ -122,10 +134,32 @@ impl CoordinationBackend for FakeCoordination {
     async fn validate_write_authority(
         &self,
         _scope: CoordinationScope<'_>,
-        _resource_id: &ResourceId,
-        _owner_token: &str,
-        _fencing_token: u64,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        fencing_token: u64,
     ) -> Result<(), Problem> {
+        if self.fail_validation.swap(false, Ordering::SeqCst) {
+            return Err(Problem::new(
+                "test_lease_lost",
+                "Test lease was lost before activation",
+                503,
+                "test",
+            )
+            .retryable(true));
+        }
+        let lease = self.lease.lock().unwrap();
+        let current = lease.as_ref().ok_or_else(lease_missing)?;
+        if current.resource_id != *resource_id
+            || current.owner_token != owner_token
+            || current.fencing_token != fencing_token
+        {
+            return Err(Problem::new(
+                "lease_not_owner",
+                "Lease owner mismatch",
+                409,
+                "test",
+            ));
+        }
         Ok(())
     }
 
@@ -268,12 +302,31 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
             .with_coordination(coordination.clone()),
     );
     assert_eq!(export.manifest.fencing_token, 8);
-    let import = request(
-        &token,
-        "sync-migration-import-0001",
-        json!({"export": export, "dryRun": false}),
+    coordination.fail_validation.store(true, Ordering::SeqCst);
+    let rejected = app
+        .clone()
+        .oneshot(request(
+            &token,
+            "sync-migration-import-0001",
+            json!({"export": export.clone(), "dryRun": false}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        RemoteChunkStore::checksum(&remote, &staged_key).unwrap(),
+        Some(staged_blob.checksum.clone())
     );
-    let first = app.clone().oneshot(import).await.unwrap();
+
+    let first = app
+        .clone()
+        .oneshot(request(
+            &token,
+            "sync-migration-import-0001",
+            json!({"export": export.clone(), "dryRun": false}),
+        ))
+        .await
+        .unwrap();
     assert_eq!(first.status(), StatusCode::OK);
     let first_body = body(first).await;
     assert_eq!(first_body["state"], "active");
@@ -297,7 +350,7 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
     let replay_body = body(replay).await;
     assert_eq!(replay_body["state"], "active");
     assert_eq!(replay_body["generation"], 1);
-    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 1);
+    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 2);
 
     let mut conflicting_export = genesis_export(workspace.clone(), resource.clone());
     conflicting_export.export_id = "hosted-sync-export-conflict".into();
@@ -327,7 +380,7 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
         .unwrap();
     assert_eq!(wrong_base.status(), StatusCode::CONFLICT);
     assert_eq!(body(wrong_base).await["code"], "sync_import_base_conflict");
-    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 2);
+    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 3);
 
     let manifest = app
         .oneshot(
