@@ -25,12 +25,14 @@ use buglogin_sync::{
     },
     payload::{PAYLOAD_SCHEMA_VERSION, PayloadDescriptor, PayloadObject},
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use crate::remote_api::{RemoteApiClient, RemoteProxySyncSnapshot};
 
 const MARKER: &str = ".buglogin-projection.json";
 const MAX_ENCRYPTED_OBJECT_BYTES: usize = MAX_PROFILE_SYNC_OBJECT_BYTES as usize;
+const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
 const MAX_PROFILE_PLAINTEXT_BYTES: u64 =
     MAX_PROFILE_SYNC_OBJECT_BYTES - AUTHENTICATED_CHUNK_OVERHEAD_BYTES as u64;
 
@@ -85,24 +87,37 @@ impl ProfileProjection {
             )
         })?;
         let remote_descriptor = descriptor_from_manifest(manifest)?;
-        let mut encrypted_objects = Vec::with_capacity(remote_descriptor.objects.len());
-        for object in &remote_descriptor.objects {
-            let bytes = client
-                .download_blob(
-                    CoordinationScope {
-                        workspace_id: &manifest.workspace_id,
-                        auth,
-                    },
-                    &manifest.resource_id,
-                    &object.path,
-                    manifest.generation,
-                    &object.checksum,
-                    object.size,
-                    correlation_id,
-                )
-                .await?;
-            encrypted_objects.push((object.path.clone(), bytes));
-        }
+        let encrypted_objects =
+            stream::iter(remote_descriptor.objects.clone().into_iter().map(|object| {
+                let client = client.clone();
+                let scope = CoordinationScope {
+                    workspace_id: &manifest.workspace_id,
+                    auth,
+                };
+                let resource_id = manifest.resource_id.clone();
+                let path = object.path;
+                let checksum = object.checksum;
+                let generation = manifest.generation;
+                let size = object.size;
+                let correlation_id = correlation_id.to_owned();
+                async move {
+                    let bytes = client
+                        .download_blob(
+                            scope,
+                            &resource_id,
+                            &path,
+                            generation,
+                            &checksum,
+                            size,
+                            &correlation_id,
+                        )
+                        .await?;
+                    Ok::<_, Problem>((path, bytes))
+                }
+            }))
+            .buffer_unordered(MAX_CONCURRENT_BLOB_DOWNLOADS)
+            .try_collect::<Vec<_>>()
+            .await?;
         let supplied: BTreeMap<_, _> = encrypted_objects.into_iter().collect();
         let envelope_bytes = supplied.get(RESOURCE_KEY_ENVELOPE_KEY).ok_or_else(|| {
             problem(
