@@ -82,6 +82,7 @@ fn every_registered_command_has_canonical_action() {
         ("profile.manifest.get", Action::Read),
         ("profile.manifest.commit", Action::Update),
         ("profile.blob.get", Action::Read),
+        ("profile.blob.check", Action::Update),
         ("profile.blob.put", Action::Update),
         ("account.get", Action::Read),
         ("organization.list", Action::Read),

@@ -464,6 +464,19 @@ paths:
       responses:
         "200": { description: Verified immutable blob receipt }
         "413": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs/check:
+    get:
+      operationId: profile.blob.check
+      parameters:
+        - { name: key, in: query, required: true, schema: { type: string } }
+        - { name: generation, in: query, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: checksum, in: query, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+        - { name: x-buglogin-owner-id, in: header, required: true, schema: { type: string } }
+        - { name: x-buglogin-owner-token, in: header, required: true, schema: { type: string } }
+        - { name: x-buglogin-fencing-token, in: header, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200": { description: Whether the encrypted blob is already staged, content: { application/json: { schema: { $ref: '#/components/schemas/BlobPresence' } } } }
+        "409": { $ref: '#/components/responses/Problem' }
   /v1/workspaces/{workspaceId}/grants:
     get:
       operationId: grant.list
@@ -486,6 +499,7 @@ components:
     Problem: { description: Canonical error, content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
   schemas:
     CommandResult: { type: object, required: [commandId, correlationId, data], properties: { commandId: { type: string }, correlationId: { type: string }, data: {} } }
+    BlobPresence: { type: object, required: [present], properties: { present: { type: boolean } }, additionalProperties: false }
     DeviceAuthorizationStartInput: { type: object, required: [deviceId, clientName], properties: { deviceId: { type: string, minLength: 8, maxLength: 128, pattern: '^\S+$' }, clientName: { type: string, maxLength: 128 } }, additionalProperties: false }
     DeviceAuthorizationStartResponse: { type: object, required: [deviceCode, userCode, verificationUri, expiresIn, interval], properties: { deviceCode: { type: string, minLength: 1 }, userCode: { type: string, minLength: 1 }, verificationUri: { type: string, format: uri }, expiresIn: { type: integer, minimum: 1 }, interval: { type: integer, minimum: 1 } }, additionalProperties: false }
     DeviceAuthorizationApproveInput: { type: object, required: [userCode], properties: { userCode: { type: string, minLength: 1 } }, additionalProperties: false }

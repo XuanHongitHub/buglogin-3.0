@@ -31,6 +31,12 @@ pub struct RemoteApiClient {
     token: Arc<RwLock<Option<String>>>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BlobPresence {
+    present: bool,
+}
+
 impl fmt::Debug for RemoteApiClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteApiClient")
@@ -567,6 +573,42 @@ impl RemoteApiClient {
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn blob_present(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource: &ResourceId,
+        key: &str,
+        generation: u64,
+        checksum: &str,
+        owner_token: &str,
+        fence: u64,
+        correlation: &str,
+    ) -> Result<bool, Problem> {
+        let path = format!(
+            "/v1/workspaces/{}/resources/{}/blobs/check?key={}&generation={generation}&checksum={checksum}",
+            scope.workspace_id.as_str(),
+            resource.as_str(),
+            urlencoding(key)
+        );
+        let extra = [
+            ("x-buglogin-owner-id", scope.auth.actor_id().to_owned()),
+            ("x-buglogin-owner-token", owner_token.to_owned()),
+            ("x-buglogin-fencing-token", fence.to_string()),
+        ];
+        let response: BlobPresence = self
+            .send(
+                Method::GET,
+                &path,
+                None,
+                correlation,
+                None,
+                Some(scope.auth),
+                &extra,
+            )
+            .await?;
+        Ok(response.present)
     }
 
     pub async fn download_blob(
@@ -1128,10 +1170,66 @@ fn uuid_key() -> String {
 mod tests {
     use super::RemoteApiClient;
     use buglogin_domain::entities::{Profile, ProfileState, Runtime, SyncMode};
-    use buglogin_domain::ids::{ProfileId, ProxyId};
+    use buglogin_domain::ids::{ProfileId, ProxyId, ResourceId, WorkspaceId};
     use buglogin_storage::local::Versioned;
+    use buglogin_sync::coordination::{CoordinationAuth, CoordinationScope};
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn blob_presence_check_uses_resource_lease_scope_and_checksum() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let body = br#"{"present":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            request
+        });
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".to_owned()).unwrap();
+        let auth = CoordinationAuth::new("desktop-1", "lease-token").unwrap();
+        let workspace = WorkspaceId::new("ws_retry").unwrap();
+        let resource = ResourceId::new("res_retry").unwrap();
+        let present = client
+            .blob_present(
+                CoordinationScope {
+                    workspace_id: &workspace,
+                    auth: &auth,
+                },
+                &resource,
+                "Default/Preferences",
+                4,
+                &"a".repeat(64),
+                "owner-token",
+                7,
+                "blob-presence-test",
+            )
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        let headers = request.split_once("\r\n\r\n").unwrap().0;
+        assert!(headers.starts_with(
+            "GET /v1/workspaces/ws_retry/resources/res_retry/blobs/check?key=Default%2FPreferences&generation=4&checksum="
+        ));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("x-buglogin-owner-id: desktop-1")
+        );
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("x-buglogin-fencing-token: 7")
+        );
+        assert!(present);
+    }
 
     #[tokio::test]
     async fn managed_profile_create_uses_the_rest_contract_and_redacts_bearer_debug() {

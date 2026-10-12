@@ -34,10 +34,10 @@ use buglogin_storage::control::{
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationScope},
     crypto::{AuthenticatedChunk, ProxyCredentialEnvelope, ResourceKeyEnvelope},
-    manifest::{MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, SyncManifest},
+    manifest::{MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject, SyncManifest},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -366,6 +366,14 @@ struct BlobQuery {
     key: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BlobCheckQuery {
+    key: String,
+    generation: u64,
+    checksum: String,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeProjectionInput {
@@ -535,6 +543,10 @@ pub(super) fn routes() -> Router<ApiState> {
         .route(
             "/v1/workspaces/{workspace_id}/resources/{resource_id}/manifest",
             get(get_resource_manifest).put(commit_resource_manifest),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/resources/{resource_id}/blobs/check",
+            get(check_resource_blob),
         )
         .route(
             "/v1/workspaces/{workspace_id}/resources/{resource_id}/blobs",
@@ -2797,6 +2809,81 @@ async fn get_resource_blob(
         bytes,
     )
         .into_response())
+}
+
+async fn check_resource_blob(
+    State(state): State<ApiState>,
+    Path((workspace_id, resource_id)): Path<(String, String)>,
+    Query(query): Query<BlobCheckQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
+    let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
+    authorize_lease(
+        &principal,
+        &grants,
+        &workspace_id,
+        &resource_id,
+        "profile.update",
+        Action::Update,
+    )?;
+    if query.generation == 0
+        || query.checksum.len() != 64
+        || !query
+            .checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(problem_response(
+            "blob_check_input_invalid",
+            "Blob check input is invalid",
+            400,
+            correlation(&headers),
+        ));
+    }
+    ManifestObject::new(query.key.clone(), &[]).map_err(response_problem)?;
+    let owner_id = required_header(&headers, "x-buglogin-owner-id")?;
+    let owner_token = required_header(&headers, "x-buglogin-owner-token")?;
+    let fencing_token = required_header(&headers, "x-buglogin-fencing-token")?
+        .parse::<u64>()
+        .map_err(|_| bad_header("x-buglogin-fencing-token"))?;
+    let auth = CoordinationAuth::new(owner_id, bearer_token(&headers).to_owned())
+        .map_err(response_problem)?;
+    state
+        .coordination()
+        .map_err(response_problem)?
+        .validate_write_authority(
+            CoordinationScope {
+                workspace_id: &workspace_id,
+                auth: &auth,
+            },
+            &resource_id,
+            owner_token,
+            fencing_token,
+        )
+        .await
+        .map_err(response_problem)?;
+    let storage_key =
+        payload_object_key(&resource_id, query.generation, &query.key, &query.checksum);
+    let present = match state
+        .remote_chunk_checksum(&storage_key)
+        .map_err(response_problem)?
+    {
+        Some(actual) if actual == query.checksum => true,
+        Some(_) => {
+            return Err(response_problem(Problem::new(
+                "remote_chunk_conflict",
+                "Staged blob checksum conflicts with the requested checksum",
+                409,
+                correlation(&headers),
+            ))
+            .into());
+        }
+        None => false,
+    };
+    Ok(Json(json!({ "present": present })))
 }
 
 async fn put_resource_blob(

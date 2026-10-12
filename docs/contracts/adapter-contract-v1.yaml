@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: 3d1cdfc5077c6d44c938bad958b74f5ec7964dff0f6c02848b7b365fd7537388
-projectionCount: 85
+sourceSha256: 98a1c72d444ec058c7d677ac5844024999e984e7c49f17600a5730e42a5e39e1
+projectionCount: 86
 projections:
   - commandId: system.health.get
     kind: query
@@ -1417,6 +1417,20 @@ projections:
       - rest
     names:
       rest: profile.blob.get
+  - commandId: profile.blob.check
+    kind: query
+    capability: profile.update
+    action: update
+    inputSchema: BlobCheckInput
+    outputSchema: BlobPresence
+    auth: required
+    audit: metadata-only
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - rest
+    names:
+      rest: profile.blob.check
   - commandId: profile.blob.put
     kind: command
     capability: profile.update
@@ -3669,6 +3683,22 @@ rest:
       outputSchema: BinaryBlob
       auth: required
       audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: profile.blob.check
+      commandId: profile.blob.check
+      kind: query
+      capability: profile.update
+      action: update
+      inputSchema: BlobCheckInput
+      outputSchema: BlobPresence
+      auth: required
+      audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
       security:

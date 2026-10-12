@@ -577,6 +577,16 @@ impl ApiState {
             .bytes)
     }
 
+    pub(crate) fn remote_chunk_checksum(
+        &self,
+        object_key: &str,
+    ) -> Result<Option<String>, Problem> {
+        self.remote_chunks
+            .lock()
+            .map_err(|_| problem("storage_unavailable", "Remote storage unavailable", 503))?
+            .checksum(object_key)
+    }
+
     fn delete_remote_chunk(
         &self,
         object_key: &str,

@@ -507,6 +507,42 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         workspace.as_str(),
         resource.as_str()
     );
+    let blob_check_path = format!(
+        "/v1/workspaces/{}/resources/{}/blobs/check?key=profile%2Fpayload.bin&generation=1&checksum={blob_checksum}",
+        workspace.as_str(),
+        resource.as_str()
+    );
+    let blob_check_request = |correlation: &'static str, owner_token: &str| {
+        Request::builder()
+            .method("GET")
+            .uri(&blob_check_path)
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-correlation-id", correlation)
+            .header("x-buglogin-owner-id", "desktop-1")
+            .header("x-buglogin-owner-token", owner_token)
+            .header(
+                "x-buglogin-fencing-token",
+                first["fencingToken"].as_u64().unwrap().to_string(),
+            )
+            .body(Body::empty())
+            .unwrap()
+    };
+    let missing_blob_check = app
+        .clone()
+        .oneshot(blob_check_request(
+            "blob-check-missing",
+            first["ownerToken"].as_str().unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_blob_check.status(), StatusCode::OK);
+    let missing_blob_check: Value = serde_json::from_slice(
+        &to_bytes(missing_blob_check.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(missing_blob_check["present"], false);
     let plaintext_blob = b"plaintext-cookie-values";
     let plaintext_checksum = checksum(plaintext_blob);
     let plaintext_response = app
@@ -570,6 +606,31 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         app.clone().oneshot(blob_put).await.unwrap().status(),
         StatusCode::OK
     );
+    let uploaded_blob_check = app
+        .clone()
+        .oneshot(blob_check_request(
+            "blob-check-present",
+            first["ownerToken"].as_str().unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded_blob_check.status(), StatusCode::OK);
+    let uploaded_blob_check: Value = serde_json::from_slice(
+        &to_bytes(uploaded_blob_check.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(uploaded_blob_check["present"], true);
+    let stale_lease_check = app
+        .clone()
+        .oneshot(blob_check_request(
+            "blob-check-stale-lease",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_lease_check.status(), StatusCode::CONFLICT);
     let blob_retry = Request::builder()
         .method("PUT")
         .uri(&blob_path)

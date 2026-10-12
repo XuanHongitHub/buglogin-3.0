@@ -1305,6 +1305,21 @@ impl ProductionDesktopState {
                         &correlation_id,
                     )
                 })?;
+                if client
+                    .blob_present(
+                        scope.clone(),
+                        resource_id,
+                        &path,
+                        generation,
+                        &object.checksum,
+                        &owner_token,
+                        fencing_token,
+                        &correlation_id,
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
                 client
                     .upload_blob(
                         scope,

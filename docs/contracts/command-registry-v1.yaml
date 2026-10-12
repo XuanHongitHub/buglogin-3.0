@@ -688,6 +688,14 @@ commands:
     adapters: [rest]
     input: BlobQueryInput
     output: BinaryBlob
+  - id: profile.blob.check
+    kind: query
+    capability: profile.update
+    action: update
+    adapters: [rest]
+    input: BlobCheckInput
+    output: BlobPresence
+    audit: metadata-only
   - id: profile.blob.put
     kind: command
     capability: profile.update

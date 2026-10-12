@@ -90,6 +90,21 @@ endpoints:
       - x-content-sha256
     response: immutable binary bytes
 
+  - id: profile.blob.check
+    method: GET
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs/check?key={objectKey}&generation={generation}&checksum={checksum}
+    capability: profile.update
+    audit: metadata-only
+    required_headers:
+      - x-buglogin-owner-id
+      - x-buglogin-owner-token
+      - x-buglogin-fencing-token
+    response: BlobPresence
+    invariants:
+      - validates the active profile-resource ACL and exact live write lease/fencing token
+      - checks only the server-derived storage key for this workspace resource, generation, object key, and checksum
+      - returns presence only; it never returns bytes or caller-controlled storage keys
+
   - id: migration.sync.import
     method: POST
     path: /v1/migrations/sync/import

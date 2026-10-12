@@ -25,12 +25,13 @@ Status: Rust API, metadata dependency validation, desktop API transport, client-
 - [ ] Implement encrypted credential-envelope lifecycle and workspace/device key rotation and revocation.
 - [x] Keep REST/OpenAPI/MCP coverage aligned with the canonical API command and resource contracts; local API and sync contract suites pass.
 - [ ] Add staging integration tests; prove retries, conflicts, partial transfers, and outages preserve the prior active generation.
+- [ ] Remove or measure the hosted API's global remote-object-store mutex before claiming parallel backend transfer throughput; keep per-object immutability and idempotency when enabling safe concurrent storage operations.
 
 ## Phase 2 — desktop sync engine
 
 - [x] Use one Rust BugLogin API client path for profile and proxy metadata/data; production mode must not contact Donut services or fall back to local authority.
 - [x] Fix encrypted chunk object-key collisions caused by random AES-GCM nonces: new remote keys include the ciphertext checksum while authenticated data remains bound to the stable logical chunk key; old manifest keys remain readable.
-- [ ] Complete incremental sync without weakening manifest authority: v2 stable AAD, key-version binding, API validation for `sourceGeneration`, and a verified per-resource ciphertext cache with desktop reuse decisions are implemented; bounded upload concurrency (four in-flight changed objects) is implemented; still connect chunk hashing/resume, coalescing, and reconciliation.
+- [ ] Complete incremental sync without weakening manifest authority: v2 stable AAD, key-version binding, API validation for `sourceGeneration`, verified ciphertext cache, bounded four-object upload concurrency, and lease-scoped presence checks for retrying staged blobs are implemented; still connect chunk hashing/resume, coalescing, and reconciliation.
 - [ ] Sync a proxy only as a dependency of an explicitly synced profile; send one shared proxy payload once per revision/hash.
 - [ ] Keep proxy secrets in the OS vault and transfer only encrypted envelopes; prove missing/revoked keys fail closed with actionable errors.
 - [x] Define a v1 proxy credential envelope primitive with profile-resource and proxy-revision authenticated scope.

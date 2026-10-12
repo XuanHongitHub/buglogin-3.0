@@ -135,8 +135,10 @@ pub enum CommandSchema {
     SyncManifest,
     OptionalSyncManifest,
     BlobQueryInput,
+    BlobCheckInput,
     BlobPutInput,
     BinaryBlob,
+    BlobPresence,
     BlobReceipt,
 }
 
@@ -257,8 +259,10 @@ impl CommandSchema {
             Self::SyncManifest => "SyncManifest",
             Self::OptionalSyncManifest => "OptionalSyncManifest",
             Self::BlobQueryInput => "BlobQueryInput",
+            Self::BlobCheckInput => "BlobCheckInput",
             Self::BlobPutInput => "BlobPutInput",
             Self::BinaryBlob => "BinaryBlob",
+            Self::BlobPresence => "BlobPresence",
             Self::BlobReceipt => "BlobReceipt",
         }
     }
