@@ -305,7 +305,8 @@ pub(super) async fn import_sync_authorized(
     ) {
         Ok(revision) => revision,
         Err(error) => {
-            let _ = state.rollback_sync_import(&staged);
+            // The journal write may have committed before its acknowledgement was lost.
+            // Keep immutable objects intact so a retry or recovery worker can reconcile it.
             release(&*backend, &input.export, &auth, &lease.owner_token).await;
             return Err(response(error));
         }

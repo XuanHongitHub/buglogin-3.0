@@ -48,7 +48,7 @@ use buglogin_network::proxy::{
 use buglogin_storage::{
     local::Versioned,
     remote::{
-        ConcurrentRemoteChunkStore, MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore,
+        ConcurrentRemoteChunkStore, MemoryRemoteChunkStore, RemoteChunkStore,
         SerializedRemoteChunkStore,
     },
     vault::NativeVault,
@@ -57,10 +57,7 @@ use buglogin_sync::coordination::{
     AuthorizationRequest, CoordinationAuth, CoordinationAuthorizer, CoordinationBackend,
     CoordinationOperation,
 };
-use buglogin_sync::{
-    import::{SyncStageReceipt, rollback_staged_sync_import},
-    manifest::SyncManifest,
-};
+use buglogin_sync::manifest::SyncManifest;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use url::Url;
@@ -241,39 +238,6 @@ pub struct ApiState {
     migration_signing_key: Arc<RwLock<Option<buglogin_storage::secrets::SecretValue>>>,
     coordination: Arc<RwLock<Option<Arc<dyn CoordinationBackend>>>>,
     remote_chunks: Arc<dyn ConcurrentRemoteChunkStore>,
-}
-
-struct ConcurrentChunkStoreAdapter<'a>(&'a dyn ConcurrentRemoteChunkStore);
-
-impl RemoteChunkStore for ConcurrentChunkStoreAdapter<'_> {
-    fn readiness(&self) -> Result<(), Problem> {
-        self.0.readiness()
-    }
-
-    fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
-        self.0.checksum(object_key)
-    }
-
-    fn put(
-        &mut self,
-        object_key: &str,
-        bytes: &[u8],
-        expected_checksum: &str,
-    ) -> Result<(), Problem> {
-        self.0.put(object_key, bytes, expected_checksum)
-    }
-
-    fn get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
-        self.0.get(object_key, expected_checksum)
-    }
-
-    fn delete_if_checksum(
-        &mut self,
-        object_key: &str,
-        expected_checksum: &str,
-    ) -> Result<bool, Problem> {
-        self.0.delete_if_checksum(object_key, expected_checksum)
-    }
 }
 
 impl ApiState {
@@ -578,11 +542,6 @@ impl ApiState {
         expected_checksum: &str,
     ) -> Result<(), Problem> {
         self.remote_chunks.put(object_key, bytes, expected_checksum)
-    }
-
-    pub(crate) fn rollback_sync_import(&self, receipt: &SyncStageReceipt) -> Result<(), Problem> {
-        let mut adapter = ConcurrentChunkStoreAdapter(self.remote_chunks.as_ref());
-        rollback_staged_sync_import(&mut adapter, &receipt.objects)
     }
 
     pub(crate) fn get_remote_chunk(
