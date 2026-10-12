@@ -31,6 +31,18 @@ pub struct HostedProfileProvisionPlan {
 pub struct HostedProfileService;
 
 impl HostedProfileService {
+    pub fn ensure_delete_supported(state: &ApiState) -> Result<(), Problem> {
+        if state.local_authority_enabled() {
+            Ok(())
+        } else {
+            Err(problem(
+                "hosted_profile_delete_not_ready",
+                "Hosted profile deletion is unavailable until quarantine and object retention are supported",
+                503,
+            ))
+        }
+    }
+
     pub fn managed_resource_id(profile_id: &ProfileId) -> Result<ResourceId, Problem> {
         let digest = format!("{:x}", Sha256::digest(profile_id.as_str().as_bytes()));
         ResourceId::new(format!("res_{}", &digest[..24])).map_err(|_| {

@@ -3161,6 +3161,7 @@ async fn delete_profile(
         Action::Delete,
         "profile.delete",
     )?;
+    HostedProfileService::ensure_delete_supported(&state).map_err(response)?;
     if input.confirmation != "QUARANTINE_PROFILE_DATA" {
         return Err(response(problem(
             "delete_not_confirmed",

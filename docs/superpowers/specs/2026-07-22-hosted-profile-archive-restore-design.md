@@ -30,5 +30,5 @@ Enable `profile.archive` and `profile.restore` for hosted production authority t
 
 ## Deferred
 
-- Hosted permanent delete needs quarantine plus object-retention cleanup proof.
+- Hosted permanent delete needs quarantine plus object-retention cleanup proof. REST and MCP share one typed fail-closed response until that capability is implemented; neither transport may fall through to the disabled local profile repository.
 - Proxy credentials need a workspace encryption-envelope authority before hosted persistence.

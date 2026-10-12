@@ -180,6 +180,57 @@ async fn profile_http_flow_enforces_auth_scope_and_revision() {
 }
 
 #[tokio::test]
+async fn hosted_profile_delete_fails_closed_until_remote_quarantine_exists() {
+    let account = AccountId::from_str("acct_hosted_delete").unwrap();
+    let mut store = MemoryControlRecordStore::default();
+    let account_value =
+        serde_json::to_value(Account::new(account.clone(), "2026-10-12T00:00:00Z")).unwrap();
+    store
+        .put(PutControlRecord {
+            tenant_id: "control",
+            record_type: "account",
+            record_id: account.as_str(),
+            expected_revision: Some(0),
+            idempotency_key: "seed-hosted-profile-delete-account",
+            value: &account_value,
+        })
+        .unwrap();
+    let state = ApiState::hosted_with_control_store(ProfileService::disabled(), store).unwrap();
+    let token = state.issue_token(account.as_str()).unwrap();
+    let profile_id = ProfileId::from_str("prf_hosted_delete").unwrap();
+    state.grants.write().unwrap().push(Grant {
+        id: GrantId::from_str("grant_hosted_profile_delete").unwrap(),
+        account_id: Some(account),
+        member_id: None,
+        capability: Capability::new("profile.delete").unwrap(),
+        action: Action::Delete,
+        scope: ResourceScope {
+            profile_id: Some(profile_id.clone()),
+            ..ResourceScope::default()
+        },
+        effect: Effect::Allow,
+    });
+
+    let response = router(state)
+        .oneshot(request(
+            "DELETE",
+            "/v1/profiles/prf_hosted_delete",
+            &token,
+            Some(json!({"revision": 1, "confirmation": "QUARANTINE_PROFILE_DATA"}).to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["code"], "hosted_profile_delete_not_ready");
+}
+
+#[tokio::test]
 async fn profile_clone_and_share_routes_validate_path_identity() {
     let root = root("profile-route-identity");
     let _ = fs::remove_dir_all(&root);

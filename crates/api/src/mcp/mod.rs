@@ -1735,13 +1735,7 @@ impl McpExecutor for ProductionMcpExecutor {
                 Ok(serde_json::to_value(updated.value).map_err(serialization_problem)?)
             }
             "profile.delete" => {
-                if !state.local_authority_enabled() {
-                    return Err(problem(
-                        "production_profile_mcp_mutation_not_ready",
-                        "Hosted profile MCP mutation is not ready",
-                        503,
-                    ));
-                }
+                HostedProfileService::ensure_delete_supported(state)?;
                 if input.get("confirmation").and_then(Value::as_str)
                     != Some("QUARANTINE_PROFILE_DATA")
                 {
