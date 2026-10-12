@@ -22,13 +22,17 @@ use buglogin_domain::{
     profile::{ProfileArchiveState, ProfileResource},
     resource::{Resource, ResourceKind, ResourceState},
 };
-use buglogin_storage::local::LocalRepository;
+use buglogin_storage::{
+    local::LocalRepository,
+    remote::{MemoryRemoteChunkStore, RemoteChunkStore},
+};
 use buglogin_sync::{
     coordination::{
         CoordinationBackend, CoordinationEvent, CoordinationScope, LeaseGrant, Presence,
         PublishedEvent, StreamEvent,
     },
     export::{SyncExport, SyncExportBlob, SyncRevision, canonical_manifest_checksum},
+    import::{plan_sync_import, sync_object_storage_key},
     manifest::{ManifestObject, SyncManifest},
 };
 use serde_json::{Value, json};
@@ -183,7 +187,7 @@ impl CoordinationBackend for FakeCoordination {
 }
 
 #[tokio::test]
-async fn hosted_sync_import_activates_postgres_state_and_never_commits_redis_manifest() {
+async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest() {
     let root = std::env::temp_dir().join(format!(
         "buglogin-http-sync-migration-{}",
         std::process::id()
@@ -239,6 +243,19 @@ async fn hosted_sync_import_activates_postgres_state_and_never_commits_redis_man
         )
         .unwrap();
     let coordination = Arc::new(FakeCoordination::default());
+    let remote = MemoryRemoteChunkStore::default();
+    let export = genesis_export(workspace.clone(), resource.clone());
+    let plan = plan_sync_import(&export, None, 41).unwrap();
+    let staged_blob = &plan.blobs[0];
+    let staged_key = sync_object_storage_key(&plan.manifest, staged_blob);
+    let mut interrupted_store = remote.clone();
+    RemoteChunkStore::put(
+        &mut interrupted_store,
+        &staged_key,
+        &staged_blob.data,
+        &staged_blob.checksum,
+    )
+    .unwrap();
     let app = router(
         state
             .with_profile_resource(ProfileResource {
@@ -247,9 +264,9 @@ async fn hosted_sync_import_activates_postgres_state_and_never_commits_redis_man
                 workspace_id: workspace.clone(),
                 archive_state: ProfileArchiveState::Active,
             })
+            .with_remote_chunks(Box::new(remote.clone()))
             .with_coordination(coordination.clone()),
     );
-    let export = genesis_export(workspace.clone(), resource.clone());
     assert_eq!(export.manifest.fencing_token, 8);
     let import = request(
         &token,
@@ -257,7 +274,15 @@ async fn hosted_sync_import_activates_postgres_state_and_never_commits_redis_man
         json!({"export": export, "dryRun": false}),
     );
     let first = app.clone().oneshot(import).await.unwrap();
-    assert_eq!(first.status(), StatusCode::OK, "{}", body(first).await);
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = body(first).await;
+    assert_eq!(first_body["state"], "active");
+    assert_eq!(first_body["createdBlobs"], 0);
+    assert_eq!(first_body["resumedBlobs"], 1);
+    assert_eq!(
+        RemoteChunkStore::checksum(&remote, &staged_key).unwrap(),
+        Some(staged_blob.checksum.clone())
+    );
 
     let replay = app
         .clone()
