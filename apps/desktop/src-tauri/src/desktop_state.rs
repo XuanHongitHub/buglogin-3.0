@@ -21,6 +21,7 @@ use buglogin_domain::{
 use buglogin_network::proxy::ProxyRow;
 use buglogin_storage::secrets::SecretVersion;
 use buglogin_sync::coordination::{CoordinationAuth, CoordinationBackend, CoordinationScope};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1278,33 +1279,51 @@ impl ProductionDesktopState {
             .filter(|object| object.source_generation.is_some())
             .map(|object| object.key.as_str())
             .collect();
-        for (path, bytes) in files {
-            if reused_object_keys.contains(path.as_str()) {
-                continue;
+        let client = self.client.clone();
+        let resource_id = &binding.resource_id;
+        let generation = manifest.generation;
+        let owner_token = lease.owner_token.clone();
+        let fencing_token = lease.fencing_token;
+        let correlation_id = correlation_id.clone();
+        stream::iter(files.into_iter().map(|(path, bytes)| {
+            let client = client.clone();
+            let scope = scope.clone();
+            let owner_token = owner_token.clone();
+            let correlation_id = correlation_id.clone();
+            let object_map = &object_map;
+            let reused_object_keys = &reused_object_keys;
+            let idempotency_key = &idempotency_key;
+            async move {
+                if reused_object_keys.contains(path.as_str()) {
+                    return Ok(());
+                }
+                let object = object_map.get(path.as_str()).ok_or_else(|| {
+                    Problem::new(
+                        "profile_snapshot_incomplete",
+                        "Profile snapshot is incomplete",
+                        409,
+                        &correlation_id,
+                    )
+                })?;
+                client
+                    .upload_blob(
+                        scope,
+                        resource_id,
+                        &path,
+                        generation,
+                        &object.checksum,
+                        &owner_token,
+                        fencing_token,
+                        &blob_idempotency_key(&idempotency_key, &path, &object.checksum),
+                        bytes,
+                        &correlation_id,
+                    )
+                    .await
             }
-            let object = object_map.get(path.as_str()).ok_or_else(|| {
-                Problem::new(
-                    "profile_snapshot_incomplete",
-                    "Profile snapshot is incomplete",
-                    409,
-                    &correlation_id,
-                )
-            })?;
-            self.client
-                .upload_blob(
-                    scope.clone(),
-                    &binding.resource_id,
-                    &path,
-                    manifest.generation,
-                    &object.checksum,
-                    &lease.owner_token,
-                    lease.fencing_token,
-                    &blob_idempotency_key(&idempotency_key, &path, &object.checksum),
-                    bytes,
-                    &correlation_id,
-                )
-                .await?;
-        }
+        }))
+        .buffer_unordered(4)
+        .try_collect::<Vec<()>>()
+        .await?;
         self.client
             .commit_manifest(
                 scope,

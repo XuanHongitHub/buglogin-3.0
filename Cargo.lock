@@ -729,6 +729,7 @@ dependencies = [
  "buglogin-storage",
  "buglogin-sync",
  "dirs",
+ "futures-util",
  "image",
  "native-tls",
  "reqwest",
