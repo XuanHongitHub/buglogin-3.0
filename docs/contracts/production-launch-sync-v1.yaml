@@ -281,6 +281,7 @@ migrationEnvelope:
     - object-store blobs are immutable and invisible until PostgreSQL activation
     - retrying a pending import uses a fresh resource-lease attempt key so an expired Redis grant cannot be replayed as current authority
     - ambiguous staging or finalizing journal acknowledgements preserve immutable blobs until durable journal and receipt state is reconciled
+    - lease and import-plan failures after journal creation persist retryable or cleanup-pending state instead of leaving an unclassified staging journal
     - profile manifests with a selected proxy include exactly one matching proxy dependency
     - sourceGeneration reuses only an exact object in the immediately previous active manifest under the same resource key version
     - proxy dependency revision and metadata object must match same-workspace Rust API authority

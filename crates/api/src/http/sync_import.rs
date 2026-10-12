@@ -245,10 +245,28 @@ pub(super) async fn import_sync_authorized(
             &lease_idempotency_key,
         )
         .await
-        .map_err(response)?;
+        .map_err(|error| {
+            persist_stage_failure(
+                state,
+                &journal_id,
+                journal_revision,
+                &actor_id,
+                &mut journal,
+                &error,
+            );
+            response(error)
+        })?;
     let plan = match plan_sync_import(&input.export, current.as_ref(), lease.fencing_token) {
         Ok(plan) => plan,
         Err(error) => {
+            persist_stage_failure(
+                state,
+                &journal_id,
+                journal_revision,
+                &actor_id,
+                &mut journal,
+                &error,
+            );
             release(&*backend, &input.export, &auth, &lease.owner_token).await;
             return Err(response(error));
         }
@@ -980,6 +998,67 @@ mod tests {
         assert_eq!(put_calls.load(Ordering::SeqCst), 1);
         assert_eq!(recovered_journal.created_objects.len(), 1);
         assert_eq!(recovered_journal.state, SyncMigrationJournalState::Staging);
+    }
+
+    #[test]
+    fn failed_non_retryable_import_plan_is_journaled_for_cleanup() {
+        let store = MemoryControlRecordStore::default();
+        let state = ApiState::hosted_with_control_store(ProfileService::disabled(), store).unwrap();
+        let mut journal = SyncMigrationJournal {
+            schema: "buglogin.migration-sync-journal/1".into(),
+            operation_id: "op_plan_failure".into(),
+            export_id: "export_plan_failure".into(),
+            export_sha256: "a".repeat(64),
+            manifest_sha256: "b".repeat(64),
+            blob_set_sha256: "c".repeat(64),
+            workspace_id: "ws_plan_failure".into(),
+            resource_id: "res_plan_failure".into(),
+            base_generation: None,
+            target_generation: 1,
+            state: SyncMigrationJournalState::Staging,
+            created_objects: Vec::new(),
+            resumed_objects: Vec::new(),
+            destination_fencing_token: None,
+            control_revision_before: 0,
+            control_revision_after: None,
+            updated_at_ms: 1,
+            error_code: None,
+        };
+        let journal_id = "msi_plan_failure";
+        let revision = state
+            .persist_sync_migration_journal(
+                journal_id,
+                0,
+                "plan-failure-initial".into(),
+                "acct_plan_failure".into(),
+                &journal,
+            )
+            .unwrap();
+        let error = buglogin_domain::errors::Problem::new(
+            "sync_generation_conflict",
+            "Sync generation conflicts with destination",
+            409,
+            "test",
+        );
+
+        super::persist_stage_failure(
+            &state,
+            journal_id,
+            revision,
+            "acct_plan_failure",
+            &mut journal,
+            &error,
+        );
+
+        let (persisted, _) = state
+            .load_sync_migration_journal(journal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.state, SyncMigrationJournalState::CleanupPending);
+        assert_eq!(
+            persisted.error_code.as_deref(),
+            Some("sync_generation_conflict")
+        );
     }
 
     #[test]
