@@ -1,6 +1,6 @@
 # Isolated Shared-VPS Production Plan
 
-Status: BugLogin-only PostgreSQL, TLS Redis, and environment files provisioned on the BugIdea VPS; API remains staged but disabled. No BugIdea services, data, proxy configuration, or existing Redis/PostgreSQL instances were changed.
+Status: BugLogin-only PostgreSQL, TLS Redis, and environment files are provisioned on the BugIdea VPS. The Linux API release artifact is staged at `/opt/buglogin3/buglogin-api`; its systemd unit remains disabled and inactive pending production delivery secrets and storage isolation. No BugIdea services, data, proxy configuration, or existing Redis/PostgreSQL instances were changed.
 
 Operational correction (2026-10-13): a `buglogin3-redis.service` unit was also present on the legacy BugLogin 1.0 VPS. It was disabled there without deleting its config/data; the 1.0 API health endpoint remained healthy. The BugIdea VPS remains the only active 3.0 Redis host.
 
@@ -21,7 +21,8 @@ Operational correction (2026-10-13): a `buglogin3-redis.service` unit was also p
 - [x] Provision a separate PostgreSQL database/role with a 12-connection cap and root-only TLS URL file. The Rust adapter now accepts an explicit PEM root through `BUGLOGIN_POSTGRES_TLS_ROOT_CERT`; the API-only trust copy is mode 0640 for the service group. The DB URL uses certificate identity `bugideas-server` with `hostaddr=127.0.0.1`, so the socket stays on loopback while TLS verifies the server name. The live adapter persistence/idempotency probe passed against the staged 3.0 database, and its synthetic rows were deleted.
 - [x] Provision the separate TLS Redis service/namespace and root-only application credentials; TLS PING succeeds.
 - [x] Verify S3 write/read/delete under the dedicated prefix. On 2026-10-13, the existing Rust `s3_https_adapter_round_trips_checksum_metadata` probe passed on `bugideas-server` using the root-only config and exact `buglogin3/prod` prefix; it performed unique put, idempotent put, checksum/content read, conditional delete, and absence verification. Probe binary SHA-256: `01cd21630a04785a52f392d2f257bb08b30cfebf525642cfc6d348578fd07442`; temporary binary/log were removed. A dedicated 3.0 bucket-scoped key is still required before final production acceptance.
-- [x] Prepare root-only production API env and a resource-limited BugLogin-only systemd unit; keep the unit disabled until a Linux artifact and real production recovery-webhook endpoint/secret are available.
+- [x] Prepare root-only production API env and a resource-limited BugLogin-only systemd unit; keep the unit disabled until production recovery delivery and storage isolation are ready.
+- [x] Build the Linux release API from commit `26cad04`, smoke-check `/v1/health`, exact OpenAPI bytes, and fail-closed production startup, then stage it at `/opt/buglogin3/buglogin-api` (SHA-256 `2cfdf5fd76b7f7e3611a25948a250ff615258610db03ed8da45b2cea9248c0a0`). Confirm service ownership/execute access and `ActiveState=inactive`, `UnitFileState=disabled`; no service start or ingress change.
 - [ ] Define BugLogin-only object-storage backup/retention and quota policy.
 - [ ] Deploy only to the dedicated 3.0 hostname and compare deployed OpenAPI bytes/hash with the checked-in Rust contract.
 - [ ] Verify readiness, authenticated profile/proxy flows, sync interruption/recovery, and logs/redaction using synthetic data.
@@ -43,7 +44,7 @@ Operational correction (2026-10-13): a `buglogin3-redis.service` unit was also p
 
 ## Current blockers
 
-- Linux API artifact is not deployed; the API unit is intentionally disabled.
+- The Linux API artifact is staged and verified, but its unit is intentionally disabled; no 3.0 hostname or ingress is live.
 - Recovery delivery has no approved HTTPS webhook endpoint/secret; production startup correctly fails closed without both.
 - The existing S3 credential is shared with BugLogin 1.0 and is not bucket/prefix-policy isolated. A live canary passed under the 3.0 prefix, but this does not prove credential isolation or backup/restore.
 - `api3.buglogin.com` and `app3.buglogin.com` are staged in API env but DNS/tunnel routes are not created or verified.
