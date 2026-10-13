@@ -135,7 +135,7 @@ fn proxy_dependency_must_reference_verified_manifest_objects() {
     value.dependencies.push(ManifestDependency::Proxy {
         proxy_id: ProxyId::new("proxy_manifest_1").unwrap(),
         revision: 1,
-        metadata_object: ManifestObjectReference::from(&metadata),
+        metadata_object: Some(ManifestObjectReference::from(&metadata)),
         credential_envelope_object: Some(ManifestObjectReference::from(&envelope)),
     });
     assert!(value.validate().is_ok());
@@ -147,16 +147,48 @@ fn proxy_dependency_must_reference_verified_manifest_objects() {
     value.dependencies[0] = ManifestDependency::Proxy {
         proxy_id: ProxyId::new("proxy_manifest_1").unwrap(),
         revision: 1,
-        metadata_object: ManifestObjectReference {
+        metadata_object: Some(ManifestObjectReference {
             key: "proxies/p1/not-uploaded".into(),
             size: 1,
             checksum: "a".repeat(64),
-        },
+        }),
         credential_envelope_object: None,
     };
     assert_eq!(
         value.validate().unwrap_err().code,
         "manifest_dependency_object_missing"
+    );
+}
+
+#[test]
+fn proxy_dependency_can_reference_canonical_api_record_without_profile_blob_copy() {
+    let mut value = SyncManifest::new(
+        workspace(),
+        resource(),
+        1,
+        1,
+        None,
+        b"profile root",
+        Vec::new(),
+    )
+    .unwrap();
+    value.dependencies.push(ManifestDependency::Proxy {
+        proxy_id: ProxyId::new("proxy_manifest_2").unwrap(),
+        revision: 3,
+        metadata_object: None,
+        credential_envelope_object: None,
+    });
+
+    assert!(value.validate().is_ok());
+    let serialized = serde_json::to_value(&value).unwrap();
+    assert!(
+        serialized["dependencies"][0]
+            .get("metadataObject")
+            .is_none()
+    );
+    assert_eq!(
+        serde_json::from_value::<SyncManifest>(serialized).unwrap(),
+        value
     );
 }
 

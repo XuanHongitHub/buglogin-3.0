@@ -66,13 +66,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let state = match env::var("BUGLOGIN_REDIS_URL") {
         Ok(url) => {
+            validate_redis_url(production, &url)?;
             let namespace = env::var("BUGLOGIN_REDIS_NAMESPACE")
                 .unwrap_or_else(|_| "buglogin-production".to_owned());
-            let backend = RedisCoordination::connect(
-                RedisCoordinationConfig::new(url, namespace),
-                coordination_authorizer(&state),
-            )
-            .await?;
+            let mut redis_config = RedisCoordinationConfig::new(url, namespace);
+            if let Ok(certificate_path) = env::var("BUGLOGIN_REDIS_CA_CERT") {
+                let certificate_pem = std::fs::read(certificate_path)?;
+                redis_config = redis_config.with_tls_root_cert(certificate_pem);
+            }
+            let backend =
+                RedisCoordination::connect(redis_config, coordination_authorizer(&state)).await?;
             state.with_coordination(Arc::new(backend))
         }
         Err(_) if production => return Err("BUGLOGIN_REDIS_URL is required in production".into()),
@@ -94,6 +97,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("BugLogin API listening on {address}");
     start_sync_migration_recovery_worker(state.clone());
     serve(listener, router(state)).await?;
+    Ok(())
+}
+
+fn validate_redis_url(production: bool, url: &str) -> Result<(), String> {
+    let scheme = url.split_once("://").map(|(scheme, _)| scheme);
+    if production && !scheme.is_some_and(|scheme| scheme.eq_ignore_ascii_case("rediss")) {
+        return Err("BUGLOGIN_REDIS_URL must use rediss:// in production".to_owned());
+    }
     Ok(())
 }
 
@@ -173,7 +184,7 @@ mod tests {
 
     use std::env;
 
-    use super::{bind_address, production_mode_from};
+    use super::{bind_address, production_mode_from, validate_redis_url};
 
     #[test]
     fn local_mode_keeps_loopback_default() {
@@ -196,5 +207,13 @@ mod tests {
         assert!(production_mode_from(Ok("prod".to_owned())).is_err());
         assert!(production_mode_from(Err(env::VarError::NotPresent)).is_err());
         assert!(production_mode_from(Ok("production".to_owned())).unwrap());
+    }
+
+    #[test]
+    fn production_redis_requires_tls_while_local_allows_plaintext() {
+        assert!(validate_redis_url(true, "redis://localhost:6379").is_err());
+        assert!(validate_redis_url(true, "rediss://redis.example:6379").is_ok());
+        assert!(validate_redis_url(true, "REDISS://redis.example:6379").is_ok());
+        assert!(validate_redis_url(false, "redis://localhost:6379").is_ok());
     }
 }

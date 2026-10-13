@@ -12,7 +12,10 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
     routing::{get, post, put},
 };
 use buglogin_browser::{
@@ -26,12 +29,15 @@ use buglogin_browser::{
 };
 use buglogin_domain::{
     account::{AccountIdentity, AccountStatus},
-    entities::{Profile, ProfileState, Runtime},
+    entities::{Profile, ProfileCreateInput, ProfileState, Runtime},
     errors::Problem,
-    ids::{AccountId, GrantId, MemberId, ProfileId, WorkspaceId},
+    ids::{AccountId, GrantId, GroupId, MemberId, ProfileId, WorkspaceId},
     member::MemberRole,
     permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, Role, is_allowed},
-    profile::{ProfileCloneInput, ProfileResource, ProfileShareInput, ProfileShareRevokeInput},
+    profile::{
+        ProfileArchiveState, ProfileCloneInput, ProfileResource, ProfileShareInput,
+        ProfileShareRevokeInput,
+    },
 };
 use buglogin_migration::{
     MigrationKey, activate_package,
@@ -55,9 +61,10 @@ use buglogin_storage::{
 };
 use buglogin_sync::coordination::{
     AuthorizationRequest, CoordinationAuth, CoordinationAuthorizer, CoordinationBackend,
-    CoordinationOperation,
+    CoordinationOperation, CoordinationScope,
 };
 use buglogin_sync::manifest::SyncManifest;
+use futures_util::{Stream, stream};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use url::Url;
@@ -76,9 +83,11 @@ use crate::{
         credentials::CredentialService,
         device_authorization::DeviceAuthorizationService,
         events::EventService,
+        groups::GroupService,
         identity_persistence::IdentityPersistence,
         members::MemberService,
         operations::{Operation, OperationService, OperationStatus},
+        profile_creation::ProfileCreationService,
         profile_hosted::HostedProfileService,
         recovery::{RecoveryDelivery, RecoveryService, WebhookRecoveryDelivery},
         resources::ResourceService,
@@ -98,12 +107,15 @@ mod package_upload;
 mod sync_import;
 
 const CONTROL_TENANT: &str = "control";
+const CONNECTED_COOKIE_JOB_TTL_SECONDS: u64 = 600;
 const CONTROL_STATE_TYPE: &str = "control_state";
 const CONTROL_STATE_ID: &str = "primary";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub(crate) struct ControlAggregate {
     grants: Vec<Grant>,
+    #[serde(default)]
+    pub(crate) operations: OperationService,
     #[serde(default)]
     materialized_member_grants: BTreeSet<MemberId>,
     #[serde(default)]
@@ -123,6 +135,11 @@ pub(crate) struct ControlAggregate {
     workspaces: WorkspaceService,
     members: MemberService,
     resources: ResourceService,
+    #[serde(default)]
+    groups: GroupService,
+    #[serde(default)]
+    profile_proxy_assignments:
+        crate::services::profile_proxy_assignment::ProfileProxyAssignmentService,
     teams: TeamService,
     audit: AuditService,
 }
@@ -210,6 +227,9 @@ pub struct ApiState {
     pub workspaces: Arc<RwLock<WorkspaceService>>,
     pub members: Arc<RwLock<MemberService>>,
     pub resources: Arc<RwLock<ResourceService>>,
+    pub groups: Arc<RwLock<GroupService>>,
+    pub profile_proxy_assignments:
+        Arc<RwLock<crate::services::profile_proxy_assignment::ProfileProxyAssignmentService>>,
     hosted_profiles: Arc<RwLock<BTreeMap<ProfileId, Versioned<Profile>>>>,
     profile_resources: Arc<RwLock<BTreeMap<ProfileId, ProfileResource>>>,
     sync_manifests: Arc<RwLock<BTreeMap<String, SyncManifest>>>,
@@ -238,6 +258,17 @@ pub struct ApiState {
     migration_signing_key: Arc<RwLock<Option<buglogin_storage::secrets::SecretValue>>>,
     coordination: Arc<RwLock<Option<Arc<dyn CoordinationBackend>>>>,
     remote_chunks: Arc<dyn ConcurrentRemoteChunkStore>,
+}
+
+#[derive(Clone)]
+struct ApiAuthorizationAuthority {
+    auth: Arc<RwLock<AuthService>>,
+    api_tokens: ApiTokenService,
+    account_persistence: AccountPersistence,
+    members: Arc<RwLock<MemberService>>,
+    platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
+    grants: Arc<RwLock<Vec<Grant>>>,
+    materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
 }
 
 impl ApiState {
@@ -322,11 +353,13 @@ impl ApiState {
             grants: Arc::new(RwLock::new(aggregate.grants)),
             materialized_member_grants: Arc::new(RwLock::new(aggregate.materialized_member_grants)),
             platform_admin_accounts: Arc::new(RwLock::new(aggregate.platform_admin_accounts)),
-            operations: Arc::new(RwLock::new(OperationService::default())),
+            operations: Arc::new(RwLock::new(aggregate.operations)),
             events: Arc::new(RwLock::new(EventService::default())),
             workspaces: Arc::new(RwLock::new(aggregate.workspaces)),
             members: Arc::new(RwLock::new(aggregate.members)),
             resources: Arc::new(RwLock::new(aggregate.resources)),
+            groups: Arc::new(RwLock::new(aggregate.groups)),
+            profile_proxy_assignments: Arc::new(RwLock::new(aggregate.profile_proxy_assignments)),
             hosted_profiles: Arc::new(RwLock::new(aggregate.profiles)),
             profile_resources: Arc::new(RwLock::new(aggregate.profile_resources)),
             sync_manifests: Arc::new(RwLock::new(aggregate.sync_manifests)),
@@ -584,85 +617,8 @@ impl ApiState {
     }
 
     pub fn authenticate_token(&self, token: &str, now_ms: u64) -> Result<Principal, Problem> {
-        let (account_id, token_scopes) = if token.starts_with("blapi_") {
-            let (account_id, scopes) = self.api_tokens.authenticate(token, now_ms)?;
-            (account_id, Some(scopes))
-        } else {
-            let account_id = self
-                .auth
-                .read()
-                .map_err(|_| {
-                    Problem::new(
-                        "auth_unavailable",
-                        "Authentication unavailable",
-                        503,
-                        "identity",
-                    )
-                })?
-                .authenticate(token, now_ms)?;
-            (account_id, None)
-        };
-        let account = match self.account_persistence.load(&account_id)? {
-            Some(account) if account.id == account_id => account,
-            _ => {
-                return Err(Problem::new(
-                    "account_record_invalid",
-                    "Account record is invalid",
-                    500,
-                    "identity",
-                ));
-            }
-        };
-        if account.status != AccountStatus::Active {
-            return Err(Problem::new(
-                "account_inactive",
-                "Account is not active",
-                403,
-                "identity",
-            ));
-        }
-        let memberships = self
-            .members
-            .read()
-            .map_err(|_| {
-                Problem::new(
-                    "member_unavailable",
-                    "Member state unavailable",
-                    503,
-                    "identity",
-                )
-            })?
-            .active_for_account(&account_id);
-        let mut principal = Principal {
-            account_id: Some(account_id),
-            roles: BTreeSet::from([Role::Account]),
-            token_scopes,
-            ..Principal::default()
-        };
-        if self
-            .platform_admin_accounts
-            .read()
-            .map_err(|_| {
-                Problem::new(
-                    "permission_unavailable",
-                    "Permission service unavailable",
-                    503,
-                    "identity",
-                )
-            })?
-            .contains(principal.account_id.as_ref().expect("account assigned"))
-        {
-            principal.roles.insert(Role::PlatformAdmin);
-        }
-        for member in memberships {
-            principal.workspace_ids.insert(member.workspace_id.clone());
-            if principal.member_id.is_none() {
-                principal.member_id = Some(member.id);
-            } else {
-                principal.member_id = None;
-            }
-        }
-        Ok(principal)
+        self.authorization_authority()
+            .authenticate_token(token, now_ms)
     }
 
     pub(crate) fn account(
@@ -673,92 +629,19 @@ impl ApiState {
     }
 
     pub fn grants(&self) -> Result<Vec<Grant>, Problem> {
-        let mut grants = self.grants.read().map(|value| value.clone()).map_err(|_| {
-            Problem::new(
-                "permission_unavailable",
-                "Permission service unavailable",
-                503,
-                "mcp",
-            )
-        })?;
-        let members = self
-            .members
-            .read()
-            .map_err(|_| {
-                Problem::new("member_unavailable", "Member state unavailable", 503, "mcp")
-            })?
-            .active_members();
-        let materialized = self
-            .materialized_member_grants
-            .read()
-            .map_err(|_| {
-                Problem::new(
-                    "permission_unavailable",
-                    "Permission service unavailable",
-                    503,
-                    "mcp",
-                )
-            })?
-            .clone();
-        const CAPABILITIES: [&str; 7] = [
-            "CAP-WS-001",
-            "CAP-TEAM-001",
-            "CAP-MEM-001",
-            "CAP-RES-001",
-            "CAP-AUD-001",
-            "events.read",
-            "operation.read",
-        ];
-        const ALL: [Action; 7] = [
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Delete,
-            Action::Execute,
-            Action::Share,
-            Action::Manage,
-        ];
-        const OPERATE: [Action; 5] = [
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Execute,
-            Action::Share,
-        ];
-        const USE: [Action; 2] = [Action::Read, Action::Execute];
-        for member in members {
-            if materialized.contains(&member.id) {
-                continue;
-            }
-            let actions: &[Action] = match member.role {
-                MemberRole::Owner | MemberRole::Admin => &ALL,
-                MemberRole::Operator => &OPERATE,
-                MemberRole::Member => &USE,
-            };
-            for capability_name in CAPABILITIES {
-                let capability = Capability::new(capability_name).map_err(|_| {
-                    Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
-                })?;
-                for action in actions {
-                    grants.push(Grant {
-                        id: GrantId::new(format!(
-                            "membership:{}:{capability_name}:{action:?}",
-                            member.id.as_str()
-                        ))
-                        .map_err(|_| {
-                            Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
-                        })?,
-                        account_id: Some(member.account_id.clone()),
-                        member_id: None,
-                        capability: capability.clone(),
-                        action: *action,
-                        scope: ResourceScope::workspace(member.workspace_id.clone()),
-                        effect: Effect::Allow,
-                    });
-                }
-            }
+        self.authorization_authority().grants()
+    }
+
+    fn authorization_authority(&self) -> ApiAuthorizationAuthority {
+        ApiAuthorizationAuthority {
+            auth: Arc::clone(&self.auth),
+            api_tokens: self.api_tokens.clone(),
+            account_persistence: self.account_persistence.clone(),
+            members: Arc::clone(&self.members),
+            platform_admin_accounts: Arc::clone(&self.platform_admin_accounts),
+            grants: Arc::clone(&self.grants),
+            materialized_member_grants: Arc::clone(&self.materialized_member_grants),
         }
-        Ok(grants)
     }
 
     pub fn with_runtime_binary(self, runtime: Runtime, binary: RuntimeBinary) -> Self {
@@ -773,6 +656,11 @@ impl ApiState {
         Ok(ControlAggregate {
             grants: self
                 .grants
+                .read()
+                .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
+                .clone(),
+            operations: self
+                .operations
                 .read()
                 .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
                 .clone(),
@@ -831,6 +719,16 @@ impl ApiState {
                 .read()
                 .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
                 .clone(),
+            groups: self
+                .groups
+                .read()
+                .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
+                .clone(),
+            profile_proxy_assignments: self
+                .profile_proxy_assignments
+                .read()
+                .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
+                .clone(),
             teams: self
                 .teams
                 .read()
@@ -850,6 +748,11 @@ impl ApiState {
     ) -> Result<(), Problem> {
         let proxies = ProxyRepository::restore(aggregate.proxies.clone())
             .map_err(proxy_repository_problem)?;
+        *self
+            .operations
+            .write()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))? =
+            aggregate.operations;
         *self
             .grants
             .write()
@@ -910,6 +813,16 @@ impl ApiState {
             .write()
             .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))? =
             aggregate.resources;
+        *self
+            .groups
+            .write()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))? =
+            aggregate.groups;
+        *self
+            .profile_proxy_assignments
+            .write()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))? =
+            aggregate.profile_proxy_assignments;
         *self
             .teams
             .write()
@@ -1034,6 +947,52 @@ impl ApiState {
         Ok(value)
     }
 
+    pub(crate) fn group_is_in_use(
+        &self,
+        workspace_id: &WorkspaceId,
+        group_id: &GroupId,
+    ) -> Result<bool, Problem> {
+        for profile in self.list_profile_records()? {
+            if !profile.value.group_ids.contains(group_id) {
+                continue;
+            }
+            if self
+                .profile_resource_record(&profile.value.id)?
+                .is_some_and(|binding| &binding.workspace_id == workspace_id)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn replace_hosted_profile_groups(
+        &self,
+        input: crate::services::groups::ProfileGroupsReplaceInput,
+    ) -> Result<Versioned<Profile>, Problem> {
+        let binding = self
+            .profile_resource_record(&input.profile_id)?
+            .ok_or_else(|| problem("binding_not_found", "Profile binding not found", 404))?;
+        if binding.workspace_id != input.workspace_id {
+            return Err(problem(
+                "profile_scope_mismatch",
+                "Profile workspace does not match request",
+                403,
+            ));
+        }
+        self.groups
+            .read()
+            .map_err(|_| problem("group_unavailable", "Group service unavailable", 503))?
+            .validate_membership(&input.workspace_id, &input.group_ids)?;
+        let mut profile = self
+            .get_profile_record(&input.profile_id)?
+            .ok_or_else(|| problem("profile_not_found", "Profile not found", 404))?
+            .value;
+        profile.group_ids = input.group_ids;
+        profile.group_ids.sort();
+        self.update_profile_record(input.expected_revision, profile)
+    }
+
     pub(crate) fn archive_profile_record(
         &self,
         expected_revision: u64,
@@ -1098,6 +1057,59 @@ impl ApiState {
             .read()
             .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
             .get(profile_id)
+            .cloned())
+    }
+
+    pub(crate) fn ensure_workspace_profile_capacity(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<(), Problem> {
+        let workspace = self
+            .workspaces
+            .read()
+            .map_err(|_| {
+                problem(
+                    "workspace_unavailable",
+                    "Workspace service unavailable",
+                    503,
+                )
+            })?
+            .workspace_for_policy(workspace_id)?;
+        let active_count = self
+            .profile_resources
+            .read()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
+            .values()
+            .filter(|binding| {
+                binding.workspace_id == *workspace_id
+                    && binding.archive_state == ProfileArchiveState::Active
+            })
+            .count();
+        if active_count >= workspace.policy.max_profiles as usize {
+            return Err(Problem::new(
+                "profile_quota_exceeded",
+                "Workspace profile quota exceeded",
+                409,
+                "workspace",
+            )
+            .with_field("maximumProfiles", workspace.policy.max_profiles));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn profile_resource_for_resource(
+        &self,
+        workspace_id: &buglogin_domain::ids::WorkspaceId,
+        resource_id: &buglogin_domain::ids::ResourceId,
+    ) -> Result<Option<ProfileResource>, Problem> {
+        Ok(self
+            .profile_resources
+            .read()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
+            .values()
+            .find(|binding| {
+                &binding.workspace_id == workspace_id && &binding.resource_id == resource_id
+            })
             .cloned())
     }
 
@@ -1556,6 +1568,13 @@ impl ApiState {
             .control_mutation
             .lock()
             .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        self.refresh_control_aggregate_locked()
+    }
+
+    pub(crate) fn refresh_control_aggregate_locked(&self) -> Result<(), Problem> {
+        if self.local_authority_enabled() {
+            return Ok(());
+        }
         let local_revision = *self
             .control_revision
             .read()
@@ -1642,6 +1661,144 @@ impl ApiState {
                 record.revision;
         }
         Ok(())
+    }
+
+    pub(crate) fn mutate_operation(
+        &self,
+        operation_id: &str,
+        command: &str,
+        stage: &str,
+        actor_id: &str,
+        mutate: impl FnOnce(&mut OperationService) -> Result<(), Problem>,
+    ) -> Result<Operation, Problem> {
+        let _mutation = self
+            .control_mutation
+            .lock()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        self.mutate_operation_locked(operation_id, command, stage, actor_id, mutate)
+    }
+
+    pub(crate) fn mutate_operation_locked(
+        &self,
+        operation_id: &str,
+        command: &str,
+        stage: &str,
+        actor_id: &str,
+        mutate: impl FnOnce(&mut OperationService) -> Result<(), Problem>,
+    ) -> Result<Operation, Problem> {
+        if !self.local_authority_enabled() {
+            let local_revision = *self
+                .control_revision
+                .read()
+                .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+            let durable_revision = self.control_persistence.revision(
+                CONTROL_TENANT,
+                CONTROL_STATE_TYPE,
+                CONTROL_STATE_ID,
+            )?;
+            if durable_revision != Some(local_revision)
+                && !(durable_revision.is_none() && local_revision == 0)
+            {
+                self.reload_control_aggregate()?;
+            }
+        }
+
+        let before = self
+            .operations
+            .read()
+            .map_err(|_| {
+                problem(
+                    "operation_unavailable",
+                    "Operation service unavailable",
+                    503,
+                )
+            })?
+            .clone();
+        let mutation_result = {
+            let mut operations = self.operations.write().map_err(|_| {
+                problem(
+                    "operation_unavailable",
+                    "Operation service unavailable",
+                    503,
+                )
+            })?;
+            mutate(&mut *operations)
+        };
+        if let Err(error) = mutation_result {
+            *self.operations.write().map_err(|_| {
+                problem(
+                    "operation_unavailable",
+                    "Operation service unavailable",
+                    503,
+                )
+            })? = before;
+            return Err(error);
+        }
+        let operation = self
+            .operations
+            .read()
+            .map_err(|_| {
+                problem(
+                    "operation_unavailable",
+                    "Operation service unavailable",
+                    503,
+                )
+            })?
+            .find(operation_id)
+            .cloned()
+            .ok_or_else(|| problem("operation_not_found", "Operation not found", 404))?;
+        let input = match serde_json::to_vec(&operation) {
+            Ok(input) => input,
+            Err(_) => {
+                *self.operations.write().map_err(|_| {
+                    problem(
+                        "operation_unavailable",
+                        "Operation service unavailable",
+                        503,
+                    )
+                })? = before;
+                return Err(problem(
+                    "operation_serialization_failed",
+                    "Operation serialization failed",
+                    500,
+                ));
+            }
+        };
+        use sha2::{Digest, Sha256};
+        let input_hash = format!("{:x}", Sha256::digest(&input));
+        let idempotency_digest = format!(
+            "{:x}",
+            Sha256::digest(format!("{operation_id}:{stage}").as_bytes())
+        );
+        let persisted = self.persist_control_aggregate(
+            command,
+            format!("operation-{}", &idempotency_digest[..32]),
+            actor_id.to_owned(),
+            true,
+            &input_hash,
+            serde_json::json!({
+                "operationId": operation_id,
+                "status": operation.status,
+                "stage": stage
+            }),
+            200,
+            serde_json::json!({ "operationId": operation_id }),
+        );
+        if let Err(error) = persisted {
+            // A failed CAS means this process may have been stale. Reload the
+            // durable aggregate so no caller can observe an uncommitted state.
+            if self.reload_control_aggregate().is_err() {
+                *self.operations.write().map_err(|_| {
+                    problem(
+                        "operation_unavailable",
+                        "Operation service unavailable",
+                        503,
+                    )
+                })? = before;
+            }
+            return Err(error);
+        }
+        Ok(operation)
     }
     pub fn with_migration_key(self, key: MigrationKey) -> Self {
         *self.migration_key.write().expect("migration key lock") = Some(key);
@@ -1878,16 +2035,250 @@ async fn readyz(State(state): State<ApiState>) -> Result<Json<Health>, Response>
     }))
 }
 
+impl ApiAuthorizationAuthority {
+    fn authenticate_token(&self, token: &str, now_ms: u64) -> Result<Principal, Problem> {
+        let (account_id, token_scopes) = if token.starts_with("blapi_") {
+            let (account_id, scopes) = self.api_tokens.authenticate(token, now_ms)?;
+            (account_id, Some(scopes))
+        } else {
+            let account_id = self
+                .auth
+                .read()
+                .map_err(|_| {
+                    Problem::new(
+                        "auth_unavailable",
+                        "Authentication unavailable",
+                        503,
+                        "identity",
+                    )
+                })?
+                .authenticate(token, now_ms)?;
+            (account_id, None)
+        };
+        let account = match self.account_persistence.load(&account_id)? {
+            Some(account) if account.id == account_id => account,
+            _ => {
+                return Err(Problem::new(
+                    "account_record_invalid",
+                    "Account record is invalid",
+                    500,
+                    "identity",
+                ));
+            }
+        };
+        if account.status != AccountStatus::Active {
+            return Err(Problem::new(
+                "account_inactive",
+                "Account is not active",
+                403,
+                "identity",
+            ));
+        }
+        let memberships = self
+            .members
+            .read()
+            .map_err(|_| {
+                Problem::new(
+                    "member_unavailable",
+                    "Member state unavailable",
+                    503,
+                    "identity",
+                )
+            })?
+            .active_for_account(&account_id);
+        let mut principal = Principal {
+            account_id: Some(account_id),
+            roles: BTreeSet::from([Role::Account]),
+            token_scopes,
+            ..Principal::default()
+        };
+        if self
+            .platform_admin_accounts
+            .read()
+            .map_err(|_| {
+                Problem::new(
+                    "permission_unavailable",
+                    "Permission service unavailable",
+                    503,
+                    "identity",
+                )
+            })?
+            .contains(principal.account_id.as_ref().expect("account assigned"))
+        {
+            principal.roles.insert(Role::PlatformAdmin);
+        }
+        for member in memberships {
+            principal.workspace_ids.insert(member.workspace_id.clone());
+            if principal.member_id.is_none() {
+                principal.member_id = Some(member.id);
+            } else {
+                principal.member_id = None;
+            }
+        }
+        Ok(principal)
+    }
+
+    fn grants(&self) -> Result<Vec<Grant>, Problem> {
+        let mut grants = self.grants.read().map(|value| value.clone()).map_err(|_| {
+            Problem::new(
+                "permission_unavailable",
+                "Permission service unavailable",
+                503,
+                "mcp",
+            )
+        })?;
+        let members = self
+            .members
+            .read()
+            .map_err(|_| {
+                Problem::new("member_unavailable", "Member state unavailable", 503, "mcp")
+            })?
+            .active_members();
+        let materialized = self
+            .materialized_member_grants
+            .read()
+            .map_err(|_| {
+                Problem::new(
+                    "permission_unavailable",
+                    "Permission service unavailable",
+                    503,
+                    "mcp",
+                )
+            })?
+            .clone();
+        const CAPABILITIES: [&str; 7] = [
+            "CAP-WS-001",
+            "CAP-TEAM-001",
+            "CAP-MEM-001",
+            "CAP-RES-001",
+            "CAP-AUD-001",
+            "events.read",
+            "operation.read",
+        ];
+        const ALL: [Action; 7] = [
+            Action::Read,
+            Action::Create,
+            Action::Update,
+            Action::Delete,
+            Action::Execute,
+            Action::Share,
+            Action::Manage,
+        ];
+        const OPERATE: [Action; 5] = [
+            Action::Read,
+            Action::Create,
+            Action::Update,
+            Action::Execute,
+            Action::Share,
+        ];
+        const USE: [Action; 2] = [Action::Read, Action::Execute];
+        for member in members {
+            if materialized.contains(&member.id) {
+                continue;
+            }
+            let actions: &[Action] = match member.role {
+                MemberRole::Owner | MemberRole::Admin => &ALL,
+                MemberRole::Operator => &OPERATE,
+                MemberRole::Member => &USE,
+            };
+            for capability_name in CAPABILITIES {
+                let capability = Capability::new(capability_name).map_err(|_| {
+                    Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
+                })?;
+                for action in actions {
+                    grants.push(Grant {
+                        id: GrantId::new(format!(
+                            "membership:{}:{capability_name}:{action:?}",
+                            member.id.as_str()
+                        ))
+                        .map_err(|_| {
+                            Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
+                        })?,
+                        account_id: Some(member.account_id.clone()),
+                        member_id: None,
+                        capability: capability.clone(),
+                        action: *action,
+                        scope: ResourceScope::workspace(member.workspace_id.clone()),
+                        effect: Effect::Allow,
+                    });
+                }
+            }
+        }
+        Ok(grants)
+    }
+}
+
 pub fn coordination_authorizer(state: &ApiState) -> Arc<dyn CoordinationAuthorizer> {
     Arc::new(ApiCoordinationAuthorizer {
-        auth: Arc::clone(&state.auth),
-        grants: Arc::clone(&state.grants),
+        authority: state.authorization_authority(),
     })
 }
 
+pub(crate) async fn read_workspace_events(
+    state: &ApiState,
+    auth: &CoordinationAuth,
+    workspace_id: &WorkspaceId,
+    after_stream_id: Option<&str>,
+    limit: usize,
+) -> Result<serde_json::Value, Problem> {
+    if !(1..=1_000).contains(&limit) {
+        return Err(problem(
+            "invalid_event_read_limit",
+            "Event limit is invalid",
+            400,
+        ));
+    }
+    if after_stream_id.is_some_and(|cursor| {
+        let Some((milliseconds, sequence)) = cursor.split_once('-') else {
+            return true;
+        };
+        milliseconds.parse::<u64>().is_err()
+            || sequence.parse::<u64>().is_err()
+            || sequence.contains('-')
+    }) {
+        return Err(problem(
+            "invalid_event_cursor",
+            "Event cursor is invalid",
+            400,
+        ));
+    }
+    let backend = state
+        .coordination
+        .read()
+        .map_err(|_| {
+            problem(
+                "coordination_unavailable",
+                "Coordination is unavailable",
+                503,
+            )
+        })?
+        .clone()
+        .ok_or_else(|| {
+            problem(
+                "coordination_unavailable",
+                "Hosted event stream is unavailable",
+                503,
+            )
+        })?;
+    let events = backend
+        .read_events(
+            CoordinationScope { workspace_id, auth },
+            after_stream_id,
+            limit,
+        )
+        .await?;
+    let next_cursor = events.last().map(|event| event.stream_id.clone());
+    Ok(serde_json::json!({
+        "items": events.into_iter().map(|event| serde_json::json!({
+            "streamId": event.stream_id,
+            "event": event.event,
+        })).collect::<Vec<_>>(),
+        "nextCursor": next_cursor,
+    }))
+}
+
 struct ApiCoordinationAuthorizer {
-    auth: Arc<RwLock<AuthService>>,
-    grants: Arc<RwLock<Vec<Grant>>>,
+    authority: ApiAuthorizationAuthority,
 }
 
 #[async_trait]
@@ -1897,23 +2288,9 @@ impl CoordinationAuthorizer for ApiCoordinationAuthorizer {
         auth: &CoordinationAuth,
         request: AuthorizationRequest<'_>,
     ) -> Result<(), Problem> {
-        let account_id = self
-            .auth
-            .read()
-            .map_err(|_| {
-                problem(
-                    "authentication_unavailable",
-                    "Authentication unavailable",
-                    503,
-                )
-            })?
-            .authenticate(auth.bearer_token(), now())?;
-        let principal = Principal {
-            account_id: Some(account_id),
-            workspace_ids: BTreeSet::from([request.workspace_id.clone()]),
-            roles: BTreeSet::from([Role::Account]),
-            ..Principal::default()
-        };
+        let principal = self
+            .authority
+            .authenticate_token(auth.bearer_token(), now())?;
         let (capability, action) = match request.operation {
             CoordinationOperation::LeaseAcquire | CoordinationOperation::LeaseRenew => {
                 ("profile.launch", Action::Execute)
@@ -1922,6 +2299,14 @@ impl CoordinationAuthorizer for ApiCoordinationAuthorizer {
             CoordinationOperation::ManifestRead => ("profile.read", Action::Read),
             CoordinationOperation::ManifestWrite => ("profile.update", Action::Update),
             CoordinationOperation::PayloadWrite => ("profile.update", Action::Update),
+            CoordinationOperation::EventRead => ("events.read", Action::Read),
+            CoordinationOperation::EventPublish => {
+                return Err(problem(
+                    "coordination_publish_forbidden",
+                    "Event publication is restricted to trusted API services",
+                    403,
+                ));
+            }
             _ => {
                 return Err(problem(
                     "coordination_operation_invalid",
@@ -1937,13 +2322,7 @@ impl CoordinationAuthorizer for ApiCoordinationAuthorizer {
             resource_id: request.resource_id.cloned(),
             ..ResourceScope::default()
         };
-        let grants = self.grants.read().map_err(|_| {
-            problem(
-                "permission_unavailable",
-                "Permission service unavailable",
-                503,
-            )
-        })?;
+        let grants = self.authority.grants()?;
         if is_allowed(&principal, &capability, action, &scope, &grants) {
             Ok(())
         } else {
@@ -1957,20 +2336,34 @@ impl CoordinationAuthorizer for ApiCoordinationAuthorizer {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RevisionInput {
     revision: u64,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfilePageQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct VersionedProfilePage {
+    items: Vec<Versioned<Profile>>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LaunchInput {
     profiles_root: PathBuf,
     extra_args: Vec<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DeleteInput {
     revision: u64,
     confirmation: String,
@@ -1993,6 +2386,24 @@ struct CookieListHttpInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CookieJobWorkspaceQuery {
     workspace_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnqueueCookieJobInput {
+    command_id: String,
+    workspace_id: String,
+    device_id: String,
+    profile_id: String,
+    expected_generation: u64,
+    #[serde(default)]
+    source_workspace_id: Option<String>,
+    #[serde(default)]
+    source_profile_id: Option<String>,
+    #[serde(default)]
+    source_device_id: Option<String>,
+    #[serde(default)]
+    staged_import_ref: Option<String>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -2062,6 +2473,7 @@ pub fn router(state: ApiState) -> Router {
                 })
             }),
         )
+        .route("/v1/openapi.yaml", get(openapi_document))
         .route("/v1/readyz", get(readyz))
         .route("/v1/proxies/parse", post(parse_proxy))
         .route("/v1/profiles", get(list_profiles).post(create_profile))
@@ -2083,6 +2495,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/profiles/{id}/cookies/copy", post(copy_cookies))
         .route("/v1/cookie-jobs", post(enqueue_cookie_job))
         .route("/v1/cookie-jobs/{id}", get(get_cookie_job))
+        .route(
+            "/v1/workspaces/{workspace_id}/cookie-jobs/inbox",
+            get(cookie_job_inbox),
+        )
         .route("/v1/cookie-jobs/{id}/claim", post(claim_cookie_job))
         .route("/v1/cookie-jobs/{id}/ack", post(ack_cookie_job))
         .route("/v1/cookie-jobs/{id}/complete", post(complete_cookie_job))
@@ -2602,10 +3018,25 @@ fn proxy_parse_view(report: ParseReport) -> ProxyParseView {
 
 async fn list_profiles(
     State(state): State<ApiState>,
+    Query(query): Query<ProfilePageQuery>,
     headers: HeaderMap,
-) -> Result<Json<Vec<buglogin_storage::local::Versioned<Profile>>>, Response> {
+) -> Result<Json<VersionedProfilePage>, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(response(problem(
+            "invalid_page_limit",
+            "Profile page limit must be between 1 and 100",
+            400,
+        )));
+    }
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(ProfileId::from_str)
+        .transpose()
+        .map_err(|_| response(problem("invalid_page_cursor", "Invalid page cursor", 400)))?;
     let profiles = state.list_profile_records().map_err(response)?;
     let mut filtered = Vec::new();
     for profile in profiles {
@@ -2620,7 +3051,23 @@ async fn list_profiles(
             filtered.push(profile);
         }
     }
-    Ok(Json(filtered))
+    filtered.sort_by(|left, right| left.value.id.as_str().cmp(right.value.id.as_str()));
+    if let Some(cursor) = cursor {
+        filtered.retain(|profile| profile.value.id.as_str() > cursor.as_str());
+    }
+    let has_more = filtered.len() > limit;
+    filtered.truncate(limit);
+    let next_cursor = has_more
+        .then(|| {
+            filtered
+                .last()
+                .map(|profile| profile.value.id.as_str().to_owned())
+        })
+        .flatten();
+    Ok(Json(VersionedProfilePage {
+        items: filtered,
+        next_cursor,
+    }))
 }
 
 async fn list_cookies(
@@ -2687,12 +3134,18 @@ async fn copy_cookies(
 async fn enqueue_cookie_job(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(mut input): Json<EnqueueConnectedCookieJob>,
-) -> Result<Json<serde_json::Value>, Response> {
+    input: Result<Json<EnqueueCookieJobInput>, axum::extract::rejection::JsonRejection>,
+) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
-    let idempotency_key = required_idempotency(&headers)?.to_owned();
-    input.idempotency_key = idempotency_key;
-    input.requested_by = principal
+    let Json(input) = input.map_err(|_| {
+        response(problem(
+            "invalid_input",
+            "Cookie job request body is invalid",
+            422,
+        ))
+    })?;
+    let raw_idempotency_key = required_idempotency(&headers)?;
+    let account_id = principal
         .account_id
         .as_ref()
         .map(|id| id.as_str().to_owned())
@@ -2703,13 +3156,152 @@ async fn enqueue_cookie_job(
                 401,
             ))
         })?;
+    let capability = match input.command_id.as_str() {
+        "cookie.import" => "cookie.import",
+        "cookie.copy" => "cookie.copy",
+        _ => {
+            return Err(response(problem(
+                "cookie_job_command_invalid",
+                "Cookie job command is invalid",
+                400,
+            )));
+        }
+    };
+    let workspace_id = WorkspaceId::from_str(&input.workspace_id).map_err(|_| {
+        response(problem(
+            "workspace_id_invalid",
+            "Workspace ID is invalid",
+            400,
+        ))
+    })?;
+    let profile_id = ProfileId::from_str(&input.profile_id)
+        .map_err(|_| response(problem("profile_id_invalid", "Profile ID is invalid", 400)))?;
+    let destination_binding = state
+        .profile_resource_record(&profile_id)
+        .map_err(response)?
+        .ok_or_else(|| {
+            response(problem(
+                "profile_binding_not_found",
+                "Profile binding not found",
+                404,
+            ))
+        })?;
+    if destination_binding.workspace_id != workspace_id {
+        return Err(response(problem(
+            "profile_forbidden",
+            "Profile access denied",
+            403,
+        )));
+    }
+    let current_grants = grants(&state)?;
+    if !authorized(
+        &state,
+        &principal,
+        &current_grants,
+        &profile_id,
+        Action::Create,
+        capability,
+    )? {
+        return Err(response(problem(
+            "profile_forbidden",
+            "Profile access denied",
+            403,
+        )));
+    }
+
+    if input.command_id == "cookie.copy" {
+        let source_workspace = input.source_workspace_id.as_deref().ok_or_else(|| {
+            response(problem(
+                "cookie_copy_source_required",
+                "Cookie copy source is required",
+                400,
+            ))
+        })?;
+        let source_workspace_id = WorkspaceId::from_str(source_workspace).map_err(|_| {
+            response(problem(
+                "workspace_id_invalid",
+                "Source workspace ID is invalid",
+                400,
+            ))
+        })?;
+        let source_profile = input.source_profile_id.as_deref().ok_or_else(|| {
+            response(problem(
+                "cookie_copy_source_required",
+                "Cookie copy source is required",
+                400,
+            ))
+        })?;
+        let source_profile_id = ProfileId::from_str(source_profile).map_err(|_| {
+            response(problem(
+                "profile_id_invalid",
+                "Source profile ID is invalid",
+                400,
+            ))
+        })?;
+        let source_binding = state
+            .profile_resource_record(&source_profile_id)
+            .map_err(response)?
+            .ok_or_else(|| {
+                response(problem(
+                    "profile_binding_not_found",
+                    "Source profile binding not found",
+                    404,
+                ))
+            })?;
+        if source_binding.workspace_id != source_workspace_id {
+            return Err(response(problem(
+                "profile_forbidden",
+                "Source profile access denied",
+                403,
+            )));
+        }
+        authorize_profile(&state, &principal, &current_grants, &source_profile_id)?;
+        if input.source_device_id.as_deref() != Some(input.device_id.as_str()) {
+            return Err(response(problem(
+                "cookie_copy_cross_device_dispatch_unavailable",
+                "Cookie copy currently requires the source and destination profiles on the same connected device",
+                409,
+            )));
+        }
+    }
+
+    let created_at = now();
+    let expires_at = created_at
+        .checked_add(CONNECTED_COOKIE_JOB_TTL_SECONDS)
+        .ok_or_else(|| {
+            response(problem(
+                "cookie_job_expiry_invalid",
+                "Cookie job expiry is invalid",
+                500,
+            ))
+        })?;
+    let scoped_idempotency_key = format!(
+        "{account_id}:{}:{}:{raw_idempotency_key}",
+        workspace_id.as_str(),
+        input.command_id,
+    );
+    let input = EnqueueConnectedCookieJob {
+        command_id: input.command_id,
+        workspace_id: workspace_id.as_str().to_owned(),
+        device_id: input.device_id,
+        profile_id: profile_id.as_str().to_owned(),
+        expected_generation: input.expected_generation,
+        source_workspace_id: input.source_workspace_id,
+        source_profile_id: input.source_profile_id,
+        source_device_id: input.source_device_id,
+        staged_import_ref: input.staged_import_ref,
+        requested_by: account_id,
+        idempotency_key: scoped_idempotency_key,
+        now: created_at,
+        expires_at,
+    };
     let job = state
         .connected_cookie_jobs
         .enqueue(input)
         .map_err(response)?;
-    Ok(Json(serde_json::to_value(job).map_err(|_| {
-        response(problem("serialization_failed", "Serialization failed", 500))
-    })?))
+    let body = serde_json::to_value(job)
+        .map_err(|_| response(problem("serialization_failed", "Serialization failed", 500)))?;
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
 async fn get_cookie_job(
@@ -2743,6 +3335,77 @@ async fn get_cookie_job(
     })?))
 }
 
+async fn cookie_job_inbox(
+    State(state): State<ApiState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    let token = bearer_token(&headers)?;
+    let (_, device_id) = state
+        .auth
+        .read()
+        .map_err(|_| {
+            response(problem(
+                "auth_unavailable",
+                "Authentication unavailable",
+                503,
+            ))
+        })?
+        .authenticate_device(token, now())
+        .map_err(response)?;
+    let principal = state.authenticate_token(token, now()).map_err(response)?;
+    let current_grants = grants(&state)?;
+    let jobs = state
+        .connected_cookie_jobs
+        .inbox(&workspace_id, &device_id)
+        .map_err(response)?;
+    let mut items = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let profile_id = ProfileId::from_str(&job.profile_id)
+            .map_err(|_| response(problem("profile_id_invalid", "Profile ID is invalid", 500)))?;
+        let capability = match job.command_id.as_str() {
+            "cookie.import" => "cookie.import",
+            "cookie.copy" => "cookie.copy",
+            _ => continue,
+        };
+        if !authorized(
+            &state,
+            &principal,
+            &current_grants,
+            &profile_id,
+            Action::Create,
+            capability,
+        )? {
+            continue;
+        }
+        if job.command_id == "cookie.copy" {
+            if job.source_device_id.as_deref() != Some(device_id.as_str()) {
+                continue;
+            }
+            let source_profile_id = ProfileId::from_str(
+                job.source_profile_id.as_deref().unwrap_or_default(),
+            )
+            .map_err(|_| {
+                response(problem(
+                    "profile_id_invalid",
+                    "Source profile ID is invalid",
+                    500,
+                ))
+            })?;
+            if let Err(error) =
+                authorize_profile(&state, &principal, &current_grants, &source_profile_id)
+            {
+                if error.status() != StatusCode::FORBIDDEN {
+                    return Err(error);
+                }
+                continue;
+            }
+        }
+        items.push(job);
+    }
+    Ok(Json(serde_json::json!({"items": items})))
+}
+
 async fn claim_cookie_job(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -2762,6 +3425,60 @@ async fn claim_cookie_job(
         })?
         .authenticate_device(token, now())
         .map_err(response)?;
+    let job = state
+        .connected_cookie_jobs
+        .get_for_device(&query.workspace_id, &id, &device_id)
+        .map_err(response)?
+        .ok_or_else(|| response(problem("cookie_job_not_found", "Cookie job not found", 404)))?;
+    let profile_id = ProfileId::from_str(&job.profile_id)
+        .map_err(|_| response(problem("profile_id_invalid", "Profile ID is invalid", 400)))?;
+    let principal = state.authenticate_token(token, now()).map_err(response)?;
+    let current_grants = grants(&state)?;
+    let capability = match job.command_id.as_str() {
+        "cookie.import" => "cookie.import",
+        "cookie.copy" => "cookie.copy",
+        _ => {
+            return Err(response(problem(
+                "cookie_job_command_invalid",
+                "Cookie job command is invalid",
+                409,
+            )));
+        }
+    };
+    if !authorized(
+        &state,
+        &principal,
+        &current_grants,
+        &profile_id,
+        Action::Create,
+        capability,
+    )? {
+        return Err(response(problem(
+            "profile_forbidden",
+            "Profile access denied",
+            403,
+        )));
+    }
+    if job.command_id == "cookie.copy" {
+        if job.source_device_id.as_deref() != Some(device_id.as_str()) {
+            return Err(response(problem(
+                "cookie_copy_cross_device_dispatch_unavailable",
+                "Cookie copy requires the source and destination profiles on the same connected device",
+                409,
+            )));
+        }
+        let source_profile_id = ProfileId::from_str(
+            job.source_profile_id.as_deref().unwrap_or_default(),
+        )
+        .map_err(|_| {
+            response(problem(
+                "profile_id_invalid",
+                "Source profile ID is invalid",
+                400,
+            ))
+        })?;
+        authorize_profile(&state, &principal, &current_grants, &source_profile_id)?;
+    }
     let job = state
         .connected_cookie_jobs
         .claim(
@@ -2844,6 +3561,7 @@ async fn complete_cookie_job(
             &query.workspace_id,
             &id,
             account_id.as_str(),
+            &device_id,
             now(),
             receipt,
         )
@@ -2905,40 +3623,132 @@ async fn get_profile_binding(
 async fn create_profile(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(profile): Json<Profile>,
+    Json(request): Json<ProfileCreateRequest>,
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
-    authorize_action(
+    let idempotency_key = required_idempotency(&headers)?;
+    let header_workspace_id = headers
+        .get("x-buglogin-workspace-id")
+        .and_then(|value| value.to_str().ok());
+    let (create_input, legacy_profile) = match request {
+        ProfileCreateRequest::Command(input) => (input, None),
+        ProfileCreateRequest::Legacy(profile) => {
+            let input = ProfileCreationService::legacy_input(&profile, header_workspace_id);
+            (input, Some(profile))
+        }
+    };
+    let managed = !state.local_authority_enabled();
+    let workspace_id = ProfileCreationService::resolve_workspace(
+        create_input.workspace_id.as_deref(),
+        header_workspace_id,
+        &principal,
+        managed,
+    )
+    .map_err(response)?;
+    let requested_id = create_input.id.as_deref();
+    let profile_id = ProfileCreationService::profile_id(
+        requested_id,
+        workspace_id.as_ref().map(WorkspaceId::as_str),
+        idempotency_key,
+    )
+    .map_err(response)?;
+    let mut profile =
+        ProfileCreationService::build(create_input.clone(), profile_id.clone(), managed)
+            .map_err(response)?;
+    if let Some(legacy) = legacy_profile {
+        profile.runtime_config = legacy.runtime_config;
+        profile.fingerprint = legacy.fingerprint;
+        profile.vpn_id = legacy.vpn_id;
+        profile.group_ids = legacy.group_ids;
+        profile.tags = legacy.tags;
+        profile.extension_group_id = legacy.extension_group_id;
+    }
+    if managed {
+        let capability = Capability::new("profile.create")
+            .map_err(|_| response(problem("invalid_capability", "Invalid capability", 500)))?;
+        let scope = ResourceScope {
+            workspace_id: workspace_id.clone(),
+            profile_id: Some(profile_id.clone()),
+            ..ResourceScope::default()
+        };
+        if !is_allowed(&principal, &capability, Action::Create, &scope, &grants) {
+            return Err(response(problem(
+                "profile_forbidden",
+                "Profile creation denied",
+                403,
+            )));
+        }
+    } else {
+        authorize_action(
+            &state,
+            &principal,
+            &grants,
+            &profile_id,
+            Action::Create,
+            "profile.create",
+        )?;
+    }
+    if managed {
+        return control::provision_managed_profile(
+            state,
+            headers,
+            principal,
+            grants,
+            profile,
+            workspace_id,
+        )
+        .await;
+    }
+    let input_value = serde_json::to_value(&create_input)
+        .map_err(|_| response(problem("invalid_input", "Input is invalid", 400)))?;
+    let resource_id = profile_id.as_str().to_owned();
+    control::mutate(
         &state,
+        &headers,
         &principal,
         &grants,
-        &profile.id,
-        Action::Create,
+        "local",
         "profile.create",
-    )?;
-    if profile.sync_mode == Some(buglogin_domain::entities::SyncMode::Managed) {
-        return control::provision_managed_profile(state, headers, principal, grants, profile)
-            .await;
-    }
-    if !state.local_authority_enabled() {
-        return Err(response(problem(
-            "production_managed_profile_required",
-            "Production profiles must use hosted managed authority",
-            422,
-        )));
-    }
-    state
-        .create_profile_record(profile)
-        .map(|value| (StatusCode::CREATED, Json(value)).into_response())
-        .map_err(response)
+        input_value,
+        ResourceScope {
+            account_id: principal.account_id.clone(),
+            profile_id: Some(profile.id.clone()),
+            ..ResourceScope::default()
+        },
+        &resource_id,
+        || match state.profiles.get(&profile.id) {
+            Ok(Some(existing))
+                if ProfileCreationService::same_created_profile(&existing.value, &profile) =>
+            {
+                Ok(existing)
+            }
+            Ok(Some(_)) => Err(control::response_problem(problem(
+                "storage_revision_conflict",
+                "Storage revision conflict",
+                409,
+            ))),
+            Ok(None) => state
+                .create_profile_record(profile)
+                .map_err(control::response_problem),
+            Err(error) => Err(control::response_problem(error)),
+        },
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProfileCreateRequest {
+    Command(ProfileCreateInput),
+    Legacy(Profile),
 }
 
 async fn archive_profile(
     State(state): State<ApiState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    input: Option<Json<RevisionInput>>,
+    Json(input): Json<RevisionInput>,
 ) -> Result<Response, Response> {
     mutate_profile(state, id, headers, input, true).await
 }
@@ -2947,7 +3757,7 @@ async fn restore_profile(
     State(state): State<ApiState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    input: Option<Json<RevisionInput>>,
+    Json(input): Json<RevisionInput>,
 ) -> Result<Response, Response> {
     mutate_profile(state, id, headers, input, false).await
 }
@@ -3018,7 +3828,7 @@ async fn mutate_profile(
     state: ApiState,
     id: String,
     headers: HeaderMap,
-    input: Option<Json<RevisionInput>>,
+    input: RevisionInput,
     archive: bool,
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
@@ -3038,8 +3848,6 @@ async fn mutate_profile(
         },
     )?;
     if !state.local_authority_enabled() {
-        let input =
-            input.ok_or_else(|| response(problem("invalid_input", "revision is required", 400)))?;
         return control::mutate_hosted_profile_archive_state(
             state,
             headers,
@@ -3054,9 +3862,7 @@ async fn mutate_profile(
         .get_profile_record(&id)
         .map_err(response)?
         .ok_or_else(|| response(problem("profile_not_found", "Profile not found", 404)))?;
-    let expected = input
-        .map(|Json(value)| value.revision)
-        .unwrap_or(current.revision);
+    let expected = input.revision;
     let updated = if archive {
         state.archive_profile_record(expected, current.value)
     } else {
@@ -3093,7 +3899,14 @@ async fn launch_profile(
         "profile.launch",
     )?;
     let operation_id = operation_id(&headers, "profile.launch")?;
-    begin_operation(&state, &operation_id, "profile.launch")?;
+    let actor_id = principal
+        .account_id
+        .as_ref()
+        .map_or("local", AccountId::as_str);
+    if let Some(operation) = existing_operation(&state, &operation_id)? {
+        return Ok((StatusCode::ACCEPTED, Json(operation)));
+    }
+    begin_operation(&state, &operation_id, "profile.launch", actor_id)?;
     let result = ProfileLifecycleService.launch(
         &state.profiles,
         &state.lifecycles,
@@ -3105,8 +3918,8 @@ async fn launch_profile(
         },
     );
     match result {
-        Ok(value) => finish_operation(&state, &operation_id, value),
-        Err(error) => fail_operation(&state, &operation_id, error),
+        Ok(value) => finish_operation(&state, &operation_id, actor_id, value),
+        Err(error) => fail_operation(&state, &operation_id, actor_id, error),
     }
 }
 
@@ -3135,11 +3948,18 @@ async fn stop_profile(
         "profile.stop",
     )?;
     let operation_id = operation_id(&headers, "profile.stop")?;
-    begin_operation(&state, &operation_id, "profile.stop")?;
+    let actor_id = principal
+        .account_id
+        .as_ref()
+        .map_or("local", AccountId::as_str);
+    if let Some(operation) = existing_operation(&state, &operation_id)? {
+        return Ok((StatusCode::ACCEPTED, Json(operation)));
+    }
+    begin_operation(&state, &operation_id, "profile.stop", actor_id)?;
     let result = ProfileLifecycleService.stop(&state.profiles, &state.lifecycles, id);
     match result {
-        Ok(value) => finish_operation(&state, &operation_id, value),
-        Err(error) => fail_operation(&state, &operation_id, error),
+        Ok(value) => finish_operation(&state, &operation_id, actor_id, value),
+        Err(error) => fail_operation(&state, &operation_id, actor_id, error),
     }
 }
 
@@ -3148,7 +3968,7 @@ async fn delete_profile(
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(input): Json<DeleteInput>,
-) -> Result<Json<serde_json::Value>, Response> {
+) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let id = ProfileId::from_str(&id)
@@ -3162,28 +3982,38 @@ async fn delete_profile(
         "profile.delete",
     )?;
     HostedProfileService::ensure_delete_supported(&state).map_err(response)?;
-    if input.confirmation != "QUARANTINE_PROFILE_DATA" {
-        return Err(response(problem(
-            "delete_not_confirmed",
-            "Profile deletion is not confirmed",
-            409,
-        )));
-    }
-    let current = state
-        .profiles
-        .get(&id)
-        .map_err(response)?
-        .ok_or_else(|| response(problem("profile_not_found", "Profile not found", 404)))?;
-    let path = state
-        .profiles
-        .delete(input.revision, &current.value)
-        .map_err(response)?;
-    Ok(Json(serde_json::json!({
-        "id": id,
-        "deleted": true,
-        "recoverable": true,
-        "quarantinePath": path
-    })))
+    let input_value = serde_json::to_value(&input)
+        .map_err(|_| response(problem("invalid_input", "Input is invalid", 400)))?;
+    let resource_id = id.as_str().to_owned();
+    control::mutate(
+        &state,
+        &headers,
+        &principal,
+        &grants,
+        "local",
+        "profile.delete",
+        input_value,
+        ResourceScope {
+            account_id: principal.account_id.clone(),
+            organization_id: None,
+            workspace_id: None,
+            team_id: None,
+            member_id: None,
+            profile_id: Some(id.clone()),
+            resource_id: None,
+        },
+        &resource_id,
+        || {
+            crate::services::profile_deletion::ProfileDeletionService::delete_local(
+                &state,
+                &id,
+                input.revision,
+                &input.confirmation,
+            )
+            .map_err(control::response_problem)
+        },
+    )
+    .await
 }
 
 async fn get_operation(
@@ -3191,6 +4021,7 @@ async fn get_operation(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<crate::services::operations::Operation>, Response> {
+    state.refresh_control_aggregate().map_err(response)?;
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let operation = state
@@ -3210,51 +4041,103 @@ async fn get_operation(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct EventQuery {
-    after: Option<u64>,
-    limit: Option<usize>,
+    workspace_id: WorkspaceId,
 }
 
 async fn read_events(
     State(state): State<ApiState>,
     Query(query): Query<EventQuery>,
     headers: HeaderMap,
-) -> Result<Json<Vec<crate::services::events::Event>>, Response> {
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, std::convert::Infallible>>>, Response> {
     let principal = authenticate(&state, &headers)?;
-    let grants = grants(&state)?;
-    let scope = ResourceScope::global();
-    let events = state
-        .events
-        .read()
-        .map_err(|_| {
-            response(problem(
-                "event_unavailable",
-                "Event service unavailable",
-                503,
-            ))
-        })?
-        .read_after(
-            &principal,
-            &grants,
-            &scope,
-            query.after,
-            query.limit.unwrap_or(100),
-        )
-        .map_err(response)?
-        .into_iter()
+    let account_id = principal.account_id.ok_or_else(|| {
+        response(problem(
+            "authentication_required",
+            "Authentication required",
+            401,
+        ))
+    })?;
+    let auth =
+        CoordinationAuth::new(account_id.as_str(), bearer_token(&headers)?).map_err(response)?;
+    let cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let initial_page =
+        read_workspace_events(&state, &auth, &query.workspace_id, cursor.as_deref(), 100)
+            .await
+            .map_err(response)?;
+    let initial_items = initial_page["items"]
+        .as_array()
         .cloned()
-        .collect();
-    Ok(Json(events))
+        .unwrap_or_default();
+    let mut next_cursor = initial_page["nextCursor"]
+        .as_str()
+        .map(str::to_owned)
+        .or(cursor);
+    let stream = stream::unfold(
+        Some((
+            state,
+            auth,
+            query.workspace_id,
+            next_cursor.take(),
+            initial_items.into_iter(),
+        )),
+        |state| async move {
+            let (state, auth, workspace_id, mut cursor, mut pending) = state?;
+            loop {
+                if let Some(item) = pending.next() {
+                    let stream_id = item["streamId"].as_str().unwrap_or_default().to_owned();
+                    let event_name = item["event"]["name"].as_str().unwrap_or("message");
+                    let payload =
+                        serde_json::to_string(&item["event"]).unwrap_or_else(|_| "{}".to_owned());
+                    let event = SseEvent::default()
+                        .id(stream_id)
+                        .event(event_name)
+                        .data(payload);
+                    return Some((
+                        Ok(event),
+                        Some((state, auth, workspace_id, cursor, pending)),
+                    ));
+                }
+
+                match read_workspace_events(&state, &auth, &workspace_id, cursor.as_deref(), 100)
+                    .await
+                {
+                    Ok(page) => {
+                        cursor = page["nextCursor"].as_str().map(str::to_owned).or(cursor);
+                        pending = page["items"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter();
+                        if pending.len() == 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                    Err(error) => {
+                        let payload =
+                            serde_json::to_string(&error).unwrap_or_else(|_| "{}".to_owned());
+                        let event = SseEvent::default().event("error").data(payload);
+                        return Some((Ok(event), None));
+                    }
+                }
+            }
+        },
+    );
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MigrationInspectInput {
     source_root: PathBuf,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MigrationImportInput {
     source_root: PathBuf,
     staging_parent: PathBuf,
@@ -3285,14 +4168,21 @@ async fn inspect_migration(
     let grants = grants(&state)?;
     authorize_capability(&principal, &grants, "migration.read", Action::Read)?;
     let operation_id = operation_id(&headers, "migration.inspect")?;
-    begin_operation(&state, &operation_id, "migration.inspect")?;
+    if let Some(operation) = existing_operation(&state, &operation_id)? {
+        return Ok((StatusCode::ACCEPTED, Json(operation)));
+    }
+    let actor_id = principal
+        .account_id
+        .as_ref()
+        .map_or("local", AccountId::as_str);
+    begin_operation(&state, &operation_id, "migration.inspect", actor_id)?;
     let result = inspect_source(&input.source_root).and_then(|(report, snapshot)| {
         serde_json::to_value(MigrationInspectResult { report, snapshot })
             .map_err(|_| problem("migration_result_invalid", "Migration result invalid", 500))
     });
     match result {
-        Ok(value) => finish_operation(&state, &operation_id, value),
-        Err(error) => fail_operation(&state, &operation_id, error),
+        Ok(value) => finish_operation(&state, &operation_id, actor_id, value),
+        Err(error) => fail_operation(&state, &operation_id, actor_id, error),
     }
 }
 
@@ -3341,7 +4231,11 @@ async fn import_migration(
     if let Some(operation) = existing_operation(&state, &operation_id)? {
         return Ok((StatusCode::ACCEPTED, Json(operation)));
     }
-    begin_operation(&state, &operation_id, "migration.import")?;
+    let actor_id = principal
+        .account_id
+        .as_ref()
+        .map_or("local", AccountId::as_str);
+    begin_operation(&state, &operation_id, "migration.import", actor_id)?;
     let result = (|| {
         let (report, snapshot) = inspect_source(&input.source_root)?;
         let key = state
@@ -3448,12 +4342,13 @@ async fn import_migration(
         }))
     })();
     match result {
-        Ok(value) => finish_operation(&state, &operation_id, value),
-        Err(error) => fail_operation(&state, &operation_id, error),
+        Ok(value) => finish_operation(&state, &operation_id, actor_id, value),
+        Err(error) => fail_operation(&state, &operation_id, actor_id, error),
     }
 }
 
 fn existing_operation(state: &ApiState, operation_id: &str) -> Result<Option<Operation>, Response> {
+    state.refresh_control_aggregate().map_err(response)?;
     state
         .operations
         .read()
@@ -3487,83 +4382,89 @@ fn operation_id(headers: &HeaderMap, command: &str) -> Result<String, Response> 
     Ok(format!("op_{}", &digest[..24]))
 }
 
-fn begin_operation(state: &ApiState, operation_id: &str, command_id: &str) -> Result<(), Response> {
-    let mut operations = state.operations.write().map_err(|_| {
-        response(problem(
-            "operation_unavailable",
-            "Operation service unavailable",
-            503,
-        ))
-    })?;
-    operations
-        .insert(
-            Operation::queued(operation_id, command_id, ResourceScope::global())
-                .map_err(response)?,
-        )
-        .map_err(response)?;
-    operations
-        .transition(
+fn begin_operation(
+    state: &ApiState,
+    operation_id: &str,
+    command_id: &str,
+    actor_id: &str,
+) -> Result<(), Response> {
+    state
+        .mutate_operation(
             operation_id,
-            OperationStatus::Running,
-            Some(0.1),
-            None,
-            None,
+            command_id,
+            "started",
+            actor_id,
+            |operations| {
+                operations.insert(Operation::queued(
+                    operation_id,
+                    command_id,
+                    ResourceScope::global(),
+                )?)?;
+                operations.transition(
+                    operation_id,
+                    OperationStatus::Running,
+                    Some(0.1),
+                    None,
+                    None,
+                )?;
+                Ok(())
+            },
         )
-        .map_err(response)?;
-    Ok(())
+        .map(|_| ())
+        .map_err(response)
 }
 
 fn finish_operation(
     state: &ApiState,
     operation_id: &str,
+    actor_id: &str,
     result: serde_json::Value,
 ) -> Result<(StatusCode, Json<Operation>), Response> {
     let operation = state
-        .operations
-        .write()
-        .map_err(|_| {
-            response(problem(
-                "operation_unavailable",
-                "Operation service unavailable",
-                503,
-            ))
-        })?
-        .transition(
+        .mutate_operation(
             operation_id,
-            OperationStatus::Completed,
-            Some(1.0),
-            Some(result),
-            None,
+            "operation.complete",
+            "completed",
+            actor_id,
+            |operations| {
+                operations.transition(
+                    operation_id,
+                    OperationStatus::Completed,
+                    Some(1.0),
+                    Some(result),
+                    None,
+                )?;
+                Ok(())
+            },
         )
-        .map_err(response)?
-        .clone();
+        .map_err(response)?;
     Ok((StatusCode::ACCEPTED, Json(operation)))
 }
 
 fn fail_operation(
     state: &ApiState,
     operation_id: &str,
+    actor_id: &str,
     error: Problem,
 ) -> Result<(StatusCode, Json<Operation>), Response> {
     let operation = state
-        .operations
-        .write()
-        .map_err(|_| {
-            response(problem(
-                "operation_unavailable",
-                "Operation service unavailable",
-                503,
-            ))
-        })?
-        .transition(
+        .mutate_operation(
             operation_id,
-            OperationStatus::Failed,
-            Some(1.0),
-            None,
-            Some(error.clone()),
+            "operation.fail",
+            "failed",
+            actor_id,
+            |operations| {
+                operations.transition(
+                    operation_id,
+                    OperationStatus::Failed,
+                    Some(1.0),
+                    None,
+                    Some(error.clone()),
+                )?;
+                Ok(())
+            },
         )
-        .map_err(response)?
-        .clone();
+        .map_err(response)?;
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     Ok((status, Json(operation)))
 }
@@ -3959,69 +4860,10 @@ fn authorized(
     action: Action,
     capability: &'static str,
 ) -> Result<bool, Response> {
-    let binding = state
-        .profile_resources
-        .read()
-        .map_err(|_| {
-            response(problem(
-                "control_unavailable",
-                "Control state unavailable",
-                503,
-            ))
-        })?
-        .get(profile_id)
-        .cloned();
-    let scope = match &binding {
-        Some(binding) => ResourceScope {
-            workspace_id: Some(binding.workspace_id.clone()),
-            resource_id: Some(binding.resource_id.clone()),
-            profile_id: Some(profile_id.clone()),
-            ..ResourceScope::default()
-        },
-        None => ResourceScope {
-            profile_id: Some(profile_id.clone()),
-            ..ResourceScope::default()
-        },
-    };
-    let capability = Capability::new(capability)
-        .map_err(|_| response(problem("invalid_capability", "Invalid capability", 500)))?;
-    if is_allowed(principal, &capability, action, &scope, grants) {
-        return Ok(true);
-    }
-    let Some(binding) = binding else {
-        return Ok(false);
-    };
-    let Some(account_id) = principal.account_id.as_ref() else {
-        return Ok(false);
-    };
-    let member_id = state
-        .members
-        .read()
-        .map_err(|_| {
-            response(problem(
-                "member_unavailable",
-                "Member state unavailable",
-                503,
-            ))
-        })?
-        .active_for_account(account_id)
-        .into_iter()
-        .find(|member| member.workspace_id == binding.workspace_id)
-        .map(|member| member.id);
-    let Some(member_id) = member_id else {
-        return Ok(false);
-    };
-    Ok(state
-        .resources
-        .read()
-        .map_err(|_| {
-            response(problem(
-                "resource_unavailable",
-                "Resource state unavailable",
-                503,
-            ))
-        })?
-        .is_allowed(&binding.resource_id, &member_id, action))
+    crate::services::profile_hosted::HostedProfileService::authorized(
+        state, principal, grants, profile_id, action, capability,
+    )
+    .map_err(response)
 }
 
 fn authorize_profile(
@@ -4067,16 +4909,32 @@ async fn require_correlation(
     next: Next,
 ) -> Result<Response, StatusCode> {
     if headers.get("x-correlation-id").is_none()
-        && !matches!(request.uri().path(), "/v1/health" | "/v1/readyz")
+        && !matches!(
+            request.uri().path(),
+            "/v1/health" | "/v1/openapi.yaml" | "/v1/readyz"
+        )
     {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(next.run(request).await)
 }
 
+async fn openapi_document() -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+        include_str!("../../openapi/openapi-v1.yaml"),
+    )
+        .into_response()
+}
+
 fn response(problem: Problem) -> Response {
     let status = StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(problem)).into_response()
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        Json(problem),
+    )
+        .into_response()
 }
 
 fn runtime_key(runtime: &Runtime) -> String {
@@ -4193,6 +5051,257 @@ mod persistence_tests {
         },
         time::Duration,
     };
+
+    #[test]
+    fn local_profile_and_migration_body_dtos_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<RevisionInput>(serde_json::json!({
+                "revision": 1,
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<LaunchInput>(serde_json::json!({
+                "profilesRoot": "C:/profiles",
+                "extraArgs": [],
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<DeleteInput>(serde_json::json!({
+                "revision": 1,
+                "confirmation": "QUARANTINE_PROFILE_DATA",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<MigrationInspectInput>(serde_json::json!({
+                "sourceRoot": "C:/source",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<MigrationImportInput>(serde_json::json!({
+                "sourceRoot": "C:/source",
+                "stagingParent": "C:/staging",
+                "destinationRoot": "C:/destination",
+                "runId": "run-1",
+                "confirmation": "CUTOVER_AND_PROMOTE",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn operation_state_survives_api_state_restart() {
+        let store = MemoryControlRecordStore::default();
+        let first =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.clone()).unwrap();
+        let operation_id = "op_restart_persisted";
+        first
+            .mutate_operation(
+                operation_id,
+                "operation.test",
+                "started",
+                "acct_operation_test",
+                |operations| {
+                    operations.insert(Operation::queued(
+                        operation_id,
+                        "operation.test",
+                        ResourceScope::global(),
+                    )?)?;
+                    operations.transition(
+                        operation_id,
+                        OperationStatus::Running,
+                        Some(0.1),
+                        None,
+                        None,
+                    )?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let restarted =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.clone()).unwrap();
+        let running = restarted
+            .operations
+            .read()
+            .unwrap()
+            .find(operation_id)
+            .cloned()
+            .expect("operation restored after restart");
+        assert_eq!(running.status, OperationStatus::Running);
+
+        restarted
+            .mutate_operation(
+                operation_id,
+                "operation.complete",
+                "completed",
+                "acct_operation_test",
+                |operations| {
+                    operations.transition(
+                        operation_id,
+                        OperationStatus::Completed,
+                        Some(1.0),
+                        Some(serde_json::json!({ "ok": true })),
+                        None,
+                    )?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let after_completion_restart =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store).unwrap();
+        let completed = after_completion_restart
+            .operations
+            .read()
+            .unwrap()
+            .find(operation_id)
+            .cloned()
+            .expect("completed operation restored after restart");
+        assert_eq!(completed.status, OperationStatus::Completed);
+        assert_eq!(completed.result, Some(serde_json::json!({ "ok": true })));
+
+        first.refresh_control_aggregate().unwrap();
+        assert_eq!(
+            first
+                .operations
+                .read()
+                .unwrap()
+                .find(operation_id)
+                .unwrap()
+                .status,
+            OperationStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn coordination_event_read_uses_workspace_grant_and_publish_is_service_only() {
+        use buglogin_domain::{
+            ids::{AccountId, GrantId, WorkspaceId},
+            permissions::{Action, Capability, Effect, Grant, ResourceScope},
+        };
+        use buglogin_sync::coordination::{
+            AuthorizationRequest, CoordinationAuth, CoordinationOperation,
+        };
+
+        let state = ApiState::local(ProfileService::disabled());
+        let account_id = AccountId::new("acct_event_reader").unwrap();
+        let workspace_id = WorkspaceId::new("ws_event_reader").unwrap();
+        let bearer = state.issue_token(account_id.as_str()).unwrap();
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::new("grant_event_read").unwrap(),
+            account_id: Some(account_id.clone()),
+            member_id: None,
+            capability: Capability::new("events.read").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(workspace_id.clone()),
+            effect: Effect::Allow,
+        });
+        let auth = CoordinationAuth::new(account_id.as_str(), bearer).unwrap();
+        let authorizer = ApiCoordinationAuthorizer {
+            authority: state.authorization_authority(),
+        };
+        authorizer
+            .authorize(
+                &auth,
+                AuthorizationRequest {
+                    operation: CoordinationOperation::EventRead,
+                    workspace_id: &workspace_id,
+                    resource_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let now = now();
+        let missing_scope_token = state
+            .api_tokens
+            .issue(
+                account_id.clone(),
+                "event-reader-without-event-scope",
+                std::collections::BTreeSet::from(["profile.read:read".to_owned()]),
+                now + 3_600,
+                now,
+            )
+            .unwrap();
+        let missing_scope_auth =
+            CoordinationAuth::new(account_id.as_str(), missing_scope_token.token).unwrap();
+        assert_eq!(
+            authorizer
+                .authorize(
+                    &missing_scope_auth,
+                    AuthorizationRequest {
+                        operation: CoordinationOperation::EventRead,
+                        workspace_id: &workspace_id,
+                        resource_id: None,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "coordination_forbidden"
+        );
+        let event_scope_token = state
+            .api_tokens
+            .issue(
+                account_id.clone(),
+                "event-reader-with-event-scope",
+                std::collections::BTreeSet::from(["events.read:read".to_owned()]),
+                now + 3_600,
+                now,
+            )
+            .unwrap();
+        let event_scope_auth =
+            CoordinationAuth::new(account_id.as_str(), event_scope_token.token).unwrap();
+        authorizer
+            .authorize(
+                &event_scope_auth,
+                AuthorizationRequest {
+                    operation: CoordinationOperation::EventRead,
+                    workspace_id: &workspace_id,
+                    resource_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let other_workspace_id = WorkspaceId::new("ws_event_other").unwrap();
+        assert_eq!(
+            authorizer
+                .authorize(
+                    &event_scope_auth,
+                    AuthorizationRequest {
+                        operation: CoordinationOperation::EventRead,
+                        workspace_id: &other_workspace_id,
+                        resource_id: None,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "coordination_forbidden"
+        );
+        assert_eq!(
+            authorizer
+                .authorize(
+                    &auth,
+                    AuthorizationRequest {
+                        operation: CoordinationOperation::EventPublish,
+                        workspace_id: &workspace_id,
+                        resource_id: None,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "coordination_publish_forbidden"
+        );
+    }
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

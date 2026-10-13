@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
     fs,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -35,6 +38,7 @@ use buglogin_sync::{
         PayloadEncryptionAlgorithm, SyncManifest,
     },
 };
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -43,6 +47,8 @@ struct FakeCoordination {
     lease: Mutex<Option<LeaseGrant>>,
     replay: Mutex<BTreeMap<String, LeaseGrant>>,
     manifest: Mutex<Option<SyncManifest>>,
+    event_reads: Arc<AtomicUsize>,
+    events: Arc<Mutex<Vec<StreamEvent>>>,
 }
 
 #[async_trait]
@@ -179,10 +185,19 @@ impl CoordinationBackend for FakeCoordination {
     async fn read_events(
         &self,
         _scope: CoordinationScope<'_>,
-        _after_stream_id: Option<&str>,
-        _limit: usize,
+        after_stream_id: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<StreamEvent>, Problem> {
-        Err(unsupported())
+        self.event_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| after_stream_id.is_none_or(|cursor| event.stream_id.as_str() > cursor))
+            .take(limit)
+            .cloned()
+            .collect())
     }
     async fn current_manifest(
         &self,
@@ -715,55 +730,6 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         .unwrap();
     assert_eq!(envelope_response.status(), StatusCode::OK);
 
-    let proxy_metadata = json!({
-        "workspaceId": workspace.as_str(),
-        "proxy": {
-            "id": proxy_id.as_str(),
-            "name": "Primary",
-            "protocol": "http",
-            "host": "proxy.example",
-            "port": 8080,
-            "hasCredential": true,
-            "rotationConfigured": false,
-            "bypassRules": [],
-            "createdAt": "2026-07-22T00:00:00Z",
-            "updatedAt": "2026-07-22T00:00:00Z"
-        },
-        "revision": 1
-    });
-    let proxy_bytes = serde_json::to_vec(&proxy_metadata).unwrap();
-    let proxy_checksum = checksum(&proxy_bytes);
-    let proxy_key = "proxy/proxy_lease_1/metadata.json";
-    let proxy_blob_path = format!(
-        "/v1/workspaces/{}/resources/{}/blobs?key=proxy%2Fproxy_lease_1%2Fmetadata.json",
-        workspace.as_str(),
-        resource.as_str()
-    );
-    let proxy_blob_put = Request::builder()
-        .method("PUT")
-        .uri(&proxy_blob_path)
-        .header("authorization", format!("Bearer {token}"))
-        .header("x-correlation-id", "proxy-metadata-put")
-        .header("content-type", "application/octet-stream")
-        .header("idempotency-key", "proxy-meta-put-key-0001")
-        .header("x-buglogin-owner-id", "desktop-1")
-        .header(
-            "x-buglogin-owner-token",
-            first["ownerToken"].as_str().unwrap(),
-        )
-        .header(
-            "x-buglogin-fencing-token",
-            first["fencingToken"].as_u64().unwrap().to_string(),
-        )
-        .header("x-buglogin-generation", "1")
-        .header("x-content-sha256", &proxy_checksum)
-        .body(Body::from(proxy_bytes.clone()))
-        .unwrap();
-    assert_eq!(
-        app.clone().oneshot(proxy_blob_put).await.unwrap().status(),
-        StatusCode::OK
-    );
-
     let proxy_credential = ProxyCredentialEnvelope::seal(
         workspace.clone(),
         resource.clone(),
@@ -816,7 +782,6 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         StatusCode::OK
     );
 
-    let proxy_object = ManifestObject::new(proxy_key, &proxy_bytes).unwrap();
     let mut manifest = SyncManifest::new(
         workspace.clone(),
         resource.clone(),
@@ -826,7 +791,6 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         &blob,
         vec![
             ManifestObject::new("profile/payload.bin", &blob).unwrap(),
-            proxy_object.clone(),
             credential_object.clone(),
             envelope_object.clone(),
         ],
@@ -858,7 +822,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         .push(ManifestDependency::Proxy {
             proxy_id: proxy_id.clone(),
             revision: 2,
-            metadata_object: ManifestObjectReference::from(&proxy_object),
+            metadata_object: None,
             credential_envelope_object: None,
         });
     let rejected_stale_proxy = app
@@ -878,7 +842,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     manifest.dependencies.push(ManifestDependency::Proxy {
         proxy_id: proxy_id.clone(),
         revision: 1,
-        metadata_object: ManifestObjectReference::from(&proxy_object),
+        metadata_object: None,
         credential_envelope_object: Some(ManifestObjectReference::from(&credential_object)),
     });
     let proxy_read_grant = {
@@ -1157,6 +1121,73 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
     let body: SyncManifest =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body, manifest);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn events_stream_reads_workspace_feed_from_coordination_backend() {
+    let root = std::env::temp_dir().join(format!("buglogin-http-events-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let state = ApiState::new(ProfileService::new(LocalRepository::open(&root).unwrap()));
+    let token = state.issue_token("acct_events").unwrap();
+    let account = AccountId::new("acct_events").unwrap();
+    let workspace = WorkspaceId::new("ws_events").unwrap();
+    state.grants.write().unwrap().push(grant(
+        &account,
+        "grant_events_read",
+        "events.read",
+        Action::Read,
+        ResourceScope::workspace(workspace.clone()),
+    ));
+    let coordination = Arc::new(FakeCoordination {
+        events: Arc::new(Mutex::new(vec![StreamEvent {
+            stream_id: "1001-0".into(),
+            event: CoordinationEvent {
+                event_id: "evt_profile_sync_1".into(),
+                event_version: "1".into(),
+                name: "profile.sync.committed".into(),
+                occurred_at_ms: 1_001,
+                correlation_id: "evt_profile_sync_1".into(),
+                causation_id: "evt_profile_sync_1".into(),
+                actor_id: "acct_events".into(),
+                resource: buglogin_sync::coordination::EventResource {
+                    resource_type: "profile".into(),
+                    id: "prf_event_test".into(),
+                    revision: 1,
+                },
+                data: json!({"generation": 1}),
+            },
+        }])),
+        ..FakeCoordination::default()
+    });
+    let app = router(state.with_coordination(coordination.clone()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/events?workspaceId={}", workspace.as_str()))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "events-stream-test")
+                .header("last-event-id", "1000-0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    assert_eq!(coordination.event_reads.load(Ordering::SeqCst), 1);
+    let first_chunk = response
+        .into_body()
+        .into_data_stream()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    let first_event = String::from_utf8(first_chunk.to_vec()).unwrap();
+    assert!(first_event.contains("id: 1001-0"));
+    assert!(first_event.contains("event: profile.sync.committed"));
+    assert!(first_event.contains("\"generation\":1"));
     let _ = fs::remove_dir_all(root);
 }
 

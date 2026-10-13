@@ -119,7 +119,7 @@ pub struct LegacyControlPlaneMapping {
 macro_rules! neutral_record {
     ($record:ident, $data:ident) => {
         #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-        #[serde(rename_all = "snake_case")]
+        #[serde(rename_all = "snake_case", deny_unknown_fields)]
         pub struct $record {
             pub schema: String,
             pub source_ref: ProfileSourceRef,
@@ -143,20 +143,20 @@ neutral_record!(NeutralProfileResourceRecord, NeutralProfileResourceData);
 neutral_record!(NeutralGrantRecord, NeutralGrantData);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralAccountData {
     pub status: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralOrganizationData {
     pub account_id: String,
     pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralWorkspacePolicy {
     pub max_profiles: u32,
     pub max_members: u32,
@@ -165,7 +165,7 @@ pub struct NeutralWorkspacePolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralWorkspaceData {
     pub organization_id: String,
     pub name: String,
@@ -173,7 +173,7 @@ pub struct NeutralWorkspaceData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralTeamData {
     pub workspace_id: String,
     pub name: String,
@@ -181,7 +181,7 @@ pub struct NeutralTeamData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralMemberData {
     pub account_id: String,
     pub workspace_id: String,
@@ -191,7 +191,7 @@ pub struct NeutralMemberData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralResourceData {
     pub workspace_id: String,
     pub kind: String,
@@ -200,7 +200,7 @@ pub struct NeutralResourceData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralProfileResourceData {
     pub profile_id: String,
     pub resource_id: String,
@@ -209,7 +209,7 @@ pub struct NeutralProfileResourceData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralGrantData {
     pub workspace_id: String,
     pub resource_id: String,

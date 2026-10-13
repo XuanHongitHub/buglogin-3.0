@@ -62,7 +62,7 @@ impl Operation {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OperationService {
     capacity: usize,
     operations: BTreeMap<String, Operation>,

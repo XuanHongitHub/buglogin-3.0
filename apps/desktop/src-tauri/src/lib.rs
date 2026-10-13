@@ -67,6 +67,7 @@ pub fn run() {
             cookie_import,
             cookie_copy,
             proxy_parse,
+            proxy_check,
             proxy_list,
             proxy_get,
             proxy_create,
@@ -561,6 +562,17 @@ async fn proxy_parse(
 ) -> Result<CommandResult<Value>, Problem> {
     state
         .invoke("proxy_parse", &correlation_id, None, payload)
+        .await
+}
+
+#[tauri::command]
+async fn proxy_check(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke("proxy_check", &correlation_id, None, payload)
         .await
 }
 

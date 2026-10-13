@@ -13,8 +13,8 @@ use buglogin_domain::{
     errors::Problem,
     grant::ResourceGrant,
     ids::{
-        AccountId, CredentialId, GrantId, MemberId, OrganizationId, ProfileId, ProxyId, ResourceId,
-        TeamId, WorkspaceId,
+        AccountId, CredentialId, GrantId, GroupId, MemberId, OrganizationId, ProfileId, ProxyId,
+        ResourceId, TeamId, WorkspaceId,
     },
     member::{Member, MemberRole},
     organization::{Organization, OrganizationPolicy},
@@ -78,10 +78,12 @@ pub(super) async fn mutate_hosted_profile_archive_state(
         "profileId": profile_id,
         "revision": expected_revision,
     });
+    let grants = grants(&state)?;
     mutate(
         &state,
         &headers,
         &principal,
+        &grants,
         binding.workspace_id.as_str(),
         command,
         input,
@@ -107,13 +109,16 @@ pub(super) async fn provision_managed_profile(
     principal: Principal,
     grants: Vec<buglogin_domain::permissions::Grant>,
     profile: Profile,
+    requested_workspace: Option<WorkspaceId>,
 ) -> Result<Response, Response> {
-    let workspace_id = headers
+    let header_workspace = headers
         .get("x-buglogin-workspace-id")
         .and_then(|value| value.to_str().ok())
         .map(WorkspaceId::from_str)
         .transpose()
-        .map_err(|_| bad_header("x-buglogin-workspace-id"))?
+        .map_err(|_| bad_header("x-buglogin-workspace-id"))?;
+    let workspace_id = requested_workspace
+        .or(header_workspace)
         .or_else(|| {
             (principal.workspace_ids.len() == 1)
                 .then(|| principal.workspace_ids.iter().next().cloned())
@@ -156,8 +161,9 @@ pub(super) async fn provision_managed_profile(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
-        "profile.provision",
+        "profile.create",
         input,
         ResourceScope::resource(workspace_id.clone(), resource_id.clone()),
         resource_id.as_str(),
@@ -193,6 +199,7 @@ pub(super) async fn clone_profile(
         &state,
         &headers,
         &principal,
+        &grants,
         binding.workspace_id.as_str(),
         "profile.clone",
         value,
@@ -235,6 +242,7 @@ pub(super) async fn share_profile(
         &state,
         &headers,
         &principal,
+        &grants,
         binding.workspace_id.as_str(),
         "profile.share",
         value,
@@ -277,6 +285,7 @@ pub(super) async fn revoke_profile_share(
         &state,
         &headers,
         &principal,
+        &grants,
         binding.workspace_id.as_str(),
         "profile.share.revoke",
         value,
@@ -302,21 +311,21 @@ struct AccountView {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccountStatusInput {
     status: AccountStatus,
     expected_revision: u64,
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OrganizationInput {
     organization: Organization,
     policy: OrganizationPolicy,
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UsageInput {
     profiles: u32,
     members: u32,
@@ -324,7 +333,7 @@ struct UsageInput {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RoleInput {
     role: MemberRole,
 }
@@ -511,6 +520,14 @@ pub(super) fn routes() -> Router<ApiState> {
             get(get_team).put(update_team).delete(delete_team),
         )
         .route(
+            "/v1/workspaces/{workspace_id}/groups",
+            get(list_groups).post(create_group),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/groups/{group_id}",
+            get(get_group).put(update_group).delete(delete_group),
+        )
+        .route(
             "/v1/workspaces/{workspace_id}/members/{member_id}",
             get(get_member),
         )
@@ -563,6 +580,14 @@ pub(super) fn routes() -> Router<ApiState> {
         .route(
             "/v1/profiles/{profile_id}/runtime/stopped",
             put(runtime_stopped),
+        )
+        .route(
+            "/v1/profiles/{profile_id}/groups",
+            put(replace_profile_groups),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/profiles/{profile_id}/proxy-assignment",
+            get(get_profile_proxy_assignment).put(set_profile_proxy_assignment),
         )
         .route(
             "/v1/workspaces/{workspace_id}/grants",
@@ -665,6 +690,7 @@ async fn create_proxy(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "proxy.create",
         input_value,
@@ -726,6 +752,7 @@ async fn update_proxy(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "proxy.update",
         input_value,
@@ -791,6 +818,7 @@ async fn delete_proxy(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "proxy.delete",
         input_value,
@@ -1055,6 +1083,7 @@ async fn create_team(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "team.create",
         input,
@@ -1124,6 +1153,7 @@ async fn update_team(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "team.update",
         value,
@@ -1156,6 +1186,7 @@ async fn delete_team(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "team.delete",
         value,
@@ -1167,6 +1198,408 @@ async fn delete_team(
                 .write()
                 .map_err(|_| service_unavailable("team"))?
                 .delete(&principal, &grants, &workspace_id, &team_id, input)
+                .map_err(response_problem)
+        },
+    )
+    .await
+}
+
+async fn list_groups(
+    State(state): State<ApiState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::services::groups::GroupRecord>>, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
+    Ok(Json(
+        state
+            .groups
+            .read()
+            .map_err(|_| service_unavailable("group"))?
+            .list(&principal, &grants, &workspace_id)
+            .map_err(response_problem)?,
+    ))
+}
+
+async fn get_group(
+    State(state): State<ApiState>,
+    Path((workspace_id, group_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<crate::services::groups::GroupRecord>, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
+    let group_id = GroupId::from_str(&group_id).map_err(|_| bad_id("group_id"))?;
+    Ok(Json(
+        state
+            .groups
+            .read()
+            .map_err(|_| service_unavailable("group"))?
+            .get(&principal, &grants, &workspace_id, &group_id)
+            .map_err(response_problem)?,
+    ))
+}
+
+async fn create_group(
+    State(state): State<ApiState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<crate::services::groups::GroupCreateInput>,
+) -> Result<Response, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
+    let value = serde_json::to_value(&input).map_err(internal)?;
+    let group_id = input.group_id.clone();
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grants,
+        workspace_id.as_str(),
+        "group.create",
+        value,
+        ResourceScope::workspace(workspace_id.clone()),
+        group_id.as_str(),
+        || {
+            state
+                .groups
+                .write()
+                .map_err(|_| service_unavailable("group"))?
+                .create(&principal, &grants, &workspace_id, input.clone())
+                .map_err(response_problem)
+        },
+    )
+    .await
+}
+
+async fn update_group(
+    State(state): State<ApiState>,
+    Path((workspace_path, group_path)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<crate::services::groups::GroupUpdateInput>,
+) -> Result<Response, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id =
+        WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
+    let group_id = GroupId::from_str(&group_path).map_err(|_| bad_id("group_id"))?;
+    let value = serde_json::to_value(&input).map_err(internal)?;
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grants,
+        workspace_id.as_str(),
+        "group.update",
+        value,
+        ResourceScope::workspace(workspace_id.clone()),
+        group_id.as_str(),
+        || {
+            state
+                .groups
+                .write()
+                .map_err(|_| service_unavailable("group"))?
+                .update(&principal, &grants, &workspace_id, &group_id, input)
+                .map_err(response_problem)
+        },
+    )
+    .await
+}
+
+async fn delete_group(
+    State(state): State<ApiState>,
+    Path((workspace_path, group_path)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<crate::services::groups::GroupDeleteInput>,
+) -> Result<Response, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id =
+        WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
+    let group_id = GroupId::from_str(&group_path).map_err(|_| bad_id("group_id"))?;
+    let value = serde_json::to_value(&input).map_err(internal)?;
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grants,
+        workspace_id.as_str(),
+        "group.delete",
+        value,
+        ResourceScope::workspace(workspace_id.clone()),
+        group_id.as_str(),
+        || {
+            let in_use = state
+                .group_is_in_use(&workspace_id, &group_id)
+                .map_err(response_problem)?;
+            state
+                .groups
+                .write()
+                .map_err(|_| service_unavailable("group"))?
+                .delete(&principal, &grants, &workspace_id, &group_id, input, in_use)
+                .map_err(response_problem)
+        },
+    )
+    .await
+}
+
+async fn replace_profile_groups(
+    State(state): State<ApiState>,
+    Path(profile_path): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<crate::services::groups::ProfileGroupsReplaceInput>,
+) -> Result<Response, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let profile_id = ProfileId::from_str(&profile_path).map_err(|_| bad_id("profile_id"))?;
+    if input.profile_id != profile_id {
+        return Err(bad_id("profile_id"));
+    }
+    let binding = state
+        .profile_resource_record(&profile_id)
+        .map_err(response_problem)?
+        .ok_or_else(|| {
+            problem_response(
+                "binding_not_found",
+                "Profile binding not found",
+                404,
+                correlation(&headers),
+            )
+        })?;
+    if binding.workspace_id != input.workspace_id {
+        return Err(problem_response(
+            "profile_scope_mismatch",
+            "Profile workspace does not match request",
+            403,
+            correlation(&headers),
+        ));
+    }
+    authorize_action(
+        &state,
+        &principal,
+        &grants,
+        &profile_id,
+        Action::Update,
+        "CAP-PROF-003",
+    )?;
+    let value = serde_json::to_value(&input).map_err(internal)?;
+    let workspace_id = binding.workspace_id;
+    let resource_id = binding.resource_id;
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grants,
+        workspace_id.as_str(),
+        "profile.groups.replace",
+        value,
+        ResourceScope {
+            workspace_id: Some(workspace_id.clone()),
+            resource_id: Some(resource_id),
+            profile_id: Some(profile_id.clone()),
+            ..ResourceScope::default()
+        },
+        profile_id.as_str(),
+        || {
+            let updated = state
+                .replace_hosted_profile_groups(input.clone())
+                .map_err(response_problem)?;
+            Ok(buglogin_domain::entities::ProfileRecord::new(
+                updated.value,
+                updated.revision,
+            ))
+        },
+    )
+    .await
+}
+
+async fn get_profile_proxy_assignment(
+    State(state): State<ApiState>,
+    Path((workspace_path, profile_path)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<crate::services::profile_proxy_assignment::ProfileProxyAssignment>, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id =
+        WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
+    let profile_id = ProfileId::from_str(&profile_path).map_err(|_| bad_id("profile_id"))?;
+    let binding = state
+        .profile_resource_record(&profile_id)
+        .map_err(response_problem)?
+        .filter(|binding| binding.workspace_id == workspace_id)
+        .ok_or_else(|| {
+            problem_response(
+                "binding_not_found",
+                "Profile binding not found",
+                404,
+                correlation(&headers),
+            )
+        })?;
+    let _ = binding;
+    authorize_action(
+        &state,
+        &principal,
+        &grants,
+        &profile_id,
+        Action::Read,
+        "profile.read",
+    )?;
+    let assignment = state
+        .profile_proxy_assignments
+        .read()
+        .map_err(|_| service_unavailable("profile proxy assignment"))?
+        .get(&workspace_id, &profile_id)
+        .map_err(response_problem)?;
+    let profile = state
+        .get_profile_record(&profile_id)
+        .map_err(response_problem)?
+        .ok_or_else(|| {
+            problem_response(
+                "profile_not_found",
+                "Profile not found",
+                404,
+                correlation(&headers),
+            )
+        })?;
+    if assignment.expected_profile_revision != profile.revision {
+        return Err(problem_response(
+            "profile_proxy_assignment_stale",
+            "Profile proxy assignment is stale",
+            409,
+            correlation(&headers),
+        ));
+    }
+    Ok(Json(assignment))
+}
+
+async fn set_profile_proxy_assignment(
+    State(state): State<ApiState>,
+    Path((workspace_path, profile_path)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<crate::services::profile_proxy_assignment::ProfileProxyAssignmentSetInput>,
+) -> Result<Response, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id =
+        WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
+    let profile_id = ProfileId::from_str(&profile_path).map_err(|_| bad_id("profile_id"))?;
+    if input.workspace_id != workspace_id || input.profile_id != profile_id {
+        return Err(problem_response(
+            "profile_scope_mismatch",
+            "Profile assignment scope does not match request",
+            403,
+            correlation(&headers),
+        ));
+    }
+    let binding = state
+        .profile_resource_record(&profile_id)
+        .map_err(response_problem)?
+        .filter(|binding| binding.workspace_id == workspace_id)
+        .ok_or_else(|| {
+            problem_response(
+                "binding_not_found",
+                "Profile binding not found",
+                404,
+                correlation(&headers),
+            )
+        })?;
+    let profile = state
+        .get_profile_record(&profile_id)
+        .map_err(response_problem)?
+        .ok_or_else(|| {
+            problem_response(
+                "profile_not_found",
+                "Profile not found",
+                404,
+                correlation(&headers),
+            )
+        })?;
+    if state.local_authority_enabled() {
+        return Err(problem_response(
+            "hosted_proxy_assignment_required",
+            "Managed proxy reassignment requires hosted profile sync",
+            503,
+            correlation(&headers),
+        ));
+    }
+    crate::services::profile_proxy_assignment::ProfileProxyAssignmentService::validate_change(
+        &profile.value,
+        profile.revision,
+        &input,
+    )
+    .map_err(|mut error| {
+        error.correlation_id = correlation(&headers);
+        response_problem(error)
+    })?;
+    authorize_action(
+        &state,
+        &principal,
+        &grants,
+        &profile_id,
+        Action::Update,
+        "profile.update",
+    )?;
+    if let Some(proxy_id) = input.proxy_id.as_ref() {
+        state
+            .proxies
+            .read()
+            .map_err(|_| service_unavailable("proxy"))?
+            .get(&workspace_id, proxy_id, &principal, &grants)
+            .map_err(proxy_response_problem)?;
+    }
+    let value = serde_json::to_value(&input).map_err(internal)?;
+    let scope = ResourceScope {
+        workspace_id: Some(binding.workspace_id.clone()),
+        resource_id: Some(binding.resource_id.clone()),
+        profile_id: Some(profile_id.clone()),
+        ..ResourceScope::default()
+    };
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grants,
+        workspace_id.as_str(),
+        "profile.proxy.assignment.set",
+        value,
+        scope,
+        profile_id.as_str(),
+        || {
+            let current = state
+                .get_profile_record(&profile_id)
+                .map_err(response_problem)?
+                .ok_or_else(|| {
+                    response_problem(Problem::new(
+                        "profile_not_found",
+                        "Profile not found",
+                        404,
+                        correlation(&headers),
+                    ))
+                })?;
+            crate::services::profile_proxy_assignment::ProfileProxyAssignmentService::validate_change(
+                &current.value,
+                current.revision,
+                &input,
+            )
+            .map_err(|mut error| {
+                error.correlation_id = correlation(&headers);
+                response_problem(error)
+            })?;
+            if let Some(proxy_id) = input.proxy_id.as_ref() {
+                state
+                    .proxies
+                    .read()
+                    .map_err(|_| service_unavailable("proxy"))?
+                    .get(&workspace_id, proxy_id, &principal, &grants)
+                    .map_err(proxy_response_problem)?;
+            }
+            state
+                .profile_proxy_assignments
+                .write()
+                .map_err(|_| service_unavailable("profile proxy assignment"))?
+                .set(&workspace_id, input.clone())
                 .map_err(response_problem)
         },
     )
@@ -1290,6 +1723,7 @@ async fn update_organization(
         &state,
         &headers,
         &principal,
+        &grants,
         organization_id.as_str(),
         "organization.update",
         value,
@@ -1346,6 +1780,7 @@ async fn update_workspace(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "workspace.update",
         value,
@@ -1387,6 +1822,7 @@ async fn create_organization(
         &state,
         &headers,
         &principal,
+        &grants,
         "",
         "organization.create",
         input_value,
@@ -1425,6 +1861,7 @@ async fn create_workspace(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace.id.as_str(),
         "workspace.create",
         input_value,
@@ -1555,6 +1992,7 @@ async fn invite_member(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "member.invite",
         value,
@@ -1623,6 +2061,7 @@ async fn activate_member(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "member.activate",
         value,
@@ -1662,6 +2101,7 @@ async fn suspend_member(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "member.suspend",
         value,
@@ -1702,6 +2142,7 @@ async fn set_member_role(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "member.role.update",
         value,
@@ -1749,6 +2190,7 @@ async fn register_resource(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "resource.register",
         value,
@@ -1886,6 +2328,7 @@ async fn set_runtime_projection(
     validate_runtime_projection_input(&input, &headers)?;
     let binding = active_profile_binding(&state, &profile_id)?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &binding.workspace_id,
@@ -1937,6 +2380,7 @@ async fn set_runtime_projection(
         &state,
         &headers,
         &principal,
+        &grants,
         binding.workspace_id.as_str(),
         command,
         mutation_input,
@@ -2029,6 +2473,7 @@ async fn acquire_resource_lease(
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -2079,6 +2524,7 @@ async fn renew_resource_lease(
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -2116,6 +2562,7 @@ async fn release_resource_lease(
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -2160,6 +2607,7 @@ async fn get_resource_manifest(
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     let grants = grants(&state)?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -2202,6 +2650,7 @@ async fn commit_resource_manifest(
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     let grants = grants(&state)?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -2215,6 +2664,17 @@ async fn commit_resource_manifest(
     let fencing_token = required_header(&headers, "x-buglogin-fencing-token")?
         .parse::<u64>()
         .map_err(|_| bad_header("x-buglogin-fencing-token"))?;
+    let expected_profile_revision = headers
+        .get("x-buglogin-profile-revision")
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|revision| *revision > 0)
+                .ok_or_else(|| bad_header("x-buglogin-profile-revision"))
+        })
+        .transpose()?;
     if manifest.fencing_token != fencing_token {
         return Err(problem_response(
             "manifest_fencing_header_mismatch",
@@ -2282,7 +2742,11 @@ async fn commit_resource_manifest(
         )
         .await
         .map_err(response_problem)?;
-    let body = serde_json::to_value(&manifest).map_err(|_| {
+    let body = serde_json::json!({
+        "expectedProfileRevision": expected_profile_revision,
+        "manifest": &manifest,
+    });
+    let body = serde_json::to_value(body).map_err(|_| {
         problem_response(
             "serialization_failed",
             "Response serialization failed",
@@ -2294,6 +2758,7 @@ async fn commit_resource_manifest(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "profile.manifest.commit",
         body,
@@ -2301,6 +2766,13 @@ async fn commit_resource_manifest(
         resource_id.as_str(),
         || {
             validate_manifest_successor(&state, &workspace_id, &resource_id, &manifest)?;
+            activate_pending_profile_proxy_assignment(
+                &state,
+                &workspace_id,
+                &resource_id,
+                &manifest,
+                expected_profile_revision,
+            )?;
             validate_profile_proxy_dependencies(
                 &state,
                 &principal,
@@ -2382,8 +2854,13 @@ fn validate_payload_object_wire_format(
         .iter()
         .any(|dependency| match dependency {
             ManifestDependency::Proxy {
-                metadata_object, ..
+                metadata_object: Some(metadata_object),
+                ..
             } => object.key == metadata_object.key,
+            ManifestDependency::Proxy {
+                metadata_object: None,
+                ..
+            } => false,
         })
     {
         let metadata: ProxyRecordView = serde_json::from_slice(bytes).map_err(|_| {
@@ -2472,21 +2949,22 @@ fn validate_manifest_successor(
         if let Some(current_encryption) = current.payload_encryption.as_ref()
             && current_encryption.algorithm
                 == buglogin_sync::manifest::PayloadEncryptionAlgorithm::Aes256GcmChunkV2
-            && manifest
-                .payload_encryption
-                .as_ref()
-                .is_none_or(|candidate| {
-                    candidate.algorithm
-                        != buglogin_sync::manifest::PayloadEncryptionAlgorithm::Aes256GcmChunkV2
-                        || candidate.key_version != current_encryption.key_version
-                })
         {
-            return Err(response_problem(Problem::new(
-                "sync_key_rotation_not_supported",
-                "The active profile key version cannot change without a key rotation",
-                409,
-                "sync",
-            )));
+            let candidate_encryption = manifest.payload_encryption.as_ref().filter(|candidate| {
+                candidate.algorithm
+                    == buglogin_sync::manifest::PayloadEncryptionAlgorithm::Aes256GcmChunkV2
+            });
+            let Some(candidate_encryption) = candidate_encryption else {
+                return Err(response_problem(Problem::new(
+                    "sync_key_rotation_invalid",
+                    "Versioned profile encryption cannot be downgraded",
+                    409,
+                    "sync",
+                )));
+            };
+            if candidate_encryption.key_version != current_encryption.key_version {
+                validate_key_rotation_successor(current, manifest)?;
+            }
         }
         if manifest.fencing_token < current.fencing_token
             || manifest.generation != current.generation + 1
@@ -2499,6 +2977,9 @@ fn validate_manifest_successor(
                 "sync",
             )));
         }
+        current
+            .validate_successor(manifest, now().saturating_mul(1000))
+            .map_err(response_problem)?;
         validate_reused_manifest_objects(current, manifest)?;
     } else if manifest.generation != 1
         || manifest.parent_generation.is_some()
@@ -2510,6 +2991,102 @@ fn validate_manifest_successor(
         return Err(response_problem(Problem::new(
             "manifest_base_missing",
             "Manifest base is missing",
+            409,
+            "sync",
+        )));
+    }
+    Ok(())
+}
+
+fn validate_key_rotation_successor(
+    current: &SyncManifest,
+    candidate: &SyncManifest,
+) -> Result<(), ResponseProblem> {
+    let Some(current_encryption) = current.payload_encryption.as_ref() else {
+        return Err(response_problem(Problem::new(
+            "sync_key_rotation_invalid",
+            "Active profile encryption metadata is missing",
+            409,
+            "sync",
+        )));
+    };
+    let Some(candidate_encryption) = candidate.payload_encryption.as_ref() else {
+        return Err(response_problem(Problem::new(
+            "sync_key_rotation_invalid",
+            "Rotated profile encryption metadata is missing",
+            409,
+            "sync",
+        )));
+    };
+    if candidate
+        .objects
+        .iter()
+        .any(|object| object.source_generation.is_some())
+    {
+        return Err(response_problem(Problem::new(
+            "sync_key_rotation_requires_full_reencrypt",
+            "Key rotation must upload every object with the new resource key",
+            409,
+            "sync",
+        )));
+    }
+    if current_encryption.resource_key_envelope.checksum
+        == candidate_encryption.resource_key_envelope.checksum
+    {
+        return Err(response_problem(Problem::new(
+            "sync_key_rotation_envelope_unchanged",
+            "Key rotation must publish a new resource key envelope",
+            409,
+            "sync",
+        )));
+    }
+    let clear_metadata_keys = current
+        .dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            buglogin_sync::manifest::ManifestDependency::Proxy {
+                metadata_object: Some(reference),
+                ..
+            } => Some(reference.key.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for previous in &current.objects {
+        if previous.key == current_encryption.resource_key_envelope.key
+            || clear_metadata_keys.contains(previous.key.as_str())
+        {
+            continue;
+        }
+        if candidate
+            .objects
+            .iter()
+            .any(|object| object.key == previous.key && object.checksum == previous.checksum)
+        {
+            return Err(response_problem(Problem::new(
+                "sync_key_rotation_object_unchanged",
+                "Key rotation cannot retain ciphertext encrypted with the previous key",
+                409,
+                "sync",
+            )));
+        }
+    }
+    let candidate_keys = candidate
+        .objects
+        .iter()
+        .map(|object| object.key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let tombstone_keys = candidate
+        .tombstones
+        .iter()
+        .map(|tombstone| tombstone.key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if current.objects.iter().any(|object| {
+        !candidate_keys.contains(object.key.as_str())
+            && !tombstone_keys.contains(object.key.as_str())
+    }) {
+        return Err(response_problem(Problem::new(
+            "sync_key_rotation_incomplete",
+            "Key rotation must retain or tombstone every prior object",
             409,
             "sync",
         )));
@@ -2600,6 +3177,135 @@ fn referenced_object_storage_generation(
                 && object.checksum == reference.checksum
         })
         .map(|object| object_storage_generation(manifest.generation, object))
+}
+
+fn activate_pending_profile_proxy_assignment(
+    state: &ApiState,
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+    manifest: &SyncManifest,
+    expected_profile_revision: Option<u64>,
+) -> Result<(), ResponseProblem> {
+    let mut bound_profile = None;
+    for profile in state.list_profile_records().map_err(response_problem)? {
+        let binding = state
+            .profile_resource_record(&profile.value.id)
+            .map_err(response_problem)?;
+        if binding.as_ref().is_some_and(|binding| {
+            &binding.workspace_id == workspace_id && &binding.resource_id == resource_id
+        }) {
+            if bound_profile.replace(profile).is_some() {
+                return Err(response_problem(Problem::new(
+                    "profile_binding_ambiguous",
+                    "Resource has multiple profile bindings",
+                    409,
+                    "sync",
+                )));
+            }
+        }
+    }
+    let Some(profile) = bound_profile else {
+        return Ok(());
+    };
+    let pending = state
+        .profile_proxy_assignments
+        .read()
+        .map_err(|_| service_unavailable("profile proxy assignment"))?
+        .get_optional(workspace_id, &profile.value.id);
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+    if state.local_authority_enabled() {
+        return Err(response_problem(Problem::new(
+            "hosted_proxy_assignment_required",
+            "Pending proxy assignment requires hosted profile storage",
+            503,
+            "sync",
+        )));
+    }
+    let expected_profile_revision = expected_profile_revision.ok_or_else(|| {
+        response_problem(Problem::new(
+            "profile_revision_required",
+            "Profile revision header is required to activate a proxy assignment",
+            400,
+            "sync",
+        ))
+    })?;
+    if expected_profile_revision != pending.expected_profile_revision
+        || profile.revision != pending.expected_profile_revision
+    {
+        return Err(response_problem(
+            Problem::new(
+                "profile_proxy_assignment_stale",
+                "Profile or pending proxy assignment changed before sync",
+                409,
+                "sync",
+            )
+            .with_field("expectedRevision", pending.expected_profile_revision)
+            .with_field("actualRevision", profile.revision),
+        ));
+    }
+    if profile.value.archived
+        || profile.value.state == buglogin_domain::entities::ProfileState::Running
+    {
+        return Err(response_problem(Problem::new(
+            "profile_proxy_assignment_not_allowed",
+            "Proxy assignment requires a stopped active profile",
+            409,
+            "sync",
+        )));
+    }
+    let manifest_proxy_id = match manifest.dependencies.as_slice() {
+        [] => None,
+        [ManifestDependency::Proxy { proxy_id, .. }] => Some(proxy_id.clone()),
+        _ => {
+            return Err(response_problem(Problem::new(
+                "manifest_dependency_mismatch",
+                "Manifest must contain at most one proxy dependency",
+                409,
+                "sync",
+            )));
+        }
+    };
+    if manifest_proxy_id != pending.proxy_id {
+        return Err(response_problem(Problem::new(
+            "profile_proxy_assignment_manifest_mismatch",
+            "Manifest proxy dependency does not match the pending assignment",
+            409,
+            "sync",
+        )));
+    }
+
+    let mut updated = profile.value;
+    updated.proxy_id = pending.proxy_id.clone();
+    updated.updated_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_| {
+            response_problem(Problem::new(
+                "clock_unavailable",
+                "Clock unavailable",
+                500,
+                "sync",
+            ))
+        })?;
+    state
+        .update_profile_record(expected_profile_revision, updated)
+        .map_err(response_problem)?;
+    let consumed = state
+        .profile_proxy_assignments
+        .write()
+        .map_err(|_| service_unavailable("profile proxy assignment"))?
+        .consume(workspace_id, &pending.profile_id, expected_profile_revision)
+        .map_err(response_problem)?;
+    if consumed != pending {
+        return Err(response_problem(Problem::new(
+            "profile_proxy_assignment_conflict",
+            "Pending profile proxy assignment changed",
+            409,
+            "sync",
+        )));
+    }
+    Ok(())
 }
 
 fn validate_profile_proxy_dependencies(
@@ -2701,7 +3407,7 @@ fn validate_profile_proxy_dependencies(
                     "sync",
                 )));
             }
-            if verify_metadata_object {
+            if verify_metadata_object && let Some(metadata_object) = metadata_object {
                 let metadata_bytes = state
                     .get_remote_chunk(
                         &payload_object_key(
@@ -2755,6 +3461,7 @@ async fn get_resource_blob(
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     let grants = grants(&state)?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -2822,6 +3529,7 @@ async fn check_resource_blob(
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -2899,6 +3607,7 @@ async fn put_resource_blob(
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     authorize_lease(
+        &state,
         &principal,
         &grants,
         &workspace_id,
@@ -3016,6 +3725,7 @@ async fn put_resource_blob(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "profile.blob.put",
         request_input,
@@ -3155,6 +3865,7 @@ fn payload_object_key(
 }
 
 fn authorize_lease(
+    state: &ApiState,
     principal: &Principal,
     grants: &[buglogin_domain::permissions::Grant],
     workspace_id: &WorkspaceId,
@@ -3162,6 +3873,21 @@ fn authorize_lease(
     capability_name: &str,
     action: Action,
 ) -> Result<(), Response> {
+    if let Some(binding) = state
+        .profile_resource_for_resource(workspace_id, resource_id)
+        .map_err(response_problem)?
+        && crate::services::profile_hosted::HostedProfileService::authorized(
+            state,
+            principal,
+            grants,
+            &binding.profile_id,
+            action,
+            capability_name,
+        )
+        .map_err(response_problem)?
+    {
+        return Ok(());
+    }
     let capability = Capability::new(capability_name).map_err(|_| {
         problem_response(
             "invalid_capability",
@@ -3251,6 +3977,7 @@ async fn grant_resource(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "resource.grant",
         value,
@@ -3327,6 +4054,7 @@ async fn grant_resource_collection(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "resource.grant",
         value,
@@ -3364,6 +4092,7 @@ async fn revoke_resource_grant(
         &state,
         &headers,
         &principal,
+        &grants,
         existing.workspace_id.as_str(),
         "resource.grant.revoke",
         value,
@@ -3410,6 +4139,7 @@ async fn revoke_workspace_resource_grant(
         &state,
         &headers,
         &principal,
+        &grants,
         workspace_id.as_str(),
         "resource.grant.revoke",
         value,
@@ -3431,27 +4161,39 @@ async fn revoke_workspace_resource_grant(
 async fn read_audit(
     State(state): State<ApiState>,
     Path(workspace_id): Path<String>,
+    Query(query): Query<AuditEventPageQuery>,
     headers: HeaderMap,
-) -> Result<Json<Vec<AuditEvent>>, Response> {
+) -> Result<Json<crate::services::audit::AuditEventPage>, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
-    let events = state
+    let page = state
         .audit
         .read()
         .map_err(|_| service_unavailable("audit"))?
-        .read(&principal, &grants, &ResourceScope::workspace(workspace_id))
-        .map_err(response_problem)?
-        .into_iter()
-        .cloned()
-        .collect();
-    Ok(Json(events))
+        .read_page(
+            &principal,
+            &grants,
+            &ResourceScope::workspace(workspace_id),
+            query.cursor.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .map_err(response_problem)?;
+    Ok(Json(page))
 }
 
-async fn mutate<T, F>(
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuditEventPageQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+pub(super) async fn mutate<T, F>(
     state: &ApiState,
     headers: &HeaderMap,
-    principal: &Principal,
+    expected_principal: &Principal,
+    expected_grants: &[buglogin_domain::permissions::Grant],
     workspace: &str,
     command: &str,
     input: serde_json::Value,
@@ -3474,6 +4216,104 @@ where
             correlation(headers),
         )
     })?;
+    state
+        .refresh_control_aggregate_locked()
+        .map_err(response_problem)?;
+    let principal = authenticate(state, headers)?;
+    let grants = state.grants().map_err(response_problem)?;
+    if &principal != expected_principal || !same_grant_snapshot(expected_grants, &grants) {
+        return Err(response(
+            problem(
+                "authorization_state_changed",
+                "Authorization changed; retry the request",
+                409,
+            )
+            .with_instance(correlation(headers))
+            .retryable(true),
+        ));
+    }
+    let reauthorize = matches!(
+        command,
+        "profile.proxy.assignment.set" | "profile.manifest.commit"
+    );
+    if reauthorize {
+        let metadata = crate::commands::CommandRegistry::get(command).ok_or_else(|| {
+            problem_response(
+                "command_contract_missing",
+                "Mutation command is not registered",
+                500,
+                correlation(headers),
+            )
+        })?;
+        let allowed = if let Some(profile_id) = scope.profile_id.as_ref() {
+            HostedProfileService::authorized(
+                state,
+                &principal,
+                &grants,
+                profile_id,
+                metadata.action,
+                metadata.capability,
+            )
+            .map_err(response_problem)?
+        } else {
+            let capability = Capability::new(metadata.capability).map_err(|_| {
+                problem_response(
+                    "invalid_capability",
+                    "Mutation capability is invalid",
+                    500,
+                    correlation(headers),
+                )
+            })?;
+            is_allowed(&principal, &capability, metadata.action, &scope, &grants)
+        };
+        if !allowed {
+            return Err(problem_response(
+                "forbidden",
+                "Permission denied",
+                403,
+                correlation(headers),
+            ));
+        }
+        if command == "profile.proxy.assignment.set" {
+            let input: crate::services::profile_proxy_assignment::ProfileProxyAssignmentSetInput =
+                serde_json::from_value(input.clone()).map_err(|_| {
+                    problem_response(
+                        "invalid_input",
+                        "Profile proxy assignment is invalid",
+                        400,
+                        correlation(headers),
+                    )
+                })?;
+            if let Some(proxy_id) = input.proxy_id.as_ref() {
+                state
+                    .proxies
+                    .read()
+                    .map_err(|_| service_unavailable("proxy"))?
+                    .get(&input.workspace_id, proxy_id, &principal, &grants)
+                    .map_err(proxy_response_problem)?;
+            }
+        } else {
+            let manifest: SyncManifest =
+                serde_json::from_value(input.get("manifest").cloned().unwrap_or(Value::Null))
+                    .map_err(|_| {
+                        problem_response(
+                            "invalid_input",
+                            "Profile manifest is invalid",
+                            400,
+                            correlation(headers),
+                        )
+                    })?;
+            for dependency in &manifest.dependencies {
+                let ManifestDependency::Proxy { proxy_id, .. } = dependency;
+                state
+                    .proxies
+                    .read()
+                    .map_err(|_| service_unavailable("proxy"))?
+                    .get(&manifest.workspace_id, proxy_id, &principal, &grants)
+                    .map_err(proxy_response_problem)?;
+            }
+        }
+    }
     let correlation = correlation(headers);
     let key = headers
         .get("idempotency-key")
@@ -3517,9 +4357,14 @@ where
     }
     let before = state.control_aggregate().map_err(response_problem)?;
     let result = operation();
+    let success_status = if command == "profile.create" {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
     let (status, body, outcome) = match result {
         Ok(value) => (
-            StatusCode::OK,
+            success_status,
             serde_json::to_value(value).map_err(|_| {
                 problem_response(
                     "serialization_failed",
@@ -3592,7 +4437,7 @@ where
                 .map(AccountId::as_str)
                 .unwrap_or("anonymous")
                 .to_owned(),
-            status == StatusCode::OK,
+            status.is_success(),
             &input_hash,
             serde_json::json!({
                 "correlationId": correlation,
@@ -3612,15 +4457,32 @@ where
     Ok((status, Json(body)).into_response())
 }
 
+fn same_grant_snapshot(
+    expected: &[buglogin_domain::permissions::Grant],
+    actual: &[buglogin_domain::permissions::Grant],
+) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut expected = expected.to_vec();
+    let mut actual = actual.to_vec();
+    expected.sort_unstable_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    actual.sort_unstable_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    expected == actual
+}
+
 fn idempotency_input(command: &str, input: &serde_json::Value) -> serde_json::Value {
-    if command != "profile.provision" {
+    if !matches!(command, "profile.create" | "profile.provision") {
         return input.clone();
     }
     let mut canonical = input.clone();
-    if let Some(profile) = canonical
+    let Some(profile) = canonical
         .get_mut("profile")
         .and_then(serde_json::Value::as_object_mut)
-    {
+    else {
+        return input.clone();
+    };
+    if matches!(command, "profile.create" | "profile.provision") {
         profile.remove("createdAt");
         profile.remove("updatedAt");
     }
@@ -3628,7 +4490,7 @@ fn idempotency_input(command: &str, input: &serde_json::Value) -> serde_json::Va
 }
 
 #[derive(Debug)]
-struct ResponseProblem(u16, serde_json::Value);
+pub(super) struct ResponseProblem(u16, serde_json::Value);
 
 impl From<ResponseProblem> for Response {
     fn from(error: ResponseProblem) -> Self {
@@ -3639,7 +4501,7 @@ impl From<ResponseProblem> for Response {
             .into_response()
     }
 }
-fn response_problem(error: buglogin_domain::errors::Problem) -> ResponseProblem {
+pub(super) fn response_problem(error: buglogin_domain::errors::Problem) -> ResponseProblem {
     ResponseProblem(
         error.status,
         serde_json::to_value(error)
@@ -3695,7 +4557,15 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use buglogin_browser::profile::ProfileService;
-    use buglogin_domain::account::Account;
+    use buglogin_domain::{
+        account::Account,
+        entities::{ProfileState, Runtime, SyncMode},
+        grant::ResourceGrant,
+        member::{Member, MemberRole, MemberStatus},
+        permissions::{Effect, Grant},
+        profile::{ProfileArchiveState, ProfileResource},
+        resource::{ResourceKind, ResourceState},
+    };
     use buglogin_storage::control::{
         ControlRecordStore, MemoryControlRecordStore, PutControlRecord,
     };
@@ -3704,6 +4574,193 @@ mod tests {
         PayloadEncryptionAlgorithm,
     };
     use tower::ServiceExt;
+
+    #[test]
+    fn control_http_body_dtos_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<super::AccountStatusInput>(serde_json::json!({
+                "status": "active",
+                "expectedRevision": 1,
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<super::OrganizationInput>(serde_json::json!({
+                "organization": {},
+                "policy": {},
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<super::UsageInput>(serde_json::json!({
+                "profiles": 1,
+                "members": 1,
+                "storageBytes": 0,
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<super::RoleInput>(serde_json::json!({
+                "role": "member",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn profile_share_read_applies_to_sync_manifest_but_not_upload_authority() {
+        use buglogin_domain::permissions::{Effect, Grant, Role};
+
+        let workspace = WorkspaceId::new("ws_shared_manifest").unwrap();
+        let resource = ResourceId::new("res_shared_manifest").unwrap();
+        let profile = ProfileId::new("prf_shared_manifest").unwrap();
+        let owner_id = AccountId::new("acct_share_owner").unwrap();
+        let recipient_id = AccountId::new("acct_share_recipient").unwrap();
+        let member_id = MemberId::new("mem_share_recipient").unwrap();
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap()
+        .with_profile_resource(ProfileResource {
+            profile_id: profile,
+            resource_id: resource.clone(),
+            workspace_id: workspace.clone(),
+            archive_state: ProfileArchiveState::Active,
+        });
+        let owner = Principal {
+            account_id: Some(owner_id.clone()),
+            workspace_ids: [workspace.clone()].into_iter().collect(),
+            roles: [Role::WorkspaceAdmin].into_iter().collect(),
+            ..Principal::default()
+        };
+        let grant = |id: &str, capability: &str, action, scope| Grant {
+            id: GrantId::new(id).unwrap(),
+            account_id: Some(owner_id.clone()),
+            member_id: None,
+            capability: Capability::new(capability).unwrap(),
+            action,
+            scope,
+            effect: Effect::Allow,
+        };
+        let grants = vec![
+            grant(
+                "grant_member_create",
+                "CAP-MEM-001",
+                Action::Create,
+                ResourceScope::workspace(workspace.clone()),
+            ),
+            grant(
+                "grant_resource_create",
+                "CAP-RES-001",
+                Action::Create,
+                ResourceScope::workspace(workspace.clone()),
+            ),
+            grant(
+                "grant_share_manage",
+                "CAP-SHARE-001",
+                Action::Manage,
+                ResourceScope::resource(workspace.clone(), resource.clone()),
+            ),
+        ];
+        state
+            .members
+            .write()
+            .unwrap()
+            .invite(
+                &owner,
+                &grants,
+                Member {
+                    id: member_id.clone(),
+                    account_id: recipient_id.clone(),
+                    workspace_id: workspace.clone(),
+                    team_id: None,
+                    role: MemberRole::Member,
+                    status: MemberStatus::Invited,
+                    invite_expires_at: Some(100),
+                },
+                1,
+            )
+            .unwrap();
+        state
+            .members
+            .write()
+            .unwrap()
+            .activate(
+                &Principal {
+                    account_id: Some(recipient_id.clone()),
+                    ..Principal::default()
+                },
+                &[],
+                &member_id,
+                2,
+            )
+            .unwrap();
+        state
+            .resources
+            .write()
+            .unwrap()
+            .register(
+                &owner,
+                &grants,
+                Resource {
+                    id: resource.clone(),
+                    workspace_id: workspace.clone(),
+                    kind: ResourceKind::Profile,
+                    state: ResourceState::Active,
+                    display_name: "Shared profile".into(),
+                },
+            )
+            .unwrap();
+        state
+            .resources
+            .write()
+            .unwrap()
+            .grant(
+                &owner,
+                &grants,
+                ResourceGrant {
+                    id: GrantId::new("rg_shared_manifest_read").unwrap(),
+                    workspace_id: workspace.clone(),
+                    resource_id: resource.clone(),
+                    member_id,
+                    action: Action::Read,
+                    effect: Effect::Allow,
+                },
+            )
+            .unwrap();
+
+        let recipient = Principal {
+            account_id: Some(recipient_id),
+            ..Principal::default()
+        };
+        authorize_lease(
+            &state,
+            &recipient,
+            &[],
+            &workspace,
+            &resource,
+            "profile.read",
+            Action::Read,
+        )
+        .unwrap();
+        assert!(
+            authorize_lease(
+                &state,
+                &recipient,
+                &[],
+                &workspace,
+                &resource,
+                "profile.update",
+                Action::Update,
+            )
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn hosted_sync_reads_refresh_committed_state_from_another_instance() {
@@ -3840,20 +4897,22 @@ mod tests {
     }
 
     #[test]
-    fn active_v2_manifest_rejects_key_version_change() {
+    fn active_v2_key_rotation_requires_a_complete_reencrypted_generation() {
         let state = ApiState::local(ProfileService::disabled());
         let workspace_id = WorkspaceId::new("ws_key_version").unwrap();
         let resource_id = ResourceId::new("res_key_version").unwrap();
         let envelope = ManifestObject::new(
             buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY,
-            b"encrypted-resource-key",
+            b"encrypted-resource-key-v1",
         )
         .unwrap();
-        let encryption = |key_version: &str| ManifestPayloadEncryption {
+        let payload = ManifestObject::new("Default/Cookies", b"ciphertext-v1").unwrap();
+        let old_payload_checksum = payload.checksum.clone();
+        let encryption = |key_version: &str, envelope: &ManifestObject| ManifestPayloadEncryption {
             schema_version: 1,
             algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
             key_version: Some(key_version.to_owned()),
-            resource_key_envelope: ManifestObjectReference::from(&envelope),
+            resource_key_envelope: ManifestObjectReference::from(envelope),
         };
         let mut current = SyncManifest::new(
             workspace_id.clone(),
@@ -3862,13 +4921,19 @@ mod tests {
             1,
             None,
             b"generation-one",
-            vec![envelope.clone()],
+            vec![envelope.clone(), payload],
         )
         .unwrap();
-        current.payload_encryption = Some(encryption(&"a".repeat(64)));
+        current.payload_encryption = Some(encryption(&"a".repeat(64), &envelope));
         current.validate().unwrap();
         state.replace_sync_manifest(current).unwrap();
 
+        let rotated_envelope = ManifestObject::new(
+            buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY,
+            b"encrypted-resource-key-v2",
+        )
+        .unwrap();
+        let rotated_payload = ManifestObject::new("Default/Cookies", b"ciphertext-v2").unwrap();
         let mut candidate = SyncManifest::new(
             workspace_id.clone(),
             resource_id.clone(),
@@ -3876,15 +4941,38 @@ mod tests {
             2,
             Some(1),
             b"generation-two",
-            vec![envelope.clone()],
+            vec![rotated_envelope.clone(), rotated_payload],
         )
         .unwrap();
-        candidate.payload_encryption = Some(encryption(&"b".repeat(64)));
+        candidate.payload_encryption = Some(encryption(&"b".repeat(64), &rotated_envelope));
         candidate.validate().unwrap();
 
+        assert!(
+            validate_manifest_successor(&state, &workspace_id, &resource_id, &candidate).is_ok()
+        );
+
+        candidate.objects[1].source_generation = Some(1);
+        assert_eq!(
+            validate_manifest_successor(&state, &workspace_id, &resource_id, &candidate)
+                .unwrap_err()
+                .1["code"],
+            "sync_key_rotation_requires_full_reencrypt"
+        );
+
+        candidate.objects[1].source_generation = None;
+        candidate.objects[1].checksum = old_payload_checksum;
+        assert_eq!(
+            validate_manifest_successor(&state, &workspace_id, &resource_id, &candidate)
+                .unwrap_err()
+                .1["code"],
+            "sync_key_rotation_object_unchanged"
+        );
+
+        candidate.objects[1].checksum = "c".repeat(64);
+        candidate.objects.pop();
         let error = validate_manifest_successor(&state, &workspace_id, &resource_id, &candidate)
             .unwrap_err();
-        assert_eq!(error.1["code"], "sync_key_rotation_not_supported");
+        assert_eq!(error.1["code"], "sync_key_rotation_incomplete");
     }
 
     #[test]
@@ -3938,6 +5026,410 @@ mod tests {
                 .unwrap_err()
                 .1["code"],
             "manifest_object_reuse_not_authorized"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_assignment_and_manifest_activation_commit_atomically() {
+        let account = AccountId::new("acct_proxy_atomic").unwrap();
+        let workspace = WorkspaceId::new("ws_proxy_atomic").unwrap();
+        let profile_id = ProfileId::new("prf_proxy_atomic").unwrap();
+        let resource_id = ResourceId::new("res_proxy_atomic").unwrap();
+        let proxy_id = ProxyId::new("pxy_proxy_atomic").unwrap();
+        let mut store = MemoryControlRecordStore::default();
+        let account_value =
+            serde_json::to_value(Account::new(account.clone(), "2026-10-13")).unwrap();
+        store
+            .put(PutControlRecord {
+                tenant_id: "control",
+                record_type: "account",
+                record_id: account.as_str(),
+                expected_revision: Some(0),
+                idempotency_key: "seed-proxy-atomic-account",
+                value: &account_value,
+            })
+            .unwrap();
+        let reopen = store.reopen();
+        let state = ApiState::hosted_with_control_store(ProfileService::disabled(), store)
+            .unwrap()
+            .with_profile_resource(ProfileResource {
+                profile_id: profile_id.clone(),
+                resource_id: resource_id.clone(),
+                workspace_id: workspace.clone(),
+                archive_state: ProfileArchiveState::Active,
+            });
+        let principal = Principal {
+            account_id: Some(account.clone()),
+            ..Principal::default()
+        };
+        let read_proxy = Grant {
+            id: GrantId::new("grant_proxy_atomic_read").unwrap(),
+            account_id: Some(account.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-NET-001").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(workspace.clone()),
+            effect: Effect::Allow,
+        };
+        let create_proxy = Grant {
+            id: GrantId::new("grant_proxy_atomic_create").unwrap(),
+            account_id: Some(account.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-NET-001").unwrap(),
+            action: Action::Create,
+            scope: ResourceScope::workspace(workspace.clone()),
+            effect: Effect::Allow,
+        };
+        let update_profile = Grant {
+            id: GrantId::new("grant_proxy_atomic_profile_update").unwrap(),
+            account_id: Some(account.clone()),
+            member_id: None,
+            capability: Capability::new("profile.update").unwrap(),
+            action: Action::Update,
+            scope: ResourceScope::resource(workspace.clone(), resource_id.clone()),
+            effect: Effect::Allow,
+        };
+        state.grants.write().unwrap().extend([
+            read_proxy.clone(),
+            create_proxy.clone(),
+            update_profile.clone(),
+        ]);
+        let grant_snapshot = vec![read_proxy, create_proxy, update_profile];
+        let now = now();
+        let token = state
+            .api_tokens
+            .issue(
+                account.clone(),
+                "atomic proxy test",
+                std::collections::BTreeSet::from([
+                    "profile.update:update".to_owned(),
+                    "CAP-NET-001:read".to_owned(),
+                ]),
+                now.saturating_add(3_600),
+                now,
+            )
+            .unwrap()
+            .token;
+        state
+            .proxies
+            .write()
+            .unwrap()
+            .create(
+                workspace.clone(),
+                Proxy {
+                    id: proxy_id.clone(),
+                    name: None,
+                    protocol: ProxyProtocol::Http,
+                    host: "proxy.example".into(),
+                    port: 8080,
+                    credential_ref: None,
+                    rotation_url: None,
+                    bypass_rules: Vec::new(),
+                    created_at: "2026-10-13T00:00:00Z".into(),
+                    updated_at: "2026-10-13T00:00:00Z".into(),
+                },
+                &principal,
+                &grant_snapshot,
+            )
+            .unwrap();
+        state
+            .create_profile_record(Profile {
+                id: profile_id.clone(),
+                name: "Atomic proxy test".into(),
+                runtime: Runtime::Wayfern,
+                runtime_version: Some("1.0.0".into()),
+                runtime_config: None,
+                state: ProfileState::Ready,
+                archived: false,
+                fingerprint: None,
+                note: None,
+                proxy_id: None,
+                vpn_id: None,
+                group_ids: Vec::new(),
+                tags: Vec::new(),
+                extension_group_id: None,
+                sync_mode: Some(SyncMode::Managed),
+                created_at: "2026-10-13T00:00:00Z".into(),
+                updated_at: "2026-10-13T00:00:00Z".into(),
+            })
+            .unwrap();
+        state
+            .profile_proxy_assignments
+            .write()
+            .unwrap()
+            .set(
+                &workspace,
+                crate::services::profile_proxy_assignment::ProfileProxyAssignmentSetInput {
+                    workspace_id: workspace.clone(),
+                    profile_id: profile_id.clone(),
+                    expected_profile_revision: 1,
+                    proxy_id: Some(proxy_id.clone()),
+                },
+            )
+            .unwrap();
+        let genesis = SyncManifest::new(
+            workspace.clone(),
+            resource_id.clone(),
+            1,
+            1,
+            None,
+            b"proxy-atomic-genesis",
+            Vec::new(),
+        )
+        .unwrap();
+        state.replace_sync_manifest(genesis).unwrap();
+
+        let mut mismatched = SyncManifest::new(
+            workspace.clone(),
+            resource_id.clone(),
+            1,
+            2,
+            Some(1),
+            b"proxy-atomic-mismatch",
+            Vec::new(),
+        )
+        .unwrap();
+        let principal = state.authenticate_token(&token, now).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", "proxy-atomic-mismatch".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers.insert(
+            "idempotency-key",
+            "proxy-atomic-mismatch-key-0001".parse().unwrap(),
+        );
+        assert!(same_grant_snapshot(
+            &grant_snapshot,
+            &state.grants().unwrap()
+        ));
+        let mismatch_response = mutate::<SyncManifest, _>(
+            &state,
+            &headers,
+            &principal,
+            &grant_snapshot,
+            workspace.as_str(),
+            "profile.manifest.commit",
+            json!({"expectedProfileRevision": 1, "manifest": mismatched}),
+            ResourceScope::resource(workspace.clone(), resource_id.clone()),
+            resource_id.as_str(),
+            || {
+                validate_manifest_successor(&state, &workspace, &resource_id, &mismatched)?;
+                activate_pending_profile_proxy_assignment(
+                    &state,
+                    &workspace,
+                    &resource_id,
+                    &mismatched,
+                    Some(1),
+                )?;
+                validate_profile_proxy_dependencies(
+                    &state,
+                    &principal,
+                    &grant_snapshot,
+                    &workspace,
+                    &resource_id,
+                    &mismatched,
+                    true,
+                )?;
+                state
+                    .replace_sync_manifest(mismatched.clone())
+                    .map_err(response_problem)?;
+                Ok(mismatched.clone())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(mismatch_response.status(), StatusCode::CONFLICT);
+        let unchanged = state.get_profile_record(&profile_id).unwrap().unwrap();
+        assert_eq!(unchanged.revision, 1);
+        assert_eq!(unchanged.value.proxy_id, None);
+        assert!(
+            state
+                .profile_proxy_assignments
+                .read()
+                .unwrap()
+                .get_optional(&workspace, &profile_id)
+                .is_some()
+        );
+        assert_eq!(
+            state
+                .current_sync_manifest(&workspace, &resource_id)
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+
+        // The profile update permission still allows committing the manifest, but
+        // the proxy read grant is revoked after the handler's original snapshot.
+        // The mutation boundary must reload ACL state and reject the dependency
+        // before the stale grant snapshot captured by the operation can be used.
+        state.grants.write().unwrap().retain(|grant| {
+            grant.action != Action::Read || grant.capability.as_str() != "CAP-NET-001"
+        });
+        let mut revoked_dependency_manifest = SyncManifest::new(
+            workspace.clone(),
+            resource_id.clone(),
+            1,
+            2,
+            Some(1),
+            b"proxy-read-revoked",
+            Vec::new(),
+        )
+        .unwrap();
+        revoked_dependency_manifest
+            .dependencies
+            .push(ManifestDependency::Proxy {
+                proxy_id: proxy_id.clone(),
+                revision: 1,
+                metadata_object: None,
+                credential_envelope_object: None,
+            });
+        let mut revoked_headers = HeaderMap::new();
+        revoked_headers.insert("x-correlation-id", "proxy-read-revoked".parse().unwrap());
+        revoked_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        revoked_headers.insert(
+            "idempotency-key",
+            "proxy-read-revoked-key-0001".parse().unwrap(),
+        );
+        let revoked_response = mutate::<SyncManifest, _>(
+            &state,
+            &revoked_headers,
+            &principal,
+            &grant_snapshot,
+            workspace.as_str(),
+            "profile.manifest.commit",
+            json!({"expectedProfileRevision": 1, "manifest": revoked_dependency_manifest}),
+            ResourceScope::resource(workspace.clone(), resource_id.clone()),
+            resource_id.as_str(),
+            || {
+                state
+                    .replace_sync_manifest(revoked_dependency_manifest.clone())
+                    .map_err(response_problem)?;
+                Ok(revoked_dependency_manifest.clone())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(revoked_response.status(), StatusCode::CONFLICT);
+        let revoked_problem = axum::body::to_bytes(revoked_response.into_body(), 4096)
+            .await
+            .unwrap();
+        let revoked_problem: Value = serde_json::from_slice(&revoked_problem).unwrap();
+        assert_eq!(revoked_problem["code"], "authorization_state_changed");
+        assert_eq!(revoked_problem["retryable"], true);
+        assert_eq!(
+            state
+                .current_sync_manifest(&workspace, &resource_id)
+                .unwrap()
+                .unwrap()
+                .generation,
+            1,
+            "revoked proxy read access must prevent manifest publication"
+        );
+        state
+            .grants
+            .write()
+            .unwrap()
+            .push(grant_snapshot[0].clone());
+
+        mismatched.dependencies.push(ManifestDependency::Proxy {
+            proxy_id: proxy_id.clone(),
+            revision: 1,
+            metadata_object: None,
+            credential_envelope_object: None,
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", "proxy-atomic-success".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers.insert(
+            "idempotency-key",
+            "proxy-atomic-success-key-0001".parse().unwrap(),
+        );
+        let committed = mutate::<SyncManifest, _>(
+            &state,
+            &headers,
+            &principal,
+            &grant_snapshot,
+            workspace.as_str(),
+            "profile.manifest.commit",
+            json!({"expectedProfileRevision": 1, "manifest": mismatched}),
+            ResourceScope::resource(workspace.clone(), resource_id.clone()),
+            resource_id.as_str(),
+            || {
+                validate_manifest_successor(&state, &workspace, &resource_id, &mismatched)?;
+                activate_pending_profile_proxy_assignment(
+                    &state,
+                    &workspace,
+                    &resource_id,
+                    &mismatched,
+                    Some(1),
+                )?;
+                validate_profile_proxy_dependencies(
+                    &state,
+                    &principal,
+                    &grant_snapshot,
+                    &workspace,
+                    &resource_id,
+                    &mismatched,
+                    true,
+                )?;
+                state
+                    .replace_sync_manifest(mismatched.clone())
+                    .map_err(response_problem)?;
+                Ok(mismatched.clone())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(committed.status(), StatusCode::OK);
+        let activated = state.get_profile_record(&profile_id).unwrap().unwrap();
+        assert_eq!(activated.revision, 2);
+        assert_eq!(activated.value.proxy_id, Some(proxy_id.clone()));
+        assert!(
+            state
+                .profile_proxy_assignments
+                .read()
+                .unwrap()
+                .get_optional(&workspace, &profile_id)
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .current_sync_manifest(&workspace, &resource_id)
+                .unwrap()
+                .unwrap()
+                .generation,
+            2
+        );
+
+        let reopened =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), reopen).unwrap();
+        let durable_profile = reopened.get_profile_record(&profile_id).unwrap().unwrap();
+        assert_eq!(durable_profile.revision, 2);
+        assert_eq!(durable_profile.value.proxy_id, Some(proxy_id));
+        assert!(
+            reopened
+                .profile_proxy_assignments
+                .read()
+                .unwrap()
+                .get_optional(&workspace, &profile_id)
+                .is_none()
+        );
+        assert_eq!(
+            reopened
+                .current_sync_manifest(&workspace, &resource_id)
+                .unwrap()
+                .unwrap()
+                .generation,
+            2
         );
     }
 }

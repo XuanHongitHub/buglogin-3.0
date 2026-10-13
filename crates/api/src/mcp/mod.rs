@@ -2,11 +2,15 @@ pub mod transport;
 
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
+use async_trait::async_trait;
 use buglogin_domain::{
-    entities::{Profile, Proxy, ProxyProtocol},
+    entities::{Profile, ProfileCreateInput, ProfileRecord, Proxy, ProxyProtocol},
     errors::Problem,
     ids::{
         AccountId, GrantId, MemberId, OrganizationId, ProfileId, ResourceId, TeamId, WorkspaceId,
@@ -17,16 +21,23 @@ use buglogin_domain::{
     team::Team,
     workspace::Workspace,
 };
+use buglogin_sync::coordination::CoordinationAuth;
 use serde_json::Value;
 
-use crate::commands::{Adapter, CommandMetadata, CommandRegistry};
-use crate::services::{operations::reject_secrets, profile_hosted::HostedProfileService};
+use crate::commands::{Adapter, CommandMetadata, CommandRegistry, registry::CommandSchema};
+use crate::services::{
+    operations::reject_secrets, profile_creation::ProfileCreationService,
+    profile_deletion::ProfileDeletionService, profile_hosted::HostedProfileService,
+};
 use buglogin_network::proxy::{
     ProxyAssignmentRepository, ProxyDelete, ProxyRecord, ProxyUpdate, RepositoryError,
 };
 
 pub const ENABLED_BY_DEFAULT: bool = false;
 static AUDIT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static MCP_INPUT_VALIDATORS: OnceLock<
+    Result<BTreeMap<&'static str, jsonschema::Validator>, String>,
+> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolMetadata {
@@ -38,6 +49,7 @@ pub struct ToolMetadata {
     pub audit_required: bool,
     pub idempotency_required: bool,
     pub timeout_ms: u64,
+    pub input_schema: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +74,14 @@ pub struct McpRequest {
     pub input: Value,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuditEventsListInput {
+    workspace_id: WorkspaceId,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest<'a> {
     pub command: &'a CommandMetadata,
@@ -70,6 +90,7 @@ pub struct ExecutionRequest<'a> {
     pub scope: ResourceScope,
     pub input: Value,
     pub idempotency_key: Option<String>,
+    pub coordination_auth: Option<CoordinationAuth>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,8 +161,13 @@ pub trait McpExecutionPolicy {
     }
 }
 
-pub trait McpExecutor {
+#[async_trait]
+pub trait McpExecutor: Send {
     fn execute(&mut self, request: ExecutionRequest<'_>) -> Result<Value, Problem>;
+
+    async fn execute_async(&mut self, request: ExecutionRequest<'_>) -> Result<Value, Problem> {
+        self.execute(request)
+    }
 }
 
 pub struct McpDispatcher<P, E> {
@@ -171,6 +197,7 @@ where
         let command = dispatch_metadata(&request.tool_name)
             .map_err(|error| dispatch_problem(error, &request.correlation_id))?
             .command;
+        validate_mcp_input(command.input_schema, &request.input)?;
         let principal = match self.policy.authenticate(
             request.bearer_token.as_deref(),
             command.auth_required,
@@ -280,6 +307,7 @@ where
             scope: scope.clone(),
             input: request.input,
             idempotency_key,
+            coordination_auth: None,
         });
         match result {
             Ok(value) => {
@@ -310,6 +338,113 @@ where
                 })?;
                 self.policy
                     .complete_idempotency(&principal, command, &Err(error.clone()))?;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn dispatch_async(&mut self, request: McpRequest) -> Result<Value, Problem> {
+        let command = dispatch_metadata(&request.tool_name)
+            .map_err(|error| dispatch_problem(error, &request.correlation_id))?
+            .command;
+        if command.id.as_str() != "events.stream" || command.idempotency_required {
+            return self.dispatch(request);
+        }
+        if !self.enabled {
+            return Err(problem("mcp_disabled", "MCP execution is disabled", 503));
+        }
+        validate_mcp_input(command.input_schema, &request.input)?;
+        let principal = match self.policy.authenticate(
+            request.bearer_token.as_deref(),
+            command.auth_required,
+            &request.correlation_id,
+        ) {
+            Ok(principal) => principal,
+            Err(error) => {
+                self.audit_denied(
+                    command,
+                    &request.correlation_id,
+                    ResourceScope::global(),
+                    None,
+                );
+                return Err(error);
+            }
+        };
+        let actor_id = principal
+            .account_id
+            .as_ref()
+            .map(|account_id| account_id.as_str().to_owned());
+        let scope = match self
+            .policy
+            .resolve_scope(&principal, command, &request.input)
+        {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.audit_denied(
+                    command,
+                    &request.correlation_id,
+                    ResourceScope::global(),
+                    actor_id,
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.policy.authorize(&principal, command, &scope) {
+            self.audit_denied(command, &request.correlation_id, scope, actor_id);
+            return Err(error);
+        }
+        let account_id = principal
+            .account_id
+            .as_ref()
+            .ok_or_else(|| problem("authentication_required", "Authentication required", 401))?;
+        let bearer = request
+            .bearer_token
+            .as_deref()
+            .ok_or_else(|| problem("authentication_required", "Authentication required", 401))?;
+        let coordination_auth = match CoordinationAuth::new(account_id.as_str(), bearer) {
+            Ok(auth) => auth,
+            Err(error) => {
+                self.audit_denied(command, &request.correlation_id, scope, actor_id);
+                return Err(error);
+            }
+        };
+        let result = self
+            .executor
+            .execute_async(ExecutionRequest {
+                command,
+                correlation_id: request.correlation_id.clone(),
+                principal: principal.clone(),
+                scope: scope.clone(),
+                input: request.input,
+                idempotency_key: request.idempotency_key,
+                coordination_auth: Some(coordination_auth),
+            })
+            .await;
+        match result {
+            Ok(value) => {
+                if let Err(error) = reject_mcp_output_secrets(command, &value) {
+                    self.audit_denied(command, &request.correlation_id, scope, actor_id.clone());
+                    return Err(error);
+                }
+                self.policy.audit(AuditRecord {
+                    actor_id,
+                    command_id: command.id.as_str(),
+                    correlation_id: request.correlation_id,
+                    scope,
+                    outcome: AuditOutcome::Succeeded,
+                    metadata: BTreeMap::new(),
+                })?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.policy.audit(AuditRecord {
+                    actor_id,
+                    command_id: command.id.as_str(),
+                    correlation_id: request.correlation_id,
+                    scope,
+                    outcome: AuditOutcome::Failed,
+                    metadata: BTreeMap::new(),
+                })?;
                 Err(error)
             }
         }
@@ -368,7 +503,61 @@ fn tool_metadata(command: &CommandMetadata) -> ToolMetadata {
         audit_required: command.audit_required,
         idempotency_required: command.idempotency_required,
         timeout_ms: command.timeout_ms,
+        input_schema: crate::commands::registry::mcp_input_schema(command.input_schema)
+            .expect("generated MCP input schema must exist for every MCP command"),
     }
+}
+
+fn validate_mcp_input(schema: CommandSchema, input: &Value) -> Result<(), Problem> {
+    let validators = MCP_INPUT_VALIDATORS.get_or_init(|| {
+        let mut validators = BTreeMap::new();
+        for command in CommandRegistry::all()
+            .iter()
+            .filter(|command| command.adapters.contains(&Adapter::Mcp))
+        {
+            if validators.contains_key(command.input_schema.as_str()) {
+                continue;
+            }
+            let schema_value = crate::commands::registry::mcp_input_schema(command.input_schema)
+                .ok_or_else(|| format!("missing generated schema for {}", command.id.as_str()))?;
+            let validator = jsonschema::validator_for(&schema_value).map_err(|error| {
+                format!(
+                    "invalid generated schema for {}: {error}",
+                    command.id.as_str()
+                )
+            })?;
+            validators.insert(command.input_schema.as_str(), validator);
+        }
+        Ok(validators)
+    });
+    let validators = validators.as_ref().map_err(|error| {
+        problem(
+            "mcp_schema_unavailable",
+            "MCP input schema is unavailable",
+            500,
+        )
+        .with_detail(error.clone())
+    })?;
+    let validator = validators.get(schema.as_str()).ok_or_else(|| {
+        problem(
+            "mcp_schema_unavailable",
+            "MCP input schema is unavailable",
+            500,
+        )
+    })?;
+    if let Err(error) = validator.validate(input) {
+        let field = error.instance_path().to_string();
+        return Err(problem(
+            "mcp_invalid_input",
+            "MCP input does not match the command contract",
+            400,
+        )
+        .with_detail(format!(
+            "Invalid input at {}",
+            if field.is_empty() { "/" } else { &field }
+        )));
+    }
+    Ok(())
 }
 
 fn reject_mcp_output_secrets(command: &CommandMetadata, value: &Value) -> Result<(), Problem> {
@@ -454,6 +643,20 @@ fn required_id<T, E>(
         .map_err(|_| Problem::new("invalid_scope", format!("{field} is invalid"), 400, "mcp"))
 }
 
+enum ParsedProfileCreate {
+    Command(ProfileCreateInput),
+    Legacy(Profile),
+}
+
+fn parse_profile_create_request(input: &Value) -> Result<ParsedProfileCreate, Problem> {
+    if let Ok(command) = serde_json::from_value::<ProfileCreateInput>(input.clone()) {
+        return Ok(ParsedProfileCreate::Command(command));
+    }
+    serde_json::from_value::<Profile>(input.clone())
+        .map(ParsedProfileCreate::Legacy)
+        .map_err(serialization_problem)
+}
+
 fn resolve_scope(
     principal: &Principal,
     command: &CommandMetadata,
@@ -522,12 +725,35 @@ fn resolve_scope(
             workspace_id: Some(required_id(input, "workspaceId", WorkspaceId::from_str)?),
             ..ResourceScope::default()
         }),
-        "team.list" | "member.list" | "member.invite" | "resource.list" | "resource.register"
-        | "grant.list" => Ok(ResourceScope::workspace(required_id(
+        "group.list" | "group.create" | "team.list" | "team.create" | "member.list"
+        | "member.invite" | "resource.list" | "grant.list" => Ok(ResourceScope::workspace(
+            required_id(input, "workspaceId", WorkspaceId::from_str)?,
+        )),
+        "group.get" | "group.update" | "group.delete" => Ok(ResourceScope::workspace(required_id(
             input,
             "workspaceId",
             WorkspaceId::from_str,
         )?)),
+        "profile.groups.replace" => Ok(ResourceScope {
+            workspace_id: Some(required_id(input, "workspaceId", WorkspaceId::from_str)?),
+            profile_id: Some(required_id(input, "profileId", ProfileId::from_str)?),
+            ..ResourceScope::default()
+        }),
+        "profile.proxy.assignment.get" | "profile.proxy.assignment.set" => Ok(ResourceScope {
+            workspace_id: Some(required_id(input, "workspaceId", WorkspaceId::from_str)?),
+            profile_id: Some(required_id(input, "profileId", ProfileId::from_str)?),
+            ..ResourceScope::default()
+        }),
+        "resource.register" => Ok(ResourceScope::workspace(required_id(
+            input.get("resource").unwrap_or(&Value::Null),
+            "workspaceId",
+            WorkspaceId::from_str,
+        )?)),
+        "audit.events.list" => {
+            let query: AuditEventsListInput =
+                serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+            Ok(ResourceScope::workspace(query.workspace_id))
+        }
         "team.get" | "team.update" => Ok(ResourceScope {
             workspace_id: Some(required_id(input, "workspaceId", WorkspaceId::from_str)?),
             team_id: Some(required_id(input, "teamId", TeamId::from_str)?),
@@ -559,23 +785,66 @@ fn resolve_scope(
             WorkspaceId::from_str,
         )?)),
         "profile.create" => {
-            let profile: Profile =
-                serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+            let (requested_id, workspace_id) = match parse_profile_create_request(input)? {
+                ParsedProfileCreate::Command(input) => (
+                    input
+                        .id
+                        .as_deref()
+                        .map(ProfileId::from_str)
+                        .transpose()
+                        .map_err(|_| problem("invalid_scope", "profile ID is invalid", 400))?,
+                    input
+                        .workspace_id
+                        .as_deref()
+                        .map(WorkspaceId::from_str)
+                        .transpose()
+                        .map_err(|_| problem("invalid_scope", "workspaceId is invalid", 400))?
+                        .or_else(|| {
+                            (principal.workspace_ids.len() == 1)
+                                .then(|| principal.workspace_ids.iter().next().cloned())
+                                .flatten()
+                        }),
+                ),
+                ParsedProfileCreate::Legacy(profile) => (
+                    Some(profile.id),
+                    input
+                        .get("workspaceId")
+                        .and_then(Value::as_str)
+                        .map(WorkspaceId::from_str)
+                        .transpose()
+                        .map_err(|_| problem("invalid_scope", "workspaceId is invalid", 400))?
+                        .or_else(|| {
+                            (principal.workspace_ids.len() == 1)
+                                .then(|| principal.workspace_ids.iter().next().cloned())
+                                .flatten()
+                        }),
+                ),
+            };
             Ok(ResourceScope {
-                profile_id: Some(profile.id),
+                workspace_id,
+                profile_id: requested_id,
                 ..ResourceScope::default()
             })
         }
+        "profile.clone" => Ok(ResourceScope {
+            profile_id: Some(required_id(input, "sourceProfileId", ProfileId::from_str)?),
+            ..ResourceScope::default()
+        }),
+        "profile.share" | "profile.share.revoke" => Ok(ResourceScope {
+            profile_id: Some(required_id(input, "profileId", ProfileId::from_str)?),
+            ..ResourceScope::default()
+        }),
         "profile.get" | "profile.launch" | "profile.stop" | "profile.delete"
         | "profile.archive" | "profile.restore" => Ok(ResourceScope {
             profile_id: Some(required_id(input, "profileId", ProfileId::from_str)?),
             ..ResourceScope::default()
         }),
         "operation.get" => Ok(ResourceScope::global()),
-        "events.stream" => {
-            serde_json::from_value(input.get("scope").cloned().unwrap_or(Value::Null))
-                .map_err(serialization_problem)
-        }
+        "events.stream" => Ok(ResourceScope::workspace(required_id(
+            input,
+            "workspaceId",
+            WorkspaceId::from_str,
+        )?)),
         _ => Ok(ResourceScope::global()),
     }
 }
@@ -626,6 +895,7 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
         input: &Value,
     ) -> Result<ResourceScope, Problem> {
         if command.id.as_str() == "operation.get" {
+            self.state.refresh_control_aggregate()?;
             let operation_id = input
                 .get("operationId")
                 .and_then(Value::as_str)
@@ -661,18 +931,33 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
         }
         let mut scope = resolve_scope(principal, command, input)?;
         if !self.state.local_authority_enabled()
-            && matches!(command.id.as_str(), "profile.archive" | "profile.restore")
+            && matches!(
+                command.id.as_str(),
+                "profile.get"
+                    | "profile.launch"
+                    | "profile.stop"
+                    | "profile.delete"
+                    | "profile.archive"
+                    | "profile.restore"
+                    | "profile.clone"
+                    | "profile.share"
+                    | "profile.share.revoke"
+            )
         {
             let profile_id = scope
                 .profile_id
                 .as_ref()
                 .ok_or_else(|| problem("profile_missing", "Profile is missing from scope", 400))?;
-            let binding = self
-                .state
-                .profile_resource_record(profile_id)?
-                .ok_or_else(|| problem("binding_not_found", "Profile binding not found", 404))?;
-            scope.workspace_id = Some(binding.workspace_id);
-            scope.resource_id = Some(binding.resource_id);
+            if let Some(binding) = self.state.profile_resource_record(profile_id)? {
+                scope.workspace_id = Some(binding.workspace_id);
+                scope.resource_id = Some(binding.resource_id);
+            } else if matches!(command.id.as_str(), "profile.archive" | "profile.restore") {
+                return Err(problem(
+                    "binding_not_found",
+                    "Profile binding not found",
+                    404,
+                ));
+            }
         }
         Ok(scope)
     }
@@ -689,6 +974,23 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
         let grants = self.state.grants()?;
         let capability = Capability::new(command.capability)
             .map_err(|_| Problem::new("invalid_capability", "Invalid capability", 500, "mcp"))?;
+        if !self.state.local_authority_enabled()
+            && command.id.as_str().starts_with("profile.")
+            && let Some(profile_id) = scope.profile_id.as_ref()
+        {
+            return if crate::services::profile_hosted::HostedProfileService::authorized(
+                &self.state,
+                principal,
+                &grants,
+                profile_id,
+                command.action,
+                command.capability,
+            )? {
+                Ok(())
+            } else {
+                Err(Problem::new("forbidden", "Permission denied", 403, "mcp"))
+            };
+        }
         if buglogin_domain::permissions::is_allowed(
             principal,
             &capability,
@@ -849,6 +1151,7 @@ impl ProductionMcpExecutor {
     }
 }
 
+#[async_trait]
 impl McpExecutor for ProductionMcpExecutor {
     fn execute(&mut self, request: ExecutionRequest<'_>) -> Result<Value, Problem> {
         let state = &self.state;
@@ -883,6 +1186,7 @@ impl McpExecutor for ProductionMcpExecutor {
                 "service": "buglogin-api"
             })),
             "operation.get" => {
+                state.refresh_control_aggregate()?;
                 let operation_id = input
                     .get("operationId")
                     .and_then(Value::as_str)
@@ -901,18 +1205,36 @@ impl McpExecutor for ProductionMcpExecutor {
                     .clone();
                 Ok(serde_json::to_value(operation).map_err(serialization_problem)?)
             }
-            "events.stream" => {
-                let after = input.get("after").and_then(Value::as_u64);
-                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-                let events = state
-                    .events
+            "events.stream" => Err(problem(
+                "async_executor_required",
+                "Event stream must use the asynchronous executor",
+                503,
+            )),
+            "audit.events.list" => {
+                let query: AuditEventsListInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                let workspace_id = request.scope.workspace_id.as_ref().ok_or_else(|| {
+                    problem("workspace_missing", "Workspace is missing from scope", 400)
+                })?;
+                if workspace_id != &query.workspace_id {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Workspace scope does not match",
+                        400,
+                    ));
+                }
+                let page = state
+                    .audit
                     .read()
-                    .map_err(|_| problem("event_unavailable", "Event service unavailable", 503))?
-                    .read_after(&principal, &grants, &request.scope, after, limit)?
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                Ok(serde_json::json!({ "items": events }))
+                    .map_err(|_| problem("audit_unavailable", "Audit service unavailable", 503))?
+                    .read_page(
+                        &principal,
+                        &grants,
+                        &ResourceScope::workspace(workspace_id.clone()),
+                        query.cursor.as_deref(),
+                        query.limit.unwrap_or(50),
+                    )?;
+                Ok(serde_json::to_value(page).map_err(serialization_problem)?)
             }
             "proxy.parse" => {
                 let text = input
@@ -1245,6 +1567,215 @@ impl McpExecutor for ProductionMcpExecutor {
                     .update_workspace(&principal, &grants, &org_id, &ws_id, update)?;
                 Ok(serde_json::to_value(record).map_err(serialization_problem)?)
             }
+            "group.create" => {
+                let input: crate::services::groups::GroupCreateInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id) {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Workspace scope does not match",
+                        400,
+                    ));
+                }
+                let workspace_id = input.workspace_id.clone();
+                let record = state
+                    .groups
+                    .write()
+                    .map_err(|_| problem("group_unavailable", "Group service unavailable", 503))?
+                    .create(&principal, &grants, &workspace_id, input)?;
+                Ok(serde_json::to_value(record).map_err(serialization_problem)?)
+            }
+            "group.list" => {
+                let input: crate::services::groups::GroupListInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id) {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Workspace scope does not match",
+                        400,
+                    ));
+                }
+                let records = state
+                    .groups
+                    .read()
+                    .map_err(|_| problem("group_unavailable", "Group service unavailable", 503))?
+                    .list(&principal, &grants, &input.workspace_id)?;
+                Ok(serde_json::to_value(records).map_err(serialization_problem)?)
+            }
+            "group.get" => {
+                let input: crate::services::groups::GroupIdInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id) {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Workspace scope does not match",
+                        400,
+                    ));
+                }
+                let record = state
+                    .groups
+                    .read()
+                    .map_err(|_| problem("group_unavailable", "Group service unavailable", 503))?
+                    .get(&principal, &grants, &input.workspace_id, &input.group_id)?;
+                Ok(serde_json::to_value(record).map_err(serialization_problem)?)
+            }
+            "group.update" => {
+                let input: crate::services::groups::GroupUpdateInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id) {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Workspace scope does not match",
+                        400,
+                    ));
+                }
+                let workspace_id = input.workspace_id.clone();
+                let group_id = input.group_id.clone();
+                let record = state
+                    .groups
+                    .write()
+                    .map_err(|_| problem("group_unavailable", "Group service unavailable", 503))?
+                    .update(&principal, &grants, &workspace_id, &group_id, input)?;
+                Ok(serde_json::to_value(record).map_err(serialization_problem)?)
+            }
+            "group.delete" => {
+                let input: crate::services::groups::GroupDeleteInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id) {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Workspace scope does not match",
+                        400,
+                    ));
+                }
+                let workspace_id = input.workspace_id.clone();
+                let group_id = input.group_id.clone();
+                let in_use = state.group_is_in_use(&workspace_id, &group_id)?;
+                let record = state
+                    .groups
+                    .write()
+                    .map_err(|_| problem("group_unavailable", "Group service unavailable", 503))?
+                    .delete(&principal, &grants, &workspace_id, &group_id, input, in_use)?;
+                Ok(serde_json::to_value(record).map_err(serialization_problem)?)
+            }
+            "profile.groups.replace" => {
+                let input: crate::services::groups::ProfileGroupsReplaceInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id)
+                    || request.scope.profile_id.as_ref() != Some(&input.profile_id)
+                {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Profile scope does not match",
+                        400,
+                    ));
+                }
+                let record = state.replace_hosted_profile_groups(input)?;
+                Ok(
+                    serde_json::to_value(ProfileRecord::new(record.value, record.revision))
+                        .map_err(serialization_problem)?,
+                )
+            }
+            "profile.proxy.assignment.get" => {
+                let input: crate::services::profile_proxy_assignment::ProfileProxyAssignmentGetInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id)
+                    || request.scope.profile_id.as_ref() != Some(&input.profile_id)
+                {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Profile scope does not match",
+                        400,
+                    ));
+                }
+                let binding = state
+                    .profile_resource_record(&input.profile_id)?
+                    .filter(|binding| binding.workspace_id == input.workspace_id)
+                    .ok_or_else(|| {
+                        problem("binding_not_found", "Profile binding not found", 404)
+                    })?;
+                let _ = binding;
+                let profile = state
+                    .get_profile_record(&input.profile_id)?
+                    .ok_or_else(|| problem("profile_not_found", "Profile not found", 404))?;
+                let assignment = state
+                    .profile_proxy_assignments
+                    .read()
+                    .map_err(|_| {
+                        problem(
+                            "profile_proxy_assignment_unavailable",
+                            "Profile proxy assignment service unavailable",
+                            503,
+                        )
+                    })?
+                    .get(&input.workspace_id, &input.profile_id)?;
+                if assignment.expected_profile_revision != profile.revision {
+                    return Err(problem(
+                        "profile_proxy_assignment_stale",
+                        "Profile proxy assignment is stale",
+                        409,
+                    ));
+                }
+                Ok(serde_json::to_value(assignment).map_err(serialization_problem)?)
+            }
+            "profile.proxy.assignment.set" => {
+                let input: crate::services::profile_proxy_assignment::ProfileProxyAssignmentSetInput =
+                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+                if request.scope.workspace_id.as_ref() != Some(&input.workspace_id)
+                    || request.scope.profile_id.as_ref() != Some(&input.profile_id)
+                {
+                    return Err(problem(
+                        "invalid_scope",
+                        "Profile scope does not match",
+                        400,
+                    ));
+                }
+                let binding = state
+                    .profile_resource_record(&input.profile_id)?
+                    .filter(|binding| binding.workspace_id == input.workspace_id)
+                    .ok_or_else(|| {
+                        problem("binding_not_found", "Profile binding not found", 404)
+                    })?;
+                let _ = binding;
+                let profile = state
+                    .get_profile_record(&input.profile_id)?
+                    .ok_or_else(|| problem("profile_not_found", "Profile not found", 404))?;
+                if state.local_authority_enabled() {
+                    return Err(problem(
+                        "hosted_proxy_assignment_required",
+                        "Managed proxy reassignment requires hosted profile sync",
+                        503,
+                    ));
+                }
+                crate::services::profile_proxy_assignment::ProfileProxyAssignmentService::validate_change(
+                    &profile.value,
+                    profile.revision,
+                    &input,
+                )?;
+                if let Some(proxy_id) = input.proxy_id.as_ref() {
+                    state
+                        .proxies
+                        .read()
+                        .map_err(|_| {
+                            problem("proxy_unavailable", "Proxy service unavailable", 503)
+                        })?
+                        .get(&input.workspace_id, proxy_id, &principal, &grants)
+                        .map_err(proxy_problem)?;
+                }
+                let workspace_id = input.workspace_id.clone();
+                let assignment = state
+                    .profile_proxy_assignments
+                    .write()
+                    .map_err(|_| {
+                        problem(
+                            "profile_proxy_assignment_unavailable",
+                            "Profile proxy assignment service unavailable",
+                            503,
+                        )
+                    })?
+                    .set(&workspace_id, input)?;
+                Ok(serde_json::to_value(assignment).map_err(serialization_problem)?)
+            }
             "team.create" => {
                 let ws_id: WorkspaceId = serde_json::from_value(
                     input.get("workspaceId").cloned().unwrap_or(Value::Null),
@@ -1253,14 +1784,14 @@ impl McpExecutor for ProductionMcpExecutor {
                 let team: Team =
                     serde_json::from_value(input.get("team").cloned().unwrap_or(Value::Null))
                         .map_err(serialization_problem)?;
-                state
+                let record = state
                     .teams
                     .write()
                     .map_err(|_| {
                         Problem::new("team_unavailable", "Team service unavailable", 503, "mcp")
                     })?
                     .create(&principal, &grants, &ws_id, team.clone())?;
-                Ok(serde_json::to_value(team).map_err(serialization_problem)?)
+                Ok(serde_json::to_value(record).map_err(serialization_problem)?)
             }
             "team.get" => {
                 let id: TeamId =
@@ -1281,7 +1812,7 @@ impl McpExecutor for ProductionMcpExecutor {
                         Problem::new("team_unavailable", "Team service unavailable", 503, "mcp")
                     })?
                     .get(&principal, &grants, &ws_id, &id)?;
-                Ok(serde_json::to_value(record.team).map_err(serialization_problem)?)
+                Ok(serde_json::to_value(record).map_err(serialization_problem)?)
             }
             "team.list" => {
                 let ws_id: WorkspaceId = serde_json::from_value(
@@ -1295,8 +1826,7 @@ impl McpExecutor for ProductionMcpExecutor {
                         Problem::new("team_unavailable", "Team service unavailable", 503, "mcp")
                     })?
                     .list(&principal, &grants, &ws_id)?;
-                let items: Vec<Team> = list.into_iter().map(|t| t.team).collect();
-                Ok(serde_json::json!({ "items": items, "nextCursor": Value::Null }))
+                serde_json::to_value(list).map_err(serialization_problem)
             }
             "team.update" => {
                 let ws_id: WorkspaceId = serde_json::from_value(
@@ -1597,17 +2127,51 @@ impl McpExecutor for ProductionMcpExecutor {
                 let profile = state.get_profile_record(&id)?.ok_or_else(|| {
                     Problem::new("profile_not_found", "Profile not found", 404, "mcp")
                 })?;
-                Ok(serde_json::to_value(profile.value).map_err(serialization_problem)?)
+                Ok(
+                    serde_json::to_value(ProfileRecord::new(profile.value, profile.revision))
+                        .map_err(serialization_problem)?,
+                )
             }
             "profile.create" => (|| {
-                let profile: Profile =
-                    serde_json::from_value(input.clone()).map_err(serialization_problem)?;
-                let workspace_id = input
-                    .get("workspaceId")
-                    .and_then(Value::as_str)
-                    .map(WorkspaceId::from_str)
-                    .transpose()
-                    .map_err(|_| problem("invalid_scope", "workspaceId is invalid", 400))?;
+                let key = request.idempotency_key.as_deref().ok_or_else(|| {
+                    problem(
+                        "idempotency_key_required",
+                        "Idempotency key is required",
+                        400,
+                    )
+                })?;
+                let parsed = parse_profile_create_request(&input)?;
+                let (create_input, legacy_profile) = match parsed {
+                    ParsedProfileCreate::Command(input) => (input, None),
+                    ParsedProfileCreate::Legacy(profile) => {
+                        let workspace = input.get("workspaceId").and_then(Value::as_str);
+                        (
+                            ProfileCreationService::legacy_input(&profile, workspace),
+                            Some(profile),
+                        )
+                    }
+                };
+                let managed = !state.local_authority_enabled();
+                let workspace_id = ProfileCreationService::resolve_workspace(
+                    create_input.workspace_id.as_deref(),
+                    None,
+                    &principal,
+                    managed,
+                )?;
+                let profile_id = ProfileCreationService::profile_id(
+                    create_input.id.as_deref(),
+                    workspace_id.as_ref().map(WorkspaceId::as_str),
+                    key,
+                )?;
+                let mut profile = ProfileCreationService::build(create_input, profile_id, managed)?;
+                if let Some(legacy) = legacy_profile {
+                    profile.runtime_config = legacy.runtime_config;
+                    profile.fingerprint = legacy.fingerprint;
+                    profile.vpn_id = legacy.vpn_id;
+                    profile.group_ids = legacy.group_ids;
+                    profile.tags = legacy.tags;
+                    profile.extension_group_id = legacy.extension_group_id;
+                }
                 validate_profile_proxy(
                     state,
                     &profile,
@@ -1618,14 +2182,11 @@ impl McpExecutor for ProductionMcpExecutor {
 
                 if state.local_authority_enabled() {
                     let created = state.create_profile_record(profile)?;
-                    return serde_json::to_value(created.value).map_err(serialization_problem);
-                }
-                if profile.sync_mode != Some(buglogin_domain::entities::SyncMode::Managed) {
-                    return Err(problem(
-                        "production_managed_profile_required",
-                        "Production profiles must use hosted managed authority",
-                        422,
-                    ));
+                    return serde_json::to_value(ProfileRecord::new(
+                        created.value,
+                        created.revision,
+                    ))
+                    .map_err(serialization_problem);
                 }
                 let workspace_id = workspace_id
                     .ok_or_else(|| problem("workspace_required", "workspaceId is required", 400))?;
@@ -1638,7 +2199,8 @@ impl McpExecutor for ProductionMcpExecutor {
                 )?;
                 let plan = HostedProfileService::prepare_provision(profile, workspace_id)?;
                 let created = HostedProfileService::provision(state, &principal, &grants, &plan)?;
-                serde_json::to_value(created.value).map_err(serialization_problem)
+                serde_json::to_value(ProfileRecord::new(created.value, created.revision))
+                    .map_err(serialization_problem)
             })(),
             "profile.clone" => {
                 let parsed: ProfileCloneInput =
@@ -1682,25 +2244,27 @@ impl McpExecutor for ProductionMcpExecutor {
                 serde_json::to_value(receipt).map_err(serialization_problem)
             }
             "profile.list" => {
+                let include_archived = input
+                    .get("includeArchived")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let list = state.list_profile_records()?;
-                let items: Vec<Profile> = list
-                    .into_iter()
-                    .filter(|value| {
-                        Capability::new("profile.read").is_ok_and(|capability| {
-                            buglogin_domain::permissions::is_allowed(
-                                &principal,
-                                &capability,
-                                Action::Read,
-                                &ResourceScope {
-                                    profile_id: Some(value.value.id.clone()),
-                                    ..ResourceScope::default()
-                                },
-                                &grants,
-                            )
-                        })
-                    })
-                    .map(|value| value.value)
-                    .collect();
+                let mut items = Vec::new();
+                for value in list {
+                    if value.value.archived && !include_archived {
+                        continue;
+                    }
+                    if HostedProfileService::authorized(
+                        state,
+                        &principal,
+                        &grants,
+                        &value.value.id,
+                        Action::Read,
+                        "profile.read",
+                    )? {
+                        items.push(ProfileRecord::new(value.value, value.revision));
+                    }
+                }
                 Ok(serde_json::json!({ "items": items, "nextCursor": Value::Null }))
             }
             "profile.archive" | "profile.restore" => {
@@ -1732,19 +2296,13 @@ impl McpExecutor for ProductionMcpExecutor {
                         request.command.id.as_str() == "profile.archive",
                     )?
                 };
-                Ok(serde_json::to_value(updated.value).map_err(serialization_problem)?)
+                Ok(
+                    serde_json::to_value(ProfileRecord::new(updated.value, updated.revision))
+                        .map_err(serialization_problem)?,
+                )
             }
             "profile.delete" => {
                 HostedProfileService::ensure_delete_supported(state)?;
-                if input.get("confirmation").and_then(Value::as_str)
-                    != Some("QUARANTINE_PROFILE_DATA")
-                {
-                    return Err(problem(
-                        "delete_not_confirmed",
-                        "Profile deletion is not confirmed",
-                        409,
-                    ));
-                }
                 let id = request.scope.profile_id.clone().ok_or_else(|| {
                     Problem::new(
                         "profile_missing",
@@ -1757,16 +2315,17 @@ impl McpExecutor for ProductionMcpExecutor {
                     .get("revision")
                     .and_then(Value::as_u64)
                     .ok_or_else(|| problem("invalid_input", "revision is required", 400))?;
-                let current = state.get_profile_record(&id)?.ok_or_else(|| {
-                    Problem::new("profile_not_found", "Profile not found", 404, "mcp")
-                })?;
-                let quarantine_path = state.profiles.delete(revision, &current.value)?;
-                Ok(serde_json::json!({
-                    "id": id,
-                    "deleted": true,
-                    "recoverable": true,
-                    "quarantinePath": quarantine_path,
-                }))
+                let confirmation = input
+                    .get("confirmation")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                serde_json::to_value(ProfileDeletionService::delete_local(
+                    state,
+                    &id,
+                    revision,
+                    confirmation,
+                )?)
+                .map_err(serialization_problem)
             }
             "profile.launch" => {
                 if !state.local_authority_enabled() {
@@ -1803,22 +2362,31 @@ impl McpExecutor for ProductionMcpExecutor {
                         "profileId": profile_id,
                     }))[..24]
                 );
-                let operation = crate::services::operations::Operation::queued(
-                    operation_id.clone(),
+                let actor_id = principal
+                    .account_id
+                    .as_ref()
+                    .map_or("local", buglogin_domain::ids::AccountId::as_str);
+                state.mutate_operation_locked(
+                    &operation_id,
                     request.command.id.as_str(),
-                    request.scope.clone(),
+                    "started",
+                    actor_id,
+                    |operations| {
+                        operations.insert(crate::services::operations::Operation::queued(
+                            operation_id.clone(),
+                            request.command.id.as_str(),
+                            request.scope.clone(),
+                        )?)?;
+                        operations.transition(
+                            &operation_id,
+                            crate::services::operations::OperationStatus::Running,
+                            Some(0.1),
+                            None,
+                            None,
+                        )?;
+                        Ok(())
+                    },
                 )?;
-                state
-                    .operations
-                    .write()
-                    .map_err(|_| {
-                        problem(
-                            "operation_unavailable",
-                            "Operation service unavailable",
-                            503,
-                        )
-                    })?
-                    .insert(operation)?;
                 let lifecycle_service = crate::http::profile_lifecycle::ProfileLifecycleService;
                 let result = lifecycle_service.launch(
                     &state.profiles,
@@ -1830,33 +2398,44 @@ impl McpExecutor for ProductionMcpExecutor {
                         extra_args,
                     },
                 );
-                let mut operations = state.operations.write().map_err(|_| {
-                    problem(
-                        "operation_unavailable",
-                        "Operation service unavailable",
-                        503,
-                    )
-                })?;
                 match result {
                     Ok(value) => {
-                        let completed = operations.transition(
+                        let completed = state.mutate_operation_locked(
                             &operation_id,
-                            crate::services::operations::OperationStatus::Completed,
-                            Some(1.0),
-                            Some(value.clone()),
-                            None,
+                            "operation.complete",
+                            "completed",
+                            actor_id,
+                            |operations| {
+                                operations.transition(
+                                    &operation_id,
+                                    crate::services::operations::OperationStatus::Completed,
+                                    Some(1.0),
+                                    Some(value.clone()),
+                                    None,
+                                )?;
+                                Ok(())
+                            },
                         )?;
                         Ok(
                             serde_json::json!({ "operationId": operation_id, "result": completed.result }),
                         )
                     }
                     Err(error) => {
-                        operations.transition(
+                        state.mutate_operation_locked(
                             &operation_id,
-                            crate::services::operations::OperationStatus::Failed,
-                            Some(1.0),
-                            None,
-                            Some(error.clone()),
+                            "operation.fail",
+                            "failed",
+                            actor_id,
+                            |operations| {
+                                operations.transition(
+                                    &operation_id,
+                                    crate::services::operations::OperationStatus::Failed,
+                                    Some(1.0),
+                                    None,
+                                    Some(error.clone()),
+                                )?;
+                                Ok(())
+                            },
                         )?;
                         Err(error)
                     }
@@ -1886,51 +2465,71 @@ impl McpExecutor for ProductionMcpExecutor {
                         "profileId": profile_id,
                     }))[..24]
                 );
-                let operation = crate::services::operations::Operation::queued(
-                    operation_id.clone(),
+                let actor_id = principal
+                    .account_id
+                    .as_ref()
+                    .map_or("local", buglogin_domain::ids::AccountId::as_str);
+                state.mutate_operation_locked(
+                    &operation_id,
                     request.command.id.as_str(),
-                    request.scope.clone(),
+                    "started",
+                    actor_id,
+                    |operations| {
+                        operations.insert(crate::services::operations::Operation::queued(
+                            operation_id.clone(),
+                            request.command.id.as_str(),
+                            request.scope.clone(),
+                        )?)?;
+                        operations.transition(
+                            &operation_id,
+                            crate::services::operations::OperationStatus::Running,
+                            Some(0.1),
+                            None,
+                            None,
+                        )?;
+                        Ok(())
+                    },
                 )?;
-                state
-                    .operations
-                    .write()
-                    .map_err(|_| {
-                        problem(
-                            "operation_unavailable",
-                            "Operation service unavailable",
-                            503,
-                        )
-                    })?
-                    .insert(operation)?;
                 let lifecycle_service = crate::http::profile_lifecycle::ProfileLifecycleService;
                 let result = lifecycle_service.stop(&state.profiles, &state.lifecycles, profile_id);
-                let mut operations = state.operations.write().map_err(|_| {
-                    problem(
-                        "operation_unavailable",
-                        "Operation service unavailable",
-                        503,
-                    )
-                })?;
                 match result {
                     Ok(value) => {
-                        let completed = operations.transition(
+                        let completed = state.mutate_operation_locked(
                             &operation_id,
-                            crate::services::operations::OperationStatus::Completed,
-                            Some(1.0),
-                            Some(value),
-                            None,
+                            "operation.complete",
+                            "completed",
+                            actor_id,
+                            |operations| {
+                                operations.transition(
+                                    &operation_id,
+                                    crate::services::operations::OperationStatus::Completed,
+                                    Some(1.0),
+                                    Some(value.clone()),
+                                    None,
+                                )?;
+                                Ok(())
+                            },
                         )?;
                         Ok(
                             serde_json::json!({ "operationId": operation_id, "result": completed.result }),
                         )
                     }
                     Err(error) => {
-                        operations.transition(
+                        state.mutate_operation_locked(
                             &operation_id,
-                            crate::services::operations::OperationStatus::Failed,
-                            Some(1.0),
-                            None,
-                            Some(error.clone()),
+                            "operation.fail",
+                            "failed",
+                            actor_id,
+                            |operations| {
+                                operations.transition(
+                                    &operation_id,
+                                    crate::services::operations::OperationStatus::Failed,
+                                    Some(1.0),
+                                    None,
+                                    Some(error.clone()),
+                                )?;
+                                Ok(())
+                            },
                         )?;
                         Err(error)
                     }
@@ -1946,13 +2545,39 @@ impl McpExecutor for ProductionMcpExecutor {
 
         if is_mutation {
             if result.is_err() {
-                if let Some(before) = before_state {
+                if let Some(mut before) = before_state {
+                    // Operation outcomes are durable records in the same
+                    // control aggregate; retain a failed operation while
+                    // rolling back any other in-memory mutation from this call.
+                    before.operations = state.control_aggregate()?.operations;
                     state.replace_control_aggregate(before)?;
                 }
             }
         }
 
         result
+    }
+
+    async fn execute_async(&mut self, request: ExecutionRequest<'_>) -> Result<Value, Problem> {
+        if request.command.id.as_str() != "events.stream" {
+            return self.execute(request);
+        }
+        let workspace_id =
+            request.scope.workspace_id.as_ref().ok_or_else(|| {
+                problem("workspace_missing", "Workspace is missing from scope", 400)
+            })?;
+        let auth = request
+            .coordination_auth
+            .as_ref()
+            .ok_or_else(|| problem("authentication_required", "Authentication required", 401))?;
+        let after = request.input.get("after").and_then(Value::as_str);
+        let limit = request
+            .input
+            .get("limit")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(100);
+        crate::http::read_workspace_events(&self.state, auth, workspace_id, after, limit).await
     }
 }
 
@@ -2147,9 +2772,247 @@ fn proxy_problem(error: RepositoryError) -> Problem {
     }
 }
 
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::commands::CommandRegistry;
+    use buglogin_domain::{
+        audit::{AuditOutcome, AuditResource},
+        ids::{AccountId, ResourceId},
+        permissions::{Effect, Grant, Role},
+        profile::{ProfileArchiveState, ProfileResource},
+    };
+
+    #[test]
+    fn audit_events_list_uses_the_workspace_scope_and_shared_page_service() {
+        let workspace_id = WorkspaceId::from_str("ws_mcp_audit").unwrap();
+        let account_id = AccountId::from_str("acct_mcp_audit").unwrap();
+        let state =
+            crate::http::ApiState::local(buglogin_browser::profile::ProfileService::disabled());
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::from_str("grant_mcp_audit_read").unwrap(),
+            account_id: Some(account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-AUD-001").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(workspace_id.clone()),
+            effect: Effect::Allow,
+        });
+        state
+            .audit
+            .write()
+            .unwrap()
+            .append(
+                buglogin_domain::audit::AuditEvent::new(
+                    "evt_mcp_audit",
+                    100,
+                    account_id.clone(),
+                    AuditResource {
+                        resource_type: "workspace".into(),
+                        resource_id: workspace_id.as_str().into(),
+                        scope: ResourceScope::workspace(workspace_id.clone()),
+                    },
+                    "workspace.update",
+                    "cor_mcp_audit",
+                    AuditOutcome::Succeeded,
+                    Default::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let principal = Principal {
+            account_id: Some(account_id),
+            workspace_ids: [workspace_id.clone()].into_iter().collect(),
+            roles: [Role::WorkspaceMember].into_iter().collect(),
+            ..Principal::default()
+        };
+        let command = CommandRegistry::get("audit.events.list").unwrap();
+        let input = serde_json::json!({"workspaceId": workspace_id, "limit": 10});
+        let mut policy = ProductionMcpPolicy::new(state.clone());
+        let scope = policy.resolve_scope(&principal, command, &input).unwrap();
+        policy.authorize(&principal, command, &scope).unwrap();
+        let result = ProductionMcpExecutor::new(state)
+            .execute(ExecutionRequest {
+                command,
+                correlation_id: "cor_mcp_audit_query".into(),
+                principal,
+                scope,
+                input,
+                idempotency_key: None,
+                coordination_auth: None,
+            })
+            .unwrap();
+
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["eventId"], "evt_mcp_audit");
+        assert_eq!(result["nextCursor"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn hosted_profile_get_uses_canonical_workspace_scope_for_authorization() {
+        let workspace_id = WorkspaceId::from_str("ws_mcp_scope").unwrap();
+        let profile_id = ProfileId::from_str("prf_mcp_scope").unwrap();
+        let account_id = AccountId::from_str("acct_mcp_scope").unwrap();
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap()
+        .with_profile_resource(ProfileResource {
+            profile_id: profile_id.clone(),
+            resource_id: ResourceId::from_str("res_mcp_scope").unwrap(),
+            workspace_id: workspace_id.clone(),
+            archive_state: ProfileArchiveState::Active,
+        });
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::from_str("grant_mcp_workspace_profile_read").unwrap(),
+            account_id: Some(account_id.clone()),
+            member_id: None,
+            capability: Capability::new("profile.read").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(workspace_id.clone()),
+            effect: Effect::Allow,
+        });
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::from_str("grant_mcp_workspace_team_create").unwrap(),
+            account_id: Some(AccountId::from_str("acct_mcp_scope").unwrap()),
+            member_id: None,
+            capability: Capability::new("CAP-TEAM-001").unwrap(),
+            action: Action::Create,
+            scope: ResourceScope::workspace(workspace_id.clone()),
+            effect: Effect::Allow,
+        });
+        let principal = Principal {
+            account_id: Some(account_id),
+            workspace_ids: [workspace_id.clone()].into_iter().collect(),
+            roles: [Role::WorkspaceMember].into_iter().collect(),
+            ..Principal::default()
+        };
+        let command = CommandRegistry::get("profile.get").unwrap();
+        let mut policy = ProductionMcpPolicy::new(state);
+
+        let scope = policy
+            .resolve_scope(
+                &principal,
+                command,
+                &serde_json::json!({ "profileId": profile_id }),
+            )
+            .unwrap();
+
+        assert_eq!(scope.workspace_id, Some(workspace_id.clone()));
+        assert_eq!(
+            scope.resource_id.as_ref().unwrap().as_str(),
+            "res_mcp_scope"
+        );
+        policy.authorize(&principal, command, &scope).unwrap();
+
+        let team_command = CommandRegistry::get("team.create").unwrap();
+        let team_scope = policy
+            .resolve_scope(
+                &principal,
+                team_command,
+                &serde_json::json!({ "workspaceId": workspace_id.clone() }),
+            )
+            .unwrap();
+        assert_eq!(team_scope.workspace_id, Some(workspace_id.clone()));
+        policy
+            .authorize(&principal, team_command, &team_scope)
+            .unwrap();
+
+        let grants = policy.state.grants.read().unwrap();
+        assert!(
+            crate::services::profile_hosted::HostedProfileService::authorized(
+                &policy.state,
+                &principal,
+                &grants,
+                &ProfileId::from_str("prf_mcp_scope").unwrap(),
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+        assert!(
+            !crate::services::profile_hosted::HostedProfileService::authorized(
+                &policy.state,
+                &principal,
+                &grants,
+                &ProfileId::from_str("prf_mcp_unrelated").unwrap(),
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+        drop(grants);
+        policy.state.grants.write().unwrap().push(Grant {
+            id: GrantId::from_str("grant_mcp_profile_read_deny").unwrap(),
+            account_id: principal.account_id.clone(),
+            member_id: None,
+            capability: Capability::new("profile.read").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::resource(
+                workspace_id,
+                ResourceId::from_str("res_mcp_scope").unwrap(),
+            ),
+            effect: Effect::Deny,
+        });
+        let grants = policy.state.grants.read().unwrap();
+        assert!(
+            !crate::services::profile_hosted::HostedProfileService::authorized(
+                &policy.state,
+                &principal,
+                &grants,
+                &ProfileId::from_str("prf_mcp_scope").unwrap(),
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OrganizationInput {
     organization: Organization,
     policy: OrganizationPolicy,
+}
+
+#[cfg(test)]
+mod input_fixture_tests {
+    use super::*;
+
+    #[test]
+    fn every_mcp_input_schema_has_a_valid_fixture_and_rejects_null() {
+        let fixtures: BTreeMap<String, Value> = serde_json::from_str(include_str!(
+            "../../../../tests/contracts/mcp-input-fixtures.json"
+        ))
+        .expect("MCP schema fixtures must be valid JSON");
+        let commands = CommandRegistry::all()
+            .iter()
+            .filter(|command| command.adapters.contains(&Adapter::Mcp))
+            .collect::<Vec<_>>();
+        let schemas = commands
+            .iter()
+            .map(|command| command.input_schema.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(fixtures.len(), schemas.len());
+        for schema_name in schemas {
+            let fixture = fixtures
+                .get(schema_name)
+                .unwrap_or_else(|| panic!("missing fixture for MCP input schema {schema_name}"));
+            let command = commands
+                .iter()
+                .find(|command| command.input_schema.as_str() == schema_name)
+                .expect("schema is used by an MCP command");
+
+            validate_mcp_input(command.input_schema, fixture)
+                .unwrap_or_else(|error| panic!("invalid fixture for {schema_name}: {error}"));
+            assert!(
+                validate_mcp_input(command.input_schema, &Value::Null).is_err(),
+                "{schema_name} unexpectedly accepts null"
+            );
+        }
+    }
 }

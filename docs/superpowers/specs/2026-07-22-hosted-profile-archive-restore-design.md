@@ -32,3 +32,11 @@ Enable `profile.archive` and `profile.restore` for hosted production authority t
 
 - Hosted permanent delete needs quarantine plus object-retention cleanup proof. REST and MCP share one typed fail-closed response until that capability is implemented; neither transport may fall through to the disabled local profile repository.
 - Proxy credentials need a workspace encryption-envelope authority before hosted persistence.
+
+## Local profile deletion contract
+
+- REST and MCP call the same Rust profile-deletion service.
+- Require an authorized profile scope, explicit `QUARANTINE_PROFILE_DATA` confirmation, expected revision, and a valid ASCII idempotency key.
+- Store the receipt and audit through the control command store; replay the exact receipt for the same key/input and reject changed input. Hosted production uses PostgreSQL; local authority mode can recover an ambiguous filesystem quarantine from the verified resource record after restart.
+- If the process stops after the filesystem quarantine rename but before the idempotency receipt is committed, a retry may recover the receipt only by validating the deterministic quarantine entry for the same profile ID and revision.
+- A different or corrupt quarantine entry is an error; never infer success from a missing active profile alone.

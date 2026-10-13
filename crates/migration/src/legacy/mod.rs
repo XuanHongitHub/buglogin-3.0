@@ -7,8 +7,9 @@ pub use control_plane::{
     LegacyControlPlaneExport, LegacyControlPlaneMapping, LegacyControlShareGrant,
     LegacyControlWorkspace, NeutralAccountData, NeutralAccountRecord, NeutralGrantData,
     NeutralGrantRecord, NeutralMemberData, NeutralMemberRecord, NeutralOrganizationData,
-    NeutralOrganizationRecord, NeutralResourceData, NeutralResourceRecord, NeutralTeamData,
-    NeutralTeamRecord, NeutralWorkspaceData, NeutralWorkspacePolicy, NeutralWorkspaceRecord,
+    NeutralOrganizationRecord, NeutralProfileResourceData, NeutralProfileResourceRecord,
+    NeutralResourceData, NeutralResourceRecord, NeutralTeamData, NeutralTeamRecord,
+    NeutralWorkspaceData, NeutralWorkspacePolicy, NeutralWorkspaceRecord,
     canonicalize_legacy_control_plane_json, map_legacy_control_plane,
     map_legacy_control_plane_json,
 };
@@ -42,14 +43,14 @@ pub enum ProfileDataClassification {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProfileDataDisposition {
     pub classification: ProfileDataClassification,
     pub reason_code: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProfileDataObject {
     pub path: String,
     pub logical_type: String,
@@ -57,7 +58,7 @@ pub struct ProfileDataObject {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProfileSourceRef {
     pub system: String,
     pub instance_id: String,
@@ -65,7 +66,7 @@ pub struct ProfileSourceRef {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralProfileData {
     pub name: String,
     pub runtime: String,
@@ -84,7 +85,7 @@ pub struct NeutralProfileData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NeutralProfileRecord {
     pub schema: String,
     pub source_ref: ProfileSourceRef,

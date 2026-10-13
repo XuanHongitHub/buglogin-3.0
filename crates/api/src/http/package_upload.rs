@@ -467,25 +467,29 @@ pub(super) async fn activate_package_upload(
             Ok(receipt) => Some(receipt),
             Err(error_response) => {
                 let sync_error = response_problem(error_response).await;
-                if sync_error.code != "migration_sync_commit_outcome_unknown" {
-                    if control_import.is_some() {
-                        if let Err(rollback_error) = control_import::rollback_package_control(
-                            &state,
-                            &package_id,
-                            &format!("{idempotency_key}-control-rollback"),
-                            &actor_id,
-                        ) {
-                            return Err(response(
-                                problem(
-                                    "migration_package_activation_rollback_failed",
-                                    "Migration package activation rollback failed",
-                                    503,
-                                )
-                                .retryable(true)
-                                .with_field("syncError", sync_error.code)
-                                .with_field("rollbackError", rollback_error.code),
-                            ));
-                        }
+                // A replayed control receipt belongs to an earlier activation
+                // attempt. Do not let a concurrent retry that loses the sync
+                // lease roll back the control graph another request is using.
+                if should_compensate_control_import(
+                    control_import.as_ref().map(|receipt| receipt.replayed),
+                    &sync_error,
+                ) {
+                    if let Err(rollback_error) = control_import::rollback_package_control(
+                        &state,
+                        &package_id,
+                        &format!("{idempotency_key}-control-rollback"),
+                        &actor_id,
+                    ) {
+                        return Err(response(
+                            problem(
+                                "migration_package_activation_rollback_failed",
+                                "Migration package activation rollback failed",
+                                503,
+                            )
+                            .retryable(true)
+                            .with_field("syncError", sync_error.code)
+                            .with_field("rollbackError", rollback_error.code),
+                        ));
                     }
                 }
                 return Err(response(sync_error));
@@ -581,6 +585,40 @@ async fn response_problem(value: Response) -> Problem {
             "Migration package activation failed",
             status,
         ),
+    }
+}
+
+fn should_compensate_control_import(
+    control_import_replayed: Option<bool>,
+    sync_error: &Problem,
+) -> bool {
+    sync_error.code != "migration_sync_commit_outcome_unknown"
+        && control_import_replayed == Some(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_attempt_that_created_control_state_can_compensate_it() {
+        let ordinary_failure = problem("sync_import_invalid", "Sync import invalid", 422);
+        assert!(should_compensate_control_import(
+            Some(false),
+            &ordinary_failure
+        ));
+        assert!(!should_compensate_control_import(
+            Some(true),
+            &ordinary_failure
+        ));
+        assert!(!should_compensate_control_import(None, &ordinary_failure));
+
+        let ambiguous = problem(
+            "migration_sync_commit_outcome_unknown",
+            "Commit outcome unknown",
+            503,
+        );
+        assert!(!should_compensate_control_import(Some(false), &ambiguous));
     }
 }
 

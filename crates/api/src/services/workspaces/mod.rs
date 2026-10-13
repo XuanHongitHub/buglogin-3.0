@@ -212,6 +212,17 @@ impl WorkspaceService {
         Ok(self.workspace_in(organization_id, workspace_id)?.clone())
     }
 
+    pub(crate) fn workspace_for_policy(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<Workspace, Problem> {
+        self.organizations
+            .values()
+            .find_map(|record| record.workspaces.get(workspace_id))
+            .cloned()
+            .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))
+    }
+
     pub fn update_workspace(
         &mut self,
         principal: &Principal,

@@ -24,8 +24,8 @@ use buglogin_domain::{
 };
 use buglogin_migration::legacy::{
     NeutralAccountRecord, NeutralGrantRecord, NeutralMemberRecord, NeutralOrganizationRecord,
-    NeutralProfileRecord, NeutralResourceRecord, NeutralTeamRecord, NeutralWorkspaceRecord,
-    ProfileSourceRef, legacy_runtime_fingerprint,
+    NeutralProfileRecord, NeutralProfileResourceRecord, NeutralResourceRecord, NeutralTeamRecord,
+    NeutralWorkspaceRecord, legacy_runtime_fingerprint,
 };
 use buglogin_migration::package::{NeutralPackage, NeutralPackageManifest};
 use buglogin_storage::control::{
@@ -96,28 +96,6 @@ pub(super) struct ControlImportInput {
     grants: Vec<NeutralGrantRecord>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct NeutralProfileResourceRecord {
-    schema: String,
-    source_ref: ProfileSourceRef,
-    id: String,
-    revision: u32,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-    data: NeutralProfileResourceData,
-    extensions: Map<String, Value>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct NeutralProfileResourceData {
-    profile_id: String,
-    resource_id: String,
-    workspace_id: String,
-    archive_state: String,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Counts {
@@ -186,9 +164,16 @@ pub(super) struct ControlRollbackInput {
 pub(super) async fn import_control(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(input): Json<ControlImportInput>,
+    input: Result<Json<ControlImportInput>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
+    let Json(input) = input.map_err(|_| {
+        response(problem(
+            "invalid_input",
+            "Control import request body is invalid",
+            422,
+        ))
+    })?;
     authorize_capability(
         &principal,
         &grants(&state)?,
@@ -526,9 +511,16 @@ fn activate(
 pub(super) async fn rollback_control(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(input): Json<ControlRollbackInput>,
+    input: Result<Json<ControlRollbackInput>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
+    let Json(input) = input.map_err(|_| {
+        response(problem(
+            "invalid_input",
+            "Control rollback request body is invalid",
+            422,
+        ))
+    })?;
     authorize_capability(
         &principal,
         &grants(&state)?,
@@ -659,7 +651,7 @@ pub(super) fn rollback_package_control(
         command_id: "migration.control.rollback".into(),
         idempotency_key: format!(
             "control-rollback-{}",
-            hex_digest(format!("{package_id}:{idempotency_key}").as_bytes())
+            hex_digest(format!("{package_id}:{idempotency_key}:{journal_revision}").as_bytes())
         ),
         expected_revisions: Default::default(),
         puts: vec![

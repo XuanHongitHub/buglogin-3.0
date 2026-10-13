@@ -1,4 +1,7 @@
-use std::{fmt, time::Duration};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use buglogin_domain::{entities::ProxyProtocol, errors::Problem};
@@ -6,6 +9,7 @@ use buglogin_storage::secrets::SecretValue;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     sync::oneshot,
     task::{JoinHandle, JoinSet},
     time::timeout,
@@ -13,6 +17,8 @@ use tokio::{
 
 const MAX_HEADERS: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_CONCURRENT_PROXY_CHECKS: usize = 4;
+static PROXY_CHECK_LIMITER: Semaphore = Semaphore::const_new(MAX_CONCURRENT_PROXY_CHECKS);
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProxyBridgeSpec {
@@ -130,6 +136,80 @@ impl ProxyBridgeHandle {
             })?;
         }
         Ok(())
+    }
+}
+
+pub async fn check_proxy_connectivity(spec: ProxyBridgeSpec) -> Result<u64, Problem> {
+    check_proxy_connectivity_with_limiter(spec, &PROXY_CHECK_LIMITER).await
+}
+
+async fn check_proxy_connectivity_with_limiter(
+    spec: ProxyBridgeSpec,
+    limiter: &Semaphore,
+) -> Result<u64, Problem> {
+    let _permit = limiter.try_acquire().map_err(|_| {
+        problem(
+            "proxy_check_busy",
+            "Too many proxy connectivity checks are already running",
+            429,
+        )
+    })?;
+    let bridge = ProxyBridgeHandle::start(spec).await?;
+    let local_address = bridge
+        .proxy_url()
+        .strip_prefix("http://")
+        .ok_or_else(|| {
+            problem(
+                "proxy_check_unavailable",
+                "Proxy check could not start",
+                503,
+            )
+        })?
+        .to_owned();
+    let started = Instant::now();
+    let check = timeout(IO_TIMEOUT, async {
+        let mut client = TcpStream::connect(&local_address).await.map_err(|_| ())?;
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .await
+            .map_err(|_| ())?;
+        let response = read_headers(&mut client).await?;
+        let status_line = std::str::from_utf8(&response)
+            .ok()
+            .and_then(|response| response.split("\r\n").next())
+            .ok_or(())?;
+        let mut fields = status_line.split_ascii_whitespace();
+        let version = fields.next().ok_or(())?;
+        let status = fields
+            .next()
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or(())?;
+        if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || !(200..300).contains(&status) {
+            return Err(());
+        }
+        Ok::<(), ()>(())
+    })
+    .await;
+    let stopped = bridge.stop().await;
+    if stopped.is_err() {
+        return Err(problem(
+            "proxy_check_cleanup_failed",
+            "Proxy check could not close its local tunnel",
+            500,
+        ));
+    }
+    match check {
+        Ok(Ok(())) => Ok(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+        Ok(Err(())) => Err(problem(
+            "proxy_check_connection_failed",
+            "Proxy could not establish an HTTPS tunnel to the connectivity check target",
+            502,
+        )),
+        Err(_) => Err(problem(
+            "proxy_check_timeout",
+            "Proxy connectivity check timed out",
+            504,
+        )),
     }
 }
 
@@ -648,6 +728,77 @@ mod tests {
         assert!(!request.contains("secret"));
         bridge.stop().await.unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connectivity_check_uses_the_proxy_tunnel_and_returns_latency() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut stream).await.unwrap();
+            assert!(request.starts_with(b"CONNECT example.com:443 HTTP/1.1"));
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            let mut byte = [0u8; 1];
+            let _ = stream.read(&mut byte).await;
+        });
+        let latency = check_proxy_connectivity(ProxyBridgeSpec {
+            protocol: ProxyProtocol::Http,
+            host: upstream_address.ip().to_string(),
+            port: upstream_address.port(),
+            credential: None,
+        })
+        .await
+        .unwrap();
+        assert!(latency < 15_000);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connectivity_check_reports_proxy_rejection_without_exposing_response() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_headers(&mut stream).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let error = check_proxy_connectivity(ProxyBridgeSpec {
+            protocol: ProxyProtocol::Http,
+            host: upstream_address.ip().to_string(),
+            port: upstream_address.port(),
+            credential: None,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "proxy_check_connection_failed");
+        assert!(!error.title.contains("407"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connectivity_check_fails_fast_when_concurrency_limit_is_reached() {
+        let limiter = Semaphore::new(1);
+        let _permit = limiter.try_acquire().unwrap();
+        let error = check_proxy_connectivity_with_limiter(
+            ProxyBridgeSpec {
+                protocol: ProxyProtocol::Http,
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                credential: None,
+            },
+            &limiter,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "proxy_check_busy");
+        assert_eq!(error.status, 429);
     }
 
     #[tokio::test]

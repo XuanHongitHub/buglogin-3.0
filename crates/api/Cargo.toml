@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 axum = "0.8"
+futures-util = "0.3"
 tower-http = { version = "0.6.11", features = ["cors"] }
 buglogin-browser = { path = "../browser" }
 buglogin-domain = { path = "../domain" }
@@ -23,7 +24,8 @@ getrandom = "0.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
 time = { version = "0.3.54", features = ["formatting"] }
 url = "2"
-tokio = { version = "1.53", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "1.53", features = ["macros", "net", "rt-multi-thread", "time"] }
+jsonschema = { version = "0.56.0", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

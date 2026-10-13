@@ -29,6 +29,44 @@ fn tool_metadata_actions_match_the_canonical_registry() {
 }
 
 #[test]
+fn every_mcp_tool_advertises_a_closed_contract_schema() {
+    for tool in mcp::tools() {
+        assert_eq!(
+            tool.input_schema["$ref"],
+            format!(
+                "#/$defs/{}",
+                CommandRegistry::get(tool.command_id)
+                    .unwrap()
+                    .input_schema
+                    .as_str()
+            ),
+            "{}",
+            tool.command_id
+        );
+        let definitions = tool.input_schema["$defs"]
+            .as_object()
+            .expect("schema definitions are embedded for MCP clients");
+        let schema_name = CommandRegistry::get(tool.command_id)
+            .unwrap()
+            .input_schema
+            .as_str();
+        let root_schema = &definitions[schema_name];
+        assert_ne!(
+            root_schema["additionalProperties"], true,
+            "{} must not use an unrestricted object schema",
+            tool.command_id
+        );
+        if root_schema["type"] == "object" {
+            assert_eq!(
+                root_schema["additionalProperties"], false,
+                "{} object input must reject unknown fields",
+                tool.command_id
+            );
+        }
+    }
+}
+
+#[test]
 fn dispatch_resolves_back_to_the_canonical_command() {
     let dispatch = mcp::dispatch_metadata("profile_launch").expect("MCP tool");
 

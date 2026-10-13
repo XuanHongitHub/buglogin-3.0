@@ -170,6 +170,37 @@ impl DesktopProxyStore {
         })
     }
 
+    pub fn connectivity_check_spec(&self, id: &ProxyId) -> Result<(ProxyBridgeSpec, u64), Problem> {
+        let stored = self
+            .repository
+            .get::<Proxy>(id.as_str())?
+            .ok_or_else(|| Problem::new("proxy_not_found", "Proxy not found", 404, "desktop"))?;
+        let revision = stored.revision;
+        let proxy = stored.value;
+        let credential = proxy
+            .credential_ref
+            .as_ref()
+            .map(|reference| {
+                let key = credential_key(reference)?;
+                self.vault
+                    .lock()
+                    .map_err(|_| vault_unavailable())?
+                    .read(&key)
+                    .map(|(value, _)| value)
+                    .map_err(secret_problem)
+            })
+            .transpose()?;
+        Ok((
+            ProxyBridgeSpec {
+                protocol: proxy.protocol,
+                host: proxy.host,
+                port: proxy.port,
+                credential,
+            },
+            revision,
+        ))
+    }
+
     fn create(&self, row: ProxyRow, name: String) -> Result<(Proxy, ImportedProxy), Problem> {
         let id = proxy_id(&row)?;
         let credential_ref = if row.username.is_some() || row.password.is_some() {

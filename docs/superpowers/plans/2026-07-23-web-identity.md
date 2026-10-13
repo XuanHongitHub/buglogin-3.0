@@ -25,6 +25,7 @@ Production migration remains blocked until rehearsal, rollback, trusted adapter,
 - [x] Scoped API token issue/list/revoke and domain ACL scope enforcement.
 - [x] REST/OpenAPI/generated command contracts and web account/recovery UI.
 - [x] Rust/domain/API/frontend/contract targeted gates.
+- [x] Add a four-slot per-process Argon2id verification admission limit with retryable 503 overload; preserve persistent five-attempt account lockout and generic unknown-identity behavior. Unit/auth/contract tests pass. This does not replace distributed gateway rate limiting.
 - [ ] Hosted PostgreSQL recovery/API-token restart E2E.
 - [ ] Hosted webhook sink evidence and browser screenshot QA.
 - [ ] Windows/macOS release evidence and migration rehearsals.

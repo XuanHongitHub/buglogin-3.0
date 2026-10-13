@@ -27,7 +27,10 @@ use buglogin_browser::{
     runtime::{RuntimeAdapter, RuntimeBinary, bugmini::BugminiAdapter, wayfern::WayfernAdapter},
 };
 use buglogin_domain::{
-    entities::{Profile, ProfileState, Proxy, ProxyProtocol, Runtime, SyncMode},
+    entities::{
+        Profile, ProfileCreateInput, ProfileRecord, ProfileState, Proxy, ProxyProtocol, Runtime,
+        SyncMode,
+    },
     errors::Problem,
     ids::{GrantId, ProfileId, ProxyId, ResourceId, WorkspaceId},
     lease::Lease,
@@ -51,7 +54,7 @@ use crate::migration_commands::{
 use crate::profile_runtime::{
     LaunchRequest, LeaseScope, ManagedCoordination, ProfileRuntimeHandle, spawn_profile_runtime,
 };
-use crate::proxy_bridge::ProxyBridgeHandle;
+use crate::proxy_bridge::{ProxyBridgeHandle, check_proxy_connectivity};
 use crate::proxy_store::{DesktopProxyStore, ImportedProxy, ProxyImportReport};
 
 pub const INVOKE_NAMESPACE: &str = "buglogin";
@@ -73,6 +76,7 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "cookie.import",
     "cookie.copy",
     "proxy.parse",
+    "proxy.check",
     "proxy.list",
     "proxy.get",
     "proxy.create",
@@ -647,6 +651,20 @@ impl AdapterState {
                 self.cookie_copy(payload, key, correlation_id)
             }
             "proxy.parse" => self.proxy_parse(payload, correlation_id),
+            "proxy.check" => {
+                let input =
+                    parse_payload::<ProxyCheckInput>(payload, "proxy.check", correlation_id)?;
+                let proxy_id = parse_proxy_id(&input.proxy_id, correlation_id)?;
+                parse_workspace_id(&input.workspace_id, correlation_id)?;
+                let (spec, revision) = self.proxy_store.connectivity_check_spec(&proxy_id)?;
+                let latency_ms = check_proxy_connectivity(spec).await?;
+                Ok(json!({
+                    "proxyId": proxy_id,
+                    "revision": revision,
+                    "status": "healthy",
+                    "latencyMs": latency_ms
+                }))
+            }
             "proxy.list" => self.proxy_list(payload, correlation_id),
             "proxy.get" => self.proxy_get(payload, correlation_id),
             "proxy.create" => self.proxy_create(payload, correlation_id),
@@ -700,12 +718,22 @@ impl AdapterState {
 
     fn organization_list(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
         parse_payload::<Empty>(payload, "organization.list", correlation_id)?;
-        Ok(json!({ "items": [], "nextCursor": Value::Null }))
+        Err(Problem::new(
+            "hosted_organization_authority_required",
+            "Organization records require the hosted BugLogin API",
+            409,
+            correlation_id,
+        ))
     }
 
     fn workspace_list(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
         parse_payload::<WorkspaceListInput>(payload, "workspace.list", correlation_id)?;
-        Ok(json!({ "items": [], "nextCursor": Value::Null }))
+        Err(Problem::new(
+            "hosted_workspace_authority_required",
+            "Workspace records require the hosted BugLogin API",
+            409,
+            correlation_id,
+        ))
     }
 
     fn profile_list(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
@@ -745,11 +773,15 @@ impl AdapterState {
                 .map_err(|error| correlate(error, correlation_id))?
                 .ok_or_else(|| proxy_not_found(correlation_id))?;
         }
+        let profile_id = match input.id.as_deref() {
+            Some(id) => parse_profile_id(id, correlation_id)?,
+            None => generated_profile_id()?,
+        };
         let timestamp = now();
         let created = self
             .profiles
             .create(Profile {
-                id: generated_profile_id()?,
+                id: profile_id,
                 name: input.name.trim().to_owned(),
                 runtime: input.runtime,
                 runtime_version: input.runtime_version,
@@ -757,7 +789,7 @@ impl AdapterState {
                 state: ProfileState::Ready,
                 archived: false,
                 fingerprint: None,
-                note: None,
+                note: input.note,
                 proxy_id,
                 vpn_id: None,
                 group_ids: Vec::new(),
@@ -768,7 +800,8 @@ impl AdapterState {
                 updated_at: timestamp,
             })
             .map_err(|error| correlate(error, correlation_id))?;
-        serde_json::to_value(created.value).map_err(|_| serialization_problem(correlation_id))
+        serde_json::to_value(ProfileRecord::new(created.value, created.revision))
+            .map_err(|_| serialization_problem(correlation_id))
     }
 
     fn profile_archive_restore(
@@ -813,7 +846,8 @@ impl AdapterState {
             self.profiles.restore(input.revision, current.value)
         }
         .map_err(|error| correlate(error, correlation_id))?;
-        serde_json::to_value(updated.value).map_err(|_| serialization_problem(correlation_id))
+        serde_json::to_value(ProfileRecord::new(updated.value, updated.revision))
+            .map_err(|_| serialization_problem(correlation_id))
     }
 
     fn cookie_list(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
@@ -1214,8 +1248,8 @@ impl AdapterState {
         payload_hash: &str,
         correlation_id: &str,
     ) -> Result<Value, Problem> {
-        let input = parse_payload::<ResourceIdInput>(payload, "profile.stop", correlation_id)?;
-        let profile_id = parse_profile_id(&input.id, correlation_id)?;
+        let input = parse_payload::<ProfileIdInput>(payload, "profile.stop", correlation_id)?;
+        let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
         let operation_correlation_id = correlation_id.to_owned();
         let action_correlation_id = operation_correlation_id.clone();
         self.run_operation(
@@ -1657,11 +1691,8 @@ fn supported_command(
 }
 
 fn profile_list_item(profile: Versioned<Profile>, correlation_id: &str) -> Result<Value, Problem> {
-    let revision = profile.revision;
-    let mut value =
-        serde_json::to_value(profile.value).map_err(|_| serialization_problem(correlation_id))?;
-    value["revision"] = json!(revision);
-    Ok(value)
+    serde_json::to_value(ProfileRecord::new(profile.value, profile.revision))
+        .map_err(|_| serialization_problem(correlation_id))
 }
 
 fn proxy_record(
@@ -1750,16 +1781,6 @@ struct ProfileRevisionInput {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProfileCreateInput {
-    name: String,
-    runtime: Runtime,
-    runtime_version: Option<String>,
-    workspace_id: Option<String>,
-    proxy_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkspaceListInput {
     organization_id: String,
 }
@@ -1780,6 +1801,12 @@ struct ResourceIdInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileIdInput {
+    profile_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OperationIdInput {
     operation_id: String,
 }
@@ -1788,6 +1815,13 @@ struct OperationIdInput {
 #[serde(deny_unknown_fields)]
 struct ProxyParseInput {
     text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProxyCheckInput {
+    workspace_id: String,
+    proxy_id: String,
 }
 
 #[derive(Deserialize)]
@@ -2311,6 +2345,30 @@ mod tests {
         (state, controller, root)
     }
 
+    #[tokio::test]
+    async fn local_authority_never_reports_fake_empty_organization_or_workspace_lists() {
+        let (state, _, root) = state("hosted-only-lists");
+        let organization = state
+            .invoke("organization_list", "cor_org_list", None, json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(organization.code, "hosted_organization_authority_required");
+        assert_eq!(organization.correlation_id, "cor_org_list");
+
+        let workspace = state
+            .invoke(
+                "workspace_list",
+                "cor_workspace_list",
+                None,
+                json!({ "organizationId": "org_test" }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(workspace.code, "hosted_workspace_authority_required");
+        assert_eq!(workspace.correlation_id, "cor_workspace_list");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     async fn create_profile(state: &AdapterState, key: &str) -> String {
         let profile_id = state
             .invoke(
@@ -2769,6 +2827,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(created.data["proxyId"], "prx_profile_create");
+        assert_eq!(created.data["revision"], 1);
         let profile_id = ProfileId::from_str(created.data["id"].as_str().unwrap()).unwrap();
         let stored = state.profiles.get(&profile_id).unwrap().unwrap();
         assert_eq!(
@@ -2815,6 +2874,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(archived.data["archived"], true);
+        assert_eq!(archived.data["revision"], 2);
         let active_only = state
             .invoke("profile_list", "cor_list_active", None, json!({}))
             .await
@@ -2841,6 +2901,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(restored.data["archived"], false);
+        assert_eq!(restored.data["revision"], 3);
         let stale = state
             .invoke(
                 "profile_archive",
@@ -2870,6 +2931,40 @@ mod tests {
         assert_eq!(result.data["invalidCount"], 1);
         assert!(!serialized.contains("secret"));
         assert!(!serialized.contains("user"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_check_runs_real_connectivity_and_fails_closed() {
+        let (state, _, root) = state("proxy-connectivity-check");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let workspace_id = "ws_proxy_check";
+        let proxy_id = "prx_proxy_check";
+        state
+            .invoke(
+                "proxy_create",
+                "cor_proxy_check_create",
+                Some("idem_proxy_check_create_0001"),
+                json!({
+                    "workspaceId": workspace_id,
+                    "proxy": proxy_metadata(proxy_id, "127.0.0.1", port)
+                }),
+            )
+            .await
+            .unwrap();
+        let error = state
+            .invoke(
+                "proxy_check",
+                "cor_proxy_check",
+                None,
+                json!({ "workspaceId": workspace_id, "proxyId": proxy_id }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "proxy_check_connection_failed");
+        assert!(!error.title.contains("127.0.0.1"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3175,7 +3270,7 @@ mod tests {
                 "profile_stop",
                 "cor_auth_proxy_stop",
                 Some("idem_auth_proxy_stop_00001"),
-                json!({"id": profile_id}),
+                json!({"profileId": profile_id}),
             )
             .await
             .unwrap();
@@ -3208,7 +3303,7 @@ mod tests {
                 "profile_stop",
                 "cor_stop",
                 Some("idem_profile_stop_00001"),
-                json!({ "id": profile_id }),
+                json!({ "profileId": profile_id }),
             )
             .await
             .unwrap();
@@ -3228,7 +3323,7 @@ mod tests {
                 "profile_stop",
                 "cor_second_stop",
                 Some("idem_profile_stop_00002"),
-                json!({ "id": profile_id }),
+                json!({ "profileId": profile_id }),
             )
             .await
             .unwrap();
@@ -3279,7 +3374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_registered_command_is_not_advertised_or_invokable() {
+    async fn unsupported_registered_command_is_not_advertised_or_invocable() {
         let (state, _, root) = state("unsupported");
         let error = state
             .invoke("profile_delete", "cor_delete", None, json!({}))

@@ -12,7 +12,7 @@ pub const RESOURCE_KEY_ENVELOPE_KEY: &str = ".buglogin/resource-key-envelope.jso
 pub const MAX_PROFILE_SYNC_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestObject {
     pub key: String,
     pub size: u64,
@@ -50,7 +50,7 @@ impl ManifestObject {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestTombstone {
     pub key: String,
     pub deleted_generation: u64,
@@ -106,7 +106,8 @@ pub enum ManifestDependency {
     Proxy {
         proxy_id: ProxyId,
         revision: u64,
-        metadata_object: ManifestObjectReference,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata_object: Option<ManifestObjectReference>,
         credential_envelope_object: Option<ManifestObjectReference>,
     },
 }
@@ -153,7 +154,7 @@ impl ManifestTombstone {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncManifest {
     pub schema_version: u16,
     pub workspace_id: WorkspaceId,
@@ -384,10 +385,15 @@ impl SyncManifest {
                             "sync",
                         ));
                     }
-                    validate_dependency_object(metadata_object, &self.objects)?;
+                    if let Some(metadata_object) = metadata_object {
+                        validate_dependency_object(metadata_object, &self.objects)?;
+                    }
                     if let Some(envelope) = credential_envelope_object {
                         validate_dependency_object(envelope, &self.objects)?;
-                        if envelope.key == metadata_object.key {
+                        if metadata_object
+                            .as_ref()
+                            .is_some_and(|metadata_object| envelope.key == metadata_object.key)
+                        {
                             return Err(Problem::new(
                                 "invalid_manifest_dependency",
                                 "Manifest dependency objects must be distinct",

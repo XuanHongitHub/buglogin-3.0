@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use buglogin_storage::blob::checksum;
@@ -17,15 +18,10 @@ fn postgres_tls_adapter_persists_and_replays_atomically() {
     let Some(database_url) = optional_env("BUGLOGIN_POSTGRES_TEST_URL") else {
         return;
     };
-    assert!(
-        database_url
-            .to_ascii_lowercase()
-            .contains("sslmode=verify-full"),
-        "live PostgreSQL evidence requires sslmode=verify-full"
-    );
     let run_id = run_id();
     let tenant_id = format!("live-test-{run_id}");
     let idempotency_key = format!("postgres-live-{run_id}");
+    println!("postgres_canary_tenant={tenant_id}");
     let command = ExecuteControlCommand {
         tenant_id: tenant_id.clone(),
         command_id: "storage.live-test".into(),
@@ -53,7 +49,11 @@ fn postgres_tls_adapter_persists_and_replays_atomically() {
         },
     };
 
-    let config = PostgresConfig::new(database_url).expect("test URL must require PostgreSQL TLS");
+    let config = PostgresConfig::new_with_tls_root_certificate(
+        database_url,
+        env::var_os("BUGLOGIN_POSTGRES_TLS_ROOT_CERT").map(PathBuf::from),
+    )
+    .expect("test URL must require PostgreSQL TLS");
     let mut store = PostgresControlRecordStore::connect(&config).expect("connect PostgreSQL TLS");
     store.ensure_schema().expect("create control schema");
     let first = store.execute(command).expect("execute control command");

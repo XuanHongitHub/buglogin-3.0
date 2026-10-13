@@ -366,6 +366,11 @@ mod live_redis {
             .await
             .unwrap();
 
+        let committed_events = backend.read_events(scope(), None, 10).await.unwrap();
+        assert_eq!(committed_events.len(), 1);
+        assert_eq!(committed_events[0].event.name, "profile.sync.committed");
+        assert_eq!(committed_events[0].event.resource.revision, 1);
+
         let current = backend
             .current_manifest(scope(), &resource)
             .await
@@ -378,6 +383,10 @@ mod live_redis {
             .commit_manifest(scope(), &resource, &lease1.owner_token, m1.clone())
             .await
             .unwrap();
+        assert_eq!(
+            backend.read_events(scope(), None, 10).await.unwrap().len(),
+            1
+        );
 
         let mut m1_diff = m1.clone();
         m1_diff.root_checksum =
@@ -418,6 +427,10 @@ mod live_redis {
             .commit_manifest(scope(), &resource, &lease1.owner_token, m2)
             .await
             .unwrap();
+
+        let committed_events = backend.read_events(scope(), None, 10).await.unwrap();
+        assert_eq!(committed_events.len(), 2);
+        assert_eq!(committed_events[1].event.resource.revision, 2);
 
         let current = backend
             .current_manifest(scope(), &resource)

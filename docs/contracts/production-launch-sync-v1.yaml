@@ -68,6 +68,28 @@ endpoints:
       - stale proxy dependencies fail closed with manifest_dependency_stale
       - the empty generation-one bootstrap manifest is returned before profile data is first synced
 
+  - id: profile.proxy.assignment.get
+    method: GET
+    path: /v1/workspaces/{workspaceId}/profiles/{profileId}/proxy-assignment
+    capability: profile.read
+    response: ProfileProxyAssignment
+    invariants:
+      - returns only a staged assignment for this workspace and profile
+      - rejects an assignment whose expected profile revision is stale
+
+  - id: profile.proxy.assignment.set
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/profiles/{profileId}/proxy-assignment
+    capability: profile.update
+    idempotency: required
+    input: ProfileProxyAssignmentSetInput
+    response: ProfileProxyAssignment
+    invariants:
+      - proxyId must be explicit; null means remove the proxy
+      - profile must be stopped, active, writable, and at expectedProfileRevision
+      - selected proxy must be readable in the same workspace
+      - staging does not change active profile metadata or manifest
+
   - id: profile.manifest.commit
     method: PUT
     path: /v1/workspaces/{workspaceId}/resources/{resourceId}/manifest
@@ -79,6 +101,12 @@ endpoints:
       - x-buglogin-fencing-token
     input: SyncManifest
     response: SyncManifest
+    optional_headers:
+      - x-buglogin-profile-revision
+    invariants:
+      - when a pending proxy assignment exists, this revision must match both the assignment and current profile
+      - manifest proxy dependency must exactly match the staged selection, including null for unassign
+      - profile proxy, profile revision, manifest, audit/idempotency receipt, and pending-assignment consumption commit atomically
 
   - id: profile.blob.get
     method: GET
@@ -223,13 +251,14 @@ schemas:
       sourceGeneration: integer (optional; v2 reuse from immediately previous manifest only)
 
   ManifestDependency:
-    required: [kind, proxyId, revision, metadataObject, credentialEnvelopeObject]
+    required: [kind, proxyId, revision, credentialEnvelopeObject]
     properties:
       kind: [proxy]
       proxyId: string
       revision: integer
-      metadataObject: ManifestObjectReference
+      metadataObject: [ManifestObjectReference, null]
       credentialEnvelopeObject: [ManifestObjectReference, null]
+    metadataObjectCompatibility: legacy references remain readable and verifiable; new manifests omit the field and use the canonical workspace proxy record.
 
   ManifestPayloadEncryption:
     required: [schemaVersion, algorithm, resourceKeyEnvelope]

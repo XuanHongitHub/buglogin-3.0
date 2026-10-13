@@ -46,11 +46,20 @@ use buglogin_sync::{
     manifest::{ManifestObject, SyncManifest},
 };
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 #[derive(Default)]
 struct FakeCoordination {
     fail_acquire: AtomicBool,
+    pause_first_acquire: AtomicBool,
+    acquire_calls: AtomicUsize,
+    first_acquire_paused: AtomicBool,
+    first_acquire_waiting: Notify,
+    resume_first_acquire: Notify,
+    second_acquire_wins: AtomicBool,
+    second_acquire_waiting: Notify,
+    resume_second_acquire: Notify,
     lease: Mutex<Option<LeaseGrant>>,
     replays: Mutex<BTreeMap<String, LeaseGrant>>,
     manifest_commits: AtomicUsize,
@@ -83,6 +92,21 @@ impl CoordinationBackend for FakeCoordination {
                 "test",
             ));
         }
+        let acquire_index = if self.pause_first_acquire.load(Ordering::SeqCst) {
+            self.acquire_calls.fetch_add(1, Ordering::SeqCst)
+        } else {
+            usize::MAX
+        };
+        if acquire_index == 0 {
+            self.first_acquire_paused.store(true, Ordering::SeqCst);
+            self.first_acquire_waiting.notify_one();
+            self.resume_first_acquire.notified().await;
+            self.first_acquire_paused.store(false, Ordering::SeqCst);
+        } else if self.first_acquire_paused.load(Ordering::SeqCst)
+            && !(acquire_index == 1 && self.second_acquire_wins.load(Ordering::SeqCst))
+        {
+            return Err(Problem::new("lease_held", "Lease held", 409, "test"));
+        }
         if let Some(lease) = self.replays.lock().unwrap().get(idempotency_key).cloned() {
             return Ok(lease);
         }
@@ -103,6 +127,10 @@ impl CoordinationBackend for FakeCoordination {
             .lock()
             .unwrap()
             .insert(idempotency_key.into(), lease.clone());
+        if acquire_index == 1 && self.second_acquire_wins.load(Ordering::SeqCst) {
+            self.second_acquire_waiting.notify_one();
+            self.resume_second_acquire.notified().await;
+        }
         Ok(lease)
     }
 
@@ -228,7 +256,7 @@ impl CoordinationBackend for FakeCoordination {
 }
 
 #[tokio::test]
-async fn signed_sync_package_upload_verify_activate_is_atomic_and_replayable() {
+async fn signed_sync_package_activation_compensates_and_replays() {
     let root = std::env::temp_dir().join(format!(
         "buglogin-http-signed-sync-package-{}",
         std::process::id()
@@ -343,13 +371,128 @@ async fn signed_sync_package_upload_verify_activate_is_atomic_and_replayable() {
     );
     assert_eq!(failed_body["code"], "test_coordination_unavailable");
 
+    // Control records are committed before sync activation. If sync cannot acquire
+    // its lease, package activation compensates by rolling the control graph back.
+    let profiles_after_failure = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/profiles?limit=50")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "signed-sync-after-failed-activate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(profiles_after_failure.status(), StatusCode::OK);
+    assert!(
+        body(profiles_after_failure).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
     coordination.fail_acquire.store(false, Ordering::SeqCst);
+    coordination
+        .pause_first_acquire
+        .store(true, Ordering::SeqCst);
+    coordination
+        .second_acquire_wins
+        .store(true, Ordering::SeqCst);
+    let first_app = app.clone();
+    let first_package_id = package_id.clone();
+    let first_token = token.clone();
+    let first_activation = tokio::spawn(async move {
+        first_app
+            .oneshot(activate_request(
+                &first_package_id,
+                &first_token,
+                "signed-sync-activate-0001",
+            ))
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        coordination.first_acquire_waiting.notified(),
+    )
+    .await
+    .expect("first activation should reach sync lease acquisition");
+
+    let second_app = app.clone();
+    let second_package_id = package_id.clone();
+    let second_token = token.clone();
+    let second_activation = tokio::spawn(async move {
+        second_app
+            .oneshot(activate_request(
+                &second_package_id,
+                &second_token,
+                "signed-sync-activate-concurrent-0001",
+            ))
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        coordination.second_acquire_waiting.notified(),
+    )
+    .await
+    .expect("replayed activation should acquire the sync lease");
+
+    coordination.resume_first_acquire.notify_one();
+    let first_lost = first_activation.await.unwrap();
+    let first_lost_status = first_lost.status();
+    let first_lost_body = body(first_lost).await;
+    assert_eq!(first_lost_status, StatusCode::CONFLICT, "{first_lost_body}");
+    assert_eq!(first_lost_body["code"], "lease_held");
+
+    let profiles_after_owner_compensation = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/profiles?limit=50")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "signed-sync-during-activate-retry")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(profiles_after_owner_compensation.status(), StatusCode::OK);
+    assert_eq!(
+        body(profiles_after_owner_compensation).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "the owner compensates its control graph when it loses sync lease acquisition"
+    );
+
+    coordination.resume_second_acquire.notify_one();
+    let second_lost = second_activation.await.unwrap();
+    assert_eq!(second_lost.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body(second_lost).await["code"],
+        "migration_sync_commit_outcome_unknown"
+    );
+
+    let manifest_after_rollback = app
+        .clone()
+        .oneshot(manifest_request(&token, &workspace, &resource))
+        .await
+        .unwrap();
+    assert_eq!(manifest_after_rollback.status(), StatusCode::OK);
+    assert!(body(manifest_after_rollback).await.is_null());
+
     let activated = app
         .clone()
         .oneshot(activate_request(
             &package_id,
             &token,
-            "signed-sync-activate-0001",
+            "signed-sync-activate-concurrent-0001",
         ))
         .await
         .unwrap();

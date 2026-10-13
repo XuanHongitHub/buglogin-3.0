@@ -51,7 +51,7 @@ pub struct ProfileCloneInput {
 #[serde(rename_all = "camelCase")]
 pub struct ProfileCloneReceipt {
     pub source_profile_id: ProfileId,
-    pub profile: crate::entities::Profile,
+    pub profile: crate::entities::ProfileRecord,
     pub resource_id: ResourceId,
     pub metadata_only: bool,
     pub copied_fields: Vec<String>,

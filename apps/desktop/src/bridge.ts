@@ -2,6 +2,8 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   COMMANDS,
   type CommandId,
+  type ProxyCheckInput,
+  type ProxyCheckResult,
 } from "../../../frontend/src/generated/command-registry.ts";
 import type {
   CommandResult,
@@ -59,6 +61,7 @@ export interface DesktopApi {
   archiveProfile(profileId: string, revision: number): Promise<Profile>;
   restoreProfile(profileId: string, revision: number): Promise<Profile>;
   parseProxy(text: string): Promise<ProxyParseReport>;
+  checkProxy(input: ProxyCheckInput): Promise<ProxyCheckResult>;
   listProxies(workspaceId: string): Promise<ProxyPage>;
   getProxy(workspaceId: string, proxyId: string): Promise<ProxyRecord>;
   createProxy(input: ProxyCreateInput): Promise<ProxyCreateResult>;
@@ -112,6 +115,7 @@ const invokeNames = {
   cookieImport: contractInvoke("cookie.import"),
   cookieCopy: contractInvoke("cookie.copy"),
   proxyParse: contractInvoke("proxy.parse"),
+  proxyCheck: contractInvoke("proxy.check"),
   proxyList: contractInvoke("proxy.list"),
   proxyGet: contractInvoke("proxy.get"),
   proxyCreate: contractInvoke("proxy.create"),
@@ -183,9 +187,10 @@ export function createTauriDesktopApi(
       call<Profile>(invokeNames.profileArchive, { profileId, revision }, true),
     restoreProfile: (profileId, revision) =>
       call<Profile>(invokeNames.profileRestore, { profileId, revision }, true),
-    // ponytail: ProxyParseInput has no published field schema; isolate the provisional text field here.
     parseProxy: (text) =>
       call<ProxyParseReport>(invokeNames.proxyParse, { text }),
+    checkProxy: (input) =>
+      call<ProxyCheckResult>(invokeNames.proxyCheck, input),
     listProxies: (workspaceId) =>
       call<ProxyPage>(invokeNames.proxyList, { workspaceId }),
     getProxy: (workspaceId, proxyId) =>

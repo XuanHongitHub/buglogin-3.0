@@ -419,15 +419,8 @@ impl ProfileProjection {
     ) -> Result<(PayloadDescriptor, Vec<(String, Vec<u8>)>, SyncManifest), Problem> {
         let mut files = Vec::new();
         collect_files(profile_path, profile_path, &mut files)?;
-        let proxy_dependency = proxy.map(|proxy| {
-            let key = format!(
-                ".buglogin/proxy-dependencies/{}/{}/metadata.json",
-                proxy.proxy_id.as_str(),
-                proxy.revision
-            );
-            files.push((key.clone(), proxy.metadata));
-            (proxy.proxy_id, proxy.revision, key, proxy.credential)
-        });
+        let proxy_dependency =
+            proxy.map(|proxy| (proxy.proxy_id, proxy.revision, proxy.credential));
         let objects = files
             .iter()
             .map(|(path, bytes)| PayloadObject::new(path.clone(), bytes))
@@ -482,16 +475,11 @@ impl ProfileProjection {
                 .collect(),
             tombstones,
         )?;
-        if let Some((proxy_id, revision, key, _credential)) = proxy_dependency {
-            let object = manifest
-                .objects
-                .iter()
-                .find(|object| object.key == key)
-                .ok_or_else(|| unavailable())?;
+        if let Some((proxy_id, revision, _credential)) = proxy_dependency {
             manifest.dependencies.push(ManifestDependency::Proxy {
                 proxy_id,
                 revision,
-                metadata_object: ManifestObjectReference::from(object),
+                metadata_object: None,
                 credential_envelope_object: None,
             });
             manifest.validate()?;
@@ -834,10 +822,15 @@ fn proxy_metadata_keys(manifest: &SyncManifest) -> std::collections::BTreeSet<St
     manifest
         .dependencies
         .iter()
-        .map(|dependency| match dependency {
+        .filter_map(|dependency| match dependency {
             ManifestDependency::Proxy {
-                metadata_object, ..
-            } => metadata_object.key.clone(),
+                metadata_object: Some(metadata_object),
+                ..
+            } => Some(metadata_object.key.clone()),
+            ManifestDependency::Proxy {
+                metadata_object: None,
+                ..
+            } => None,
         })
         .collect()
 }
@@ -1392,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_adds_selected_proxy_metadata_as_a_manifest_dependency() {
+    fn snapshot_references_selected_proxy_revision_without_copying_metadata() {
         let root = std::env::temp_dir().join(format!(
             "buglogin-projection-proxy-{}-{}",
             std::process::id(),
@@ -1406,10 +1399,6 @@ mod tests {
         fs::create_dir_all(&profile_path).unwrap();
         fs::write(profile_path.join("Preferences"), b"profile-data").unwrap();
         let previous = SyncManifest::new(workspace, resource, 1, 1, None, b"", Vec::new()).unwrap();
-        let metadata =
-            br#"{"workspaceId":"ws_projection","proxy":{"id":"proxy_projection"},"revision":4}"#
-                .to_vec();
-
         let (descriptor, files, manifest) = projection
             .snapshot_with_proxy(
                 &profile_path,
@@ -1418,7 +1407,6 @@ mod tests {
                 Some(RemoteProxySyncSnapshot {
                     proxy_id: proxy_id.clone(),
                     revision: 4,
-                    metadata: metadata.clone(),
                     credential: None,
                 }),
             )
@@ -1434,17 +1422,11 @@ mod tests {
         assert_eq!(manifest_proxy_id, &proxy_id);
         assert_eq!(*revision, 4);
         assert_eq!(credential_envelope_object, &None);
-        assert_eq!(metadata_object.size, metadata.len() as u64);
-        assert!(manifest.objects.iter().any(|object| {
-            object.key == metadata_object.key && object.checksum == metadata_object.checksum
-        }));
-        assert_eq!(
-            files
+        assert_eq!(metadata_object, &None);
+        assert!(
+            !files
                 .iter()
-                .find(|(path, _)| path == &metadata_object.key)
-                .unwrap()
-                .1,
-            metadata
+                .any(|(path, _)| path.contains("proxy-dependencies"))
         );
         assert_eq!(descriptor.generation, manifest.generation);
         let _ = fs::remove_dir_all(root);
@@ -1696,7 +1678,6 @@ mod tests {
                 Some(RemoteProxySyncSnapshot {
                     proxy_id: proxy_id.clone(),
                     revision: 5,
-                    metadata: br#"{"workspaceId":"ws_proxy_secret","revision":5}"#.to_vec(),
                     credential: Some(SecretValue::new(clear_secret.to_vec()).unwrap()),
                 }),
                 &client_key,

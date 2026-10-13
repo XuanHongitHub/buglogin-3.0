@@ -1,12 +1,15 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, RwLock},
     time::Duration,
 };
 
+use crate::profile_runtime::DesktopSyncBackend;
+use buglogin_api::services::connected_cookie_jobs::{ConnectedCookieJob, ConnectedCookieReceipt};
+use buglogin_api::services::profile_proxy_assignment::ProfileProxyAssignment;
 use buglogin_domain::{
-    entities::{Profile, ProfileState, ProxyProtocol, Runtime, SyncMode},
+    entities::{Profile, ProfileCreateInput, ProfileRecord, ProfileState, ProxyProtocol, SyncMode},
     errors::Problem,
     ids::{ProfileId, ProxyId, ResourceId, WorkspaceId},
     profile::ProfileResource,
@@ -14,10 +17,7 @@ use buglogin_domain::{
 use buglogin_storage::local::Versioned;
 use buglogin_storage::secrets::SecretValue;
 use buglogin_sync::{
-    coordination::{
-        CoordinationAuth, CoordinationBackend, CoordinationEvent, CoordinationScope, LeaseGrant,
-        Presence, PublishedEvent, StreamEvent,
-    },
+    coordination::{CoordinationAuth, CoordinationScope, LeaseGrant},
     manifest::SyncManifest,
 };
 use reqwest::{Method, StatusCode, Url, header};
@@ -35,6 +35,20 @@ pub struct RemoteApiClient {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BlobPresence {
     present: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedProfilePage {
+    items: Vec<Versioned<Profile>>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CookieJobInboxResponse {
+    items: Vec<ConnectedCookieJob>,
 }
 
 impl fmt::Debug for RemoteApiClient {
@@ -73,18 +87,14 @@ struct ProxyRecordView {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct ProxyView {
     id: ProxyId,
-    name: Option<String>,
     protocol: ProxyProtocol,
     host: String,
     port: u16,
     has_credential: bool,
-    rotation_configured: bool,
     bypass_rules: Vec<String>,
-    created_at: String,
-    updated_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -103,7 +113,6 @@ pub struct RemoteProxyLaunch {
 pub struct RemoteProxySyncSnapshot {
     pub proxy_id: ProxyId,
     pub revision: u64,
-    pub metadata: Vec<u8>,
     /// Plaintext exists only in Rust memory until ProfileProjection seals it
     /// with the selected profile resource key.
     pub credential: Option<SecretValue>,
@@ -417,6 +426,90 @@ impl RemoteApiClient {
         Ok(())
     }
 
+    pub async fn cookie_job_inbox(
+        &self,
+        workspace: &WorkspaceId,
+        correlation: &str,
+    ) -> Result<Vec<ConnectedCookieJob>, Problem> {
+        let response: CookieJobInboxResponse = self
+            .get(
+                &format!("/v1/workspaces/{}/cookie-jobs/inbox", workspace.as_str()),
+                correlation,
+            )
+            .await?;
+        Ok(response.items)
+    }
+
+    pub async fn claim_cookie_job(
+        &self,
+        workspace: &WorkspaceId,
+        job_id: &str,
+        correlation: &str,
+    ) -> Result<ConnectedCookieJob, Problem> {
+        validate_cookie_job_id(job_id)?;
+        self.send(
+            Method::POST,
+            &format!(
+                "/v1/cookie-jobs/{job_id}/claim?workspaceId={}",
+                workspace.as_str()
+            ),
+            None,
+            correlation,
+            None,
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn acknowledge_cookie_job(
+        &self,
+        workspace: &WorkspaceId,
+        job_id: &str,
+        correlation: &str,
+    ) -> Result<ConnectedCookieJob, Problem> {
+        validate_cookie_job_id(job_id)?;
+        self.send(
+            Method::POST,
+            &format!(
+                "/v1/cookie-jobs/{job_id}/ack?workspaceId={}",
+                workspace.as_str()
+            ),
+            None,
+            correlation,
+            None,
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn complete_cookie_job(
+        &self,
+        workspace: &WorkspaceId,
+        job_id: &str,
+        receipt: &ConnectedCookieReceipt,
+        correlation: &str,
+    ) -> Result<ConnectedCookieJob, Problem> {
+        validate_cookie_job_id(job_id)?;
+        self.send(
+            Method::POST,
+            &format!(
+                "/v1/cookie-jobs/{job_id}/complete?workspaceId={}",
+                workspace.as_str()
+            ),
+            Some(
+                serde_json::to_value(receipt)
+                    .map_err(|_| client_problem("cookie_job_receipt_invalid", 400))?,
+            ),
+            correlation,
+            None,
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn profile(
         &self,
         id: &ProfileId,
@@ -521,16 +614,9 @@ impl RemoteApiClient {
                 correlation,
             ));
         }
-        let metadata = serde_json::to_vec(&json!({"workspaceId":record.workspace_id,"proxy":{
-            "id":record.proxy.id,"name":record.proxy.name,"protocol":record.proxy.protocol,
-            "host":record.proxy.host,"port":record.proxy.port,"hasCredential":record.proxy.has_credential,
-            "rotationConfigured":record.proxy.rotation_configured,"bypassRules":record.proxy.bypass_rules,
-            "createdAt":record.proxy.created_at,"updatedAt":record.proxy.updated_at
-        },"revision":record.revision})).map_err(|_| client_problem("api_response_invalid", 502))?;
         Ok(RemoteProxySyncSnapshot {
             proxy_id: id.clone(),
             revision: record.revision,
-            metadata,
             credential,
         })
     }
@@ -751,19 +837,36 @@ impl RemoteApiClient {
             "workspace_list" => { let org=path_arg(&payload,"organizationId",correlation)?; json!({"items":self.get::<Vec<Value>>(&format!("/v1/organizations/{org}/workspaces"),correlation).await?,"nextCursor":Value::Null}) },
             "profile_list" => {
                 let include_archived=payload.get("includeArchived").and_then(Value::as_bool).unwrap_or(false);
-                let profiles:Vec<Versioned<Profile>>=self.get("/v1/profiles",correlation).await?;
+                let mut profiles = Vec::new();
+                let mut cursor: Option<String> = None;
+                let mut seen_cursors = BTreeSet::new();
+                loop {
+                    let path = match cursor.as_deref() {
+                        Some(cursor) => format!("/v1/profiles?limit=100&cursor={}", urlencoding(cursor)),
+                        None => "/v1/profiles?limit=100".to_owned(),
+                    };
+                    let page: VersionedProfilePage = self.get(&path, correlation).await?;
+                    let next_cursor = page.next_cursor.clone();
+                    profiles.extend(page.items);
+                    match next_cursor {
+                        Some(next)
+                            if next.len() <= 512 && seen_cursors.insert(next.clone()) =>
+                        {
+                            cursor = Some(next)
+                        }
+                        Some(_) => return Err(client_problem("api_profile_cursor_invalid", 502)),
+                        None => break,
+                    }
+                }
                 let items=profiles.into_iter().filter(|profile|include_archived||!profile.value.archived).map(|profile|{
-                    let revision=profile.revision;
-                    let mut value=serde_json::to_value(profile.value).map_err(|_|client_problem("api_response_invalid",502))?;
-                    value["revision"]=json!(revision);
-                    Ok(value)
+                    profile_record_value(profile)
                 }).collect::<Result<Vec<_>,Problem>>()?;
                 json!({"items":items,"nextCursor":Value::Null})
             },
-            "profile_get" => { let id=path_arg(&payload,"profileId",correlation)?; self.get::<Value>(&format!("/v1/profiles/{id}"),correlation).await? },
+            "profile_get" => { let id=path_arg(&payload,"profileId",correlation)?; let record:Versioned<Profile>=self.get(&format!("/v1/profiles/{id}"),correlation).await?; profile_record_value(record)? },
             "profile_create" => self.create_managed_profile(payload,correlation,idem).await?,
             "profile_delete" => { let id=path_arg(&payload,"profileId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/profiles/{id}"),Some(payload),correlation,idem,None,&[]).await? },
-            "profile_archive" | "profile_restore" => { let id=path_arg(&payload,"profileId",correlation)?; let action=if name=="profile_archive" {"archive"} else {"restore"}; let body=json!({"revision":payload.get("revision").and_then(Value::as_u64).ok_or_else(||bad_input("revision",correlation))?}); let updated:Versioned<Profile>=self.send(Method::PUT,&format!("/v1/profiles/{id}/{action}"),Some(body),correlation,idem,None,&[]).await?; serde_json::to_value(updated.value).map_err(|_|client_problem("api_response_invalid",502))? },
+            "profile_archive" | "profile_restore" => { let id=path_arg(&payload,"profileId",correlation)?; let action=if name=="profile_archive" {"archive"} else {"restore"}; let body=json!({"revision":payload.get("revision").and_then(Value::as_u64).ok_or_else(||bad_input("revision",correlation))?}); let updated:Versioned<Profile>=self.send(Method::PUT,&format!("/v1/profiles/{id}/{action}"),Some(body),correlation,idem,None,&[]).await?; profile_record_value(updated)? },
             "profile_clone" => { let id=path_arg(&payload,"sourceProfileId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/profiles/{id}/clone"),Some(payload),correlation,idem,None,&[]).await? },
             "profile_share" => { let id=path_arg(&payload,"profileId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/profiles/{id}/shares"),Some(payload),correlation,idem,None,&[]).await? },
             "profile_share_revoke" => { let id=path_arg(&payload,"profileId",correlation)?; let member=path_arg(&payload,"memberId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/profiles/{id}/shares/{member}"),Some(payload),correlation,idem,None,&[]).await? },
@@ -774,9 +877,14 @@ impl RemoteApiClient {
             "proxy_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"proxyId",correlation)?; self.send::<Value>(Method::PATCH,&format!("/v1/workspaces/{ws}/proxies/{id}"),Some(payload),correlation,idem,None,&[]).await? },
             "proxy_delete" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"proxyId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/proxies/{id}"),Some(payload),correlation,idem,None,&[]).await? },
             "cookie_list" => { let id=path_arg(&payload,"profileId",correlation)?; let ws=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/profiles/{id}/cookies?workspaceId={ws}"),correlation).await? },
-            "cookie_stage" => { let id=path_arg(&payload,"profileId",correlation)?; self.send(Method::POST,&format!("/v1/profiles/{id}/cookies/stage"),Some(payload),correlation,idem,None,&[]).await? },
-            "cookie_import" => { let id=path_arg(&payload,"profileId",correlation)?; self.send(Method::POST,&format!("/v1/profiles/{id}/cookies/import"),Some(payload),correlation,idem,None,&[]).await? },
-            "cookie_copy" => { let id=path_arg(&payload,"destinationProfileId",correlation)?; self.send(Method::POST,&format!("/v1/profiles/{id}/cookies/copy"),Some(payload),correlation,idem,None,&[]).await? },
+            "cookie_stage" | "cookie_import" | "cookie_copy" => {
+                return Err(Problem::new(
+                    "production_cookie_device_dispatch_required",
+                    "Cookie mutations must execute on the authorized connected device",
+                    503,
+                    correlation,
+                ).retryable(true));
+            }
             "grant_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let mut path=format!("/v1/workspaces/{ws}/grants");let mut query=Vec::new();for key in ["resourceId","memberId"]{if let Some(value)=payload.get(key).and_then(Value::as_str){query.push(format!("{key}={}",urlencoding(value)));}}if !query.is_empty(){path.push('?');path.push_str(&query.join("&"));}self.get::<Value>(&path,correlation).await? },
             "grant_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send(Method::POST,&format!("/v1/workspaces/{ws}/grants"),Some(payload),correlation,idem,None,&[]).await? },
             "grant_revoke" => { let ws=path_arg(&payload,"workspaceId",correlation)?;let id=path_arg(&payload,"grantId",correlation)?;self.send(Method::DELETE,&format!("/v1/workspaces/{ws}/grants/{id}"),None,correlation,idem,None,&[]).await? },
@@ -811,20 +919,13 @@ impl RemoteApiClient {
         correlation: &str,
         idem: Option<&str>,
     ) -> Result<Value, Problem> {
-        let name = input
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| bad_input("name", correlation))?
-            .trim();
-        let runtime: Runtime = serde_json::from_value(
-            input
-                .get("runtime")
-                .cloned()
-                .ok_or_else(|| bad_input("runtime", correlation))?,
-        )
-        .map_err(|_| bad_input("runtime", correlation))?;
-        let workspace = input.get("workspaceId").and_then(Value::as_str);
+        let mut input: ProfileCreateInput =
+            serde_json::from_value(input).map_err(|_| bad_input("profile", correlation))?;
+        input.name = input.name.trim().to_owned();
+        if input.name.is_empty() {
+            return Err(bad_input("name", correlation));
+        }
+        let workspace = input.workspace_id.clone();
         let key = idem.ok_or_else(|| {
             Problem::new(
                 "idempotency_key_required",
@@ -833,17 +934,17 @@ impl RemoteApiClient {
                 correlation,
             )
         })?;
-        let seed = format!("{}:{key}", workspace.unwrap_or_default());
-        let id = format!("prf_{}", &sha256_hex(seed.as_bytes())[..24]);
-        let expected_id =
-            ProfileId::from_str(&id).map_err(|_| client_problem("api_request_invalid", 400))?;
-        let timestamp = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|_| client_problem("api_clock_invalid", 500))?;
-        let profile = json!({"id":id,"name":name,"runtime":runtime,"runtimeVersion":input.get("runtimeVersion"),"runtimeConfig":null,"state":ProfileState::Created,"archived":false,"fingerprint":null,"note":null,"proxyId":input.get("proxyId"),"vpnId":null,"groupIds":[],"tags":[],"extensionGroupId":null,"syncMode":SyncMode::Managed,"createdAt":timestamp,"updatedAt":timestamp});
+        let expected_id = input
+            .id
+            .as_deref()
+            .map(ProfileId::from_str)
+            .transpose()
+            .map_err(|_| client_problem("api_request_invalid", 400))?;
         let extra = workspace
-            .map(|workspace| vec![("x-buglogin-workspace-id", workspace.to_owned())])
+            .map(|workspace| vec![("x-buglogin-workspace-id", workspace)])
             .unwrap_or_default();
+        let profile =
+            serde_json::to_value(input).map_err(|_| client_problem("api_request_invalid", 400))?;
         let created: Versioned<Profile> = self
             .send(
                 Method::POST,
@@ -855,7 +956,9 @@ impl RemoteApiClient {
                 &extra,
             )
             .await?;
-        if created.value.id != expected_id
+        if expected_id
+            .as_ref()
+            .is_some_and(|expected| created.value.id != *expected)
             || created.value.state != ProfileState::Ready
             || created.value.sync_mode != Some(SyncMode::Managed)
         {
@@ -866,26 +969,17 @@ impl RemoteApiClient {
                 correlation,
             ));
         }
-        serde_json::to_value(created.value).map_err(|_| client_problem("api_response_invalid", 502))
+        profile_record_value(created)
     }
 }
 
+fn profile_record_value(profile: Versioned<Profile>) -> Result<Value, Problem> {
+    serde_json::to_value(ProfileRecord::new(profile.value, profile.revision))
+        .map_err(|_| client_problem("api_response_invalid", 502))
+}
+
 #[async_trait::async_trait]
-impl CoordinationBackend for RemoteApiClient {
-    async fn acquire_lease(
-        &self,
-        scope: CoordinationScope<'_>,
-        resource: &ResourceId,
-        ttl: Duration,
-    ) -> Result<LeaseGrant, Problem> {
-        self.acquire_lease_idempotent(
-            scope,
-            resource,
-            ttl,
-            &format!("lease-{}-{}", resource.as_str(), uuid_key()),
-        )
-        .await
-    }
+impl DesktopSyncBackend for RemoteApiClient {
     async fn acquire_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
@@ -941,34 +1035,6 @@ impl CoordinationBackend for RemoteApiClient {
             .await?;
         Ok(())
     }
-    async fn heartbeat_presence(
-        &self,
-        _: CoordinationScope<'_>,
-        _: &str,
-        _: BTreeMap<String, String>,
-        _: Duration,
-    ) -> Result<Presence, Problem> {
-        Err(client_problem("api_presence_unsupported", 501))
-    }
-    async fn list_presence(&self, _: CoordinationScope<'_>) -> Result<Vec<Presence>, Problem> {
-        Err(client_problem("api_presence_unsupported", 501))
-    }
-    async fn publish_event(
-        &self,
-        _: CoordinationScope<'_>,
-        _: &str,
-        _: CoordinationEvent,
-    ) -> Result<PublishedEvent, Problem> {
-        Err(client_problem("api_events_unsupported", 501))
-    }
-    async fn read_events(
-        &self,
-        _: CoordinationScope<'_>,
-        _: Option<&str>,
-        _: usize,
-    ) -> Result<Vec<StreamEvent>, Problem> {
-        Err(client_problem("api_events_unsupported", 501))
-    }
     async fn current_manifest(
         &self,
         scope: CoordinationScope<'_>,
@@ -994,9 +1060,10 @@ impl CoordinationBackend for RemoteApiClient {
         scope: CoordinationScope<'_>,
         resource: &ResourceId,
         owner_token: &str,
+        expected_profile_revision: Option<u64>,
         manifest: SyncManifest,
     ) -> Result<(), Problem> {
-        let extra = [
+        let mut extra = vec![
             ("x-buglogin-owner-id", scope.auth.actor_id().to_owned()),
             ("x-buglogin-owner-token", owner_token.to_owned()),
             (
@@ -1004,6 +1071,9 @@ impl CoordinationBackend for RemoteApiClient {
                 manifest.fencing_token.to_string(),
             ),
         ];
+        if let Some(revision) = expected_profile_revision {
+            extra.push(("x-buglogin-profile-revision", revision.to_string()));
+        }
         let idem = format!(
             "manifest-{}-{}-{}",
             resource.as_str(),
@@ -1029,6 +1099,86 @@ impl CoordinationBackend for RemoteApiClient {
             )
             .await?;
         Ok(())
+    }
+}
+
+impl RemoteApiClient {
+    /// Reconcile a retryable manifest commit failure before deciding whether the
+    /// stopped profile still needs another sync attempt. A timed-out response may
+    /// mean the server activated the generation even though the client saw an error.
+    pub async fn commit_manifest_with_reconciliation(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource: &ResourceId,
+        owner_token: &str,
+        expected_profile_revision: Option<u64>,
+        manifest: SyncManifest,
+        correlation: &str,
+    ) -> Result<(), Problem> {
+        match DesktopSyncBackend::commit_manifest(
+            self,
+            scope.clone(),
+            resource,
+            owner_token,
+            expected_profile_revision,
+            manifest.clone(),
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(commit_error) if commit_error.retryable || commit_error.status >= 500 => {
+                match DesktopSyncBackend::current_manifest(self, scope, resource).await {
+                    Ok(Some(active))
+                        if active.workspace_id == manifest.workspace_id
+                            && active.resource_id == manifest.resource_id
+                            && active.generation == manifest.generation
+                            && active.root_checksum == manifest.root_checksum =>
+                    {
+                        Ok(())
+                    }
+                    Ok(Some(active)) if active.generation >= manifest.generation => Err(
+                        Problem::new(
+                            "sync_manifest_commit_conflict",
+                            "A different manifest generation is active",
+                            409,
+                            correlation,
+                        ),
+                    ),
+                    Ok(_) => Err(commit_error),
+                    Err(_) => Err(Problem::new(
+                        "sync_manifest_commit_outcome_unknown",
+                        "Could not verify whether the profile sync was activated; retry sync to reconcile",
+                        503,
+                        correlation,
+                    )
+                    .retryable(true)),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn profile_proxy_assignment(
+        &self,
+        workspace_id: &WorkspaceId,
+        profile_id: &ProfileId,
+        correlation: &str,
+    ) -> Result<Option<ProfileProxyAssignment>, Problem> {
+        match self
+            .get(
+                &format!(
+                    "/v1/workspaces/{}/profiles/{}/proxy-assignment",
+                    workspace_id.as_str(),
+                    profile_id.as_str()
+                ),
+                correlation,
+            )
+            .await
+        {
+            Ok(assignment) => Ok(Some(assignment)),
+            Err(error) if error.code == "profile_proxy_assignment_not_found" => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -1070,6 +1220,16 @@ async fn parse_response(response: reqwest::Response, correlation: &str) -> Resul
 }
 fn client_problem(code: &'static str, status: u16) -> Problem {
     Problem::new(code, "BugLogin API client error", status, "desktop-api")
+}
+
+fn validate_cookie_job_id(job_id: &str) -> Result<(), Problem> {
+    let Some(suffix) = job_id.strip_prefix("job_") else {
+        return Err(client_problem("cookie_job_id_invalid", 400));
+    };
+    if suffix.len() != 64 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(client_problem("cookie_job_id_invalid", 400));
+    }
+    Ok(())
 }
 fn valid_bearer(token: &str) -> bool {
     !token.is_empty()
@@ -1169,12 +1329,217 @@ fn uuid_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::RemoteApiClient;
+    use crate::profile_runtime::DesktopSyncBackend;
+    use buglogin_api::services::connected_cookie_jobs::{
+        ConnectedCookieJob, ConnectedCookieJobState, ConnectedCookieReceipt,
+    };
     use buglogin_domain::entities::{Profile, ProfileState, Runtime, SyncMode};
     use buglogin_domain::ids::{ProfileId, ProxyId, ResourceId, WorkspaceId};
     use buglogin_storage::local::Versioned;
-    use buglogin_sync::coordination::{CoordinationAuth, CoordinationScope};
+    use buglogin_sync::coordination::{CoordinationAuth, CoordinationScope, LeaseGrant};
+    use buglogin_sync::manifest::SyncManifest;
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn connected_cookie_transport_uses_device_bearer_and_metadata_receipt_only() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let workspace = WorkspaceId::new("ws_cookie_transport").unwrap();
+        let workspace_text = workspace.as_str();
+        let job_id = format!("job_{}", "a".repeat(64));
+        let operation_id = "operation_cookie_transport";
+        let device_id = "device_cookie_transport";
+        let profile_id = "prf_cookie_transport";
+        let receipt = ConnectedCookieReceipt {
+            operation_id: operation_id.into(),
+            job_id: job_id.clone(),
+            device_id: device_id.into(),
+            profile_id: profile_id.into(),
+            previous_generation: 3,
+            new_generation: 4,
+            created_count: 2,
+            replaced_count: 1,
+            deleted_count: 0,
+            metadata_checksum: "b".repeat(64),
+            completed_at: 500,
+        };
+        let server_job = |state, receipt| ConnectedCookieJob {
+            job_id: job_id.clone(),
+            operation_id: operation_id.into(),
+            command_id: "cookie.import".into(),
+            workspace_id: workspace_text.into(),
+            device_id: device_id.into(),
+            profile_id: profile_id.into(),
+            expected_generation: 3,
+            source_workspace_id: None,
+            source_profile_id: None,
+            source_device_id: None,
+            staged_import_ref: Some("opaque_stage_ref".into()),
+            requested_by: "acct_cookie_transport".into(),
+            idempotency_key: "cookie-idempotency-transport".into(),
+            created_at: 100,
+            expires_at: 700,
+            state,
+            receipt,
+        };
+        let responses = vec![
+            serde_json::json!({"items":[server_job(ConnectedCookieJobState::Accepted, None)]}),
+            serde_json::to_value(server_job(ConnectedCookieJobState::Dispatched, None)).unwrap(),
+            serde_json::to_value(server_job(ConnectedCookieJobState::Running, None)).unwrap(),
+            serde_json::to_value(server_job(
+                ConnectedCookieJobState::Completed,
+                Some(receipt.clone()),
+            ))
+            .unwrap(),
+        ];
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for body in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                requests.push(read_http_request(&mut stream).await);
+                let body = serde_json::to_vec(&body).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+            requests
+        });
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        assert_eq!(
+            client
+                .claim_cookie_job(&workspace, "../unexpected-path", "cookie-invalid-id")
+                .await
+                .unwrap_err()
+                .code,
+            "cookie_job_id_invalid"
+        );
+        let inbox = client
+            .cookie_job_inbox(&workspace, "cookie-inbox-test")
+            .await
+            .unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].job_id, job_id);
+        assert_eq!(
+            client
+                .claim_cookie_job(&workspace, &inbox[0].job_id, "cookie-claim-test")
+                .await
+                .unwrap()
+                .state,
+            ConnectedCookieJobState::Dispatched
+        );
+        assert_eq!(
+            client
+                .acknowledge_cookie_job(&workspace, &inbox[0].job_id, "cookie-ack-test")
+                .await
+                .unwrap()
+                .state,
+            ConnectedCookieJobState::Running
+        );
+        assert_eq!(
+            client
+                .complete_cookie_job(
+                    &workspace,
+                    &inbox[0].job_id,
+                    &receipt,
+                    "cookie-complete-test",
+                )
+                .await
+                .unwrap()
+                .state,
+            ConnectedCookieJobState::Completed
+        );
+        let requests = server.await.unwrap();
+        let expected_paths = [
+            format!("GET /v1/workspaces/{workspace_text}/cookie-jobs/inbox HTTP/1.1"),
+            format!("POST /v1/cookie-jobs/{job_id}/claim?workspaceId={workspace_text} HTTP/1.1"),
+            format!("POST /v1/cookie-jobs/{job_id}/ack?workspaceId={workspace_text} HTTP/1.1"),
+            format!("POST /v1/cookie-jobs/{job_id}/complete?workspaceId={workspace_text} HTTP/1.1"),
+        ];
+        for (request, expected_path) in requests.iter().zip(expected_paths) {
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with(&expected_path));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer device-token")
+            );
+            if !body.is_empty() {
+                let payload: Value = serde_json::from_str(body).unwrap();
+                assert_eq!(payload["metadataChecksum"], "b".repeat(64));
+                assert!(payload.get("cookies").is_none());
+                assert!(payload.get("value").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_lease_uses_versioned_rest_contract_and_idempotency() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let workspace = WorkspaceId::new("ws_lease").unwrap();
+        let resource = ResourceId::new("res_lease").unwrap();
+        let response_lease = LeaseGrant {
+            resource_id: resource.clone(),
+            workspace_id: workspace.clone(),
+            owner_id: "desktop-1".into(),
+            owner_token: "opaque-owner-token".into(),
+            fencing_token: 12,
+            issued_at_ms: 1_000,
+            expires_at_ms: 121_000,
+        };
+        let response_body = serde_json::to_vec(&response_lease).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&response_body).await.unwrap();
+            request
+        });
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        let auth = CoordinationAuth::new("desktop-1", "device-token").unwrap();
+        let lease = client
+            .acquire_lease_idempotent(
+                CoordinationScope {
+                    workspace_id: &workspace,
+                    auth: &auth,
+                },
+                &resource,
+                std::time::Duration::from_secs(120),
+                "lease-create-key-0001",
+            )
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+        let request_body: Value = serde_json::from_str(body).unwrap();
+
+        assert!(
+            headers.starts_with("POST /v1/workspaces/ws_lease/resources/res_lease/lease HTTP/1.1")
+        );
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer device-token")
+        );
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("idempotency-key: lease-create-key-0001")
+        );
+        assert_eq!(request_body["ownerId"], "desktop-1");
+        assert_eq!(request_body["ttlSeconds"], 120);
+        assert_eq!(lease, response_lease);
+    }
 
     #[tokio::test]
     async fn blob_presence_check_uses_resource_lease_scope_and_checksum() {
@@ -1229,6 +1594,128 @@ mod tests {
                 .contains("x-buglogin-fencing-token: 7")
         );
         assert!(present);
+    }
+
+    #[tokio::test]
+    async fn retryable_manifest_commit_error_is_reconciled_against_active_generation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let workspace = WorkspaceId::new("ws_reconcile").unwrap();
+        let resource = ResourceId::new("res_reconcile").unwrap();
+        let manifest = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            7,
+            1,
+            None,
+            b"canonical profile root",
+            Vec::new(),
+        )
+        .unwrap();
+        let active_body = serde_json::to_vec(&manifest).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut commit_stream, _) = listener.accept().await.unwrap();
+            let commit_request = read_http_request(&mut commit_stream).await;
+            assert!(commit_request.starts_with(
+                "PUT /v1/workspaces/ws_reconcile/resources/res_reconcile/manifest HTTP/1.1"
+            ));
+            let unavailable = br#"{"code":"api_temporarily_unavailable","title":"Temporary outage","status":503,"retryable":true}"#;
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/problem+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                unavailable.len()
+            );
+            commit_stream.write_all(response.as_bytes()).await.unwrap();
+            commit_stream.write_all(unavailable).await.unwrap();
+
+            let (mut reconcile_stream, _) = listener.accept().await.unwrap();
+            let reconcile_request = read_http_request(&mut reconcile_stream).await;
+            assert!(reconcile_request.starts_with(
+                "GET /v1/workspaces/ws_reconcile/resources/res_reconcile/manifest HTTP/1.1"
+            ));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                active_body.len()
+            );
+            reconcile_stream
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+            reconcile_stream.write_all(&active_body).await.unwrap();
+            (commit_request, reconcile_request)
+        });
+
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        let auth = CoordinationAuth::new("desktop-1", "device-token").unwrap();
+        client
+            .commit_manifest_with_reconciliation(
+                CoordinationScope {
+                    workspace_id: &workspace,
+                    auth: &auth,
+                },
+                &resource,
+                "lease-owner-token",
+                None,
+                manifest,
+                "sync-reconcile-test",
+            )
+            .await
+            .expect("active generation proves that the commit succeeded");
+
+        let (commit_request, reconcile_request) = server.await.unwrap();
+        assert!(
+            commit_request
+                .to_ascii_lowercase()
+                .contains("idempotency-key: manifest-res_reconcile-1-")
+        );
+        assert!(
+            reconcile_request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer device-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_list_rejects_cyclic_remote_cursor_sequences() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (expected_cursor, next_cursor) in [
+                (None, "cursor-a"),
+                (Some("cursor-a"), "cursor-b"),
+                (Some("cursor-b"), "cursor-a"),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await;
+                let request_line = request.lines().next().unwrap_or_default();
+                if let Some(cursor) = expected_cursor {
+                    assert!(request_line.contains(&format!("cursor={cursor}")));
+                } else {
+                    assert!(request_line.starts_with("GET /v1/profiles?limit=100 "));
+                }
+                let body = format!(r#"{{"items":[],"nextCursor":"{next_cursor}"}}"#);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        let error = client
+            .invoke(
+                "profile_list",
+                "profile-list-cycle-test",
+                None,
+                json!({"includeArchived":false}),
+            )
+            .await
+            .expect_err("cursor cycle should fail instead of looping forever");
+        assert_eq!(error.code, "api_profile_cursor_invalid");
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1314,11 +1801,83 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("x-buglogin-workspace-id: ws_test")
         );
-        assert_eq!(request_body["id"], expected_id);
-        assert_eq!(request_body["syncMode"], "managed");
-        assert_eq!(request_body["state"], "created");
+        assert!(request_body.get("id").is_none());
+        assert!(request_body.get("note").is_none());
+        assert!(request_body.get("syncMode").is_none());
+        assert!(request_body.get("state").is_none());
+        assert_eq!(request_body["name"], "Browser profile");
+        assert_eq!(request_body["runtime"], "wayfern");
         assert_eq!(result.command_id, "profile.create");
         assert_eq!(result.data["id"], expected_id);
+    }
+
+    #[tokio::test]
+    async fn proxy_sync_fails_closed_when_local_vault_secret_is_missing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = br#"{"workspaceId":"ws_proxy_missing_secret","revision":7,"proxy":{"id":"pxy_proxy_missing_secret","protocol":"http","host":"proxy.example","port":8080,"hasCredential":true,"bypassRules":[]}}"#;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(response_body).await.unwrap();
+            request
+        });
+
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        let workspace = WorkspaceId::from_str("ws_proxy_missing_secret").unwrap();
+        let proxy = ProxyId::from_str("pxy_proxy_missing_secret").unwrap();
+        let error = client
+            .proxy_for_sync(&workspace, &proxy, 7, None, "cor_missing_proxy_secret")
+            .await
+            .expect_err("profile sync must not drop an unavailable proxy credential");
+        assert_eq!(error.code, "proxy_secret_sync_unavailable");
+        assert_eq!(error.status, 409);
+        assert!(error.title.contains("operating system vault"));
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with(
+            "GET /v1/workspaces/ws_proxy_missing_secret/proxies/pxy_proxy_missing_secret HTTP/1.1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cookie_mutations_fail_before_any_remote_request() {
+        let client = RemoteApiClient::new("http://127.0.0.1:0", "device-token".into()).unwrap();
+        let commands = [
+            (
+                "cookie_stage",
+                json!({"profileId":"prf_local","cookies":[{"value":"secret-cookie-value"}]}),
+            ),
+            (
+                "cookie_import",
+                json!({"profileId":"prf_local","stageId":"stage_local"}),
+            ),
+            (
+                "cookie_copy",
+                json!({"destinationProfileId":"prf_local","sourceProfileId":"prf_source"}),
+            ),
+        ];
+
+        for (command, payload) in commands {
+            let error = client
+                .invoke(
+                    command,
+                    "cor_cookie_dispatch_required",
+                    Some("cookie-key-00000001"),
+                    payload,
+                )
+                .await
+                .expect_err("unsupported production mutation must fail before transport");
+            assert_eq!(error.code, "production_cookie_device_dispatch_required");
+            assert_eq!(error.status, 503);
+            assert!(error.retryable);
+        }
     }
 
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {

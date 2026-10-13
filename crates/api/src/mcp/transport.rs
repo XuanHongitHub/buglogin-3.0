@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use axum::{
@@ -126,7 +126,7 @@ impl McpTransportControl {
 struct ProductionTransportState {
     config: McpTransportConfig,
     control: McpTransportControl,
-    dispatcher: Arc<Mutex<ProductionMcpDispatcher>>,
+    dispatcher: Arc<tokio::sync::Mutex<ProductionMcpDispatcher>>,
     control_state: crate::http::ApiState,
 }
 
@@ -145,7 +145,7 @@ pub fn production_router(
         .with_state(ProductionTransportState {
             config,
             control,
-            dispatcher: Arc::new(Mutex::new(dispatcher)),
+            dispatcher: Arc::new(tokio::sync::Mutex::new(dispatcher)),
             control_state: state,
         })
 }
@@ -275,30 +275,30 @@ async fn call_tool_with_snapshot(
             .read_owned()
             .await;
         state.control_state.refresh_control_aggregate()?;
-        dispatch_tool(&state.dispatcher, params)
+        dispatch_tool(&state.dispatcher, params).await
     } else {
         let _snapshot = Arc::clone(&state.control_state.control_snapshot_gate)
             .write_owned()
             .await;
         state.control_state.refresh_control_aggregate()?;
-        dispatch_tool(&state.dispatcher, params)
+        dispatch_tool(&state.dispatcher, params).await
     }
 }
 
-fn dispatch_tool(
-    dispatcher: &Arc<Mutex<ProductionMcpDispatcher>>,
+async fn dispatch_tool(
+    dispatcher: &Arc<tokio::sync::Mutex<ProductionMcpDispatcher>>,
     params: ToolCallParams,
 ) -> Result<Value, Problem> {
-    let mut dispatcher = dispatcher
-        .lock()
-        .map_err(|_| problem("mcp_unavailable", "MCP dispatcher unavailable", 503))?;
-    dispatcher.dispatch(McpRequest {
-        tool_name: params.name,
-        correlation_id: params.correlation_id,
-        bearer_token: params.bearer_token,
-        idempotency_key: params.idempotency_key,
-        input: params.arguments,
-    })
+    let mut dispatcher = dispatcher.lock().await;
+    dispatcher
+        .dispatch_async(McpRequest {
+            tool_name: params.name,
+            correlation_id: params.correlation_id,
+            bearer_token: params.bearer_token,
+            idempotency_key: params.idempotency_key,
+            input: params.arguments,
+        })
+        .await
 }
 
 fn tool_list(items: Vec<ToolMetadata>) -> Vec<Value> {
@@ -308,7 +308,7 @@ fn tool_list(items: Vec<ToolMetadata>) -> Vec<Value> {
             json!({
                 "name": tool.name,
                 "description": tool.command_id,
-                "inputSchema": { "type": "object", "additionalProperties": true },
+                "inputSchema": tool.input_schema,
                 "annotations": {
                     "readOnlyHint": matches!(tool.action, buglogin_domain::permissions::Action::Read),
                     "destructiveHint": matches!(tool.action, buglogin_domain::permissions::Action::Delete),

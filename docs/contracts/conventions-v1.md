@@ -10,6 +10,7 @@ All adapters return one canonical problem object:
 
 - `code`: stable snake_case machine identifier; never parse `detail`.
 - HTTP mapping: validation `400`, auth `401`, forbidden `403`, missing `404`, conflict/state `409`, payload too large `413`, rate limit `429`, internal `500`, unavailable `503`, timeout `504`.
+- `authorization_state_changed` is a retryable `409`: the caller's authenticated principal or ACL snapshot changed before the mutation was serialized. The request is rejected before its idempotency key is claimed; retry with fresh authorization state.
 - Tauri returns `Result<T, Problem>`. MCP maps invalid input to `-32602`, unavailable command to `-32601`, auth/permission to `-32001`, conflict to `-32009`, internal to `-32603`; canonical `Problem` remains in structured content.
 - Secrets, tokens, credentials, cookies, filesystem roots, and raw upstream responses are redacted.
 

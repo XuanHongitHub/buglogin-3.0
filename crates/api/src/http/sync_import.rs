@@ -1,7 +1,7 @@
 use std::{
     future::Future,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -9,8 +9,8 @@ use std::{
 
 use axum::{
     Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
 use buglogin_domain::errors::Problem;
@@ -32,7 +32,7 @@ use buglogin_sync::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::oneshot,
+    sync::{Semaphore, oneshot},
     task::JoinHandle,
     time::{interval, timeout},
 };
@@ -43,6 +43,8 @@ use super::{
 };
 
 const JOURNAL_SCHEMA: &str = "buglogin.migration-sync-journal/1";
+pub(super) const MAX_SYNC_IMPORT_REQUEST_BYTES: usize = 320 * 1024 * 1024;
+static SYNC_IMPORT_REQUEST_SLOT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const IMPORT_LEASE_TTL: Duration = Duration::from_secs(300);
 const IMPORT_LEASE_HEARTBEAT: Duration = Duration::from_secs(60);
 
@@ -153,7 +155,7 @@ pub(super) struct SyncImportInput {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct SyncImportReceipt {
     pub(super) operation_id: String,
     pub(super) export_id: String,
@@ -170,12 +172,65 @@ pub(super) struct SyncImportReceipt {
 
 pub(super) async fn import_sync(
     State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(input): Json<SyncImportInput>,
+    request: Request,
 ) -> Result<Response, Response> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
     let principal = authenticate(&state, &headers)?;
+    let _admission = sync_import_request_slot()?;
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("application/json")) {
+        return Err(response(problem(
+            "unsupported_media_type",
+            "Sync import requires application/json",
+            415,
+        )));
+    }
+    let input = parse_sync_import_input(body, MAX_SYNC_IMPORT_REQUEST_BYTES).await?;
     let receipt = import_sync_authorized(&state, &headers, &principal, input).await?;
     Ok((StatusCode::OK, Json(receipt)).into_response())
+}
+
+fn sync_import_request_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
+    Arc::clone(SYNC_IMPORT_REQUEST_SLOT.get_or_init(|| Arc::new(Semaphore::new(1))))
+        .try_acquire_owned()
+        .map_err(|_| {
+            response(
+                problem(
+                    "sync_import_capacity_exhausted",
+                    "Another direct sync import is already running",
+                    503,
+                )
+                .retryable(true),
+            )
+        })
+}
+
+async fn parse_sync_import_input(
+    body: axum::body::Body,
+    max_bytes: usize,
+) -> Result<SyncImportInput, Response> {
+    let bytes = axum::body::to_bytes(body, max_bytes).await.map_err(|_| {
+        response(
+            problem(
+                "sync_import_request_too_large",
+                "Sync import request exceeds the configured size limit",
+                413,
+            )
+            .with_field("maxBytes", max_bytes),
+        )
+    })?;
+    serde_json::from_slice::<SyncImportInput>(&bytes).map_err(|_| {
+        response(problem(
+            "sync_import_request_invalid",
+            "Sync import request JSON is invalid",
+            422,
+        ))
+    })
 }
 
 pub(super) async fn import_sync_authorized(
@@ -571,11 +626,31 @@ pub(super) async fn import_sync_authorized(
 
     let finalize_result: Result<SyncImportReceipt, Problem> = (|| {
         let _snapshot = snapshot;
+        // Refresh while holding the same mutation lock used by control writes.
+        // Otherwise a local ACL or binding update can land between refresh and
+        // lock acquisition, letting this commit authorize against stale state.
         let _mutation = state
             .control_mutation()
             .lock()
             .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        state.refresh_control_aggregate_locked()?;
+        let token = bearer_token(headers)
+            .map_err(|_| problem("authentication_required", "Authentication required", 401))?;
+        let current_principal = state.authenticate_token(&token, now())?;
+        let current_actor_id = current_principal
+            .account_id
+            .as_ref()
+            .map(|account| account.as_str());
+        if current_actor_id != Some(actor_id.as_str()) {
+            return Err(problem(
+                "authentication_required",
+                "Authentication is no longer valid for this import",
+                401,
+            ));
+        }
+        authorize_problem(state, &current_principal, &input.export)?;
         let mut target = state.control_aggregate()?;
+        verify_binding_aggregate(&target, &input.export)?;
         let key = format!(
             "{}:{}",
             input.export.workspace_id.as_str(),
@@ -690,28 +765,45 @@ fn authorize(
     }
 }
 
+fn authorize_problem(
+    state: &ApiState,
+    principal: &buglogin_domain::permissions::Principal,
+    export: &SyncExport,
+) -> Result<(), Problem> {
+    let capability = Capability::new("migration.write")
+        .map_err(|_| problem("invalid_capability", "Invalid capability", 500))?;
+    let scope = ResourceScope::resource(export.workspace_id.clone(), export.resource_id.clone());
+    if is_allowed(
+        principal,
+        &capability,
+        Action::Execute,
+        &scope,
+        &state.grants()?,
+    ) {
+        Ok(())
+    } else {
+        Err(problem(
+            "migration_forbidden",
+            "Migration access denied",
+            403,
+        ))
+    }
+}
+
 fn verify_binding(state: &ApiState, export: &SyncExport) -> Result<(), Response> {
+    verify_binding_problem(state, export).map_err(response)
+}
+
+fn verify_binding_problem(state: &ApiState, export: &SyncExport) -> Result<(), Problem> {
     let resource_exists = state
         .resources
         .read()
-        .map_err(|_| {
-            response(problem(
-                "resource_unavailable",
-                "Resource state unavailable",
-                503,
-            ))
-        })?
+        .map_err(|_| problem("resource_unavailable", "Resource state unavailable", 503))?
         .exists_in_workspace(&export.resource_id, &export.workspace_id);
     let binding_exists = state
         .profile_resources
         .read()
-        .map_err(|_| {
-            response(problem(
-                "binding_unavailable",
-                "Profile binding unavailable",
-                503,
-            ))
-        })?
+        .map_err(|_| problem("binding_unavailable", "Profile binding unavailable", 503))?
         .values()
         .any(|binding| {
             binding.workspace_id == export.workspace_id
@@ -721,11 +813,34 @@ fn verify_binding(state: &ApiState, export: &SyncExport) -> Result<(), Response>
     if resource_exists && binding_exists {
         Ok(())
     } else {
-        Err(response(problem(
+        Err(problem(
             "migration_sync_binding_not_found",
             "Active profile resource binding not found",
             404,
-        )))
+        ))
+    }
+}
+
+fn verify_binding_aggregate(
+    aggregate: &super::ControlAggregate,
+    export: &SyncExport,
+) -> Result<(), Problem> {
+    let resource_exists = aggregate
+        .resources
+        .exists_in_workspace(&export.resource_id, &export.workspace_id);
+    let binding_exists = aggregate.profile_resources.values().any(|binding| {
+        binding.workspace_id == export.workspace_id
+            && binding.resource_id == export.resource_id
+            && binding.archive_state == ProfileArchiveState::Active
+    });
+    if resource_exists && binding_exists {
+        Ok(())
+    } else {
+        Err(problem(
+            "migration_sync_binding_not_found",
+            "Active profile resource binding not found",
+            404,
+        ))
     }
 }
 
@@ -1036,8 +1151,9 @@ mod tests {
         time::Duration,
     };
 
-    use super::{lease_attempt_idempotency_key, spawn_lease_heartbeat};
+    use super::{SyncImportInput, lease_attempt_idempotency_key, spawn_lease_heartbeat};
     use crate::http::{ApiState, SyncMigrationJournal, SyncMigrationJournalState};
+    use axum::http::StatusCode;
     use buglogin_browser::profile::ProfileService;
     use buglogin_domain::ids::{ResourceId, WorkspaceId};
     use buglogin_storage::{
@@ -1051,22 +1167,163 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
 
+    #[test]
+    fn sync_import_rejects_unknown_fields_at_every_request_boundary() {
+        let workspace = WorkspaceId::new("ws_strict_import").unwrap();
+        let resource = ResourceId::new("res_strict_import").unwrap();
+        let bytes = b"encrypted-object";
+        let manifest = SyncManifest::new(
+            workspace,
+            resource,
+            7,
+            1,
+            None,
+            b"root",
+            vec![ManifestObject::new("profile/state", bytes).unwrap()],
+        )
+        .unwrap();
+        let export = SyncExport::new(
+            "strict-import-export",
+            "source-instance",
+            manifest.clone(),
+            None,
+            vec![SyncRevision {
+                generation: 1,
+                parent_generation: None,
+                manifest_sha256: canonical_manifest_checksum(&manifest).unwrap(),
+            }],
+            vec![SyncExportBlob {
+                key: "profile/state".into(),
+                size: bytes.len() as u64,
+                checksum: format!("{:x}", Sha256::digest(bytes)),
+                data: bytes.to_vec(),
+            }],
+            1,
+            "0.1.0",
+        )
+        .unwrap();
+        let valid = serde_json::to_value(SyncImportInput {
+            export,
+            dry_run: false,
+        })
+        .unwrap();
+
+        let mut without_dry_run = valid.clone();
+        without_dry_run.as_object_mut().unwrap().remove("dryRun");
+        assert!(serde_json::from_value::<SyncImportInput>(without_dry_run).is_ok());
+
+        let mut cases = Vec::new();
+        let mut top_level = valid.clone();
+        top_level["unexpected"] = serde_json::json!(true);
+        cases.push(top_level);
+        let mut export = valid.clone();
+        export["export"]["unexpected"] = serde_json::json!(true);
+        cases.push(export);
+        let mut manifest = valid.clone();
+        manifest["export"]["manifest"]["unexpected"] = serde_json::json!(true);
+        cases.push(manifest);
+        let mut manifest_object = valid.clone();
+        manifest_object["export"]["manifest"]["objects"][0]["unexpected"] = serde_json::json!(true);
+        cases.push(manifest_object);
+        let mut tombstone = valid.clone();
+        tombstone["export"]["manifest"]["tombstones"] = serde_json::json!([{
+            "key": "profile/old",
+            "deletedGeneration": 1,
+            "deletedAtUnixMs": 1,
+            "retentionDeadlineUnixMs": 2,
+            "unexpected": true
+        }]);
+        cases.push(tombstone);
+        let mut dependency = valid.clone();
+        dependency["export"]["manifest"]["dependencies"] = serde_json::json!([{
+            "kind": "proxy",
+            "proxyId": "proxy_strict",
+            "revision": 1,
+            "metadataObject": null,
+            "credentialEnvelopeObject": null,
+            "unexpected": true
+        }]);
+        cases.push(dependency);
+        let mut encryption = valid.clone();
+        encryption["export"]["manifest"]["payloadEncryption"] = serde_json::json!({
+            "schemaVersion": 1,
+            "algorithm": "aes-256-gcm-chunk-v1",
+            "resourceKeyEnvelope": {
+                "key": ".buglogin/resource-key-envelope.json",
+                "size": 1,
+                "checksum": "a".repeat(64)
+            },
+            "unexpected": true
+        });
+        cases.push(encryption);
+        let mut blob = valid.clone();
+        blob["export"]["blobs"][0]["unexpected"] = serde_json::json!(true);
+        cases.push(blob);
+        let mut revision = valid;
+        revision["export"]["revisions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "generation": 1,
+                "parentGeneration": null,
+                "manifestSha256": "a".repeat(64),
+                "unexpected": true
+            }));
+        cases.push(revision);
+
+        for value in cases {
+            assert!(
+                serde_json::from_value::<SyncImportInput>(value).is_err(),
+                "unknown request fields must be rejected recursively"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_import_body_limit_returns_canonical_problem() {
+        let error = super::parse_sync_import_input(axum::body::Body::from("{\"export\":null}"), 4)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(error.into_body(), 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "sync_import_request_too_large");
+        assert_eq!(body["fields"]["maxBytes"], 4);
+    }
+
+    #[test]
+    fn direct_sync_import_admission_is_bounded_and_retryable() {
+        let permit = super::sync_import_request_slot().unwrap();
+        let error = super::sync_import_request_slot().unwrap_err();
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(permit);
+        assert!(super::sync_import_request_slot().is_ok());
+    }
+
     #[tokio::test]
     async fn lease_heartbeat_renews_periodically_and_stops_cleanly() {
         let renewals = Arc::new(AtomicUsize::new(0));
+        let renewal_signals = Arc::new(tokio::sync::Semaphore::new(0));
         let heartbeat_renewals = Arc::clone(&renewals);
+        let heartbeat_signals = Arc::clone(&renewal_signals);
         let heartbeat = spawn_lease_heartbeat(
             move || {
                 let renewals = Arc::clone(&heartbeat_renewals);
+                let signals = Arc::clone(&heartbeat_signals);
                 async move {
                     renewals.fetch_add(1, Ordering::SeqCst);
+                    signals.add_permits(1);
                     Ok(())
                 }
             },
             Duration::from_millis(10),
         );
 
-        tokio::time::sleep(Duration::from_millis(45)).await;
+        tokio::time::timeout(Duration::from_secs(2), renewal_signals.acquire_many(2))
+            .await
+            .expect("heartbeat should renew the lease at least twice")
+            .expect("heartbeat renewal signals should remain open")
+            .forget();
         heartbeat.stop().await;
         let stopped_at = renewals.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1077,20 +1334,30 @@ mod tests {
 
     #[tokio::test]
     async fn lease_heartbeat_stops_when_authority_renewal_fails() {
+        let (failed_tx, failed_rx) = tokio::sync::oneshot::channel();
+        let mut failed_tx = Some(failed_tx);
         let heartbeat = spawn_lease_heartbeat(
-            || async {
-                Err(buglogin_domain::errors::Problem::new(
-                    "test_lease_lost",
-                    "Lease renewal failed",
-                    503,
-                    "test",
-                ))
+            move || {
+                if let Some(failed_tx) = failed_tx.take() {
+                    let _ = failed_tx.send(());
+                }
+                async {
+                    Err(buglogin_domain::errors::Problem::new(
+                        "test_lease_lost",
+                        "Lease renewal failed",
+                        503,
+                        "test",
+                    ))
+                }
             },
             Duration::from_millis(10),
         );
         let healthy = Arc::clone(&heartbeat.healthy);
         let failure = Arc::clone(&heartbeat.failure);
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::timeout(Duration::from_secs(1), failed_rx)
+            .await
+            .expect("lease heartbeat should attempt renewal")
+            .expect("lease heartbeat should report failed renewal");
         heartbeat.stop().await;
 
         assert!(!healthy.load(Ordering::SeqCst));

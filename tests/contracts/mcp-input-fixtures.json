@@ -1,0 +1,293 @@
+{
+  "Empty": {},
+  "GroupListInput": { "workspaceId": "ws_fixture_001" },
+  "GroupIdInput": {
+    "workspaceId": "ws_fixture_001",
+    "groupId": "grp_fixture_001"
+  },
+  "GroupCreateInput": {
+    "workspaceId": "ws_fixture_001",
+    "groupId": "grp_fixture_001",
+    "name": "Fixture group",
+    "appearance": { "color": "blue" }
+  },
+  "GroupUpdateInput": {
+    "workspaceId": "ws_fixture_001",
+    "groupId": "grp_fixture_001",
+    "expectedRevision": 1,
+    "name": "Updated fixture group",
+    "appearance": null
+  },
+  "GroupDeleteInput": {
+    "workspaceId": "ws_fixture_001",
+    "groupId": "grp_fixture_001",
+    "expectedRevision": 1
+  },
+  "ProfileGroupsReplaceInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001",
+    "expectedRevision": 1,
+    "groupIds": ["grp_fixture_001"]
+  },
+  "ProfileProxyAssignmentGetInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001"
+  },
+  "ProfileProxyAssignmentSetInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001",
+    "expectedProfileRevision": 1,
+    "proxyId": "pxy_fixture_001"
+  },
+  "OperationIdInput": { "operationId": "op_fixture_001" },
+  "EventFilterInput": {
+    "workspaceId": "ws_fixture_001",
+    "after": null,
+    "limit": 25
+  },
+  "AuditEventsListInput": {
+    "workspaceId": "ws_fixture_001",
+    "cursor": null,
+    "limit": 25
+  },
+  "ProfileListInput": { "includeArchived": false },
+  "ProfileIdInput": { "profileId": "prf_fixture_001" },
+  "ProfileCreateInput": {
+    "name": "Fixture profile",
+    "runtime": "wayfern",
+    "workspaceId": "ws_fixture_001"
+  },
+  "ProfileCloneInput": {
+    "sourceProfileId": "prf_source_001",
+    "targetProfileId": "prf_target_001",
+    "name": "Cloned fixture",
+    "expectedRevision": 1
+  },
+  "ProfileShareInput": {
+    "profileId": "prf_fixture_001",
+    "memberId": "mem_fixture_001",
+    "permission": "read",
+    "expectedRevision": 1
+  },
+  "ProfileShareRevokeInput": {
+    "profileId": "prf_fixture_001",
+    "memberId": "mem_fixture_001",
+    "permission": "read",
+    "expectedRevision": 1
+  },
+  "ProfileLaunchInput": {
+    "profilesRoot": "C:/BugLogin/profiles",
+    "extraArgs": []
+  },
+  "ProfileDeleteInput": {
+    "profileId": "prf_fixture_001",
+    "revision": 1,
+    "confirmation": "DELETE_PROFILE"
+  },
+  "ProfileRevisionInput": { "profileId": "prf_fixture_001", "revision": 1 },
+  "CookieListInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001"
+  },
+  "CookieStageInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001",
+    "cookies": [
+      {
+        "name": "sid",
+        "domain": "example.com",
+        "path": "/",
+        "secure": true,
+        "httpOnly": true,
+        "sameSite": "lax",
+        "value": "fixture-cookie"
+      }
+    ]
+  },
+  "CookieImportInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001",
+    "stageId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expectedGeneration": 0
+  },
+  "CookieCopyInput": {
+    "sourceWorkspaceId": "ws_source_001",
+    "sourceProfileId": "prf_source_001",
+    "destinationWorkspaceId": "ws_destination_001",
+    "destinationProfileId": "prf_destination_001",
+    "expectedGeneration": 0
+  },
+  "ProxyParseInput": { "text": "http://127.0.0.1:8080" },
+  "ProxyListInput": { "workspaceId": "ws_fixture_001" },
+  "ProxyIdInput": {
+    "workspaceId": "ws_fixture_001",
+    "proxyId": "pxy_fixture_001"
+  },
+  "ProxyCreateInput": {
+    "workspaceId": "ws_fixture_001",
+    "proxy": {
+      "id": "pxy_fixture_001",
+      "name": "Fixture proxy",
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": 8080,
+      "bypassRules": [],
+      "createdAt": "2026-10-12T00:00:00Z",
+      "updatedAt": "2026-10-12T00:00:00Z"
+    }
+  },
+  "ProxyUpdateInput": {
+    "workspaceId": "ws_fixture_001",
+    "proxyId": "pxy_fixture_001",
+    "expectedRevision": 1,
+    "proxy": {
+      "id": "pxy_fixture_001",
+      "name": "Fixture proxy",
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": 8080,
+      "bypassRules": [],
+      "createdAt": "2026-10-12T00:00:00Z",
+      "updatedAt": "2026-10-12T00:00:00Z"
+    }
+  },
+  "ProxyDeleteInput": {
+    "workspaceId": "ws_fixture_001",
+    "proxyId": "pxy_fixture_001",
+    "expectedRevision": 1
+  },
+  "OrganizationIdInput": { "organizationId": "org_fixture_001" },
+  "OrganizationCreateInput": {
+    "organization": {
+      "id": "org_fixture_001",
+      "accountId": "acct_fixture_001",
+      "name": "Fixture org",
+      "createdAt": "2026-10-12T00:00:00Z"
+    },
+    "policy": { "maxWorkspaces": 10, "offlineEntitled": false }
+  },
+  "OrganizationUpdateInput": {
+    "organizationId": "org_fixture_001",
+    "update": {
+      "organization": {
+        "id": "org_fixture_001",
+        "accountId": "acct_fixture_001",
+        "name": "Fixture org",
+        "createdAt": "2026-10-12T00:00:00Z"
+      },
+      "policy": { "maxWorkspaces": 10, "offlineEntitled": false },
+      "expectedRevision": 1
+    }
+  },
+  "WorkspaceListInput": { "organizationId": "org_fixture_001" },
+  "WorkspaceIdInput": {
+    "organizationId": "org_fixture_001",
+    "workspaceId": "ws_fixture_001"
+  },
+  "WorkspaceCreateInput": {
+    "organizationId": "org_fixture_001",
+    "workspace": {
+      "id": "ws_fixture_001",
+      "organizationId": "org_fixture_001",
+      "name": "Fixture workspace",
+      "policy": {
+        "maxProfiles": 100,
+        "maxMembers": 10,
+        "maxStorageBytes": 1000000,
+        "offlineEntitled": false
+      },
+      "createdAt": "2026-10-12T00:00:00Z"
+    }
+  },
+  "WorkspaceUpdateInput": {
+    "organizationId": "org_fixture_001",
+    "workspaceId": "ws_fixture_001",
+    "update": {
+      "workspace": {
+        "id": "ws_fixture_001",
+        "organizationId": "org_fixture_001",
+        "name": "Fixture workspace",
+        "policy": {
+          "maxProfiles": 100,
+          "maxMembers": 10,
+          "maxStorageBytes": 1000000,
+          "offlineEntitled": false
+        },
+        "createdAt": "2026-10-12T00:00:00Z"
+      },
+      "expectedRevision": 1
+    }
+  },
+  "TeamListInput": { "workspaceId": "ws_fixture_001" },
+  "TeamIdInput": {
+    "workspaceId": "ws_fixture_001",
+    "teamId": "team_fixture_001"
+  },
+  "TeamCreateInput": {
+    "workspaceId": "ws_fixture_001",
+    "team": {
+      "id": "team_fixture_001",
+      "workspaceId": "ws_fixture_001",
+      "name": "Fixture team",
+      "memberIds": []
+    }
+  },
+  "TeamUpdateInput": {
+    "workspaceId": "ws_fixture_001",
+    "teamId": "team_fixture_001",
+    "update": { "name": "Updated fixture team", "expectedRevision": 1 }
+  },
+  "MemberListInput": { "workspaceId": "ws_fixture_001" },
+  "MemberIdInput": {
+    "workspaceId": "ws_fixture_001",
+    "memberId": "mem_fixture_001"
+  },
+  "MemberInviteInput": {
+    "workspaceId": "ws_fixture_001",
+    "member": {
+      "id": "mem_fixture_001",
+      "accountId": "acct_fixture_001",
+      "workspaceId": "ws_fixture_001",
+      "teamId": null,
+      "role": "member",
+      "status": "invited",
+      "inviteExpiresAt": null
+    }
+  },
+  "MemberRoleUpdateInput": {
+    "workspaceId": "ws_fixture_001",
+    "memberId": "mem_fixture_001",
+    "role": "operator"
+  },
+  "ResourceListInput": { "workspaceId": "ws_fixture_001" },
+  "ResourceIdInput": {
+    "workspaceId": "ws_fixture_001",
+    "resourceId": "res_fixture_001"
+  },
+  "ResourceRegisterInput": {
+    "resource": {
+      "id": "res_fixture_001",
+      "workspaceId": "ws_fixture_001",
+      "kind": "profile",
+      "state": "active",
+      "displayName": "Fixture resource"
+    }
+  },
+  "GrantListInput": {
+    "workspaceId": "ws_fixture_001",
+    "resourceId": "res_fixture_001",
+    "memberId": "mem_fixture_001"
+  },
+  "GrantCreateInput": {
+    "id": "grt_fixture_001",
+    "workspaceId": "ws_fixture_001",
+    "resourceId": "res_fixture_001",
+    "memberId": "mem_fixture_001",
+    "action": "read",
+    "effect": "allow"
+  },
+  "GrantIdInput": {
+    "workspaceId": "ws_fixture_001",
+    "grantId": "grt_fixture_001"
+  }
+}

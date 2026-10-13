@@ -13,6 +13,7 @@ use buglogin_storage::control::{
 use getrandom::fill;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use super::{control_persistence::ControlPersistence, identity_persistence::IdentityPersistence};
 
@@ -20,6 +21,9 @@ const TENANT: &str = "identity";
 const RECORD_TYPE: &str = "account_password";
 const MAX_FAILURES: u32 = 5;
 const LOCK_SECONDS: u64 = 15 * 60;
+const MAX_CONCURRENT_PASSWORD_VERIFICATIONS: usize = 4;
+static PASSWORD_VERIFICATION_SLOTS: Semaphore =
+    Semaphore::const_new(MAX_CONCURRENT_PASSWORD_VERIFICATIONS);
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +98,7 @@ impl CredentialService {
         password: &str,
         now: u64,
     ) -> Result<(AccountId, u32), Problem> {
+        let verification_slot = acquire_password_verification_slot(&PASSWORD_VERIFICATION_SLOTS)?;
         if password.chars().count() > 256 {
             let _ = verify_password(&self.dummy_phc, password);
             return Err(invalid_credentials());
@@ -123,6 +128,7 @@ impl CredentialService {
             return Err(invalid_credentials());
         };
         let verified = verify_password(&record.password_phc, password);
+        drop(verification_slot);
         if record.locked_until.is_some_and(|until| now < until) {
             return Err(invalid_credentials());
         }
@@ -287,6 +293,18 @@ impl CredentialService {
             .map(|stored| stored.revision)
             .ok_or_else(unavailable)
     }
+}
+
+fn acquire_password_verification_slot(limiter: &Semaphore) -> Result<SemaphorePermit<'_>, Problem> {
+    limiter.try_acquire().map_err(|_| {
+        Problem::new(
+            "credential_capacity_exhausted",
+            "Password verification is temporarily busy",
+            503,
+            "identity",
+        )
+        .retryable(true)
+    })
 }
 
 fn argon2() -> Result<Argon2<'static>, Problem> {
@@ -465,5 +483,17 @@ mod tests {
                 .code,
             "invalid_credentials"
         );
+    }
+
+    #[test]
+    fn password_verification_admission_fails_fast_when_saturated() {
+        let limiter = Semaphore::new(1);
+        let occupied = limiter.try_acquire().unwrap();
+        let error = acquire_password_verification_slot(&limiter).unwrap_err();
+        assert_eq!(error.code, "credential_capacity_exhausted");
+        assert_eq!(error.status, 503);
+        assert!(error.retryable);
+        drop(occupied);
+        assert!(acquire_password_verification_slot(&limiter).is_ok());
     }
 }

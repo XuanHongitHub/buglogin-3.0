@@ -38,6 +38,8 @@ use buglogin_sync::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+static SYNC_IMPORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Default)]
 struct FakeCoordination {
     lease: Mutex<Option<LeaseGrant>>,
@@ -222,6 +224,7 @@ impl CoordinationBackend for FakeCoordination {
 
 #[tokio::test]
 async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest() {
+    let _test_lock = SYNC_IMPORT_TEST_LOCK.lock().await;
     let root = std::env::temp_dir().join(format!(
         "buglogin-http-sync-migration-{}",
         std::process::id()
@@ -406,6 +409,66 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
     assert_ne!(manifest["fencingToken"], 8);
     assert_eq!(coordination.manifest_commits.load(Ordering::SeqCst), 0);
     let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn direct_sync_import_accepts_bodies_above_axums_default_limit() {
+    let _test_lock = SYNC_IMPORT_TEST_LOCK.lock().await;
+    let state = ApiState::new(ProfileService::disabled());
+    let token = state.issue_token("acct_large_sync_import").unwrap();
+    let request_body = format!(
+        r#"{{"export":null,"padding":"{}"}}"#,
+        "x".repeat(3 * 1024 * 1024)
+    );
+    let response = router(state.clone())
+        .oneshot(
+            Request::post("/v1/migrations/sync/import")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "large-sync-import")
+                .header("idempotency-key", "large-sync-import-key")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the body should reach DTO validation instead of being rejected by Axum's 2 MiB default"
+    );
+    let invalid_body = body(response).await;
+    assert_eq!(invalid_body["status"], 422);
+    assert_eq!(invalid_body["code"], "sync_import_request_invalid");
+
+    let unsupported_media_type = router(state)
+        .oneshot(
+            Request::post("/v1/migrations/sync/import")
+                .header("content-type", "text/plain")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "sync-import-wrong-media")
+                .body(Body::from("payload"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        unsupported_media_type.status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+
+    let unauthenticated = router(ApiState::new(ProfileService::disabled()))
+        .oneshot(
+            Request::post("/v1/migrations/sync/import")
+                .header("content-type", "application/json")
+                .header("x-correlation-id", "unauth-large-sync-import")
+                .body(Body::from(r#"{"export":null}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 }
 
 fn genesis_export(workspace: WorkspaceId, resource: ResourceId) -> SyncExport {

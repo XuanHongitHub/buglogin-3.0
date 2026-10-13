@@ -52,6 +52,14 @@ Server processes require an explicit `BUGLOGIN_ENV=local|production`; a missing 
 
 RC artifacts tested in staging are byte-identical to stable artifacts. Promotion changes signed channel metadata, not binaries.
 
+## Rust API container
+
+`Dockerfile.api` builds and runs the `buglogin-api` Rust binary. It is the only supported production API container in this repository; `donut-sync/Dockerfile` is a separate legacy service and does not implement the BugLogin v1 API contract.
+
+Build from the repository root with `docker build --pull -f Dockerfile.api -t buglogin-api:<commit> .`. Deploy the image behind the API ingress on port `12343`, inject the production PostgreSQL, S3, Redis, recovery-delivery, device-verification, and web-origin settings through the secret/configuration manager, and do not bake credentials into image layers. Production `BUGLOGIN_REDIS_URL` must use `rediss://`; local development may use `redis://`. The process defaults to production mode and fails startup when required production settings are absent. It runs as an unprivileged user and exposes `/v1/health` for liveness and `/v1/readyz` for PostgreSQL/S3/Redis readiness. The container health check uses `/v1/readyz`; a proxy's generic `/health` or `/readyz` must not be used as evidence that this service is deployed.
+
+Before switching `api.buglogin.com`, deploy this image to an isolated staging hostname and fetch `/v1/openapi.yaml`; compare its SHA-256 with `crates/api/openapi/openapi-v1.yaml`. Then verify authenticated REST/MCP behavior, migrations, and failure recovery against staging-only services. This image definition does not itself deploy or authorize a production cutover.
+
 ## Data and failure injection
 
 - Synthetic accounts/workspaces/ACL.

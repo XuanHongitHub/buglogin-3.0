@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -14,7 +15,7 @@ use redis::{AsyncCommands, Script, aio::ConnectionManagerConfig, streams::Stream
 
 use super::{
     AuthorizationRequest, CoordinationAuthorizer, CoordinationBackend, CoordinationEvent,
-    CoordinationOperation, CoordinationScope, LeaseGrant, Presence, PublishedEvent,
+    CoordinationOperation, CoordinationScope, EventResource, LeaseGrant, Presence, PublishedEvent,
     SharedAuthorizer, StreamEvent, protocol,
 };
 use crate::manifest::SyncManifest;
@@ -258,13 +259,16 @@ redis.call('HSET', manifest_key,
   'payload', payload
 )
 
+redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[9], '*', 'event', ARGV[8])
+
 return {1, 'success'}
 "#;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RedisCoordinationConfig {
     pub url: String,
     pub namespace: String,
+    tls_root_cert: Option<Vec<u8>>,
     pub reconnect_min_delay: Duration,
     pub reconnect_max_delay: Duration,
     pub reconnect_attempts: usize,
@@ -279,6 +283,7 @@ impl RedisCoordinationConfig {
         Self {
             url: url.into(),
             namespace: namespace.into(),
+            tls_root_cert: None,
             reconnect_min_delay: Duration::from_millis(100),
             reconnect_max_delay: Duration::from_secs(5),
             reconnect_attempts: 8,
@@ -287,6 +292,11 @@ impl RedisCoordinationConfig {
             idempotency_ttl: MIN_IDEMPOTENCY_TTL,
             stream_max_len: DEFAULT_STREAM_MAX_LEN,
         }
+    }
+
+    pub fn with_tls_root_cert(mut self, certificate_pem: Vec<u8>) -> Self {
+        self.tls_root_cert = Some(certificate_pem);
+        self
     }
 
     fn validate(&self) -> Result<(), Problem> {
@@ -305,6 +315,27 @@ impl RedisCoordinationConfig {
     }
 }
 
+impl fmt::Debug for RedisCoordinationConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedisCoordinationConfig")
+            .field("url", &"<redacted>")
+            .field("namespace", &self.namespace)
+            .field(
+                "tls_root_cert",
+                &self.tls_root_cert.as_ref().map(|_| "<configured>"),
+            )
+            .field("reconnect_min_delay", &self.reconnect_min_delay)
+            .field("reconnect_max_delay", &self.reconnect_max_delay)
+            .field("reconnect_attempts", &self.reconnect_attempts)
+            .field("connection_timeout", &self.connection_timeout)
+            .field("response_timeout", &self.response_timeout)
+            .field("idempotency_ttl", &self.idempotency_ttl)
+            .field("stream_max_len", &self.stream_max_len)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct RedisCoordination {
     connection: redis::aio::ConnectionManager,
@@ -320,7 +351,17 @@ impl RedisCoordination {
         authorizer: Arc<dyn CoordinationAuthorizer>,
     ) -> Result<Self, Problem> {
         config.validate()?;
-        let client = redis::Client::open(config.url.as_str()).map_err(redis_problem)?;
+        let client = match config.tls_root_cert.as_ref() {
+            Some(root_cert) => redis::Client::build_with_tls(
+                config.url.as_str(),
+                redis::TlsCertificates {
+                    client_tls: None,
+                    root_cert: Some(root_cert.clone()),
+                },
+            ),
+            None => redis::Client::open(config.url.as_str()),
+        }
+        .map_err(redis_problem)?;
         let manager_config = ConnectionManagerConfig::new()
             .set_min_delay(config.reconnect_min_delay)
             .set_max_delay(config.reconnect_max_delay)
@@ -894,6 +935,38 @@ impl CoordinationBackend for RedisCoordination {
         }
 
         let payload = protocol::encode(&manifest)?;
+        let mut event_id_bytes = [0_u8; 16];
+        getrandom::fill(&mut event_id_bytes).map_err(|_| {
+            Problem::new(
+                "event_id_unavailable",
+                "Event identifier generation failed",
+                503,
+                "sync-coordination",
+            )
+        })?;
+        let event_id = format!("evt_sync_{}", hex(&event_id_bytes));
+        let occurred_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        let event = CoordinationEvent {
+            event_id: event_id.clone(),
+            event_version: "1".to_owned(),
+            name: "profile.sync.committed".to_owned(),
+            occurred_at_ms,
+            correlation_id: event_id.clone(),
+            causation_id: event_id,
+            actor_id: scope.auth.actor_id().to_owned(),
+            resource: EventResource {
+                resource_type: "profile".to_owned(),
+                id: resource_id.as_str().to_owned(),
+                revision: manifest.generation,
+            },
+            data: serde_json::json!({ "generation": manifest.generation }),
+        };
+        validate_event(scope.clone(), &event)?;
+        let event_payload = event.encode()?;
         let parent_gen_str = manifest
             .parent_generation
             .map_or_else(|| "none".to_owned(), |v| v.to_string());
@@ -902,6 +975,7 @@ impl CoordinationBackend for RedisCoordination {
         let (status, msg): (i64, String) = Script::new(COMMIT_MANIFEST)
             .key(self.manifest_key(scope.clone(), resource_id))
             .key(self.lease_key(scope.clone(), resource_id))
+            .key(self.stream_key(scope.clone()))
             .arg(owner_token)
             .arg(manifest.fencing_token.to_string())
             .arg(scope.workspace_id.as_str())
@@ -909,6 +983,8 @@ impl CoordinationBackend for RedisCoordination {
             .arg(manifest.generation.to_string())
             .arg(parent_gen_str)
             .arg(payload)
+            .arg(event_payload)
+            .arg(self.stream_max_len)
             .invoke_async(&mut connection)
             .await
             .map_err(redis_problem)?;
@@ -1000,6 +1076,10 @@ fn validate_idempotency_key(key: &str) -> Result<(), Problem> {
 
 fn key_segment(value: &str) -> String {
     value.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn parse_stream_id(id: &str) -> Option<(u64, u64)> {
@@ -1175,5 +1255,20 @@ mod tests {
             manifest_key("sync", &workspace, &resource),
             "buglogin:{sync:workspace-1}:manifest:resource-1"
         );
+    }
+
+    #[test]
+    fn redis_connection_debug_redacts_credentials_and_ca_material() {
+        let config = RedisCoordinationConfig::new(
+            "rediss://buglogin3:private-password@127.0.0.1:6380",
+            "buglogin3-prod",
+        )
+        .with_tls_root_cert(b"private-ca-material".to_vec());
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains("private-password"));
+        assert!(!debug.contains("private-ca-material"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("<configured>"));
     }
 }

@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use buglogin_domain::errors::Problem;
-use native_tls::TlsConnector;
-use postgres::{Client, GenericClient, Transaction};
+use native_tls::{Certificate, TlsConnector};
+use postgres::{Client, Config as PgConfig, GenericClient, Transaction, config::SslMode};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,37 +18,50 @@ const CORRELATION: &str = "storage";
 
 #[derive(Clone)]
 pub struct PostgresConfig {
-    database_url: String,
+    config: PgConfig,
+    tls_root_certificate: Option<PathBuf>,
 }
 impl PostgresConfig {
     pub fn new(database_url: impl Into<String>) -> Result<Self, Problem> {
+        Self::new_with_tls_root_certificate(database_url, None)
+    }
+    pub fn new_with_tls_root_certificate(
+        database_url: impl Into<String>,
+        tls_root_certificate: Option<PathBuf>,
+    ) -> Result<Self, Problem> {
         let database_url = database_url.into();
-        let normalized = database_url.to_ascii_lowercase();
-        if database_url.trim().is_empty()
-            || ![
-                "sslmode=require",
-                "sslmode=verify-ca",
-                "sslmode=verify-full",
-            ]
-            .iter()
-            .any(|mode| normalized.contains(mode))
-        {
+        if database_url.trim().is_empty() {
             return Err(problem(
                 "invalid_postgres_config",
-                "PostgreSQL TLS configuration is required",
+                "PostgreSQL configuration is required",
                 400,
             ));
         }
-        Ok(Self { database_url })
+        let config = PgConfig::from_str(&database_url)
+            .map_err(|_| problem("invalid_postgres_config", "PostgreSQL URL is invalid", 400))?;
+        if config.get_ssl_mode() != SslMode::Require {
+            return Err(problem(
+                "invalid_postgres_config",
+                "PostgreSQL TLS is required",
+                400,
+            ));
+        }
+        Ok(Self {
+            config,
+            tls_root_certificate,
+        })
     }
     pub fn from_env() -> Result<Self, Problem> {
-        Self::new(env::var("BUGLOGIN_POSTGRES_URL").map_err(|_| {
-            problem(
-                "missing_postgres_config",
-                "PostgreSQL configuration is missing",
-                500,
-            )
-        })?)
+        Self::new_with_tls_root_certificate(
+            env::var("BUGLOGIN_POSTGRES_URL").map_err(|_| {
+                problem(
+                    "missing_postgres_config",
+                    "PostgreSQL configuration is missing",
+                    500,
+                )
+            })?,
+            env::var_os("BUGLOGIN_POSTGRES_TLS_ROOT_CERT").map(PathBuf::from),
+        )
     }
 }
 impl fmt::Debug for PostgresConfig {
@@ -54,6 +69,10 @@ impl fmt::Debug for PostgresConfig {
         formatter
             .debug_struct("PostgresConfig")
             .field("database_url", &"<redacted>")
+            .field(
+                "tls_root_certificate_configured",
+                &self.tls_root_certificate.is_some(),
+            )
             .finish()
     }
 }
@@ -525,8 +544,16 @@ pub struct PostgresControlRecordStore {
 }
 impl PostgresControlRecordStore {
     pub fn connect(config: &PostgresConfig) -> Result<Self, Problem> {
-        let connector = TlsConnector::builder().build().map_err(|_| unavailable())?;
-        let client = Client::connect(&config.database_url, MakeTlsConnector::new(connector))
+        let mut connector_builder = TlsConnector::builder();
+        if let Some(path) = &config.tls_root_certificate {
+            let pem = std::fs::read(path).map_err(|_| unavailable())?;
+            let certificate = Certificate::from_pem(&pem).map_err(|_| unavailable())?;
+            connector_builder.add_root_certificate(certificate);
+        }
+        let connector = connector_builder.build().map_err(|_| unavailable())?;
+        let client = config
+            .config
+            .connect(MakeTlsConnector::new(connector))
             .map_err(|_| unavailable())?;
         Ok(Self { client })
     }
@@ -1371,8 +1398,18 @@ mod tests {
     #[test]
     fn config_requires_tls_and_redacts_secret() {
         assert!(PostgresConfig::new("postgres://user:secret@db/app?sslmode=disable").is_err());
-        let config =
-            PostgresConfig::new("postgres://user:secret@db/app?sslmode=verify-full").unwrap();
+        assert!(
+            PostgresConfig::new(
+                "postgres://db/app?sslmode=disable&application_name=sslmode=require"
+            )
+            .is_err()
+        );
+        assert!(
+            PostgresConfig::new("postgres://db/app?sslmode=prefer&application_name=verify-full")
+                .is_err()
+        );
+        assert!(PostgresConfig::new("postgres://db/app?sslmode=verify-full").is_err());
+        let config = PostgresConfig::new("postgres://user:secret@db/app?sslmode=require").unwrap();
         let debug = format!("{config:?}");
         assert!(!debug.contains("secret"));
         assert!(debug.contains("<redacted>"));

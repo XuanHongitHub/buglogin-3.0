@@ -26,6 +26,7 @@ fn every_registered_command_has_canonical_action() {
         ("system.health.get", Action::Read),
         ("operation.get", Action::Read),
         ("events.stream", Action::Read),
+        ("audit.events.list", Action::Read),
         ("profile.list", Action::Read),
         ("profile.get", Action::Read),
         ("profile.create", Action::Create),
@@ -43,15 +44,19 @@ fn every_registered_command_has_canonical_action() {
         ("cookie.stage", Action::Create),
         ("cookie.import", Action::Create),
         ("cookie.copy", Action::Create),
+        ("cookie.jobs.inbox", Action::Read),
         ("proxy.parse", Action::Read),
         ("proxy.list", Action::Read),
         ("proxy.get", Action::Read),
         ("proxy.create", Action::Create),
         ("proxy.update", Action::Update),
         ("proxy.delete", Action::Delete),
+        ("proxy.check", Action::Read),
         ("migration.inspect", Action::Read),
         ("migration.import", Action::Execute),
         ("migration.sync.import", Action::Execute),
+        ("migration.control.import", Action::Execute),
+        ("migration.control.rollback", Action::Execute),
         ("migration.package.file.put", Action::Execute),
         ("migration.package.verify", Action::Execute),
         ("migration.package.activate", Action::Execute),
@@ -93,10 +98,19 @@ fn every_registered_command_has_canonical_action() {
         ("workspace.get", Action::Read),
         ("workspace.create", Action::Create),
         ("workspace.update", Action::Update),
+        ("group.list", Action::Read),
+        ("group.get", Action::Read),
+        ("group.create", Action::Create),
+        ("group.update", Action::Update),
+        ("group.delete", Action::Delete),
+        ("profile.groups.replace", Action::Update),
+        ("profile.proxy.assignment.get", Action::Read),
+        ("profile.proxy.assignment.set", Action::Update),
         ("team.list", Action::Read),
         ("team.get", Action::Read),
         ("team.create", Action::Create),
         ("team.update", Action::Update),
+        ("team.delete", Action::Delete),
         ("member.list", Action::Read),
         ("member.get", Action::Read),
         ("member.invite", Action::Create),
@@ -124,7 +138,7 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
         (
             "organization.list",
             "CAP-ORG-001",
-            "OrganizationListInput",
+            "Empty",
             "OrganizationPage",
         ),
         (
@@ -169,10 +183,25 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
             "WorkspaceUpdateInput",
             "Workspace",
         ),
-        ("team.list", "CAP-TEAM-001", "TeamListInput", "TeamPage"),
-        ("team.get", "CAP-TEAM-001", "TeamIdInput", "Team"),
-        ("team.create", "CAP-TEAM-001", "TeamCreateInput", "Team"),
-        ("team.update", "CAP-TEAM-001", "TeamUpdateInput", "Team"),
+        (
+            "team.list",
+            "CAP-TEAM-001",
+            "TeamListInput",
+            "TeamRecordList",
+        ),
+        ("team.get", "CAP-TEAM-001", "TeamIdInput", "TeamRecord"),
+        (
+            "team.create",
+            "CAP-TEAM-001",
+            "TeamCreateInput",
+            "TeamRecord",
+        ),
+        (
+            "team.update",
+            "CAP-TEAM-001",
+            "TeamUpdateInput",
+            "TeamRecord",
+        ),
         (
             "member.list",
             "CAP-MEM-001",
@@ -224,6 +253,12 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
         assert_eq!(command.output_schema.as_str(), output, "{id}");
         assert!(command.adapters.contains(&Adapter::Mcp), "{id}");
     }
+
+    let delete = CommandRegistry::get("team.delete").expect("team delete");
+    assert_eq!(delete.capability, "CAP-TEAM-001");
+    assert_eq!(delete.input_schema.as_str(), "TeamDeleteInput");
+    assert_eq!(delete.output_schema.as_str(), "TeamRecord");
+    assert_eq!(delete.adapters, &[Adapter::Rest]);
 }
 
 #[test]

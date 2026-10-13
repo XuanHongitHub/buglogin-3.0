@@ -134,7 +134,7 @@ impl ConnectedCookieJobService {
                 value,
             }],
             deletes: vec![],
-            audit: audit(&job, "cookie.job.enqueue"),
+            audit: audit(&job, "cookie.job.enqueue", &job.requested_by),
             response: HttpResponse {
                 status: 202,
                 headers: Default::default(),
@@ -157,6 +157,45 @@ impl ConnectedCookieJobService {
             return Err(problem("cookie_job_forbidden"));
         }
         Ok(job)
+    }
+
+    pub fn get_for_device(
+        &self,
+        tenant_id: &str,
+        job_id: &str,
+        device_id: &str,
+    ) -> Result<Option<ConnectedCookieJob>, Problem> {
+        let job: Option<ConnectedCookieJob> =
+            self.persistence.load(tenant_id, RECORD_TYPE, job_id)?;
+        Ok(job.filter(|job| job.device_id == device_id))
+    }
+
+    pub fn inbox(
+        &self,
+        tenant_id: &str,
+        device_id: &str,
+    ) -> Result<Vec<ConnectedCookieJob>, Problem> {
+        let mut jobs = self
+            .persistence
+            .list_versioned::<ConnectedCookieJob>(tenant_id, RECORD_TYPE)?
+            .into_iter()
+            .map(|(_, job, _)| job)
+            .filter(|job| {
+                job.device_id == device_id
+                    && matches!(
+                        job.state,
+                        ConnectedCookieJobState::Accepted
+                            | ConnectedCookieJobState::Dispatched
+                            | ConnectedCookieJobState::Running
+                    )
+            })
+            .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.job_id.cmp(&right.job_id))
+        });
+        Ok(jobs)
     }
 
     pub fn claim(
@@ -200,12 +239,13 @@ impl ConnectedCookieJobService {
         tenant_id: &str,
         job_id: &str,
         actor_id: &str,
+        device_id: &str,
         now: u64,
         receipt: ConnectedCookieReceipt,
     ) -> Result<ConnectedCookieJob, Problem> {
         let (mut job, revision) = self.load_required(tenant_id, job_id)?;
-        if job.requested_by != actor_id {
-            return Err(problem("cookie_job_forbidden"));
+        if job.device_id != device_id {
+            return Err(problem("cookie_job_device_mismatch"));
         }
         if job.state == ConnectedCookieJobState::Completed {
             if job.receipt.as_ref() == Some(&receipt) {
@@ -218,7 +258,7 @@ impl ConnectedCookieJobService {
         }
         if now >= job.expires_at {
             job.state = ConnectedCookieJobState::Expired;
-            return self.save(tenant_id, &job, revision, "cookie.job.expire");
+            return self.save(tenant_id, &job, revision, "cookie.job.expire", actor_id);
         }
         if receipt.job_id != job.job_id
             || receipt.operation_id != job.operation_id
@@ -236,7 +276,7 @@ impl ConnectedCookieJobService {
         }
         job.state = ConnectedCookieJobState::Completed;
         job.receipt = Some(receipt);
-        self.save(tenant_id, &job, revision, "cookie.job.complete")
+        self.save(tenant_id, &job, revision, "cookie.job.complete", actor_id)
     }
 
     fn transition(
@@ -249,9 +289,6 @@ impl ConnectedCookieJobService {
         state: ConnectedCookieJobState,
     ) -> Result<ConnectedCookieJob, Problem> {
         let (mut job, revision) = self.load_required(tenant_id, job_id)?;
-        if job.requested_by != actor_id {
-            return Err(problem("cookie_job_forbidden"));
-        }
         if job.device_id != device_id {
             return Err(problem("cookie_job_device_mismatch"));
         }
@@ -260,7 +297,7 @@ impl ConnectedCookieJobService {
         }
         if now >= job.expires_at {
             job.state = ConnectedCookieJobState::Expired;
-            return self.save(tenant_id, &job, revision, "cookie.job.expire");
+            return self.save(tenant_id, &job, revision, "cookie.job.expire", actor_id);
         }
         let valid = matches!(
             (job.state, state),
@@ -276,7 +313,7 @@ impl ConnectedCookieJobService {
             return Err(problem("cookie_job_invalid_state"));
         }
         job.state = state;
-        self.save(tenant_id, &job, revision, "cookie.job.transition")
+        self.save(tenant_id, &job, revision, "cookie.job.transition", actor_id)
     }
 
     fn load_required(
@@ -298,6 +335,7 @@ impl ConnectedCookieJobService {
         job: &ConnectedCookieJob,
         revision: u64,
         command_id: &str,
+        actor_id: &str,
     ) -> Result<ConnectedCookieJob, Problem> {
         let value = serde_json::to_value(job).map_err(|_| problem("job_encode_failed"))?;
         let result = self.persistence.execute(ExecuteControlCommand {
@@ -313,7 +351,7 @@ impl ConnectedCookieJobService {
                 value,
             }],
             deletes: vec![],
-            audit: audit(job, command_id),
+            audit: audit(job, command_id, actor_id),
             response: HttpResponse {
                 status: 200,
                 headers: Default::default(),
@@ -334,6 +372,7 @@ fn validate_enqueue(input: &EnqueueConnectedCookieJob) -> Result<(), Problem> {
         || input.profile_id.trim().is_empty()
         || input.requested_by.trim().is_empty()
         || input.idempotency_key.trim().is_empty()
+        || input.expected_generation == 0
         || input.expires_at <= input.now
     {
         return Err(problem("cookie_job_input_invalid"));
@@ -360,6 +399,9 @@ fn validate_enqueue(input: &EnqueueConnectedCookieJob) -> Result<(), Problem> {
         if source.iter().any(|value| value.is_none_or(str::is_empty)) {
             return Err(problem("cookie_copy_source_required"));
         }
+        if input.source_device_id.as_deref() != Some(input.device_id.as_str()) {
+            return Err(problem("cookie_copy_cross_device_dispatch_unavailable"));
+        }
     }
     Ok(())
 }
@@ -373,11 +415,11 @@ fn stable_id(prefix: &str, key: &str) -> String {
     format!("{prefix}_{suffix}")
 }
 
-fn audit(job: &ConnectedCookieJob, command_id: &str) -> ControlAuditEntry {
+fn audit(job: &ConnectedCookieJob, command_id: &str, actor_id: &str) -> ControlAuditEntry {
     ControlAuditEntry {
         tenant_id: job.workspace_id.clone(),
         command_id: command_id.into(),
-        actor_id: job.requested_by.clone(),
+        actor_id: actor_id.into(),
         allowed: true,
         detail: json!({"jobId": job.job_id, "deviceId": job.device_id, "profileId": job.profile_id}),
     }
@@ -442,19 +484,49 @@ mod tests {
     }
 
     #[test]
+    fn inbox_is_scoped_to_the_target_device_and_active_jobs() {
+        let service = service();
+        let job = service.enqueue(input("cookie.import")).unwrap();
+        assert_eq!(service.inbox("ws_1", "device_other").unwrap(), Vec::new());
+        assert_eq!(
+            service.inbox("ws_1", "device_1").unwrap(),
+            vec![job.clone()]
+        );
+        assert_eq!(
+            service
+                .get_for_device("ws_1", &job.job_id, "device_other")
+                .unwrap(),
+            None
+        );
+        service
+            .claim("ws_1", &job.job_id, "executor_account", "device_1", 101)
+            .unwrap();
+        assert_eq!(
+            service.inbox("ws_1", "device_1").unwrap()[0].state,
+            ConnectedCookieJobState::Dispatched
+        );
+    }
+
+    #[test]
+    fn cross_device_copy_is_rejected_until_local_source_transport_exists() {
+        let error = service().enqueue(input("cookie.copy")).unwrap_err();
+        assert_eq!(error.code, "cookie_copy_cross_device_dispatch_unavailable");
+    }
+
+    #[test]
     fn device_state_machine_and_receipt_binding_are_fail_closed() {
         let service = service();
         let job = service.enqueue(input("cookie.import")).unwrap();
         assert_eq!(
             service
-                .claim("ws_1", &job.job_id, "account_1", "device_1", 101)
+                .claim("ws_1", &job.job_id, "executor_account", "device_1", 101)
                 .unwrap()
                 .state,
             ConnectedCookieJobState::Dispatched
         );
         assert_eq!(
             service
-                .acknowledge("ws_1", &job.job_id, "account_1", "device_1", 102)
+                .acknowledge("ws_1", &job.job_id, "executor_account", "device_1", 102)
                 .unwrap()
                 .state,
             ConnectedCookieJobState::Running
@@ -474,7 +546,14 @@ mod tests {
         };
         assert_eq!(
             service
-                .complete("ws_1", &job.job_id, "account_1", 103, bad)
+                .complete(
+                    "ws_1",
+                    &job.job_id,
+                    "executor_account",
+                    "device_1",
+                    103,
+                    bad
+                )
                 .unwrap_err()
                 .code,
             "cookie_receipt_binding_invalid"
@@ -487,14 +566,14 @@ mod tests {
         let job = service.enqueue(input("cookie.import")).unwrap();
         assert_eq!(
             service
-                .claim("ws_1", &job.job_id, "account_1", "other", 101)
+                .claim("ws_1", &job.job_id, "executor_account", "other", 101)
                 .unwrap_err()
                 .code,
             "cookie_job_device_mismatch"
         );
         assert_eq!(
             service
-                .claim("ws_1", &job.job_id, "account_1", "device_1", 200)
+                .claim("ws_1", &job.job_id, "executor_account", "device_1", 200)
                 .unwrap()
                 .state,
             ConnectedCookieJobState::Expired

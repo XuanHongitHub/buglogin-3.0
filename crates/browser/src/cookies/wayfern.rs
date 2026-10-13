@@ -1,12 +1,12 @@
 use super::{CookieInput, CookieSameSite};
 use rusqlite::{Connection, OpenFlags, params};
 use std::{
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
 };
 
 const WINDOWS_EPOCH_DIFF: i64 = 11_644_473_600;
-const COOKIE_SCHEMA_VERSION: &str = "23";
+const MIN_SUPPORTED_COOKIE_SCHEMA_VERSION: i64 = 23;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileCookieState {
@@ -67,6 +67,7 @@ pub enum WayfernCookieError {
     InvalidCiphertext,
     InvalidValue,
     InvalidExpiry,
+    UnsupportedSchema,
     Database,
 }
 
@@ -78,6 +79,7 @@ impl fmt::Display for WayfernCookieError {
             Self::InvalidCiphertext => "invalid_cookie_ciphertext",
             Self::InvalidValue => "invalid_cookie_value",
             Self::InvalidExpiry => "invalid_cookie_expiry",
+            Self::UnsupportedSchema => "unsupported_cookie_database_schema",
             Self::Database => "cookie_database_error",
         })
     }
@@ -120,11 +122,15 @@ pub fn materialize_encrypted(
         return Err(WayfernCookieError::InvalidExpiry);
     }
     let path = database_path(profile_data_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| WayfernCookieError::Database)?;
+    if !path.is_file() {
+        return Err(WayfernCookieError::Database);
     }
-    let mut connection = Connection::open(path).map_err(|_| WayfernCookieError::Database)?;
-    initialize_schema(&connection)?;
+    let mut connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| WayfernCookieError::Database)?;
+    validate_supported_schema(&connection)?;
     let transaction = connection
         .transaction()
         .map_err(|_| WayfernCookieError::Database)?;
@@ -136,10 +142,12 @@ pub fn materialize_encrypted(
         if expires < 0 {
             return Err(WayfernCookieError::InvalidExpiry);
         }
+        let source_scheme = if cookie.secure { 2 } else { 1 };
+        let source_port = if cookie.secure { 443 } else { 80 };
         let existing: bool = transaction
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM cookies WHERE host_key = ?1 AND top_frame_site_key = '' AND name = ?2 AND path = ?3)",
-                params![cookie.domain, cookie.name, cookie.path],
+                "SELECT EXISTS(SELECT 1 FROM cookies WHERE host_key = ?1 AND top_frame_site_key = '' AND has_cross_site_ancestor = 0 AND name = ?2 AND path = ?3 AND source_scheme = ?4 AND source_port = ?5)",
+                params![cookie.domain, cookie.name, cookie.path, source_scheme, source_port],
                 |row| row.get(0),
             )
             .map_err(|_| WayfernCookieError::Database)?;
@@ -148,12 +156,10 @@ pub fn materialize_encrypted(
         let same_site = same_site_to_db(cookie.same_site);
         let secure = i32::from(cookie.secure);
         let http_only = i32::from(cookie.http_only);
-        let source_scheme = if cookie.secure { 2 } else { 1 };
-        let source_port = if cookie.secure { 443 } else { 80 };
         if existing {
             transaction.execute(
-                "UPDATE cookies SET value = '', encrypted_value = ?1, expires_utc = ?2, is_secure = ?3, is_httponly = ?4, last_access_utc = ?5, has_expires = 1, is_persistent = 1, samesite = ?6, source_scheme = ?7, source_port = ?8, last_update_utc = ?9 WHERE host_key = ?10 AND top_frame_site_key = '' AND name = ?11 AND path = ?12",
-                params![cookie.ciphertext, expires_utc, secure, http_only, now_utc, same_site, source_scheme, source_port, now_utc, cookie.domain, cookie.name, cookie.path],
+                "UPDATE cookies SET value = '', encrypted_value = ?1, expires_utc = ?2, is_secure = ?3, is_httponly = ?4, last_access_utc = ?5, has_expires = 1, is_persistent = 1, samesite = ?6, last_update_utc = ?7 WHERE host_key = ?8 AND top_frame_site_key = '' AND has_cross_site_ancestor = 0 AND name = ?9 AND path = ?10 AND source_scheme = ?11 AND source_port = ?12",
+                params![cookie.ciphertext, expires_utc, secure, http_only, now_utc, same_site, now_utc, cookie.domain, cookie.name, cookie.path, source_scheme, source_port],
             ).map_err(|_| WayfernCookieError::Database)?;
             report.replaced += 1;
         } else {
@@ -205,8 +211,95 @@ pub struct CookieInputMetadata {
     pub same_site: CookieSameSite,
 }
 
-fn initialize_schema(connection: &Connection) -> Result<(), WayfernCookieError> {
-    connection.execute_batch(&format!("CREATE TABLE IF NOT EXISTS cookies(creation_utc INTEGER NOT NULL, host_key TEXT NOT NULL, top_frame_site_key TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, encrypted_value BLOB NOT NULL DEFAULT '', path TEXT NOT NULL, expires_utc INTEGER NOT NULL, is_secure INTEGER NOT NULL, is_httponly INTEGER NOT NULL, last_access_utc INTEGER NOT NULL, has_expires INTEGER NOT NULL DEFAULT 1, is_persistent INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 1, samesite INTEGER NOT NULL DEFAULT -1, source_scheme INTEGER NOT NULL DEFAULT 0, source_port INTEGER NOT NULL DEFAULT -1, last_update_utc INTEGER NOT NULL DEFAULT 0, source_type INTEGER NOT NULL DEFAULT 0, has_cross_site_ancestor INTEGER NOT NULL DEFAULT 0); CREATE UNIQUE INDEX IF NOT EXISTS cookies_unique_index ON cookies(host_key, top_frame_site_key, name, path); CREATE TABLE IF NOT EXISTS meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR); INSERT OR IGNORE INTO meta VALUES('version', '{COOKIE_SCHEMA_VERSION}'); INSERT OR IGNORE INTO meta VALUES('last_compatible_version', '{COOKIE_SCHEMA_VERSION}');"),).map_err(|_| WayfernCookieError::Database)
+fn validate_supported_schema(connection: &Connection) -> Result<(), WayfernCookieError> {
+    let version = connection
+        .query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|_| WayfernCookieError::UnsupportedSchema)?
+        .parse::<i64>()
+        .map_err(|_| WayfernCookieError::UnsupportedSchema)?;
+    if version < MIN_SUPPORTED_COOKIE_SCHEMA_VERSION {
+        return Err(WayfernCookieError::UnsupportedSchema);
+    }
+
+    let mut statement = connection
+        .prepare("PRAGMA table_info(cookies)")
+        .map_err(|_| WayfernCookieError::Database)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| WayfernCookieError::Database)?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|_| WayfernCookieError::Database)?;
+    let required_columns = [
+        "creation_utc",
+        "host_key",
+        "top_frame_site_key",
+        "name",
+        "value",
+        "encrypted_value",
+        "path",
+        "expires_utc",
+        "is_secure",
+        "is_httponly",
+        "last_access_utc",
+        "has_expires",
+        "is_persistent",
+        "priority",
+        "samesite",
+        "source_scheme",
+        "source_port",
+        "last_update_utc",
+        "source_type",
+        "has_cross_site_ancestor",
+    ];
+    if required_columns
+        .iter()
+        .any(|required| !columns.contains(*required))
+    {
+        return Err(WayfernCookieError::UnsupportedSchema);
+    }
+
+    let mut indexes = connection
+        .prepare("PRAGMA index_list(cookies)")
+        .map_err(|_| WayfernCookieError::Database)?;
+    let has_expected_index = indexes
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+        })
+        .map_err(|_| WayfernCookieError::Database)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| WayfernCookieError::Database)?
+        .iter()
+        .any(|(name, unique)| name == "cookies_unique_index" && *unique);
+    if !has_expected_index {
+        return Err(WayfernCookieError::UnsupportedSchema);
+    }
+    let mut index_columns = connection
+        .prepare("PRAGMA index_info(cookies_unique_index)")
+        .map_err(|_| WayfernCookieError::Database)?;
+    let index_columns = index_columns
+        .query_map([], |row| row.get::<_, String>(2))
+        .map_err(|_| WayfernCookieError::Database)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| WayfernCookieError::Database)?;
+    let expected_index_columns = [
+        "host_key",
+        "top_frame_site_key",
+        "has_cross_site_ancestor",
+        "name",
+        "path",
+        "source_scheme",
+        "source_port",
+    ];
+    if index_columns
+        .iter()
+        .map(String::as_str)
+        .ne(expected_index_columns)
+    {
+        return Err(WayfernCookieError::UnsupportedSchema);
+    }
+    Ok(())
 }
 
 fn same_site_to_db(value: CookieSameSite) -> i32 {
@@ -247,6 +340,7 @@ mod tests {
     use super::*;
     use buglogin_storage::secrets::SecretValue;
     use rusqlite::Connection;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn input(value: &[u8]) -> CookieInput {
@@ -276,8 +370,47 @@ mod tests {
         .unwrap()
     }
 
+    fn create_supported_database(root: &Path) {
+        let path = database_path(root);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+                 INSERT INTO meta(key, value) VALUES('version', '24');
+                 INSERT INTO meta(key, value) VALUES('last_compatible_version', '24');
+                 CREATE TABLE cookies(
+                     creation_utc INTEGER NOT NULL,
+                     host_key TEXT NOT NULL,
+                     top_frame_site_key TEXT NOT NULL,
+                     name TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     encrypted_value BLOB NOT NULL,
+                     path TEXT NOT NULL,
+                     expires_utc INTEGER NOT NULL,
+                     is_secure INTEGER NOT NULL,
+                     is_httponly INTEGER NOT NULL,
+                     last_access_utc INTEGER NOT NULL,
+                     has_expires INTEGER NOT NULL,
+                     is_persistent INTEGER NOT NULL,
+                     priority INTEGER NOT NULL,
+                     samesite INTEGER NOT NULL,
+                     source_scheme INTEGER NOT NULL,
+                     source_port INTEGER NOT NULL,
+                     last_update_utc INTEGER NOT NULL,
+                     source_type INTEGER NOT NULL,
+                     has_cross_site_ancestor INTEGER NOT NULL
+                 );
+                 CREATE UNIQUE INDEX cookies_unique_index ON cookies(
+                     host_key, top_frame_site_key, has_cross_site_ancestor,
+                     name, path, source_scheme, source_port
+                 );",
+            )
+            .unwrap();
+    }
+
     #[test]
-    fn materializes_chromium_schema_and_redacts_reads() {
+    fn writes_to_existing_supported_profile_database_and_redacts_reads() {
         let root = std::env::temp_dir().join(format!(
             "buglogin-wayfern-cookie-{}",
             SystemTime::now()
@@ -285,6 +418,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        create_supported_database(&root);
         let report = materialize_encrypted(
             &root,
             ProfileCookieState::Stopped,
@@ -390,6 +524,7 @@ mod tests {
             expires_at: Some(-1),
             ..encrypted_input(b"v10-invalid-expiry")
         };
+        create_supported_database(&root);
         assert_eq!(
             materialize_encrypted(
                 &root,
@@ -401,6 +536,53 @@ mod tests {
         );
         assert!(read_metadata(&root).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_or_unsupported_profile_database_is_never_created_or_rewritten() {
+        let missing = std::env::temp_dir().join(format!(
+            "buglogin-wayfern-cookie-missing-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert_eq!(
+            materialize_encrypted(
+                &missing,
+                ProfileCookieState::Stopped,
+                &[encrypted_input(b"v10-opaque-ciphertext")],
+                1_700_000_000,
+            ),
+            Err(WayfernCookieError::Database)
+        );
+        assert!(!missing.exists());
+
+        let unsupported = std::env::temp_dir().join(format!(
+            "buglogin-wayfern-cookie-unsupported-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        create_supported_database(&unsupported);
+        let db_path = database_path(&unsupported);
+        Connection::open(&db_path)
+            .unwrap()
+            .execute("UPDATE meta SET value = '22' WHERE key = 'version'", [])
+            .unwrap();
+        let before = fs::read(&db_path).unwrap();
+        assert_eq!(
+            materialize_encrypted(
+                &unsupported,
+                ProfileCookieState::Stopped,
+                &[encrypted_input(b"v10-opaque-ciphertext")],
+                1_700_000_000,
+            ),
+            Err(WayfernCookieError::UnsupportedSchema)
+        );
+        assert_eq!(fs::read(&db_path).unwrap(), before);
+        fs::remove_dir_all(unsupported).unwrap();
     }
 
     #[test]

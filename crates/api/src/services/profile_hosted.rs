@@ -3,7 +3,7 @@ use buglogin_domain::{
     errors::Problem,
     grant::ResourceGrant,
     ids::{GrantId, MemberId, ProfileId, ResourceId, WorkspaceId},
-    permissions::{Action, Capability, Grant, Principal, ResourceScope, is_allowed},
+    permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, is_allowed},
     profile::{
         ProfileArchiveState, ProfileCloneInput, ProfileCloneReceipt, ProfileResource,
         ProfileShareInput, ProfileSharePermission, ProfileShareReceipt,
@@ -31,6 +31,96 @@ pub struct HostedProfileProvisionPlan {
 pub struct HostedProfileService;
 
 impl HostedProfileService {
+    pub fn authorized(
+        state: &ApiState,
+        principal: &Principal,
+        grants: &[Grant],
+        profile_id: &ProfileId,
+        action: Action,
+        capability_name: &str,
+    ) -> Result<bool, Problem> {
+        let binding = state.profile_resource_record(profile_id)?;
+        let scope = match &binding {
+            Some(binding) => ResourceScope {
+                workspace_id: Some(binding.workspace_id.clone()),
+                resource_id: Some(binding.resource_id.clone()),
+                profile_id: Some(profile_id.clone()),
+                ..ResourceScope::default()
+            },
+            None => ResourceScope {
+                profile_id: Some(profile_id.clone()),
+                ..ResourceScope::default()
+            },
+        };
+        let capability = Capability::new(capability_name)
+            .map_err(|_| problem("invalid_capability", "Invalid capability", 500))?;
+        if is_allowed(principal, &capability, action, &scope, grants) {
+            return Ok(true);
+        }
+        let Some(binding) = binding else {
+            return Ok(false);
+        };
+        if !matches!(action, Action::Read | Action::Execute) {
+            return Ok(false);
+        }
+
+        // Resource shares are an additional grant path. They must not bypass
+        // token restrictions or an explicit capability deny.
+        let action_name = match action {
+            Action::Read => "read",
+            Action::Create => "create",
+            Action::Update => "update",
+            Action::Delete => "delete",
+            Action::Execute => "execute",
+            Action::Share => "share",
+            Action::Manage => "manage",
+        };
+        if principal.token_scopes.as_ref().is_some_and(|scopes| {
+            !scopes.contains(&format!("{}:{action_name}", capability.as_str()))
+                && !scopes.contains(&format!("{}:*", capability.as_str()))
+        }) || grants.iter().any(|grant| {
+            grant.capability == capability
+                && grant.action == action
+                && grant.scope.contains(&scope)
+                && grant.effect == Effect::Deny
+                && grant
+                    .account_id
+                    .as_ref()
+                    .is_none_or(|id| principal.account_id.as_ref() == Some(id))
+                && grant
+                    .member_id
+                    .as_ref()
+                    .is_none_or(|id| principal.member_id.as_ref() == Some(id))
+        }) {
+            return Ok(false);
+        }
+
+        let Some(account_id) = principal.account_id.as_ref() else {
+            return Ok(false);
+        };
+        let member_id = state
+            .members
+            .read()
+            .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
+            .active_for_account(account_id)
+            .into_iter()
+            .find(|member| member.workspace_id == binding.workspace_id)
+            .map(|member| member.id);
+        let Some(member_id) = member_id else {
+            return Ok(false);
+        };
+        Ok(state
+            .resources
+            .read()
+            .map_err(|_| problem("resource_unavailable", "Resource service unavailable", 503))?
+            .is_allowed_in_workspace(
+                &binding.resource_id,
+                &binding.workspace_id,
+                &member_id,
+                action,
+            ))
+    }
+
     pub fn ensure_delete_supported(state: &ApiState) -> Result<(), Problem> {
         if state.local_authority_enabled() {
             Ok(())
@@ -182,6 +272,7 @@ impl HostedProfileService {
                 })?;
             authorize_profile_read(principal, grants, &binding)?;
             authorize_profile_create(principal, grants, &binding)?;
+            state.ensure_workspace_profile_capacity(&binding.workspace_id)?;
             let mut target = source.value.clone();
             target.id = input.target_profile_id;
             target.name = input.name.trim().to_owned();
@@ -213,7 +304,10 @@ impl HostedProfileService {
             let created = state.create_profile_record(plan.profile.clone())?;
             Ok(ProfileCloneReceipt {
                 source_profile_id: input.source_profile_id,
-                profile: created.value,
+                profile: buglogin_domain::entities::ProfileRecord::new(
+                    created.value,
+                    created.revision,
+                ),
                 resource_id: plan.resource_id,
                 metadata_only: true,
                 copied_fields: vec![
@@ -259,6 +353,11 @@ impl HostedProfileService {
                 .ok_or_else(|| problem("binding_not_found", "Profile binding not found", 404))?;
             check_revision(current.revision, input.expected_revision)?;
             ensure_member_in_workspace(state, &input.member_id, &binding.workspace_id)?;
+            ensure_encrypted_profile_key_sharing_ready(
+                state,
+                &binding.workspace_id,
+                &binding.resource_id,
+            )?;
             let actions = share_actions(&input.permission);
             let mut resources = state.resources.write().map_err(|_| {
                 problem("resource_unavailable", "Resource service unavailable", 503)
@@ -338,6 +437,7 @@ impl HostedProfileService {
         plan: &HostedProfileProvisionPlan,
     ) -> Result<Versioned<Profile>, Problem> {
         require_hosted(state)?;
+        state.ensure_workspace_profile_capacity(&plan.workspace_id)?;
         state
             .resources
             .write()
@@ -526,6 +626,378 @@ fn require_hosted(state: &ApiState) -> Result<(), Problem> {
     Ok(())
 }
 
+fn ensure_encrypted_profile_key_sharing_ready(
+    state: &ApiState,
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+) -> Result<(), Problem> {
+    if state
+        .current_sync_manifest(workspace_id, resource_id)?
+        .is_some_and(|manifest| manifest.payload_encryption.is_some())
+    {
+        return Err(problem(
+            "profile_key_distribution_not_ready",
+            "Encrypted profile sharing is unavailable until recipient key envelopes and revocation are configured",
+            503,
+        ));
+    }
+    Ok(())
+}
+
 fn problem(code: &'static str, message: &'static str, status: u16) -> Problem {
     Problem::new(code, message, status, "profile")
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use buglogin_domain::{
+        grant::ResourceGrant,
+        ids::{AccountId, GrantId, OrganizationId},
+        member::{Member, MemberRole, MemberStatus},
+        organization::{Organization, OrganizationPolicy},
+        permissions::{Effect, Role},
+        resource::{ResourceKind, ResourceState},
+        workspace::{Workspace, WorkspacePolicy},
+    };
+    use buglogin_sync::manifest::{
+        ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
+        PayloadEncryptionAlgorithm, SyncManifest,
+    };
+
+    #[test]
+    fn hosted_profile_capacity_uses_authoritative_active_workspace_bindings() {
+        let account_id = AccountId::new("acct_quota_test").unwrap();
+        let organization = Organization {
+            id: OrganizationId::new("org_quota_test").unwrap(),
+            account_id,
+            name: "Quota test".into(),
+            created_at: "2026-10-12T00:00:00Z".into(),
+        };
+        let workspace_id = WorkspaceId::new("ws_quota_test").unwrap();
+        let mut workspaces = crate::services::workspaces::WorkspaceService::new(
+            organization.clone(),
+            OrganizationPolicy {
+                max_workspaces: 1,
+                offline_entitled: false,
+            },
+        )
+        .unwrap();
+        workspaces
+            .create_workspace(
+                &Principal {
+                    roles: std::collections::BTreeSet::from([Role::PlatformAdmin]),
+                    ..Principal::default()
+                },
+                &[],
+                &organization.id,
+                Workspace {
+                    id: workspace_id.clone(),
+                    organization_id: organization.id.clone(),
+                    name: "Quota test".into(),
+                    policy: WorkspacePolicy {
+                        max_profiles: 1,
+                        max_members: 10,
+                        max_storage_bytes: 1024,
+                        offline_entitled: false,
+                    },
+                    created_at: "2026-10-12T00:00:00Z".into(),
+                },
+            )
+            .unwrap();
+
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        *state.workspaces.write().unwrap() = workspaces;
+        state
+            .replace_profile_resource(ProfileResource {
+                profile_id: ProfileId::new("prf_quota_existing").unwrap(),
+                resource_id: ResourceId::new("res_quota_existing").unwrap(),
+                workspace_id: workspace_id.clone(),
+                archive_state: ProfileArchiveState::Active,
+            })
+            .unwrap();
+
+        assert_eq!(
+            state
+                .ensure_workspace_profile_capacity(&workspace_id)
+                .unwrap_err()
+                .code,
+            "profile_quota_exceeded"
+        );
+        state
+            .replace_profile_resource(ProfileResource {
+                profile_id: ProfileId::new("prf_quota_existing").unwrap(),
+                resource_id: ResourceId::new("res_quota_existing").unwrap(),
+                workspace_id: workspace_id.clone(),
+                archive_state: ProfileArchiveState::Archived,
+            })
+            .unwrap();
+        state
+            .ensure_workspace_profile_capacity(&workspace_id)
+            .expect("archived profile should not consume active profile capacity");
+    }
+
+    #[test]
+    fn encrypted_profile_sharing_fails_closed_without_recipient_key_lifecycle() {
+        let workspace = WorkspaceId::from_str("ws_share_key_gate").unwrap();
+        let resource = ResourceId::from_str("res_share_key_gate").unwrap();
+        let envelope = ManifestObject::new(
+            buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY,
+            b"opaque-envelope",
+        )
+        .unwrap();
+        let mut manifest = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            1,
+            1,
+            None,
+            b"encrypted-profile-root",
+            vec![envelope.clone()],
+        )
+        .unwrap();
+        manifest.payload_encryption = Some(ManifestPayloadEncryption {
+            schema_version: 1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
+            key_version: None,
+            resource_key_envelope: ManifestObjectReference::from(&envelope),
+        });
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        state.replace_sync_manifest(manifest).unwrap();
+
+        let error =
+            ensure_encrypted_profile_key_sharing_ready(&state, &workspace, &resource).unwrap_err();
+        assert_eq!(error.code, "profile_key_distribution_not_ready");
+        assert_eq!(error.status, 503);
+    }
+
+    #[test]
+    fn hosted_share_authorization_respects_token_scope_and_resource_deny() {
+        let workspace_id = WorkspaceId::from_str("ws_profile_share").unwrap();
+        let profile_id = ProfileId::from_str("prf_profile_share").unwrap();
+        let resource_id = ResourceId::from_str("res_profile_share").unwrap();
+        let owner_id = AccountId::from_str("acct_profile_owner").unwrap();
+        let recipient_id = AccountId::from_str("acct_profile_recipient").unwrap();
+        let member_id = MemberId::from_str("mem_profile_recipient").unwrap();
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap()
+        .with_profile_resource(ProfileResource {
+            profile_id: profile_id.clone(),
+            resource_id: resource_id.clone(),
+            workspace_id: workspace_id.clone(),
+            archive_state: ProfileArchiveState::Active,
+        });
+        let owner = Principal {
+            account_id: Some(owner_id.clone()),
+            workspace_ids: [workspace_id.clone()].into_iter().collect(),
+            roles: [Role::WorkspaceAdmin].into_iter().collect(),
+            ..Principal::default()
+        };
+        let admin_grants = vec![
+            capability_grant(
+                "grant_member_create",
+                &owner_id,
+                "CAP-MEM-001",
+                Action::Create,
+                ResourceScope::workspace(workspace_id.clone()),
+            ),
+            capability_grant(
+                "grant_resource_create",
+                &owner_id,
+                "CAP-RES-001",
+                Action::Create,
+                ResourceScope::workspace(workspace_id.clone()),
+            ),
+            capability_grant(
+                "grant_share_manage",
+                &owner_id,
+                "CAP-SHARE-001",
+                Action::Manage,
+                ResourceScope::resource(workspace_id.clone(), resource_id.clone()),
+            ),
+        ];
+
+        state
+            .members
+            .write()
+            .unwrap()
+            .invite(
+                &owner,
+                &admin_grants,
+                Member {
+                    id: member_id.clone(),
+                    account_id: recipient_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    team_id: None,
+                    role: MemberRole::Member,
+                    status: MemberStatus::Invited,
+                    invite_expires_at: Some(100),
+                },
+                1,
+            )
+            .unwrap();
+        state
+            .members
+            .write()
+            .unwrap()
+            .activate(
+                &Principal {
+                    account_id: Some(recipient_id.clone()),
+                    ..Principal::default()
+                },
+                &[],
+                &member_id,
+                2,
+            )
+            .unwrap();
+        state
+            .resources
+            .write()
+            .unwrap()
+            .register(
+                &owner,
+                &admin_grants,
+                Resource {
+                    id: resource_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    kind: ResourceKind::Profile,
+                    state: ResourceState::Active,
+                    display_name: "Shared profile".into(),
+                },
+            )
+            .unwrap();
+        state
+            .resources
+            .write()
+            .unwrap()
+            .grant(
+                &owner,
+                &admin_grants,
+                ResourceGrant {
+                    id: GrantId::from_str("rg_profile_share_allow").unwrap(),
+                    workspace_id: workspace_id.clone(),
+                    resource_id: resource_id.clone(),
+                    member_id: member_id.clone(),
+                    action: Action::Read,
+                    effect: Effect::Allow,
+                },
+            )
+            .unwrap();
+
+        let recipient = Principal {
+            account_id: Some(recipient_id),
+            workspace_ids: [workspace_id.clone()].into_iter().collect(),
+            ..Principal::default()
+        };
+        assert!(
+            HostedProfileService::authorized(
+                &state,
+                &recipient,
+                &[],
+                &profile_id,
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+        let mut mcp_policy = crate::mcp::ProductionMcpPolicy::new(state.clone());
+        let profile_get = crate::commands::CommandRegistry::get("profile.get").unwrap();
+        let mcp_scope = crate::mcp::McpExecutionPolicy::resolve_scope(
+            &mut mcp_policy,
+            &recipient,
+            profile_get,
+            &serde_json::json!({ "profileId": profile_id.clone() }),
+        )
+        .unwrap();
+        crate::mcp::McpExecutionPolicy::authorize(
+            &mut mcp_policy,
+            &recipient,
+            profile_get,
+            &mcp_scope,
+        )
+        .unwrap();
+        assert!(
+            !HostedProfileService::authorized(
+                &state,
+                &recipient,
+                &[],
+                &profile_id,
+                Action::Delete,
+                "profile.delete",
+            )
+            .unwrap()
+        );
+        assert!(
+            !HostedProfileService::authorized(
+                &state,
+                &Principal {
+                    token_scopes: Some(Default::default()),
+                    ..recipient.clone()
+                },
+                &[],
+                &profile_id,
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+
+        state
+            .resources
+            .write()
+            .unwrap()
+            .grant(
+                &owner,
+                &admin_grants,
+                ResourceGrant {
+                    id: GrantId::from_str("rg_profile_share_deny").unwrap(),
+                    workspace_id,
+                    resource_id,
+                    member_id,
+                    action: Action::Read,
+                    effect: Effect::Deny,
+                },
+            )
+            .unwrap();
+        assert!(
+            !HostedProfileService::authorized(
+                &state,
+                &recipient,
+                &[],
+                &profile_id,
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+    }
+
+    fn capability_grant(
+        id: &str,
+        account_id: &buglogin_domain::ids::AccountId,
+        capability: &str,
+        action: Action,
+        scope: ResourceScope,
+    ) -> Grant {
+        Grant {
+            id: GrantId::from_str(id).unwrap(),
+            account_id: Some(account_id.clone()),
+            member_id: None,
+            capability: Capability::new(capability).unwrap(),
+            action,
+            scope,
+            effect: Effect::Allow,
+        }
+    }
 }

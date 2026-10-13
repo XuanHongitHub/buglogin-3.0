@@ -12,7 +12,7 @@ use crate::manifest::SyncManifest;
 pub const SYNC_EXPORT_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncExportBlob {
     pub key: String,
     pub size: u64,
@@ -21,7 +21,7 @@ pub struct SyncExportBlob {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncRevision {
     pub generation: u64,
     pub parent_generation: Option<u64>,
@@ -29,7 +29,7 @@ pub struct SyncRevision {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncExport {
     pub schema_version: u16,
     pub export_id: String,

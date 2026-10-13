@@ -301,6 +301,9 @@ async fn account_admin_and_team_crud_are_acl_and_revision_checked() {
         .await
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::OK);
+    let deleted_body = json_body(deleted).await;
+    assert_eq!(deleted_body["team"]["id"], "team_control");
+    assert_eq!(deleted_body["revision"], 2);
 
     let missing = app
         .oneshot(request(
@@ -675,6 +678,7 @@ async fn control_http_flow_enforces_acl_replay_audit_and_redaction() {
     assert_eq!(denied_resource.status(), StatusCode::FORBIDDEN);
 
     let audit = app
+        .clone()
         .oneshot(request(
             "GET",
             "/v1/workspaces/ws_control/audit-events",
@@ -687,7 +691,7 @@ async fn control_http_flow_enforces_acl_replay_audit_and_redaction() {
         .unwrap();
     assert_eq!(audit.status(), StatusCode::OK);
     let audit_body = json_body(audit).await;
-    let events = audit_body.as_array().unwrap();
+    let events = audit_body["items"].as_array().unwrap();
     assert_eq!(
         events
             .iter()
@@ -719,5 +723,67 @@ async fn control_http_flow_enforces_acl_replay_audit_and_redaction() {
     ] {
         assert!(!evidence.contains(secret), "audit leaked {secret}");
     }
+
+    let denied_audit = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/workspaces/ws_control/audit-events",
+            Some(&denied_token),
+            None,
+            Some("control-http-audit-denied"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied_audit.status(), StatusCode::FORBIDDEN);
+
+    let first_page = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/workspaces/ws_control/audit-events?limit=1",
+            Some(&owner_token),
+            None,
+            Some("control-http-audit-page-1"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let first_page = json_body(first_page).await;
+    let first_item = first_page["items"][0]["eventId"].as_str().unwrap();
+    let cursor = first_page["nextCursor"].as_str().unwrap();
+    assert!(cursor.ends_with(first_item));
+
+    let next_page = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/v1/workspaces/ws_control/audit-events?limit=1&cursor={cursor}"),
+            Some(&owner_token),
+            None,
+            Some("control-http-audit-page-2"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next_page.status(), StatusCode::OK);
+    assert_ne!(
+        json_body(next_page).await["items"][0]["eventId"],
+        first_item
+    );
+
+    let invalid_page = app
+        .oneshot(request(
+            "GET",
+            "/v1/workspaces/ws_control/audit-events?limit=101",
+            Some(&owner_token),
+            None,
+            Some("control-http-audit-invalid-limit"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid_page.status(), StatusCode::BAD_REQUEST);
     let _ = fs::remove_dir_all(base);
 }

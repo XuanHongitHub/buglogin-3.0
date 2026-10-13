@@ -6,6 +6,7 @@ import { parse, stringify } from "yaml";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = resolve(root, "docs/contracts/command-registry-v1.yaml");
+const openApiSourcePath = resolve(root, "crates/api/openapi/openapi-v1.yaml");
 const frontendOutputPath = resolve(root, "frontend/src/generated/command-registry.ts");
 const adapterOutputPath = resolve(root, "docs/contracts/adapter-contract-v1.yaml");
 const rustOutputPath = resolve(root, "crates/api/src/commands/generated.rs");
@@ -14,6 +15,8 @@ const rustOnly = process.argv.includes("--rust-only") || process.argv.includes("
 
 const source = await readFile(sourcePath, "utf8");
 const registry = parse(source);
+const openApiSource = await readFile(openApiSourcePath, "utf8");
+const openApi = parse(openApiSource);
 
 if (
   !registry ||
@@ -40,15 +43,92 @@ for (const command of commands) {
   }
 }
 
+const mcpInputs = [...new Set(
+  commands.filter((command) => command.adapters.includes("mcp")).map((command) => command.input),
+)];
+const mcpInputSchemas = Object.fromEntries(mcpInputs.map((name) => [name, makeMcpInputSchema(name, openApi?.components?.schemas)]));
+
 const sourceHash = createHash("sha256").update(source).digest("hex");
+const openApiHash = createHash("sha256").update(openApiSource).digest("hex");
+const schemas = openApi?.components?.schemas;
+const profileTypes = [
+  ["Runtime", schemas?.Runtime],
+  ["ProfileState", schemas?.ProfileState],
+  ["SyncMode", schemas?.SyncMode],
+  ["JsonValue", schemas?.JsonValue],
+  ["Profile", schemas?.Profile],
+  ["ProfileRecord", schemas?.ProfileRecord],
+  ["ProfileCreateInput", schemas?.ProfileCreateCommandInput],
+  ["ProfileProxyAssignment", schemas?.ProfileProxyAssignment],
+  ["ProfileProxyAssignmentGetInput", schemas?.ProfileProxyAssignmentGetInput],
+  ["ProfileProxyAssignmentSetInput", schemas?.ProfileProxyAssignmentSetInput],
+  ["Group", schemas?.Group],
+  ["GroupRecord", schemas?.GroupRecord],
+  ["GroupRecordList", schemas?.GroupRecordList],
+  ["GroupCreateInput", schemas?.GroupCreateInput],
+  ["GroupUpdateInput", schemas?.GroupUpdateInput],
+  ["GroupDeleteInput", schemas?.GroupDeleteInput],
+  ["ProfileGroupsReplaceInput", schemas?.ProfileGroupsReplaceInput],
+  ["ResourceScope", schemas?.ResourceScope],
+  ["Problem", schemas?.Problem],
+  ["OperationStatus", schemas?.OperationStatus],
+  ["Operation", schemas?.Operation],
+  ["ProfileLaunchInput", schemas?.ProfileLaunchInput],
+  ["WebSessionResponse", schemas?.WebSessionResponse],
+  ["WebSession", schemas?.WebSession],
+  ["ApiTokenCreateInput", schemas?.ApiTokenCreateInput],
+  ["ApiToken", schemas?.ApiToken],
+  ["ProxyMetadataInput", schemas?.ProxyMetadataInput],
+  ["ProxyView", schemas?.ProxyView],
+  ["ProxyRecord", schemas?.ProxyRecord],
+  ["ProxyPage", schemas?.ProxyPage],
+  ["ProxyCreateInput", schemas?.ProxyCreateInput],
+  ["ProxyUpdateInput", schemas?.ProxyUpdateInput],
+  ["ProxyDeleteInput", schemas?.ProxyDeleteInput],
+  ["ProxyCreateResult", schemas?.ProxyCreateResult],
+  ["Organization", schemas?.Organization],
+  ["OrganizationRecord", schemas?.OrganizationRecord],
+  ["OrganizationCreateInput", schemas?.OrganizationCreateInput],
+  ["OrganizationUpdate", schemas?.OrganizationUpdate],
+  ["OrganizationPolicy", schemas?.OrganizationPolicy],
+  ["WorkspacePolicy", schemas?.WorkspacePolicy],
+  ["Workspace", schemas?.Workspace],
+  ["WorkspaceUpdate", schemas?.WorkspaceUpdate],
+  ["Team", schemas?.Team],
+  ["TeamRecord", schemas?.TeamRecord],
+  ["MemberRole", schemas?.MemberRole],
+  ["MemberStatus", schemas?.MemberStatus],
+  ["Action", schemas?.Action],
+  ["Effect", schemas?.Effect],
+  ["ProxyProtocol", schemas?.ProxyProtocol],
+  ["Member", schemas?.Member],
+  ["ResourceKind", schemas?.ResourceKind],
+  ["ResourceState", schemas?.ResourceState],
+  ["Resource", schemas?.Resource],
+  ["Grant", schemas?.Grant],
+  ["GrantCreateInput", schemas?.GrantCreateInput],
+  ["AuditResource", schemas?.AuditResource],
+  ["AuditEvent", schemas?.AuditEvent],
+  ["AuditEventPage", schemas?.AuditEventPage],
+  ["ProxyCheckInput", schemas?.ProxyCheckInput],
+  ["ProxyCheckResult", schemas?.ProxyCheckResult],
+  ["VersionedProfile", schemas?.VersionedProfile],
+  ["VersionedProfilePage", schemas?.VersionedProfilePage],
+].map(([name, schema]) => renderOpenApiType(name, schema));
+const generatedSchemaNames = new Set(profileTypes.flatMap((type) => [...type.matchAll(/^export type (\w+)/gm)].map((match) => match[1])));
+for (const [name, schema] of Object.entries(schemas ?? {})) {
+  if (!generatedSchemaNames.has(name)) profileTypes.push(renderOpenApiType(name, schema));
+}
 const frontendOutput = render({
   registryId: requiredString(registry.registryId, "registryId"),
   version: requiredString(registry.version, "version"),
   sourceHash,
+  openApiHash,
+  profileTypes,
   commands,
 });
 const adapterOutput = renderAdapters(commands, sourceHash);
-const rustOutput = renderRust(commands, sourceHash);
+const rustOutput = renderRust(commands, sourceHash, mcpInputSchemas);
 
 if (checkOnly) {
   if (!rustOnly) {
@@ -71,6 +151,73 @@ async function checkGenerated(path, expected) {
     console.error(`Generated file is stale: ${path}`);
     process.exitCode = 1;
   }
+}
+
+function renderOpenApiType(name, schema) {
+  if (!schema || typeof schema !== "object") {
+    throw new Error(`OpenAPI schema ${name} is required for generated frontend types`);
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    const values = JSON.stringify(schema.enum);
+    const constant = `${name.replace(/([a-z])([A-Z])/g, "$1_$2").toUpperCase()}_VALUES`;
+    return `export const ${constant} = ${values} as const;\nexport type ${name} = (typeof ${constant})[number];`;
+  }
+  if (name === "JsonValue") {
+    return "export interface JsonObject { [key: string]: JsonValue; }\nexport type JsonValue = JsonObject | JsonValue[] | string | number | boolean | null;";
+  }
+  return `export type ${name} = ${schemaToTypeScript(schema, name)};`;
+}
+
+function schemaToTypeScript(schema, owner) {
+  if (schema.$ref) return schema.$ref.split("/").at(-1);
+  if (schema.const !== undefined) return JSON.stringify(schema.const);
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    return schema.enum.map((value) => JSON.stringify(value)).join(" | ");
+  }
+  if (Array.isArray(schema.oneOf)) {
+    return schema.oneOf.map((variant) => schemaToTypeScript(variant, owner)).join(" | ");
+  }
+  if (Array.isArray(schema.allOf)) {
+    return schema.allOf.map((variant) => schemaToTypeScript(variant, owner)).join(" & ");
+  }
+  if (Array.isArray(schema.type)) {
+    return schema.type.map((type) => schemaToTypeScript({ ...schema, type }, owner)).join(" | ");
+  }
+  if (schema.type === "array") {
+    if (!schema.items) throw new Error(`OpenAPI array ${owner} is missing items`);
+    return `Array<${schemaToTypeScript(schema.items, owner)}>`;
+  }
+  if (schema.type === "object") {
+    if (schema.properties) {
+      if (schema.required !== undefined && !Array.isArray(schema.required)) {
+        throw new Error(`OpenAPI object ${owner} has invalid required fields`);
+      }
+      if (Object.keys(schema.properties).length === 0 && schema.additionalProperties === false) {
+        return "Record<string, never>";
+      }
+      const fields = Object.entries(schema.properties).map(([field, property]) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Invalid ${owner} field name: ${field}`);
+        const optional = (schema.required ?? []).includes(field) ? "" : "?";
+        return `  ${field}${optional}: ${schemaToTypeScript(property, `${owner}.${field}`)};`;
+      });
+      if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+        fields.push(`  [key: string]: ${schemaToTypeScript(schema.additionalProperties, `${owner} additional property`)};`);
+      } else if (schema.additionalProperties === true) {
+        fields.push("  [key: string]: unknown;");
+      }
+      return `{\n${fields.join("\n")}\n}`;
+    }
+    if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+      return `Record<string, ${schemaToTypeScript(schema.additionalProperties, owner)}>`;
+    }
+    return "Record<string, unknown>";
+  }
+  if (schema.type === "string") return "string";
+  if (schema.type === "integer" || schema.type === "number") return "number";
+  if (schema.type === "boolean") return "boolean";
+  if (schema.type === "null") return "null";
+  if (!schema.type) return "unknown";
+  throw new Error(`Unsupported OpenAPI type ${schema.type} for ${owner}`);
 }
 
 function renderAdapters(commands, sourceHash) {
@@ -314,7 +461,7 @@ function numberValue(value, path) {
   return value;
 }
 
-function renderRust(commands, sourceHash) {
+function renderRust(commands, sourceHash, mcpInputSchemas) {
   const enumVariant = (value) =>
     value
       .split("-")
@@ -337,6 +484,14 @@ function renderRust(commands, sourceHash) {
     ),`,
     )
     .join("\n");
+  const inputSchemaArms = Object.entries(mcpInputSchemas)
+    .map(([name, schema]) => {
+      const serialized = JSON.stringify(schema);
+      const hashes = [...serialized.matchAll(/"#+/g)].map((match) => match[0].length);
+      const delimiter = "#".repeat(Math.max(1, ...hashes));
+      return `        CommandSchema::${name} => r${delimiter}\"${serialized}\"${delimiter},`;
+    })
+    .join("\n");
   return `// @generated by scripts/generate-api.mjs; do not edit.
 // Source SHA-256: ${sourceHash}
 
@@ -346,10 +501,43 @@ pub const COMMAND_REGISTRY_SOURCE_SHA256: &str =
 pub(crate) const COMMANDS: &[CommandMetadata] = &[
 ${rows}
 ];
+
+pub(crate) fn mcp_input_schema(schema: CommandSchema) -> Option<serde_json::Value> {
+    let raw = match schema {
+${inputSchemaArms}
+        _ => return None,
+    };
+    serde_json::from_str(raw).ok()
+}
 `;
 }
 
-function render({ registryId, version, sourceHash, commands }) {
+function makeMcpInputSchema(name, components) {
+  if (!components || !Object.hasOwn(components, name)) {
+    throw new Error(`MCP command input schema is missing from OpenAPI: ${name}`);
+  }
+  const definitions = {};
+  const visit = (schema) => {
+    if (Array.isArray(schema)) return schema.map(visit);
+    if (!schema || typeof schema !== "object") return schema;
+    if (typeof schema.$ref === "string") {
+      const match = schema.$ref.match(/^#\/components\/schemas\/([^/]+)$/);
+      if (!match) throw new Error(`Unsupported MCP input schema reference: ${schema.$ref}`);
+      const target = match[1];
+      if (!Object.hasOwn(components, target)) throw new Error(`Unknown OpenAPI schema reference: ${schema.$ref}`);
+      if (!Object.hasOwn(definitions, target)) {
+        definitions[target] = {};
+        definitions[target] = visit(components[target]);
+      }
+      return { ...schema, $ref: `#/$defs/${target}` };
+    }
+    return Object.fromEntries(Object.entries(schema).map(([key, value]) => [key, visit(value)]));
+  };
+  const root = visit({ $ref: `#/components/schemas/${name}` });
+  return { ...root, $defs: definitions };
+}
+
+function render({ registryId, version, sourceHash, openApiHash, profileTypes, commands }) {
   const quote = (value) => JSON.stringify(value);
   const array = (values) => `[${values.map(quote).join(", ")}]`;
   const metadata = commands
@@ -376,6 +564,7 @@ function render({ registryId, version, sourceHash, commands }) {
     .join("\n");
   return `// @generated by scripts/generate-api.mjs; do not edit.
 // Source: ${registryId} v${version}; SHA-256: ${sourceHash}
+// OpenAPI source SHA-256: ${openApiHash}
 
 export const COMMAND_REGISTRY_ID = ${quote(registryId)} as const;
 export const COMMAND_REGISTRY_VERSION = ${quote(version)} as const;
@@ -385,6 +574,8 @@ export const COMMAND_REGISTRY_SOURCE_SHA256 =
 export type CommandId =
 ${idUnion};
 export type CommandKind = "query" | "command" | "operation" | "subscription";
+
+${profileTypes.join("\n\n")}
 
 export type CommandMetadata = {
   readonly id: CommandId;

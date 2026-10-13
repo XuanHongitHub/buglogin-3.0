@@ -230,6 +230,31 @@ impl LocalRepository {
         Ok(destination)
     }
 
+    pub fn quarantined_path<T: LocalEntity>(
+        &self,
+        expected_revision: u64,
+        id: &str,
+    ) -> Result<Option<PathBuf>, Problem> {
+        validate_id(id)?;
+        let destination = self
+            .root
+            .join("quarantine")
+            .join(T::KIND.directory())
+            .join(format!("{id}-{expected_revision}"));
+        let metadata = match fs::metadata(&destination) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_problem("inspect quarantine entity", &error)),
+        };
+        if !metadata.is_dir() {
+            return Err(quarantine_corrupt());
+        }
+        if latest_revision(&destination.join("revisions"))? != Some(expected_revision) {
+            return Err(quarantine_corrupt());
+        }
+        Ok(Some(destination))
+    }
+
     fn write<T: LocalEntity>(
         &self,
         expected_revision: Option<u64>,
@@ -353,6 +378,15 @@ fn latest_revision(directory: &Path) -> Result<Option<u64>, Problem> {
         latest = Some(latest.map_or(revision, |current: u64| current.max(revision)));
     }
     Ok(latest)
+}
+
+fn quarantine_corrupt() -> Problem {
+    Problem::new(
+        "storage_quarantine_corrupt",
+        "Quarantined entity does not match its expected revision",
+        500,
+        "storage",
+    )
 }
 
 fn read_revision<T: DeserializeOwned>(path: &Path) -> Result<Option<Versioned<T>>, Problem> {

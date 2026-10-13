@@ -18,9 +18,9 @@ use buglogin_domain::{
     permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope},
     profile::ProfileArchiveState,
 };
-use buglogin_network::proxy::ProxyRow;
+use buglogin_network::proxy::{ProxyRow, parse_lines};
 use buglogin_storage::secrets::SecretVersion;
-use buglogin_sync::coordination::{CoordinationAuth, CoordinationBackend, CoordinationScope};
+use buglogin_sync::coordination::{CoordinationAuth, CoordinationScope};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,7 +32,8 @@ use crate::{
     auth_vault::AuthVault,
     profile_projection::{HydratedProxyCredential, ProfileProjection},
     profile_runtime::{
-        LaunchRequest, LeaseScope, ManagedCoordination, ProfileRuntimeHandle, spawn_profile_runtime,
+        DesktopSyncBackend, LaunchRequest, LeaseScope, ManagedCoordination, ProfileRuntimeHandle,
+        spawn_profile_runtime,
     },
     proxy_bridge::{ProxyBridgeHandle, ProxyBridgeSpec},
     proxy_credential_vault::ProxyCredentialVault,
@@ -79,6 +80,19 @@ struct PendingDeviceAuthorization {
 struct ProxyCredentialInput {
     username: String,
     password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProxyParseInput {
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProxyCheckInput {
+    workspace_id: String,
+    proxy_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -393,6 +407,58 @@ impl ProductionDesktopState {
         payload: Value,
     ) -> Result<CommandResult<Value>, Problem> {
         match invoke_name {
+            "proxy_parse" => local_proxy_parse(payload, correlation_id),
+            "proxy_check" => {
+                let input: ProxyCheckInput = serde_json::from_value(payload)
+                    .map_err(|_| invalid_input("proxyId", correlation_id))?;
+                let workspace_id = WorkspaceId::new(input.workspace_id)
+                    .map_err(|_| invalid_input("workspaceId", correlation_id))?;
+                let proxy_id = ProxyId::new(input.proxy_id)
+                    .map_err(|_| invalid_input("proxyId", correlation_id))?;
+                let proxy = self
+                    .client
+                    .proxy_for_launch(&workspace_id, &proxy_id, correlation_id)
+                    .await?;
+                let credential = self.proxy_credential_vault.load(
+                    &workspace_id,
+                    &proxy.proxy_id,
+                    proxy.revision,
+                    correlation_id,
+                )?;
+                if proxy.has_credential && credential.is_none() {
+                    return Err(Problem::new(
+                        "proxy_secret_unavailable",
+                        "This device does not have the selected proxy credentials in its operating system vault",
+                        409,
+                        correlation_id,
+                    ));
+                }
+                if !proxy.has_credential && credential.is_some() {
+                    return Err(Problem::new(
+                        "proxy_credential_state_mismatch",
+                        "Proxy credential state does not match the API record",
+                        409,
+                        correlation_id,
+                    ));
+                }
+                let latency_ms = crate::proxy_bridge::check_proxy_connectivity(ProxyBridgeSpec {
+                    protocol: proxy.protocol,
+                    host: proxy.host,
+                    port: proxy.port,
+                    credential,
+                })
+                .await?;
+                Ok(result(
+                    "proxy.check",
+                    correlation_id,
+                    json!({
+                        "proxyId": proxy_id,
+                        "revision": proxy.revision,
+                        "status": "healthy",
+                        "latencyMs": latency_ms
+                    }),
+                ))
+            }
             "proxy_create" | "proxy_update" | "proxy_delete" => {
                 self.invoke_proxy_mutation(invoke_name, correlation_id, idempotency_key, payload)
                     .await
@@ -467,7 +533,7 @@ impl ProductionDesktopState {
                 let key = validate_idempotency_key(idempotency_key, correlation_id)?;
                 let hash = payload_hash(&payload)?;
                 let input: ProfileStopInput = parse_payload(payload, correlation_id)?;
-                let profile_id = parse_profile_id(&input.id, correlation_id)?;
+                let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
                 let action_correlation = correlation_id.to_owned();
                 let sync_idempotency_key = key.to_owned();
                 let data = self
@@ -1229,7 +1295,26 @@ impl ProductionDesktopState {
             auth: &auth,
         };
         let profile = self.client.profile(&profile_id, &correlation_id).await?;
-        let proxy_snapshot = match profile.value.proxy_id.as_ref() {
+        let pending_proxy_assignment = self
+            .client
+            .profile_proxy_assignment(&binding.workspace_id, &profile_id, &correlation_id)
+            .await?;
+        if pending_proxy_assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.expected_profile_revision != profile.revision)
+        {
+            return Err(Problem::new(
+                "profile_proxy_assignment_stale",
+                "Profile proxy assignment is stale; refresh the profile before syncing",
+                409,
+                &correlation_id,
+            ));
+        }
+        let selected_proxy_id = pending_proxy_assignment
+            .as_ref()
+            .map(|assignment| assignment.proxy_id.clone())
+            .unwrap_or_else(|| profile.value.proxy_id.clone());
+        let proxy_snapshot = match selected_proxy_id.as_ref() {
             Some(proxy_id) => {
                 let proxy_info = self
                     .client
@@ -1352,11 +1437,13 @@ impl ProductionDesktopState {
         .try_collect::<Vec<()>>()
         .await?;
         self.client
-            .commit_manifest(
+            .commit_manifest_with_reconciliation(
                 scope,
                 &binding.resource_id,
                 &lease.owner_token,
+                pending_proxy_assignment.as_ref().map(|_| profile.revision),
                 manifest.clone(),
+                &correlation_id,
             )
             .await?;
         self.client
@@ -1716,9 +1803,9 @@ struct ProfileLaunchInput {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProfileStopInput {
-    id: String,
+    profile_id: String,
 }
 
 #[derive(Deserialize)]
@@ -1833,6 +1920,50 @@ fn result(command_id: &str, correlation_id: &str, data: Value) -> CommandResult<
     }
 }
 
+fn local_proxy_parse(
+    payload: Value,
+    correlation_id: &str,
+) -> Result<CommandResult<Value>, Problem> {
+    let input: ProxyParseInput =
+        serde_json::from_value(payload).map_err(|_| invalid_input("text", correlation_id))?;
+    if input.text.len() > 1_048_576 {
+        return Err(Problem::new(
+            "proxy_input_too_large",
+            "Proxy input exceeds the maximum size",
+            413,
+            correlation_id,
+        ));
+    }
+    let report = parse_lines(&input.text);
+    let mut rows = report
+        .rows
+        .iter()
+        .map(|row| {
+            json!({
+                "protocol": row.protocol,
+                "endpoint": format!("{}:{}", row.host, row.port),
+                "valid": true
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.extend(
+        report
+            .errors
+            .iter()
+            .map(|error| json!({ "line": error.line, "valid": false, "error": error.code })),
+    );
+    Ok(result(
+        "proxy.parse",
+        correlation_id,
+        json!({
+            "validCount": report.rows.len(),
+            "invalidCount": report.errors.len(),
+            "duplicateCount": report.duplicates,
+            "rows": rows
+        }),
+    ))
+}
+
 fn unavailable(code: &'static str, correlation_id: &str) -> Problem {
     Problem::new(
         code,
@@ -1873,7 +2004,7 @@ fn production_sync_not_ready() -> Problem {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopState, production_sync_not_ready, production_transport};
+    use super::{DesktopState, local_proxy_parse, production_sync_not_ready, production_transport};
     use buglogin_domain::errors::Problem;
     use serde_json::json;
 
@@ -1911,5 +2042,22 @@ mod tests {
         assert_eq!(error.status, 503);
         assert!(error.retryable);
         assert_eq!(error.correlation_id, "desktop-production");
+    }
+
+    #[test]
+    fn production_proxy_parse_stays_local_and_redacts_credentials() {
+        let result = local_proxy_parse(
+            json!({
+                "text": "http://proxy-user:proxy-secret@127.0.0.1:8080\ninvalid"
+            }),
+            "cor_proxy_parse_local",
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert_eq!(result.data["validCount"], 1);
+        assert_eq!(result.data["invalidCount"], 1);
+        assert_eq!(result.data["rows"][0]["endpoint"], "127.0.0.1:8080");
+        assert!(!serialized.contains("proxy-user"));
+        assert!(!serialized.contains("proxy-secret"));
     }
 }

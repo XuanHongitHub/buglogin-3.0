@@ -260,7 +260,7 @@ pub async fn kill_browser_profile(
     profile: Value,
 ) -> Result<(), Problem> {
     let profile_id = profile_id(&profile)?;
-    run_operation(&state, "profile_stop", json!({ "id": profile_id })).await?;
+    run_operation(&state, "profile_stop", json!({ "profileId": profile_id })).await?;
     app.emit(
         "profile-running-changed",
         json!({ "id": profile_id, "is_running": false }),

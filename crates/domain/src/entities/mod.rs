@@ -37,6 +37,26 @@ pub enum SyncMode {
     Disabled,
 }
 
+/// Stable command input shared by REST, MCP, and the native desktop adapter.
+/// Identity, runtime state, timestamps, and sync authority are assigned by the
+/// owning backend rather than accepted from callers.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileCreateInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    pub runtime: Runtime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
@@ -57,6 +77,20 @@ pub struct Profile {
     pub sync_mode: Option<SyncMode>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileRecord {
+    #[serde(flatten)]
+    pub profile: Profile,
+    pub revision: u64,
+}
+
+impl ProfileRecord {
+    pub fn new(profile: Profile, revision: u64) -> Self {
+        Self { profile, revision }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

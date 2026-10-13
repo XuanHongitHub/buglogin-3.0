@@ -184,6 +184,32 @@ impl ResourceService {
         }
         matching.any(|grant| grant.effect == Effect::Allow)
     }
+
+    pub fn is_allowed_in_workspace(
+        &self,
+        resource: &ResourceId,
+        workspace: &WorkspaceId,
+        member: &MemberId,
+        action: Action,
+    ) -> bool {
+        if !self
+            .resources
+            .get(resource)
+            .is_some_and(|value| &value.workspace_id == workspace)
+        {
+            return false;
+        }
+        let mut matching = self.grants.values().filter(|grant| {
+            &grant.workspace_id == workspace
+                && &grant.resource_id == resource
+                && &grant.member_id == member
+                && grant.action == action
+        });
+        if matching.clone().any(|grant| grant.effect == Effect::Deny) {
+            return false;
+        }
+        matching.any(|grant| grant.effect == Effect::Allow)
+    }
 }
 
 fn authorize_capability(

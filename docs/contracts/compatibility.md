@@ -8,6 +8,7 @@ WP-47 treats `docs/contracts/command-registry-v1.yaml` as the canonical command 
 - `domain-schema-v2.json` adds organization/workspace/team/member/resource/grant plus VPN and extension migration authority.
 - VPN configuration uses a vault-backed `configRef`; extension bytes use a checksum-bound `artifactRef`. Inline secrets or binary payloads are incompatible.
 - Readers reject unknown major versions. Migration may translate v1 into v2, never silently reinterpret v2 as v1.
+- Organization/workspace inventory is hosted-authority data. Production desktop reads it through the Rust HTTPS adapter; the standalone local repository does not fabricate empty lists for that hosted-only surface.
 
 ## Drift rules
 
@@ -26,13 +27,12 @@ cargo test -p buglogin-api --test compatibility
 pnpm check:api
 ```
 
-## Current Gate 4 blockers
+## Current Gate 4 evidence
 
-As of 2026-07-20, the checks intentionally report existing upstream drift rather than changing contracts outside WP-47 ownership:
+The previous 2026-07-20 drift list is stale. On 2026-10-12, the current worktree passed all listed interface-parity checks:
 
-- Canonical REST OpenAPI omits `migration.import`, `migration.inspect`, and `proxy.parse`.
-- Runtime REST OpenAPI exposes only `system.health.get` and `proxy.parse`.
-- Tauri adapter mappings omit eight commands declared for Tauri.
-- MCP adapter mappings omit five commands declared for MCP.
+- `cargo test -p buglogin-api --test compatibility` — REST OpenAPI, Tauri commands, MCP tools, and generated client compatibility (4 passed).
+- `pnpm check:api` — canonical registry, REST OpenAPI, Tauri, MCP, and generated Rust/frontend artifacts (7 passed).
+- `node --test tests/contracts/contract-drift.test.mjs` — REST OpenAPI, adapter mappings, and generated client metadata (7 passed).
 
-Gate 4 interface parity remains blocked until the owning packets update their OpenAPI and adapter contracts. WP-47 must not baseline or suppress these differences.
+These checks prove command/interface parity for the checked artifacts. They do not prove hosted staging behavior, end-to-end role semantics, production sync readiness, or Windows/macOS release readiness; those remain separate gates.

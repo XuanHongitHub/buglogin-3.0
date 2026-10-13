@@ -75,6 +75,11 @@ async fn transport_authenticates_and_serves_json_rpc_tools() {
         listed["result"]["tools"].as_array().unwrap().len(),
         tools().len()
     );
+    for tool in listed["result"]["tools"].as_array().unwrap() {
+        assert!(tool["inputSchema"]["$ref"].is_string());
+        assert!(tool["inputSchema"]["$defs"].is_object());
+        assert_ne!(tool["inputSchema"]["additionalProperties"], true);
+    }
 
     let called = app
         .oneshot(request(

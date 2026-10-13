@@ -10,16 +10,112 @@ use buglogin_domain::{
 use buglogin_sync::coordination::{
     CoordinationAuth, CoordinationBackend, CoordinationScope, LeaseGrant,
 };
+use buglogin_sync::manifest::SyncManifest;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::proxy_bridge::ProxyBridgeHandle;
 
 #[derive(Clone)]
 pub struct ManagedCoordination {
-    pub backend: Arc<dyn CoordinationBackend>,
+    pub backend: Arc<dyn DesktopSyncBackend>,
     pub auth: CoordinationAuth,
     pub lease_ttl: Duration,
     pub heartbeat_interval: Duration,
+}
+
+#[async_trait::async_trait]
+pub trait DesktopSyncBackend: Send + Sync {
+    async fn acquire_lease_idempotent(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        ttl: Duration,
+        idempotency_key: &str,
+    ) -> Result<LeaseGrant, Problem>;
+    async fn renew_lease(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        ttl: Duration,
+    ) -> Result<LeaseGrant, Problem>;
+    async fn release_lease(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+    ) -> Result<(), Problem>;
+    async fn current_manifest(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+    ) -> Result<Option<SyncManifest>, Problem>;
+    async fn commit_manifest(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        expected_profile_revision: Option<u64>,
+        manifest: SyncManifest,
+    ) -> Result<(), Problem>;
+}
+
+#[async_trait::async_trait]
+impl<T: CoordinationBackend + ?Sized> DesktopSyncBackend for T {
+    async fn acquire_lease_idempotent(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        ttl: Duration,
+        idempotency_key: &str,
+    ) -> Result<LeaseGrant, Problem> {
+        CoordinationBackend::acquire_lease_idempotent(
+            self,
+            scope,
+            resource_id,
+            ttl,
+            idempotency_key,
+        )
+        .await
+    }
+
+    async fn renew_lease(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        ttl: Duration,
+    ) -> Result<LeaseGrant, Problem> {
+        CoordinationBackend::renew_lease(self, scope, resource_id, owner_token, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+    ) -> Result<(), Problem> {
+        CoordinationBackend::release_lease(self, scope, resource_id, owner_token).await
+    }
+
+    async fn current_manifest(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+    ) -> Result<Option<SyncManifest>, Problem> {
+        CoordinationBackend::current_manifest(self, scope, resource_id).await
+    }
+
+    async fn commit_manifest(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        _expected_profile_revision: Option<u64>,
+        manifest: SyncManifest,
+    ) -> Result<(), Problem> {
+        CoordinationBackend::commit_manifest(self, scope, resource_id, owner_token, manifest).await
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +270,7 @@ struct RunningProfile {
     profile_path: PathBuf,
     lease: Option<LeaseGrant>,
     process_stopped: bool,
+    sync_pending: bool,
     proxy_bridge: Option<ProxyBridgeHandle>,
 }
 
@@ -223,6 +320,8 @@ where
                     let _ = reply.send(runtime.authority(&profile_id));
                 }
                 Some(RuntimeCommand::RunningProfiles { reply }) => {
+                    // This list also guards logout/reconfiguration. Keep profiles
+                    // with a pending sync lease here even after their process stops.
                     let mut profiles = runtime.running.keys().cloned().collect::<Vec<_>>();
                     profiles.sort();
                     let _ = reply.send(profiles);
@@ -321,6 +420,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 profile_path: request.profile_path,
                 lease,
                 process_stopped: false,
+                sync_pending: false,
                 proxy_bridge,
             },
         );
@@ -367,6 +467,9 @@ impl<C: ProcessController> ProfileRuntime<C> {
         if let Some(proxy_bridge) = proxy_bridge {
             proxy_bridge.stop().await?;
         }
+        if let Some(running) = self.running.get_mut(profile_id) {
+            running.sync_pending = true;
+        }
         Ok(StopReceipt {
             profile_path,
             lease,
@@ -410,7 +513,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             if self
                 .running
                 .get(&profile_id)
-                .is_some_and(|running| running.process_stopped)
+                .is_some_and(|running| running.process_stopped && !running.sync_pending)
             {
                 if release(self.coordination.clone(), &lease).await.is_ok() {
                     self.running.remove(&profile_id);
@@ -437,6 +540,9 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 }
                 _ => {
                     let _ = self.stop_for_sync(&profile_id).await;
+                    if let Some(running) = self.running.get_mut(&profile_id) {
+                        running.sync_pending = false;
+                    }
                 }
             }
         }
@@ -661,6 +767,7 @@ mod tests {
 
     struct TestCoordination {
         log: Arc<Mutex<Vec<&'static str>>>,
+        renewals: Arc<AtomicUsize>,
         fail_acquire: AtomicBool,
         fail_renew: AtomicBool,
         release_failures: AtomicUsize,
@@ -671,6 +778,7 @@ mod tests {
         fn new(log: Arc<Mutex<Vec<&'static str>>>) -> Self {
             Self {
                 log,
+                renewals: Arc::new(AtomicUsize::new(0)),
                 fail_acquire: AtomicBool::new(false),
                 fail_renew: AtomicBool::new(false),
                 release_failures: AtomicUsize::new(0),
@@ -709,6 +817,7 @@ mod tests {
             owner_token: &str,
             _ttl: Duration,
         ) -> Result<LeaseGrant, Problem> {
+            self.renewals.fetch_add(1, Ordering::SeqCst);
             if self.fail_renew.load(Ordering::SeqCst) {
                 self.log.lock().unwrap().push("renew");
                 return Err(unavailable());
@@ -997,6 +1106,39 @@ mod tests {
             *log.lock().unwrap(),
             vec!["acquire", "launch", "stop", "release"]
         );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_profile_keeps_lease_renewing_until_sync_completes() {
+        let path = profile_path("sync-lease-renewal");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        let renewals = Arc::clone(&backend.renewals);
+        let coordination = ManagedCoordination {
+            backend: backend.clone(),
+            auth: CoordinationAuth::new("actor-runtime", "private-bearer").unwrap(),
+            lease_ttl: Duration::from_secs(1),
+            heartbeat_interval: Duration::from_millis(10),
+        };
+        let handle = spawn_profile_runtime(controller, Some(coordination));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        handle.launch(request(&path, true)).await.unwrap();
+        handle.stop_for_sync(profile_id.clone()).await.unwrap();
+
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let during_sync = log.lock().unwrap().clone();
+        assert!(renewals.load(Ordering::SeqCst) >= 2);
+        assert!(!during_sync.contains(&"release"));
+
+        handle.complete_stop(profile_id).await.unwrap();
+        assert!(log.lock().unwrap().contains(&"release"));
+        handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
     }
 

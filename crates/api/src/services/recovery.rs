@@ -25,6 +25,7 @@ const RATE_RECORD_TYPE: &str = "recovery_rate";
 const TOKEN_SECONDS: u64 = 15 * 60;
 const RATE_WINDOW_SECONDS: u64 = 15 * 60;
 const MAX_REQUESTS_PER_WINDOW: u32 = 3;
+const MAX_RATE_CAS_RETRIES: usize = 32;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct RecoveryDeliveryMessage {
@@ -160,87 +161,108 @@ impl RecoveryService {
             return Err(delivery_unavailable());
         }
         let rate_id = hex(&sha256(identifier.trim().to_lowercase().as_bytes()));
-        let (rate, rate_revision) = self
-            .store
-            .load_versioned::<RecoveryRateRecord>(TENANT, RATE_RECORD_TYPE, &rate_id)?
-            .unwrap_or((
+        let request_nonce = random_token()?;
+        let identity = self.find_identity(identifier)?;
+        for _ in 0..MAX_RATE_CAS_RETRIES {
+            let (rate, rate_revision) = self
+                .store
+                .load_versioned::<RecoveryRateRecord>(TENANT, RATE_RECORD_TYPE, &rate_id)?
+                .unwrap_or((
+                    RecoveryRateRecord {
+                        window_started_at: now,
+                        attempts: 0,
+                    },
+                    0,
+                ));
+            let mut next_rate = if now.saturating_sub(rate.window_started_at) >= RATE_WINDOW_SECONDS
+            {
                 RecoveryRateRecord {
                     window_started_at: now,
                     attempts: 0,
-                },
-                0,
-            ));
-        let mut next_rate = if now.saturating_sub(rate.window_started_at) >= RATE_WINDOW_SECONDS {
-            RecoveryRateRecord {
-                window_started_at: now,
-                attempts: 0,
-            }
-        } else {
-            rate
-        };
-        next_rate.attempts = next_rate.attempts.saturating_add(1);
-        let identity = self.find_identity(identifier)?;
-        let suppressed = next_rate.attempts > MAX_REQUESTS_PER_WINDOW || identity.is_none();
-        let mut puts = vec![ControlPut {
-            tenant_id: TENANT.into(),
-            record_type: RATE_RECORD_TYPE.into(),
-            record_id: rate_id.clone(),
-            expected_revision: Some(rate_revision),
-            value: serde_json::to_value(&next_rate).map_err(|_| corrupt())?,
-        }];
-        let issued = if let Some(identity) = identity.filter(|_| !suppressed) {
-            let raw_token = random_token()?;
-            let token_hash = sha256(raw_token.as_bytes());
-            let record = RecoveryTokenRecord {
-                account_id: identity.account_id.clone(),
-                token_hash,
-                created_at: now,
-                expires_at: now.saturating_add(TOKEN_SECONDS),
-                consumed_at: None,
+                }
+            } else {
+                rate
             };
-            puts.push(ControlPut {
+            next_rate.attempts = next_rate.attempts.saturating_add(1);
+            let suppressed = next_rate.attempts > MAX_REQUESTS_PER_WINDOW || identity.is_none();
+            let mut puts = vec![ControlPut {
                 tenant_id: TENANT.into(),
-                record_type: TOKEN_RECORD_TYPE.into(),
-                record_id: hex(&token_hash),
-                expected_revision: Some(0),
-                value: serde_json::to_value(&record).map_err(|_| corrupt())?,
-            });
-            Some((identity, record, raw_token))
-        } else {
-            None
-        };
-        self.store.execute(ExecuteControlCommand {
-            tenant_id: TENANT.into(),
-            command_id: "auth.recovery.request".into(),
-            idempotency_key: format!("recovery-request-{rate_id}-{}", next_rate.attempts),
-            expected_revisions: Default::default(),
-            puts,
-            deletes: vec![],
-            audit: ControlAuditEntry {
+                record_type: RATE_RECORD_TYPE.into(),
+                record_id: rate_id.clone(),
+                expected_revision: Some(rate_revision),
+                value: serde_json::to_value(&next_rate).map_err(|_| corrupt())?,
+            }];
+            let issued = if let Some(identity) = identity.clone().filter(|_| !suppressed) {
+                let raw_token = random_token()?;
+                let token_hash = sha256(raw_token.as_bytes());
+                let record = RecoveryTokenRecord {
+                    account_id: identity.account_id.clone(),
+                    token_hash,
+                    created_at: now,
+                    expires_at: now.saturating_add(TOKEN_SECONDS),
+                    consumed_at: None,
+                };
+                puts.push(ControlPut {
+                    tenant_id: TENANT.into(),
+                    record_type: TOKEN_RECORD_TYPE.into(),
+                    record_id: hex(&token_hash),
+                    expected_revision: Some(0),
+                    value: serde_json::to_value(&record).map_err(|_| corrupt())?,
+                });
+                Some((identity, record, raw_token))
+            } else {
+                None
+            };
+            let result = self.store.execute(ExecuteControlCommand {
                 tenant_id: TENANT.into(),
                 command_id: "auth.recovery.request".into(),
-                actor_id: "anonymous".into(),
-                allowed: true,
-                detail: json!({"state": "accepted"}),
-            },
-            response: HttpResponse {
-                status: 202,
-                headers: Default::default(),
-                body: Value::Null,
-            },
-        })?;
-        if let Some((identity, record, raw_token)) = issued {
-            if let Err(error) = self.delivery.deliver(RecoveryDeliveryMessage {
-                account_id: identity.account_id,
-                destination: identity.email,
-                raw_token,
-                expires_at: record.expires_at,
-            }) {
-                self.invalidate(&record, now)?;
-                let _ = error;
+                idempotency_key: format!(
+                    "recovery-request-{rate_id}-{}-{}",
+                    &request_nonce[..32],
+                    next_rate.attempts
+                ),
+                expected_revisions: Default::default(),
+                puts,
+                deletes: vec![],
+                audit: ControlAuditEntry {
+                    tenant_id: TENANT.into(),
+                    command_id: "auth.recovery.request".into(),
+                    actor_id: "anonymous".into(),
+                    allowed: true,
+                    detail: json!({"state": "accepted"}),
+                },
+                response: HttpResponse {
+                    status: 202,
+                    headers: Default::default(),
+                    body: Value::Null,
+                },
+            });
+            match result {
+                Ok(_) => {
+                    if let Some((identity, record, raw_token)) = issued {
+                        if let Err(error) = self.delivery.deliver(RecoveryDeliveryMessage {
+                            account_id: identity.account_id,
+                            destination: identity.email,
+                            raw_token,
+                            expires_at: record.expires_at,
+                        }) {
+                            self.invalidate(&record, now)?;
+                            let _ = error;
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(error) if error.code == "storage_revision_conflict" => continue,
+                Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Err(Problem::new(
+            "recovery_rate_limit_busy",
+            "Recovery request could not be recorded; retry shortly",
+            503,
+            "identity",
+        )
+        .retryable(true))
     }
 
     pub fn complete(
@@ -589,6 +611,37 @@ mod tests {
             recovery.request("owner@example.com", second).unwrap();
         }
         assert_eq!(delivery.messages.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn concurrent_recovery_requests_retry_rate_revision_conflicts_without_over_delivery() {
+        let (recovery, _, delivery, store, _) = setup();
+        let barrier = Arc::new(std::sync::Barrier::new(12));
+        let requests = (0..12)
+            .map(|_| {
+                let recovery = recovery.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    recovery.request("owner@example.com", 300)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for request in requests {
+            request
+                .join()
+                .expect("recovery request thread should finish")
+                .expect("CAS conflict should retry without exposing account state");
+        }
+
+        assert_eq!(delivery.messages.lock().unwrap().len(), 3);
+        let rate_id = hex(&sha256(b"owner@example.com"));
+        let rate = store
+            .load::<RecoveryRateRecord>(TENANT, RATE_RECORD_TYPE, &rate_id)
+            .unwrap()
+            .expect("all request attempts should be counted");
+        assert_eq!(rate.attempts, 12);
     }
 
     #[test]

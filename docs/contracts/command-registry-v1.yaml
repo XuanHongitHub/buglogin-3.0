@@ -32,6 +32,14 @@ commands:
     input: EventFilterInput
     output: Event
     audit: metadata-only
+  - id: audit.events.list
+    kind: query
+    capability: CAP-AUD-001
+    action: read
+    adapters: [rest, mcp]
+    input: AuditEventsListInput
+    output: AuditEventPage
+    audit: metadata-only
   - id: profile.list
     kind: query
     capability: profile.read
@@ -44,15 +52,15 @@ commands:
     capability: profile.read
     action: read
     adapters: [tauri, rest, mcp]
-    input: ResourceIdInput
-    output: Profile
+    input: ProfileIdInput
+    output: ProfileRecord
   - id: profile.create
     kind: command
     capability: profile.create
     action: create
     adapters: [tauri, rest, mcp]
     input: ProfileCreateInput
-    output: Profile
+    output: ProfileRecord
     idempotency: required
   - id: profile.clone
     kind: command
@@ -96,7 +104,7 @@ commands:
     capability: profile.stop
     action: execute
     adapters: [tauri, rest, mcp]
-    input: ResourceIdInput
+    input: ProfileIdInput
     output: OperationAccepted
     timeoutMs: 60000
     idempotency: required
@@ -158,7 +166,7 @@ commands:
     action: update
     adapters: [tauri, rest, mcp]
     input: ProfileRevisionInput
-    output: Profile
+    output: ProfileRecord
     idempotency: required
     preconditions: [profile-not-running]
   - id: profile.restore
@@ -167,7 +175,7 @@ commands:
     action: update
     adapters: [tauri, rest, mcp]
     input: ProfileRevisionInput
-    output: Profile
+    output: ProfileRecord
     idempotency: required
   - id: cookie.list
     kind: query
@@ -178,6 +186,15 @@ commands:
     output: CookieListResult
     audit: metadata-only
     preconditions: [profile-not-running]
+  - id: cookie.jobs.inbox
+    kind: query
+    capability: CAP-COOK-001
+    action: read
+    adapters: [rest]
+    input: CookieJobInboxInput
+    output: ConnectedCookieJobInbox
+    audit: metadata-only
+    preconditions: [device-session-bound-to-target-device]
   - id: cookie.stage
     kind: command
     capability: CAP-COOK-001
@@ -211,6 +228,15 @@ commands:
     adapters: [tauri, rest, mcp]
     input: ProxyParseInput
     output: ProxyParseReport
+    audit: metadata-only
+  - id: proxy.check
+    kind: query
+    capability: CAP-NET-002
+    action: read
+    adapters: [tauri]
+    input: ProxyCheckInput
+    output: ProxyCheckResult
+    timeoutMs: 20000
     audit: metadata-only
   - id: proxy.list
     kind: query
@@ -273,6 +299,24 @@ commands:
     idempotency: required
     preconditions: [source-read-only, snapshot-present, dry-run-approved]
     events: [operation.updated, migration.item.updated]
+  - id: migration.control.import
+    kind: command
+    capability: migration.write
+    action: execute
+    adapters: [rest]
+    input: ControlImportInput
+    output: ControlImportResult
+    idempotency: required
+    preconditions: [verified-control-graph, package-identity-bound, dry-run-before-activation]
+  - id: migration.control.rollback
+    kind: command
+    capability: migration.write
+    action: execute
+    adapters: [rest]
+    input: ControlRollbackInput
+    output: ControlImportReceipt
+    idempotency: required
+    preconditions: [exact-rollback-confirmation, imported-graph-unchanged]
   - id: migration.sync.import
     kind: operation
     capability: migration.write
@@ -489,7 +533,7 @@ commands:
     capability: CAP-ORG-001
     action: read
     adapters: [tauri, rest, mcp]
-    input: OrganizationListInput
+    input: Empty
     output: OrganizationPage
   - id: organization.get
     kind: query
@@ -544,27 +588,88 @@ commands:
     input: WorkspaceUpdateInput
     output: Workspace
     idempotency: required
+  - id: group.list
+    kind: query
+    capability: CAP-PROF-003
+    action: read
+    adapters: [rest, mcp]
+    input: GroupListInput
+    output: GroupRecordList
+  - id: group.get
+    kind: query
+    capability: CAP-PROF-003
+    action: read
+    adapters: [rest, mcp]
+    input: GroupIdInput
+    output: GroupRecord
+  - id: group.create
+    kind: command
+    capability: CAP-PROF-003
+    action: create
+    adapters: [rest, mcp]
+    input: GroupCreateInput
+    output: GroupRecord
+    idempotency: required
+  - id: group.update
+    kind: command
+    capability: CAP-PROF-003
+    action: update
+    adapters: [rest, mcp]
+    input: GroupUpdateInput
+    output: GroupRecord
+    idempotency: required
+  - id: group.delete
+    kind: command
+    capability: CAP-PROF-003
+    action: delete
+    adapters: [rest, mcp]
+    input: GroupDeleteInput
+    output: GroupRecord
+    idempotency: required
+  - id: profile.groups.replace
+    kind: command
+    capability: CAP-PROF-003
+    action: update
+    adapters: [rest, mcp]
+    input: ProfileGroupsReplaceInput
+    output: ProfileRecord
+    idempotency: required
+  - id: profile.proxy.assignment.get
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [rest, mcp]
+    input: ProfileProxyAssignmentGetInput
+    output: ProfileProxyAssignment
+  - id: profile.proxy.assignment.set
+    kind: command
+    capability: profile.update
+    action: update
+    adapters: [rest, mcp]
+    input: ProfileProxyAssignmentSetInput
+    output: ProfileProxyAssignment
+    idempotency: required
   - id: team.list
     kind: query
     capability: CAP-TEAM-001
     action: read
     adapters: [tauri, rest, mcp]
     input: TeamListInput
-    output: TeamPage
+    output: TeamRecordList
   - id: team.get
     kind: query
     capability: CAP-TEAM-001
     action: read
     adapters: [tauri, rest, mcp]
     input: TeamIdInput
-    output: Team
+    output: TeamRecord
   - id: team.create
     kind: command
     capability: CAP-TEAM-001
     action: create
     adapters: [tauri, rest, mcp]
     input: TeamCreateInput
-    output: Team
+    output: TeamRecord
     idempotency: required
   - id: team.update
     kind: command
@@ -572,7 +677,15 @@ commands:
     action: update
     adapters: [tauri, rest, mcp]
     input: TeamUpdateInput
-    output: Team
+    output: TeamRecord
+    idempotency: required
+  - id: team.delete
+    kind: command
+    capability: CAP-TEAM-001
+    action: delete
+    adapters: [rest]
+    input: TeamDeleteInput
+    output: TeamRecord
     idempotency: required
   - id: member.list
     kind: query

@@ -1,0 +1,30 @@
+FROM rust:1.95.0-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+RUN cargo build --locked --release --package buglogin-api --bin buglogin-api
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates curl libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 buglogin \
+    && useradd --system --uid 10001 --gid buglogin --no-create-home buglogin
+
+COPY --from=build --chown=10001:10001 /build/target/release/buglogin-api /usr/local/bin/buglogin-api
+
+ENV BUGLOGIN_ENV=production \
+    BUGLOGIN_API_BIND=0.0.0.0:12343
+
+USER 10001:10001
+EXPOSE 12343
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl --fail --silent http://127.0.0.1:12343/v1/readyz || exit 1
+
+ENTRYPOINT ["/usr/local/bin/buglogin-api"]

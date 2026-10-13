@@ -94,6 +94,50 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     });
     let app = router(state.clone());
 
+    let unprivileged = state.issue_token("acct_no_migration_permission").unwrap();
+    for (index, (uri, value)) in [
+        (
+            "/v1/migrations/control/import",
+            json!({"packageId":"pkg-auth-import"}),
+        ),
+        (
+            "/v1/migrations/control/rollback",
+            json!({"packageId":"pkg-auth-rollback","confirmation":"ROLLBACK_CONTROL_MIGRATION"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let unauthorized = app
+            .clone()
+            .oneshot(post(
+                "invalid-auth-token",
+                &format!("control-auth-unauthorized-{index:04}"),
+                uri,
+                value.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body(unauthorized).await["code"], "invalid_session");
+
+        let forbidden = app
+            .clone()
+            .oneshot(post(
+                &unprivileged,
+                &format!("control-auth-forbidden-{index:04}"),
+                uri,
+                value,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            forbidden.headers().get("content-type").unwrap(),
+            "application/problem+json"
+        );
+    }
+
     let mut dry = base.clone();
     dry["dryRun"] = json!(true);
     let dry_response = app
@@ -105,7 +149,7 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     let dry_body = body(dry_response).await;
     assert_eq!(dry_body["create"]["accounts"], 2);
     assert_eq!(dry_body["create"]["profileResources"], 1);
-    assert_eq!(account_count(app.clone(), &token).await, 1);
+    assert_eq!(account_count(app.clone(), &token).await, 2);
 
     let activated = app
         .clone()
@@ -117,7 +161,8 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     assert_eq!(activated_body["replayed"], false);
     assert_eq!(activated_body["create"]["workspaces"], 1);
     assert_eq!(activated_body["create"]["profileResources"], 1);
-    assert_eq!(account_count(app.clone(), &token).await, 3);
+    assert_eq!(activated_body["create"]["grants"], 2);
+    assert_eq!(account_count(app.clone(), &token).await, 4);
     let member_token = state.issue_token(member_account_id).unwrap();
     let member_read = app
         .clone()
@@ -128,18 +173,7 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
         ))
         .await
         .unwrap();
-    assert_eq!(member_read.status(), StatusCode::OK);
-    let member_profile = body(member_read).await;
-    assert_eq!(
-        member_profile["value"]["runtimeVersion"],
-        "146.0.7680.177.4"
-    );
-    assert_eq!(member_profile["value"]["note"], "legacy note");
-    assert_eq!(member_profile["value"]["fingerprint"]["language"], "en-US");
-    assert_eq!(
-        member_profile["value"]["runtimeConfig"]["schema_key"],
-        "chromium.runtime-config.v1"
-    );
+    assert_eq!(member_read.status(), StatusCode::FORBIDDEN);
     let member_update = app
         .clone()
         .oneshot(
@@ -190,7 +224,7 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     let rollback_body = body(rollback).await;
     assert_eq!(rollback_status, StatusCode::OK, "{rollback_body}");
     assert_eq!(rollback_body["state"], "rolled_back");
-    assert_eq!(account_count(app.clone(), &token).await, 1);
+    assert_eq!(account_count(app.clone(), &token).await, 2);
     let replay_rollback = app
         .clone()
         .oneshot(post(
@@ -208,7 +242,11 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
 
     let reactivated = app
         .clone()
-        .oneshot(request(&token, "control-import-reactivate-0001", base))
+        .oneshot(request(
+            &token,
+            "control-import-reactivate-0001",
+            base.clone(),
+        ))
         .await
         .unwrap();
     let reactivated_status = reactivated.status();
@@ -216,7 +254,76 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     assert_eq!(reactivated_status, StatusCode::OK, "{reactivated_body}");
     assert_eq!(reactivated_body["state"], "active");
     assert_eq!(reactivated_body["replayed"], false);
-    assert_eq!(account_count(app.clone(), &token).await, 3);
+    assert_eq!(account_count(app.clone(), &token).await, 4);
+
+    for (uri, idempotency, value) in [
+        (
+            "/v1/migrations/control/import",
+            "control-invalid-import-0001",
+            json!({"packageId":"pkg-invalid","unexpected":true}),
+        ),
+        (
+            "/v1/migrations/control/rollback",
+            "control-invalid-rollback-0001",
+            json!({"packageId":"pkg-control-import","confirmation":"ROLLBACK_CONTROL_MIGRATION","unexpected":true}),
+        ),
+    ] {
+        let invalid = app
+            .clone()
+            .oneshot(post(&token, idempotency, uri, value))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            invalid.headers().get("content-type").unwrap(),
+            "application/problem+json"
+        );
+        let invalid_body = body(invalid).await;
+        assert_eq!(invalid_body["code"], "invalid_input");
+        assert_eq!(invalid_body["status"], 422);
+    }
+
+    for (index, pointer) in [
+        "/accounts/0/unknown",
+        "/accounts/0/data/unknown",
+        "/profiles/0/data/unknown",
+        "/profiles/0/data/source_data_object/disposition/unknown",
+        "/organizations/0/source_ref/unknown",
+        "/workspaces/0/data/policy/unknown",
+        "/teams/0/data/unknown",
+        "/members/0/data/unknown",
+        "/resources/0/data/unknown",
+        "/profileResources/0/data/unknown",
+        "/grants/0/data/unknown",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut invalid_value = base.clone();
+        let parent_pointer = pointer.rsplit_once('/').unwrap().0;
+        invalid_value
+            .pointer_mut(parent_pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpectedField".into(), json!(true));
+        let invalid = app
+            .clone()
+            .oneshot(request(
+                &token,
+                &format!("control-nested-unknown-{index:04}"),
+                invalid_value,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{pointer}"
+        );
+        assert_eq!(body(invalid).await["code"], "invalid_input", "{pointer}");
+    }
+    assert_eq!(account_count(app.clone(), &token).await, 4);
 
     let final_rollback = app
         .oneshot(post(

@@ -111,6 +111,15 @@ impl ProfileService {
             .quarantine::<Profile>(expected_revision, profile.id.as_str())
     }
 
+    pub fn quarantined_path(
+        &self,
+        expected_revision: u64,
+        profile_id: &ProfileId,
+    ) -> Result<Option<std::path::PathBuf>, Problem> {
+        self.repository()?
+            .quarantined_path::<Profile>(expected_revision, profile_id.as_str())
+    }
+
     fn repository(&self) -> Result<&LocalRepository, Problem> {
         self.repository.as_ref().ok_or_else(|| {
             Problem::new(
