@@ -1,6 +1,6 @@
 # Migration Production-Readiness Evidence Register
 
-Status: audit snapshot, 2026-08-21
+Status: audit snapshot, 2026-10-13
 
 This register separates evidence that can be produced from sanitized fixtures from evidence that requires a production clone, approved staging services, or a real cutover window. No production data, source root, credentials, or production claim is created by this document.
 
@@ -19,7 +19,7 @@ This register separates evidence that can be produced from sanitized fixtures fr
 
 | Gate | Why offline fixtures cannot prove it | Required artifact |
 |---|---|---|
-| Production-clone export | Requires an immutable, access-controlled clone of the legacy production root | Signed inspect/export package plus source before/after hash |
+| Production-clone export | A stable local BugLogin 1.1.84 profile-root clone was inspected on 2026-10-13, but it is not the hosted production clone and contains no organizations/workspaces/memberships/grants export; it also has one missing profile metadata record and 14 partial `bugmini` runtimes | Signed inspect/export package from an immutable hosted production clone, complete control-plane export, and source before/after hash |
 | Source write freeze | Requires the old client/server write path and an approved freeze window | Rejected-write probes, timestamps, operator sign-off |
 | Two complete RC rehearsals | Requires release-candidate binaries and final runbook execution | RC-1 and RC-2 evidence bundles with distinct run IDs |
 | Hosted PostgreSQL/Redis/S3 migration path | Requires trusted staging endpoints and real adapter coordination | Transaction, lease, recovery, and orphan-GC evidence |
