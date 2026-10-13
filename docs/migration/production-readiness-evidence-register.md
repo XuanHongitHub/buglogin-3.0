@@ -15,6 +15,21 @@ This register separates evidence that can be produced from sanitized fixtures fr
 | Fixture coverage index | Present: 28 fixtures | Run the full migration fixture suite and archive the command log | Sanitized regression breadth |
 | Production-readiness manifest | Missing before this register | Generate one per RC with explicit `proven`/`blocked` fields | Prevents evidence overclaiming |
 
+## Isolated live-source rehearsal snapshot — 2026-10-13
+
+This is a database-restore rehearsal from the legacy 1.0 control plane, performed while the source API remained online. It proves that this point-in-time database dump can be restored into an isolated database on the BugIdea host; it does **not** prove write-freeze, complete profile-object migration, application compatibility, or cutover readiness.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Legacy source | PostgreSQL 16.15 database `buglogin`; 26 public tables; database size 10,820,631 bytes | Read-only source; 1.0 API remained online |
+| Snapshot artifact | Custom-format `pg_dump`, `--no-owner --no-privileges`; 166,661 bytes; SHA-256 `e1341386a5eaf2ce5ff4aa68fe5335e18f0a248d008d70de9331a8f67a080de6`; `pg_restore --list` succeeded | Verified on workstation and both VPS hosts; owner-restricted copies |
+| Destination | `buglogin3_rehearsal_20261013` on the isolated BugIdea PostgreSQL instance; restored in one transaction with `--exit-on-error --single-transaction --no-owner --no-privileges` | 26 public tables restored |
+| Row-count reconciliation | Exact per-table count comparison between source snapshot and rehearsal database | All 26 tables matched; zero count differences |
+| Access isolation | Database ACL grants `CONNECT` only to owner `postgres`; `PUBLIC` and role `buglogin3` cannot connect | Passed; BugLogin 3 API remained inactive |
+| Source/service integrity | Source database was not modified; old `buglogin-api` PM2 service remained online | Passed for this rehearsal window |
+
+The source was live during `pg_dump`; PostgreSQL's dump is a consistent snapshot, but there was no application write-freeze and therefore no claim that the dump is the final cutover state. The rehearsal database is intentionally inaccessible to the BugLogin 3 service identity. This artifact covers control-plane PostgreSQL only; S3/profile payloads, key distribution, migration transforms, API-level reads, rollback against a populated destination, and native desktop release evidence remain unproven.
+
 ## Still blocked by environment or production controls
 
 | Gate | Why offline fixtures cannot prove it | Required artifact |
