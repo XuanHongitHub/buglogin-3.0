@@ -30,11 +30,31 @@ This is a database-restore rehearsal from the legacy 1.0 control plane, performe
 
 The source was live during `pg_dump`; PostgreSQL's dump is a consistent snapshot, but there was no application write-freeze and therefore no claim that the dump is the final cutover state. The rehearsal database is intentionally inaccessible to the BugLogin 3 service identity. This artifact covers control-plane PostgreSQL only; S3/profile payloads, key distribution, migration transforms, API-level reads, rollback against a populated destination, and native desktop release evidence remain unproven.
 
+## Legacy control-plane and S3 inventory — 2026-10-13
+
+Read-only queries against the same live 1.0 source found 49 workspaces (37 personal, 12 team), 34 hosted profile rows, 91 memberships, 42 share grants, and 14 workspace groups. The `workspaces` schema has no organization relationship or organization table. Profile runtime metadata is mixed: 21 `bugmini`, 4 `bugox`, and 9 `cloak`. The local 1.1.84 data-root snapshot contains only 14 valid profile metadata rows and is not a complete source for this hosted control plane.
+
+Read-only S3 `ListObjectsV2` inventory used the existing 1.0 server credential without emitting credential values, object keys, or object contents:
+
+| Prefix | Objects | Bytes | Migration interpretation |
+|---|---:|---:|---|
+| `buglogin-prod` | 6,801 | 858,029,757 | Includes `workspaces`: 6,729 objects / 858,000,006 bytes; candidate production sync data, linkage not complete |
+| `profiles` | 10,578 | 1,786,636,841 | Separate root; key layout not yet reconciled to hosted profile IDs |
+| `workspaces` | 8,351 | 1,495,646,206 | Separate root; key layout not yet reconciled to hosted workspace IDs |
+| `releases` | 164 | 11,242,861,871 | Browser/desktop release artifacts; must not be included in profile migration |
+| `selfhost-dev` | 17,679 | 1,848,800,956 | Development/self-host data; must not be included in production migration |
+| Other (`meta`, `proxies`) | 25 | 12,241 | Requires explicit ownership/purpose mapping |
+| **Total** | **43,598** | **17,231,987,872** | Inventory only; payload snapshot/import not performed |
+
+Within the candidate `buglogin-prod/workspaces` path, only 23 of the 34 database profile IDs and 13 of the 49 workspace IDs appear as exact path segments. These counts do not prove that missing records have no data elsewhere or that matching objects are complete. Relationship validation found one active share grant whose recipient is an unconsumed invite rather than a direct workspace member; the current migration mapper correctly fails closed for that grant. Organization synthesis and pending-invite/grant treatment require explicit deterministic migration rules before a complete export can be produced.
+
+This S3 credential is shared with 1.0 and can list multiple production, development, profile, workspace, and release prefixes. A `buglogin3/prod` write prefix is not an isolation boundary. No S3 payload was downloaded, changed, or deleted during this inventory.
+
 ## Still blocked by environment or production controls
 
 | Gate | Why offline fixtures cannot prove it | Required artifact |
 |---|---|---|
-| Production-clone export | A stable local BugLogin 1.1.84 profile-root clone was inspected on 2026-10-13, but it is not the hosted production clone and contains no organizations/workspaces/memberships/grants export; it also has one missing profile metadata record and 14 partial `bugmini` runtimes | Signed inspect/export package from an immutable hosted production clone, complete control-plane export, and source before/after hash |
+| Production-clone export | A stable local BugLogin 1.1.84 profile-root clone was inspected, but it has only 14 profile metadata rows versus 34 hosted profile rows. The live control schema has no organizations table, one active grant targets an unconsumed invite, and only 23/34 profile IDs plus 13/49 workspace IDs appear in the candidate S3 prefix | Approved deterministic organization and invite/grant mapping rules; immutable combined source snapshot; complete S3/profile/control-plane reconciliation; signed package and before/after source hash |
 | Source write freeze | Requires the old client/server write path and an approved freeze window | Rejected-write probes, timestamps, operator sign-off |
 | Two complete RC rehearsals | Requires release-candidate binaries and final runbook execution | RC-1 and RC-2 evidence bundles with distinct run IDs |
 | Hosted PostgreSQL/Redis/S3 migration path | Requires trusted staging endpoints and real adapter coordination | Transaction, lease, recovery, and orphan-GC evidence |

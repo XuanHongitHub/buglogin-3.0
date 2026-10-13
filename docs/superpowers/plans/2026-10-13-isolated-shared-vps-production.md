@@ -8,7 +8,7 @@ Operational correction (2026-10-13): a `buglogin3-redis.service` unit was also p
 
 - [x] Locate the existing BugIdea VPS deployment procedure without editing its repository or service configuration. Its deploy script is BugIdea-specific (Git checkout, Laravel migration, PHP-FPM/queue reload) and must not be used for BugLogin.
 - [x] Confirm SSH access and capture a read-only host baseline: 2 vCPU, 3.8 GiB RAM, 60 GiB free disk; Nginx, PostgreSQL and Redis are already present; Docker is unavailable. Recheck immediately before any deployment.
-- [ ] Identify Nginx vhost ownership, firewall policy, and an internal API bind path without editing shared proxy configuration.
+- [x] Identify Nginx vhost ownership, firewall policy, and API bind without editing shared proxy configuration: the enabled Nginx sites are BugIdea-only; UFW is active with deny-incoming default; BugLogin API is configured on `0.0.0.0:12343`, but no process is listening and the API unit is disabled. No BugIdea Nginx file or firewall rule was changed. A dedicated tunnel route is still required before public API verification.
 - [x] Provision a separate PostgreSQL database/role without changing BugIdea app data/configuration; verify TLS and the 12-connection cap.
 - [x] Provision a separate BugLogin Redis systemd instance using TLS, loopback bind, private CA, namespace ACL/data path, and strict memory/CPU limits. The existing Redis service remains unchanged.
 - [x] Install the legacy BugLogin Spaces credential into a root-only 3.0 env file scoped by application prefix `buglogin3/prod` and tenant `buglogin3-prod`; obtain a dedicated bucket-scoped 3.0 key before final production acceptance. Never use BugIdea's storage.
@@ -30,7 +30,8 @@ Operational correction (2026-10-13): a `buglogin3-redis.service` unit was also p
 
 ## Phase 3 — migration rehearsal
 
-- [ ] Snapshot/backup 1.0 source read-only; verify snapshot identity and restore it to an isolated rehearsal source.
+- [x] Snapshot the 1.0 control-plane database read-only, verify the dump hash, and restore it into an isolated BugIdea-host rehearsal database; all 26 table row counts matched and the rehearsal DB denies `PUBLIC` and `buglogin3` connections.
+- [ ] Complete an immutable migration source snapshot covering the actual 1.0 S3 profile payloads and reconcile every DB profile/resource/share reference; no source write-freeze or production cutover has occurred.
 - [ ] Dry-run and import the agreed migration cohort into BugLogin 3.0 staging.
 - [ ] Compare organization/workspace/member/share graph and profile/browser payload checksums/counts.
 - [ ] Rehearse write-freeze, final delta, rollback, and recovery without production writes.
@@ -50,5 +51,9 @@ Operational correction (2026-10-13): a `buglogin3-redis.service` unit was also p
 - `api3.buglogin.com` and `app3.buglogin.com` are staged in API env but DNS/tunnel routes are not created or verified.
 - Object-store backup/restore, API health/OpenAPI comparison, and monitoring are not verified.
 - Hosted sync/auth, migration rehearsal, rollback, native release and signing gates remain open per `docs/readiness/implementation-readiness.md`.
+- The live 1.0 database has 49 workspaces, 34 hosted profile records (21 `bugmini`, 4 `bugox`, 9 `cloak`), 91 memberships, and 42 share grants. It has no organization table, so the 3.0 organization relationship requires an explicit deterministic migration policy before export.
+- One active share grant points to an unconsumed invite rather than a current direct workspace member. The current strict migration mapper rejects this relationship; it must be preserved through an approved pending-invite/grant policy or resolved by the source owner before rehearsal.
+- Read-only S3 inventory found 43,598 objects / 17,231,987,872 bytes in the legacy bucket. The bucket includes 11,242,861,871 bytes under `releases`, 1,848,800,956 bytes under `selfhost-dev`, and multiple profile/workspace prefixes. The candidate `buglogin-prod/workspaces` prefix contains 6,729 objects / 858,000,006 bytes, but only 23 of 34 database profile IDs and 13 of 49 workspace IDs appear in its object-key segments. This is inventory evidence only; no payload objects were downloaded or written, and prefix completeness is unproven.
+- The owner workstation has only 4,147,142,656 bytes free on `F:` (the protected migration volume); the separately reported `C:` volume has 156,862,074,880 bytes free. Do not stage a multi-gigabyte source snapshot on `F:` without first reclaiming space or selecting a verified smaller source set.
 
 Credential inventory on the legacy 1.0 host (read-only, 2026-10-13) found its S3 credentials and no mail/SMTP/recovery/webhook provider variables in either deployed app env or PM2 environment names. Do not route 3.0 recovery through the 1.0 API; obtain/configure a dedicated delivery provider before enabling API startup.
