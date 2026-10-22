@@ -685,6 +685,14 @@ commands:
     adapters: [tauri, rest, mcp]
     input: Empty
     output: AccountView
+  - id: account.create
+    kind: command
+    capability: CAP-ADM-001
+    action: create
+    adapters: [mcp]
+    input: AccountCreatePendingInput
+    output: PendingAccountProvisioningReceipt
+    idempotency: required
   - id: account.list
     kind: query
     capability: CAP-ADM-001

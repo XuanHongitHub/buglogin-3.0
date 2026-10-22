@@ -1176,7 +1176,7 @@ fn resolve_scope(
             .clone()
             .map(ResourceScope::account)
             .ok_or_else(|| problem("account_missing", "Account is missing", 401)),
-        "account.list" => Ok(ResourceScope::global()),
+        "account.list" | "account.create" => Ok(ResourceScope::global()),
         "account.status.update" => Ok(ResourceScope::account(required_id(
             input,
             "accountId",
@@ -1672,6 +1672,7 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
         let capability = Capability::new(command.capability)
             .map_err(|_| Problem::new("invalid_capability", "Invalid capability", 500, "mcp"))?;
         if !self.state.local_authority_enabled()
+            && command.id.as_str() != "profile.create"
             && command.id.as_str().starts_with("profile.")
             && let Some(profile_id) = scope.profile_id.as_ref()
         {
@@ -2295,6 +2296,43 @@ impl McpExecutor for ProductionMcpExecutor {
                     .list::<buglogin_domain::account::Account>("control", "account")?;
                 accounts.sort_by(|left, right| left.id.cmp(&right.id));
                 Ok(serde_json::json!({ "items": accounts, "nextCursor": Value::Null }))
+            }
+            "account.create" => {
+                let account_id = required_id(&input, "accountId", AccountId::from_str)?;
+                let username = input
+                    .get("username")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "username is required", 400))?;
+                let email = input
+                    .get("email")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "email is required", 400))?;
+                let actor_id = principal.account_id.as_ref().ok_or_else(|| {
+                    Problem::new("account_missing", "Account is missing", 401, "identity")
+                })?;
+                let idempotency_key = request.idempotency_key.as_deref().ok_or_else(|| {
+                    problem("idempotency_key_required", "Idempotency key required", 400)
+                })?;
+                let created_at = crate::clock::rfc3339(&request.correlation_id)?;
+                let pending =
+                    crate::services::account_provisioning::AccountProvisioningService::new(
+                        state.control_persistence.clone(),
+                    )
+                    .create_pending(
+                        account_id,
+                        username,
+                        email,
+                        actor_id,
+                        idempotency_key,
+                        &created_at,
+                    )?;
+                Ok(serde_json::json!({
+                    "account": pending.account,
+                    "identity": pending.identity,
+                    "replayed": pending.replayed,
+                    "onboardingStatus": "pending_verification",
+                    "loginEnabled": false
+                }))
             }
             "account.status.update" => {
                 let account_id = required_id(&input, "accountId", AccountId::from_str)?;

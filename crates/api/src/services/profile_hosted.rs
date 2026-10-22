@@ -1018,21 +1018,19 @@ impl HostedProfileService {
         // Managed profile creation provisions its resource as an internal part of
         // profile.create. Keep API keys scoped to that operation instead of also
         // granting the broader resource.create capability needed by resource.register.
-        let profile_create_key_allowed = principal
-            .token_scopes
-            .as_ref()
-            .is_some_and(|scopes| scopes.contains("profile.create:create"))
-            && {
-                let mut account_principal = principal.clone();
-                account_principal.token_scopes = None;
-                is_allowed(
-                    &account_principal,
-                    &capability,
-                    Action::Create,
-                    &scope,
-                    grants,
-                )
-            };
+        let profile_create_key_allowed = principal.token_scopes.as_ref().is_some_and(|scopes| {
+            scopes.contains("profile.create:create") || scopes.contains("profile.create:*")
+        }) && {
+            let mut account_principal = principal.clone();
+            account_principal.token_scopes = None;
+            is_allowed(
+                &account_principal,
+                &capability,
+                Action::Create,
+                &scope,
+                grants,
+            )
+        };
         if resource_create_allowed || profile_create_key_allowed {
             Ok(())
         } else {
@@ -1391,11 +1389,9 @@ impl HostedProfileService {
             &plan.resource_id,
         )?;
         let mut resource_principal = principal.clone();
-        if principal
-            .token_scopes
-            .as_ref()
-            .is_some_and(|scopes| scopes.contains("profile.create:create"))
-        {
+        if principal.token_scopes.as_ref().is_some_and(|scopes| {
+            scopes.contains("profile.create:create") || scopes.contains("profile.create:*")
+        }) {
             // authorize_resource_creation above has checked the account grant and
             // the narrower profile.create token scope. ResourceService.register
             // performs the same grant check, but cannot see that this is the

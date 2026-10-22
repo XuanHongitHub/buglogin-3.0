@@ -1,4 +1,5 @@
 pub(crate) mod account_persistence;
+pub mod account_provisioning;
 pub mod api_tokens;
 pub mod audit;
 pub mod connected_cookie_jobs;

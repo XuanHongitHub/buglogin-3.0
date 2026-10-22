@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: b9fc4eefa402c1b917bc7e8337a89faf7d92c7b2a275135f97730c8a69078cb0
-projectionCount: 135
+sourceSha256: c65fd3681772a1c0a7ef22dead987c101d4bddb29f5ebcd2ea9d0693cc5bd0c7
+projectionCount: 136
 projections:
   - commandId: runtime.catalog.get
     kind: query
@@ -1322,6 +1322,20 @@ projections:
       tauri: account_get
       rest: account.get
       mcp: account_get
+  - commandId: account.create
+    kind: command
+    capability: CAP-ADM-001
+    action: create
+    inputSchema: AccountCreatePendingInput
+    outputSchema: PendingAccountProvisioningReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - mcp
+    names:
+      mcp: account_create
   - commandId: account.list
     kind: query
     capability: CAP-ADM-001
@@ -2825,6 +2839,24 @@ mcp:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         secrets: never-returned
+    - name: account_create
+      commandId: account.create
+      kind: command
+      capability: CAP-ADM-001
+      action: create
+      inputSchema: AccountCreatePendingInput
+      outputSchema: PendingAccountProvisioningReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
     - name: account_list
       commandId: account.list
       kind: query

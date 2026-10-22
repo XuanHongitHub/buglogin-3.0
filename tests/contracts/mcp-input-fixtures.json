@@ -1,5 +1,10 @@
 {
   "Empty": {},
+  "AccountCreatePendingInput": {
+    "accountId": "acc_mcp_fixture_001",
+    "username": "mcp-fixture-user",
+    "email": "mcp-fixture-user@example.test"
+  },
   "AccountStatusUpdateCommandInput": {
     "accountId": "acc_fixture_001",
     "status": "suspended",

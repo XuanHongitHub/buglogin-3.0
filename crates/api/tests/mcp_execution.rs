@@ -1210,13 +1210,23 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
                 .uri("/v1/auth/api-tokens")
                 .header("content-type", "application/json")
                 .header("origin", "http://127.0.0.1:3000")
-                .header("cookie", cookies)
+                .header("cookie", &cookies)
                 .header("x-csrf-token", csrf)
                 .header("x-correlation-id", "mcp-admin-api-key-create")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "name": "MCP platform admin",
-                        "scopes": ["CAP-ADM-001:read", "CAP-ADM-001:manage"],
+                        "scopes": [
+                            "CAP-ADM-001:*",
+                            "CAP-ORG-001:*",
+                            "CAP-WS-001:*",
+                            "CAP-MEM-001:*",
+                            "CAP-PROF-003:*",
+                            "profile.read:*",
+                            "profile.create:*",
+                            "profile.update:*",
+                            "profile.delete:*"
+                        ],
                         "expiresAt": expires_at
                     }))
                     .unwrap(),
@@ -1235,6 +1245,125 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
     let token = key_body["token"].as_str().unwrap().to_owned();
     assert!(token.starts_with("blapi_"));
     let mut dispatcher = production_dispatcher(&state);
+    let account_input = json!({
+        "accountId": "acct_mcp_pending_child",
+        "username": "mcp-pending-child",
+        "email": "mcp-pending-child@example.test"
+    });
+    let pending_account = dispatcher
+        .dispatch(production_request(
+            "account_create",
+            "cor_mcp_platform_account_create",
+            Some(&token),
+            Some("mcp-platform-account-create-01"),
+            account_input.clone(),
+        ))
+        .unwrap();
+    assert_eq!(pending_account["account"]["id"], "acct_mcp_pending_child");
+    assert_eq!(pending_account["identity"]["verification"], "pending");
+    assert_eq!(pending_account["onboardingStatus"], "pending_verification");
+    assert_eq!(pending_account["loginEnabled"], false);
+    assert!(pending_account.get("password").is_none());
+
+    let replayed_account = dispatcher
+        .dispatch(production_request(
+            "account_create",
+            "cor_mcp_platform_account_create_replay",
+            Some(&token),
+            Some("mcp-platform-account-create-01"),
+            account_input.clone(),
+        ))
+        .unwrap();
+    assert_eq!(replayed_account, pending_account);
+
+    let conflicting_replay = dispatcher
+        .dispatch(production_request(
+            "account_create",
+            "cor_mcp_platform_account_create_conflict",
+            Some(&token),
+            Some("mcp-platform-account-create-01"),
+            json!({
+                "accountId": "acct_mcp_other_child",
+                "username": "mcp-other-child",
+                "email": "mcp-other-child@example.test"
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(conflicting_replay.status, 409);
+
+    let pending_login = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/login")
+                .header("content-type", "application/json")
+                .header("origin", "http://127.0.0.1:3000")
+                .header("x-correlation-id", "mcp-pending-account-login")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "identifier": "mcp-pending-child",
+                        "password": "Mcp platform owner 2026!"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending_login.status(), StatusCode::UNAUTHORIZED);
+    let pending_login_body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(pending_login.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pending_login_body["code"], "invalid_credentials");
+
+    let restricted_key_response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/api-tokens")
+                .header("content-type", "application/json")
+                .header("origin", "http://127.0.0.1:3000")
+                .header("cookie", &cookies)
+                .header("x-csrf-token", csrf)
+                .header("x-correlation-id", "mcp-admin-restricted-key-create")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "name": "MCP account manager without create",
+                        "scopes": ["CAP-ADM-001:manage"],
+                        "expiresAt": expires_at
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restricted_key_response.status(), StatusCode::CREATED);
+    let restricted_key_body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(restricted_key_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let restricted_token = restricted_key_body["token"].as_str().unwrap();
+    let scope_denied = production_dispatcher(&state)
+        .dispatch(production_request(
+            "account_create",
+            "cor_mcp_platform_account_create_scope_denied",
+            Some(restricted_token),
+            Some("mcp-platform-account-create-denied-01"),
+            json!({
+                "accountId": "acct_mcp_scope_denied",
+                "username": "mcp-scope-denied",
+                "email": "mcp-scope-denied@example.test"
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(scope_denied.status, 403);
+
     let accounts = dispatcher
         .dispatch(production_request(
             "account_list",
@@ -1245,8 +1374,164 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
         ))
         .unwrap();
 
-    assert_eq!(accounts["items"].as_array().unwrap().len(), 1);
-    assert_eq!(accounts["items"][0]["id"], owner.account_id.as_str());
+    assert_eq!(accounts["items"].as_array().unwrap().len(), 2);
+    assert!(
+        accounts["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|account| account["id"] == owner.account_id.as_str())
+    );
+    assert!(
+        accounts["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|account| account["id"] == "acct_mcp_pending_child")
+    );
+    let owner_revision = accounts["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["id"] == owner.account_id.as_str())
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+
+    // A platform-admin API key carries the platform role, but every MCP
+    // operation is still constrained by the key's explicit capability scopes.
+    let mut policy = buglogin_api::mcp::ProductionMcpPolicy::new(state.clone());
+    let platform_principal = policy
+        .authenticate(Some(&token), true, "cor_mcp_platform_authz")
+        .unwrap();
+    assert!(platform_principal.roles.contains(&Role::PlatformAdmin));
+    for (command_id, scope) in [
+        ("account.create", ResourceScope::global()),
+        ("account.list", ResourceScope::global()),
+        (
+            "organization.create",
+            ResourceScope {
+                account_id: Some(owner.account_id.clone()),
+                organization_id: Some(OrganizationId::from_str("org_mcp_admin_authz").unwrap()),
+                ..ResourceScope::default()
+            },
+        ),
+        (
+            "workspace.create",
+            ResourceScope {
+                organization_id: Some(OrganizationId::from_str("org_mcp_admin_authz").unwrap()),
+                workspace_id: Some(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+                ..ResourceScope::default()
+            },
+        ),
+        (
+            "member.role.update",
+            ResourceScope {
+                workspace_id: Some(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+                member_id: Some(MemberId::from_str("mem_mcp_admin_authz").unwrap()),
+                ..ResourceScope::default()
+            },
+        ),
+        (
+            "group.create",
+            ResourceScope::workspace(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+        ),
+        (
+            "profile.create",
+            ResourceScope {
+                workspace_id: Some(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+                profile_id: Some(ProfileId::from_str("prf_mcp_admin_authz").unwrap()),
+                ..ResourceScope::default()
+            },
+        ),
+    ] {
+        let command = buglogin_api::commands::CommandRegistry::get(command_id).unwrap();
+        policy
+            .authorize(&platform_principal, command, &scope)
+            .unwrap_or_else(|error| panic!("platform admin denied {command_id}: {error:?}"));
+    }
+
+    let lower_role = Principal {
+        account_id: Some(owner.account_id.clone()),
+        workspace_ids: [WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()]
+            .into_iter()
+            .collect(),
+        roles: [Role::WorkspaceAdmin].into_iter().collect(),
+        token_scopes: platform_principal.token_scopes.clone(),
+        ..Principal::default()
+    };
+    state.grants.write().unwrap().push(Grant {
+        id: GrantId::from_str("grant_mcp_workspace_profile_create").unwrap(),
+        account_id: Some(owner.account_id.clone()),
+        member_id: None,
+        capability: Capability::new("profile.create").unwrap(),
+        action: Action::Create,
+        scope: ResourceScope::workspace(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+        effect: Effect::Allow,
+    });
+    for (command_id, scope) in [
+        (
+            "group.create",
+            ResourceScope::workspace(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+        ),
+        (
+            "member.role.update",
+            ResourceScope {
+                workspace_id: Some(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+                member_id: Some(MemberId::from_str("mem_mcp_admin_authz").unwrap()),
+                ..ResourceScope::default()
+            },
+        ),
+        (
+            "profile.create",
+            ResourceScope {
+                workspace_id: Some(WorkspaceId::from_str("ws_mcp_admin_authz").unwrap()),
+                profile_id: Some(ProfileId::from_str("prf_mcp_admin_authz").unwrap()),
+                ..ResourceScope::default()
+            },
+        ),
+    ] {
+        let command = buglogin_api::commands::CommandRegistry::get(command_id).unwrap();
+        policy
+            .authorize(&lower_role, command, &scope)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "workspace admin denied equivalent workspace permission {command_id}: {error:?}"
+                )
+            });
+    }
+    let admin_only_key = Principal {
+        token_scopes: Some(["CAP-ADM-001:manage".to_owned()].into_iter().collect()),
+        ..platform_principal.clone()
+    };
+    assert_eq!(
+        policy
+            .authorize(
+                &admin_only_key,
+                buglogin_api::commands::CommandRegistry::get("organization.create").unwrap(),
+                &ResourceScope::global(),
+            )
+            .unwrap_err()
+            .status,
+        403,
+        "PlatformAdmin role must not bypass API-key capability scopes"
+    );
+    let admin_manage_without_create = Principal {
+        token_scopes: Some(["CAP-ADM-001:manage".to_owned()].into_iter().collect()),
+        ..platform_principal.clone()
+    };
+    assert_eq!(
+        policy
+            .authorize(
+                &admin_manage_without_create,
+                buglogin_api::commands::CommandRegistry::get("account.create").unwrap(),
+                &ResourceScope::global(),
+            )
+            .unwrap_err()
+            .status,
+        403,
+        "account creation requires an explicit CAP-ADM-001:create scope"
+    );
 
     let command = buglogin_api::commands::CommandRegistry::get("account.list").unwrap();
     let principal = Principal {
@@ -1254,13 +1539,25 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
         roles: [Role::Account].into_iter().collect(),
         ..Principal::default()
     };
-    let mut policy = buglogin_api::mcp::ProductionMcpPolicy::new(state);
+    let mut policy = buglogin_api::mcp::ProductionMcpPolicy::new(state.clone());
     assert_eq!(
         policy
             .authorize(&principal, command, &ResourceScope::global())
             .unwrap_err()
             .status,
         403
+    );
+    assert_eq!(
+        policy
+            .authorize(
+                &principal,
+                buglogin_api::commands::CommandRegistry::get("account.create").unwrap(),
+                &ResourceScope::global(),
+            )
+            .unwrap_err()
+            .status,
+        403,
+        "account role cannot create accounts without the platform grant"
     );
     let status_command =
         buglogin_api::commands::CommandRegistry::get("account.status.update").unwrap();
@@ -1276,6 +1573,344 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
         403
     );
 
+    let created_at = "2026-10-23T00:00:00Z";
+    let organization_id = OrganizationId::from_str("org_mcp_api_key_crud").unwrap();
+    let workspace_id = WorkspaceId::from_str("ws_mcp_api_key_crud").unwrap();
+    let organization = Organization {
+        id: organization_id.clone(),
+        account_id: owner.account_id.clone(),
+        name: "MCP API Key Organization".into(),
+        created_at: created_at.into(),
+    };
+    let organization_policy = OrganizationPolicy {
+        max_workspaces: 4,
+        offline_entitled: false,
+    };
+    let created_organization = dispatcher
+        .dispatch(production_request(
+            "organization_create",
+            "cor_mcp_api_key_org_create",
+            Some(&token),
+            Some("mcp-api-key-org-create-0001"),
+            json!({
+                "organization": organization,
+                "policy": organization_policy
+            }),
+        ))
+        .unwrap();
+    assert_eq!(created_organization["id"], organization_id.as_str());
+
+    let renamed_organization = Organization {
+        name: "MCP API Key Organization Updated".into(),
+        ..organization.clone()
+    };
+    let updated_organization = dispatcher
+        .dispatch(production_request(
+            "organization_update",
+            "cor_mcp_api_key_org_update",
+            Some(&token),
+            Some("mcp-api-key-org-update-0001"),
+            json!({
+                "organizationId": organization_id,
+                "update": {
+                    "organization": renamed_organization,
+                    "policy": organization_policy,
+                    "expectedRevision": 1
+                }
+            }),
+        ))
+        .unwrap();
+    assert_eq!(
+        updated_organization["name"],
+        "MCP API Key Organization Updated"
+    );
+
+    let workspace = Workspace {
+        id: workspace_id.clone(),
+        organization_id: organization_id.clone(),
+        name: "MCP API Key Workspace".into(),
+        policy: WorkspacePolicy {
+            max_profiles: 10,
+            max_members: 10,
+            max_storage_bytes: 1_048_576,
+            offline_entitled: false,
+        },
+        created_at: created_at.into(),
+    };
+    let created_workspace = dispatcher
+        .dispatch(production_request(
+            "workspace_create",
+            "cor_mcp_api_key_workspace_create",
+            Some(&token),
+            Some("mcp-api-key-workspace-create-0001"),
+            json!({
+                "organizationId": organization_id,
+                "workspace": workspace
+            }),
+        ))
+        .unwrap();
+    assert_eq!(created_workspace["id"], workspace_id.as_str());
+
+    let renamed_workspace = Workspace {
+        name: "MCP API Key Workspace Updated".into(),
+        ..workspace.clone()
+    };
+    let updated_workspace = dispatcher
+        .dispatch(production_request(
+            "workspace_update",
+            "cor_mcp_api_key_workspace_update",
+            Some(&token),
+            Some("mcp-api-key-workspace-update-0001"),
+            json!({
+                "organizationId": organization_id,
+                "workspaceId": workspace_id,
+                "update": {
+                    "workspace": renamed_workspace,
+                    "expectedRevision": 1
+                }
+            }),
+        ))
+        .unwrap();
+    assert_eq!(updated_workspace["name"], "MCP API Key Workspace Updated");
+
+    let target_account = AccountId::from_str("acct_mcp_api_key_member").unwrap();
+    let member_id = MemberId::from_str("mem_mcp_api_key_member").unwrap();
+    let grants = state.grants.read().unwrap().clone();
+    state
+        .members
+        .write()
+        .unwrap()
+        .invite(
+            &platform_principal,
+            &grants,
+            Member {
+                id: member_id.clone(),
+                account_id: target_account.clone(),
+                workspace_id: workspace_id.clone(),
+                team_id: None,
+                role: MemberRole::Member,
+                status: MemberStatus::Invited,
+                invite_expires_at: Some(100),
+            },
+            1,
+        )
+        .unwrap();
+    state
+        .members
+        .write()
+        .unwrap()
+        .activate(
+            &Principal {
+                account_id: Some(target_account),
+                ..Principal::default()
+            },
+            &[],
+            &workspace_id,
+            &member_id,
+            2,
+        )
+        .unwrap();
+    let role_updated = dispatcher
+        .dispatch(production_request(
+            "member_role_update",
+            "cor_mcp_api_key_member_role_update",
+            Some(&token),
+            Some("mcp-api-key-member-role-update-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "memberId": member_id,
+                "role": "operator"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(role_updated["role"], "operator");
+
+    let group_id = "grp_mcp_api_key_crud";
+    let created_group = dispatcher
+        .dispatch(production_request(
+            "group_create",
+            "cor_mcp_api_key_group_create",
+            Some(&token),
+            Some("mcp-api-key-group-create-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "groupId": group_id,
+                "name": "MCP API Key Group",
+                "appearance": {"color": "blue"}
+            }),
+        ))
+        .unwrap();
+    assert_eq!(created_group["group"]["id"], group_id);
+    let updated_group = dispatcher
+        .dispatch(production_request(
+            "group_update",
+            "cor_mcp_api_key_group_update",
+            Some(&token),
+            Some("mcp-api-key-group-update-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "groupId": group_id,
+                "expectedRevision": 1,
+                "name": "MCP API Key Group Updated",
+                "appearance": null
+            }),
+        ))
+        .unwrap();
+    assert_eq!(updated_group["group"]["name"], "MCP API Key Group Updated");
+    let deleted_group = dispatcher
+        .dispatch(production_request(
+            "group_delete",
+            "cor_mcp_api_key_group_delete",
+            Some(&token),
+            Some("mcp-api-key-group-delete-0001"),
+            json!({"workspaceId": workspace_id, "groupId": group_id, "expectedRevision": 2}),
+        ))
+        .unwrap();
+    assert_eq!(deleted_group["group"]["id"], group_id);
+    assert!(
+        dispatcher
+            .dispatch(production_request(
+                "group_list",
+                "cor_mcp_api_key_group_list_after_delete",
+                Some(&token),
+                None,
+                json!({"workspaceId": workspace_id}),
+            ))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let profile_id = "prf_mcp_api_key_crud";
+    let created_profile = dispatcher
+        .dispatch(production_request(
+            "profile_create",
+            "cor_mcp_api_key_profile_create",
+            Some(&token),
+            Some("mcp-api-key-profile-create-0001"),
+            json!({
+                "id": profile_id,
+                "workspaceId": workspace_id,
+                "name": "MCP API Key Profile",
+                "runtime": "wayfern",
+                "runtimeVersion": "154.0.8037.57"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(created_profile["id"], profile_id);
+    let updated_profile = dispatcher
+        .dispatch(production_request(
+            "profile_update",
+            "cor_mcp_api_key_profile_update",
+            Some(&token),
+            Some("mcp-api-key-profile-update-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "profileId": profile_id,
+                "expectedRevision": 1,
+                "name": "MCP API Key Profile Updated",
+                "note": null,
+                "tags": []
+            }),
+        ))
+        .unwrap();
+    assert_eq!(updated_profile["name"], "MCP API Key Profile Updated");
+    let deleted_profile = dispatcher
+        .dispatch(production_request(
+            "profile_delete",
+            "cor_mcp_api_key_profile_delete",
+            Some(&token),
+            Some("mcp-api-key-profile-delete-0001"),
+            json!({
+                "profileId": profile_id,
+                "revision": 2,
+                "confirmation": "QUARANTINE_PROFILE_DATA"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(deleted_profile["deleted"], true);
+
+    let workspace_admin = Principal {
+        account_id: Some(owner.account_id.clone()),
+        workspace_ids: [workspace_id.clone()].into_iter().collect(),
+        roles: [Role::WorkspaceAdmin].into_iter().collect(),
+        ..Principal::default()
+    };
+    for (command_id, scope) in [
+        (
+            "workspace.update",
+            ResourceScope {
+                organization_id: Some(organization_id.clone()),
+                workspace_id: Some(workspace_id.clone()),
+                ..ResourceScope::default()
+            },
+        ),
+        (
+            "member.role.update",
+            ResourceScope {
+                workspace_id: Some(workspace_id.clone()),
+                member_id: Some(member_id.clone()),
+                ..ResourceScope::default()
+            },
+        ),
+        (
+            "group.create",
+            ResourceScope::workspace(workspace_id.clone()),
+        ),
+        (
+            "group.update",
+            ResourceScope::workspace(workspace_id.clone()),
+        ),
+        (
+            "group.delete",
+            ResourceScope::workspace(workspace_id.clone()),
+        ),
+    ] {
+        policy
+            .authorize(
+                &workspace_admin,
+                buglogin_api::commands::CommandRegistry::get(command_id).unwrap(),
+                &scope,
+            )
+            .unwrap_or_else(|error| {
+                panic!("WorkspaceAdmin denied same-workspace command {command_id}: {error:?}")
+            });
+    }
+    for (command_id, scope) in [
+        ("account.list", ResourceScope::global()),
+        ("account.create", ResourceScope::global()),
+        (
+            "organization.create",
+            ResourceScope {
+                account_id: Some(owner.account_id.clone()),
+                organization_id: Some(organization_id.clone()),
+                ..ResourceScope::default()
+            },
+        ),
+        (
+            "organization.update",
+            ResourceScope {
+                account_id: Some(owner.account_id.clone()),
+                organization_id: Some(organization_id.clone()),
+                ..ResourceScope::default()
+            },
+        ),
+    ] {
+        assert_eq!(
+            policy
+                .authorize(
+                    &workspace_admin,
+                    buglogin_api::commands::CommandRegistry::get(command_id).unwrap(),
+                    &scope,
+                )
+                .unwrap_err()
+                .status,
+            403,
+            "WorkspaceAdmin must not use global/account/org command {command_id}"
+        );
+    }
+
     let updated = dispatcher
         .dispatch(production_request(
             "account_status_update",
@@ -1285,14 +1920,12 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
             json!({
                 "accountId": owner.account_id.as_str(),
                 "status": "suspended",
-                "expectedRevision": accounts["items"][0]["revision"],
+                "expectedRevision": owner_revision,
             }),
         ))
         .unwrap();
     assert_eq!(updated["status"], "suspended");
-    assert!(
-        updated["revision"].as_u64().unwrap() > accounts["items"][0]["revision"].as_u64().unwrap()
-    );
+    assert!(updated["revision"].as_u64().unwrap() > owner_revision);
 }
 
 #[test]
