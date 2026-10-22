@@ -227,7 +227,7 @@ fn install_dmg(
     fs::create_dir_all(parent)
         .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
 
-    let staged_artifact = create_staging_file(&parent.join("runtime-package.dmg"))?;
+    let mut staged_artifact = create_staging_file(&parent.join("runtime-package.dmg"))?;
     let mut file = staged_artifact
         .file
         .take()
