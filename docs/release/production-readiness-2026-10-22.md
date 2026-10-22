@@ -145,3 +145,8 @@ The S3 workflow edits are in the local worktree only. The committed `origin/main
 - The signed embedded runtime catalog verifies on the Windows desktop test target and contains Wayfern `155.0.8059.79` for macOS arm64 as a DMG, with executable path `Wayfern.app/Contents/MacOS/Wayfern`.
 - The upstream DMG URL returned HTTP 200 and `Content-Length: 1453563936`. Downloaded the package temporarily to `G:\buglogin-target`, computed SHA-256 `4a4e1f58e489eda94cdd9bb1ed7a44fc88127ea831082870ea4f96541413c248`, matched the signed catalog entry, and removed the temporary file.
 - This confirms the current macOS runtime package is downloadable and matches the catalog checksum. The Windows code test verifies the embedded catalog signature; this does not execute `hdiutil`/`ditto` or launch Wayfern on macOS. Native macOS install/launch acceptance remains open.
+
+### GitHub Actions and public visibility recheck — 2026-10-23
+
+- Run `39833094681` on `d549233a` failed before runner steps. The macOS arm64 check annotation says the job was not started because recent account payments failed or the spending limit must be increased. Public visibility does not resolve this account-level billing lock.
+- Do not make the existing repository public without history remediation. Commit `28bcceb4` added `true/session.json`; the historical file contains non-empty values in three password-named fields. The repository's GitHub secret-scanning feature is disabled, so no clean secret-scan result is available. The values were not printed or copied. A fresh public mirror would need a reviewed clean snapshot/history and separately configured secrets, and still needs Actions billing to be unlocked.
