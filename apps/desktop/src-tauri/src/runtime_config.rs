@@ -518,6 +518,13 @@ mod tests {
 
         assert!(!catalog.releases.is_empty());
         assert!(catalog.verify(&verifier).is_ok());
+        assert!(catalog.releases.iter().any(|release| {
+            release.runtime == buglogin_domain::entities::Runtime::Wayfern
+                && release.platform == buglogin_domain::entities::RuntimePlatform::Macos
+                && release.architecture == buglogin_domain::entities::RuntimeArchitecture::Arm64
+                && release.package_format
+                    == buglogin_browser::runtime::catalog::RuntimePackageFormat::Dmg
+        }));
     }
 
     #[test]

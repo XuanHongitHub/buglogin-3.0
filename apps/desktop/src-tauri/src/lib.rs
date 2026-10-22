@@ -916,15 +916,18 @@ mod runtime_version_selection_tests {
     use super::runtime_version_to_install;
     use buglogin_domain::entities::{Runtime, RuntimeArchitecture, RuntimePlatform};
 
-    fn catalog_releases() -> Vec<(Runtime, String, RuntimePlatform, RuntimeArchitecture)> {
+    fn catalog_releases(
+        platform: RuntimePlatform,
+        architecture: RuntimeArchitecture,
+    ) -> Vec<(Runtime, String, RuntimePlatform, RuntimeArchitecture)> {
         ["154.0.8037.57", "155.0.8059.79"]
             .into_iter()
             .map(|version| {
                 (
                     Runtime::Wayfern,
                     version.to_owned(),
-                    RuntimePlatform::Windows,
-                    RuntimeArchitecture::X64,
+                    platform.clone(),
+                    architecture.clone(),
                 )
             })
             .collect()
@@ -936,7 +939,7 @@ mod runtime_version_selection_tests {
             &Runtime::Wayfern,
             None,
             &[],
-            &catalog_releases(),
+            &catalog_releases(RuntimePlatform::Windows, RuntimeArchitecture::X64),
             &RuntimePlatform::Windows,
             &RuntimeArchitecture::X64,
             "runtime-version-test",
@@ -951,7 +954,7 @@ mod runtime_version_selection_tests {
             &Runtime::Wayfern,
             Some("154.0.8037.57"),
             &["155.0.8059.79".to_owned()],
-            &catalog_releases(),
+            &catalog_releases(RuntimePlatform::Windows, RuntimeArchitecture::X64),
             &RuntimePlatform::Windows,
             &RuntimeArchitecture::X64,
             "runtime-version-test",
@@ -966,13 +969,58 @@ mod runtime_version_selection_tests {
             &Runtime::Wayfern,
             Some("154.0.8037.57"),
             &["154.0.8037.57".to_owned()],
-            &catalog_releases(),
+            &catalog_releases(RuntimePlatform::Windows, RuntimeArchitecture::X64),
             &RuntimePlatform::Windows,
             &RuntimeArchitecture::X64,
             "runtime-version-test",
         )
         .unwrap();
         assert_eq!(requested, None);
+    }
+
+    #[test]
+    fn first_macos_arm64_launch_selects_latest_compatible_release() {
+        let requested = runtime_version_to_install(
+            &Runtime::Wayfern,
+            None,
+            &[],
+            &catalog_releases(RuntimePlatform::Macos, RuntimeArchitecture::Arm64),
+            &RuntimePlatform::Macos,
+            &RuntimeArchitecture::Arm64,
+            "runtime-version-test",
+        )
+        .unwrap();
+        assert_eq!(requested.as_deref(), Some("155.0.8059.79"));
+    }
+
+    #[test]
+    fn macos_version_switch_selects_the_exact_uninstalled_release() {
+        let requested = runtime_version_to_install(
+            &Runtime::Wayfern,
+            Some("154.0.8037.57"),
+            &["155.0.8059.79".to_owned()],
+            &catalog_releases(RuntimePlatform::Macos, RuntimeArchitecture::Arm64),
+            &RuntimePlatform::Macos,
+            &RuntimeArchitecture::Arm64,
+            "runtime-version-test",
+        )
+        .unwrap();
+        assert_eq!(requested.as_deref(), Some("154.0.8037.57"));
+    }
+
+    #[test]
+    fn macos_runtime_selection_never_uses_a_release_for_another_platform_or_architecture() {
+        let error = runtime_version_to_install(
+            &Runtime::Wayfern,
+            None,
+            &[],
+            &catalog_releases(RuntimePlatform::Macos, RuntimeArchitecture::Arm64),
+            &RuntimePlatform::Macos,
+            &RuntimeArchitecture::X64,
+            "runtime-version-test",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "runtime_release_not_found");
     }
 }
 
