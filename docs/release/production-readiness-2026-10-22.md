@@ -139,3 +139,9 @@ The S3 workflow edits are in the local worktree only. The committed `origin/main
 3. Complete the independent-vault cross-OS recovery test and real Windows/macOS profile launch/sync acceptance.
 4. Produce release-attested Windows and signed/notarized macOS artifacts, publish to the BugLogin S3 v3 namespace, and prove install/update including restart and preserved profile state.
 5. Provision and verify the requested production platform-admin login through the supported operator/bootstrap flow; a pending account is not an admin login.
+
+### macOS Wayfern artifact recheck — 2026-10-23
+
+- The signed embedded runtime catalog verifies on the Windows desktop test target and contains Wayfern `155.0.8059.79` for macOS arm64 as a DMG, with executable path `Wayfern.app/Contents/MacOS/Wayfern`.
+- The upstream DMG URL returned HTTP 200 and `Content-Length: 1453563936`. Downloaded the package temporarily to `G:\buglogin-target`, computed SHA-256 `4a4e1f58e489eda94cdd9bb1ed7a44fc88127ea831082870ea4f96541413c248`, matched the signed catalog entry, and removed the temporary file.
+- This confirms the current macOS runtime package is downloadable and matches the catalog checksum. The Windows code test verifies the embedded catalog signature; this does not execute `hdiutil`/`ditto` or launch Wayfern on macOS. Native macOS install/launch acceptance remains open.
