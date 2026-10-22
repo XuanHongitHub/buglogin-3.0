@@ -625,8 +625,6 @@ async fn runtime_install(
     version: String,
     correlation_id: String,
 ) -> Result<RuntimeInstallResult, Problem> {
-    use buglogin_domain::entities::Runtime;
-
     if version.trim().is_empty() {
         return Err(Problem::new(
             "runtime_version_required",
@@ -635,35 +633,69 @@ async fn runtime_install(
             &correlation_id,
         ));
     }
-    let (platform, architecture) = runtime_install::current_platform_architecture(&correlation_id)?;
+    let installed_target = install_verified_runtime(
+        app.clone(),
+        state.inner(),
+        runtime.clone(),
+        &version,
+        &correlation_id,
+    )
+    .await?;
+    let result = RuntimeInstallResult {
+        runtime: runtime_name(&runtime).to_owned(),
+        version,
+        executable_path: installed_target.binary.path.to_string_lossy().into_owned(),
+    };
+    Ok(result)
+}
+
+fn runtime_name(runtime: &buglogin_domain::entities::Runtime) -> &'static str {
+    use buglogin_domain::entities::Runtime;
+    match runtime {
+        Runtime::Wayfern => "wayfern",
+        Runtime::Bugmini => "bugmini",
+        _ => "unsupported",
+    }
+}
+
+async fn install_verified_runtime(
+    app: tauri::AppHandle,
+    state: &DesktopState,
+    runtime: buglogin_domain::entities::Runtime,
+    version: &str,
+    correlation_id: &str,
+) -> Result<adapter::RuntimeTarget, Problem> {
+    use buglogin_domain::entities::Runtime;
+
+    let (platform, architecture) = runtime_install::current_platform_architecture(correlation_id)?;
     if !matches!(&runtime, Runtime::Wayfern | Runtime::Bugmini) {
         return Err(Problem::new(
             "runtime_not_supported",
             "Runtime has no approved desktop adapter",
             400,
-            &correlation_id,
+            correlation_id,
         ));
     }
-    let catalog = state.runtime_catalog_get(&correlation_id).await?;
-    let verifier = runtime_config::pinned_runtime_verifier(&correlation_id)?;
+    let catalog = state.runtime_catalog_get(correlation_id).await?;
+    let verifier = runtime_config::pinned_runtime_verifier(correlation_id)?;
     let releases = catalog
         .verify(&verifier)
-        .map_err(|error| Problem::new(error.code, error.title, error.status, &correlation_id))?;
+        .map_err(|error| Problem::new(error.code, error.title, error.status, correlation_id))?;
     let release = releases
         .into_iter()
         .find(|candidate| {
-            let candidate = candidate.release();
-            candidate.runtime == runtime
-                && candidate.version == version
-                && candidate.platform == platform
-                && candidate.architecture == architecture
+            let release = candidate.release();
+            release.runtime == runtime
+                && release.version == version
+                && release.platform == platform
+                && release.architecture == architecture
         })
         .ok_or_else(|| {
             Problem::new(
                 "runtime_release_not_found",
                 "The requested signed browser runtime release is unavailable",
                 404,
-                &correlation_id,
+                correlation_id,
             )
         })?;
     let runtime_root = runtime_config::runtime_install_root()?;
@@ -684,27 +716,17 @@ async fn runtime_install(
             "runtime_install_failed",
             "Browser runtime installation failed",
             500,
-            &correlation_id,
+            correlation_id,
         )
     })??;
-    let result = RuntimeInstallResult {
-        runtime: match &runtime {
-            Runtime::Wayfern => "wayfern",
-            Runtime::Bugmini => "bugmini",
-            _ => "unsupported",
-        }
-        .to_owned(),
-        version,
-        executable_path: installed_target.binary.path.to_string_lossy().into_owned(),
-    };
     if let Err(error) = state
-        .register_runtime_target(runtime, installed_target, &correlation_id)
+        .register_runtime_target(runtime.clone(), installed_target.clone(), correlation_id)
         .await
     {
         runtime_install::emit_progress(
             &app,
-            &result.runtime,
-            &result.version,
+            runtime_name(&runtime),
+            version,
             0,
             package_size,
             0,
@@ -715,15 +737,266 @@ async fn runtime_install(
     }
     runtime_install::emit_progress(
         &app,
-        &result.runtime,
-        &result.version,
+        runtime_name(&runtime),
+        version,
         package_size,
         package_size,
         0,
         None,
         "completed",
     );
-    Ok(result)
+    Ok(installed_target)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileRuntimeSelection {
+    runtime: buglogin_domain::entities::Runtime,
+    runtime_version: Option<String>,
+}
+
+async fn ensure_profile_runtime_installed(
+    app: tauri::AppHandle,
+    state: &DesktopState,
+    profile_id: &str,
+    correlation_id: &str,
+) -> Result<(), Problem> {
+    use buglogin_domain::entities::Runtime;
+
+    let profile = state
+        .invoke(
+            "profile_get",
+            correlation_id,
+            None,
+            json!({ "profileId": profile_id }),
+        )
+        .await?;
+    let selection: ProfileRuntimeSelection =
+        serde_json::from_value(profile.data).map_err(|_| {
+            Problem::new(
+                "profile_runtime_invalid",
+                "Profile browser runtime settings are invalid",
+                502,
+                correlation_id,
+            )
+        })?;
+    if !matches!(selection.runtime, Runtime::Wayfern | Runtime::Bugmini) {
+        return Ok(());
+    }
+
+    let installed_versions =
+        state.runtime_installed_versions_get(&selection.runtime, correlation_id)?;
+    if selection
+        .runtime_version
+        .as_ref()
+        .map_or(!installed_versions.is_empty(), |version| {
+            installed_versions
+                .iter()
+                .any(|installed| installed == version)
+        })
+    {
+        return Ok(());
+    }
+    if matches!(state, DesktopState::Local(_)) {
+        return Err(Problem::new(
+            "runtime_install_hosted_only",
+            "Verified browser runtimes require BugLogin hosted authority",
+            409,
+            correlation_id,
+        ));
+    }
+
+    let (platform, architecture) = runtime_install::current_platform_architecture(correlation_id)?;
+    let catalog = state.runtime_catalog_get(correlation_id).await?;
+    let verifier = runtime_config::pinned_runtime_verifier(correlation_id)?;
+    let releases = catalog
+        .verify(&verifier)
+        .map_err(|error| Problem::new(error.code, error.title, error.status, correlation_id))?;
+    let release_index: Vec<_> = releases
+        .iter()
+        .map(|candidate| {
+            let release = candidate.release();
+            (
+                release.runtime.clone(),
+                release.version.clone(),
+                release.platform.clone(),
+                release.architecture.clone(),
+            )
+        })
+        .collect();
+    let Some(requested_version) = runtime_version_to_install(
+        &selection.runtime,
+        selection.runtime_version.as_deref(),
+        &installed_versions,
+        &release_index,
+        &platform,
+        &architecture,
+        correlation_id,
+    )?
+    else {
+        return Ok(());
+    };
+
+    install_verified_runtime(
+        app,
+        state,
+        selection.runtime,
+        &requested_version,
+        correlation_id,
+    )
+    .await?;
+    Ok(())
+}
+
+fn runtime_version_to_install(
+    runtime: &buglogin_domain::entities::Runtime,
+    selected_version: Option<&str>,
+    installed_versions: &[String],
+    releases: &[(
+        buglogin_domain::entities::Runtime,
+        String,
+        buglogin_domain::entities::RuntimePlatform,
+        buglogin_domain::entities::RuntimeArchitecture,
+    )],
+    platform: &buglogin_domain::entities::RuntimePlatform,
+    architecture: &buglogin_domain::entities::RuntimeArchitecture,
+    correlation_id: &str,
+) -> Result<Option<String>, Problem> {
+    if let Some(version) = selected_version {
+        if installed_versions
+            .iter()
+            .any(|installed| installed == version)
+        {
+            return Ok(None);
+        }
+        if releases.iter().any(
+            |(release_runtime, release_version, release_platform, release_arch)| {
+                release_runtime == runtime
+                    && release_version == version
+                    && release_platform == platform
+                    && release_arch == architecture
+            },
+        ) {
+            return Ok(Some(version.to_owned()));
+        }
+        return Err(Problem::new(
+            "runtime_release_not_found",
+            "The selected signed browser release is unavailable for this device",
+            404,
+            correlation_id,
+        ));
+    }
+    if !installed_versions.is_empty() {
+        return Ok(None);
+    }
+    releases
+        .iter()
+        .filter_map(
+            |(release_runtime, version, release_platform, release_arch)| {
+                (release_runtime == runtime
+                    && release_platform == platform
+                    && release_arch == architecture)
+                    .then_some(version.as_str())
+            },
+        )
+        .max_by(|left, right| compare_numeric_versions(left, right))
+        .map(|version| Some(version.to_owned()))
+        .ok_or_else(|| {
+            Problem::new(
+                "runtime_release_not_found",
+                "No signed browser release is available for this device",
+                404,
+                correlation_id,
+            )
+        })
+}
+
+#[cfg(test)]
+mod runtime_version_selection_tests {
+    use super::runtime_version_to_install;
+    use buglogin_domain::entities::{Runtime, RuntimeArchitecture, RuntimePlatform};
+
+    fn catalog_releases() -> Vec<(Runtime, String, RuntimePlatform, RuntimeArchitecture)> {
+        ["154.0.8037.57", "155.0.8059.79"]
+            .into_iter()
+            .map(|version| {
+                (
+                    Runtime::Wayfern,
+                    version.to_owned(),
+                    RuntimePlatform::Windows,
+                    RuntimeArchitecture::X64,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn first_launch_without_any_installed_version_selects_latest_compatible_catalog_release() {
+        let requested = runtime_version_to_install(
+            &Runtime::Wayfern,
+            None,
+            &[],
+            &catalog_releases(),
+            &RuntimePlatform::Windows,
+            &RuntimeArchitecture::X64,
+            "runtime-version-test",
+        )
+        .unwrap();
+        assert_eq!(requested.as_deref(), Some("155.0.8059.79"));
+    }
+
+    #[test]
+    fn switching_to_an_uninstalled_selected_version_installs_that_exact_catalog_release() {
+        let requested = runtime_version_to_install(
+            &Runtime::Wayfern,
+            Some("154.0.8037.57"),
+            &["155.0.8059.79".to_owned()],
+            &catalog_releases(),
+            &RuntimePlatform::Windows,
+            &RuntimeArchitecture::X64,
+            "runtime-version-test",
+        )
+        .unwrap();
+        assert_eq!(requested.as_deref(), Some("154.0.8037.57"));
+    }
+
+    #[test]
+    fn already_installed_selected_version_skips_download() {
+        let requested = runtime_version_to_install(
+            &Runtime::Wayfern,
+            Some("154.0.8037.57"),
+            &["154.0.8037.57".to_owned()],
+            &catalog_releases(),
+            &RuntimePlatform::Windows,
+            &RuntimeArchitecture::X64,
+            "runtime-version-test",
+        )
+        .unwrap();
+        assert_eq!(requested, None);
+    }
+}
+
+fn compare_numeric_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left: Vec<_> = left
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect();
+    let right: Vec<_> = right
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect();
+    for index in 0..left.len().max(right.len()) {
+        match left
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+            .cmp(&right.get(index).copied().unwrap_or_default())
+        {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 #[tauri::command]
@@ -2104,11 +2377,15 @@ async fn profile_share_recipientdevicekeys_list(
 
 #[tauri::command]
 async fn profile_launch(
+    app: tauri::AppHandle,
     state: State<'_, DesktopState>,
     correlation_id: String,
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
+    if let Some(profile_id) = payload.get("profileId").and_then(Value::as_str) {
+        ensure_profile_runtime_installed(app, state.inner(), profile_id, &correlation_id).await?;
+    }
     state
         .invoke(
             "profile_launch",

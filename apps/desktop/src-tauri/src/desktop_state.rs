@@ -6325,18 +6325,7 @@ impl DesktopState {
             .runtime_targets
             .write()
             .map_err(|_| runtime_state_unavailable(correlation_id))?;
-        match runtime {
-            Runtime::Wayfern => targets.wayfern = Some(target),
-            Runtime::Bugmini => targets.bugmini = Some(target),
-            _ => {
-                return Err(Problem::new(
-                    "runtime_not_supported",
-                    "Runtime has no approved desktop adapter",
-                    400,
-                    correlation_id,
-                ));
-            }
-        }
+        targets.insert(runtime, target);
         Ok(())
     }
 
@@ -6345,26 +6334,17 @@ impl DesktopState {
         runtime: &Runtime,
         correlation_id: &str,
     ) -> Result<Vec<String>, Problem> {
-        let Self::Production(state) = self else {
-            return Err(Problem::new(
-                "runtime_install_hosted_only",
-                "Verified browser runtimes require BugLogin hosted authority",
-                409,
-                correlation_id,
-            ));
-        };
-        let targets = state
-            .runtime_targets
-            .read()
-            .map_err(|_| runtime_state_unavailable(correlation_id))?;
-        let target = match runtime {
-            Runtime::Wayfern => targets.wayfern.as_ref(),
-            Runtime::Bugmini => targets.bugmini.as_ref(),
-            _ => None,
-        };
-        Ok(target
-            .map(|target| vec![target.binary.version.clone()])
-            .unwrap_or_default())
+        match self {
+            Self::Production(state) => {
+                let targets = state
+                    .runtime_targets
+                    .read()
+                    .map_err(|_| runtime_state_unavailable(correlation_id))?;
+                Ok(targets.versions(runtime))
+            }
+            Self::Local(state) => Ok(state.runtime_installed_versions_get(runtime)),
+            Self::Unavailable(problem) => Err(problem.clone()),
+        }
     }
 
     pub(crate) fn wayfern_executable_path_get(
@@ -6384,8 +6364,7 @@ impl DesktopState {
             .read()
             .map_err(|_| runtime_state_unavailable(correlation_id))?;
         targets
-            .wayfern
-            .as_ref()
+            .latest_target(&Runtime::Wayfern)
             .map(|target| target.binary.path.clone())
             .ok_or_else(|| {
                 Problem::new(

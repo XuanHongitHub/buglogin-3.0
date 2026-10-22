@@ -157,30 +157,72 @@ pub struct RuntimeTarget {
 
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeTargets {
-    pub wayfern: Option<RuntimeTarget>,
-    pub bugmini: Option<RuntimeTarget>,
+    pub wayfern: BTreeMap<String, RuntimeTarget>,
+    pub bugmini: BTreeMap<String, RuntimeTarget>,
 }
 
 impl RuntimeTargets {
     pub fn wayfern(binary: RuntimeBinary, extra_args: Vec<String>) -> Self {
-        Self {
-            wayfern: Some(RuntimeTarget { binary, extra_args }),
-            bugmini: None,
+        let mut targets = Self::default();
+        targets.insert(Runtime::Wayfern, RuntimeTarget { binary, extra_args });
+        targets
+    }
+
+    pub(crate) fn insert(&mut self, runtime: Runtime, target: RuntimeTarget) {
+        let targets = match runtime {
+            Runtime::Wayfern => &mut self.wayfern,
+            Runtime::Bugmini => &mut self.bugmini,
+            _ => return,
+        };
+        targets.insert(target.binary.version.clone(), target);
+    }
+
+    pub(crate) fn versions(&self, runtime: &Runtime) -> Vec<String> {
+        let targets = match runtime {
+            Runtime::Wayfern => &self.wayfern,
+            Runtime::Bugmini => &self.bugmini,
+            _ => return Vec::new(),
+        };
+        let mut versions: Vec<_> = targets.keys().cloned().collect();
+        versions.sort_by(|left, right| compare_runtime_versions(right, left));
+        versions
+    }
+
+    pub(crate) fn target(
+        &self,
+        runtime: &Runtime,
+        version: Option<&str>,
+    ) -> Option<&RuntimeTarget> {
+        let targets = match runtime {
+            Runtime::Wayfern => &self.wayfern,
+            Runtime::Bugmini => &self.bugmini,
+            _ => return None,
+        };
+        match version {
+            Some(version) => targets.get(version),
+            None => targets
+                .iter()
+                .max_by(|(left, _), (right, _)| compare_runtime_versions(left, right))
+                .map(|(_, target)| target),
         }
+    }
+
+    pub(crate) fn latest_target(&self, runtime: &Runtime) -> Option<&RuntimeTarget> {
+        self.target(runtime, None)
     }
 
     pub fn supports(&self, runtime: &Runtime) -> bool {
         match runtime {
-            Runtime::Wayfern => self.wayfern.is_some(),
-            Runtime::Bugmini => self.bugmini.is_some(),
+            Runtime::Wayfern => !self.wayfern.is_empty(),
+            Runtime::Bugmini => !self.bugmini.is_empty(),
             _ => false,
         }
     }
 
     pub(crate) fn approved_executables(&self) -> Result<Vec<ApprovedExecutable>, Problem> {
         self.wayfern
-            .iter()
-            .chain(self.bugmini.iter())
+            .values()
+            .chain(self.bugmini.values())
             .map(|target| ApprovedExecutable::new(&target.binary.path))
             .collect()
     }
@@ -192,10 +234,10 @@ impl RuntimeTargets {
         profile_id: &ProfileId,
     ) -> Result<PathBuf, Problem> {
         match runtime {
-            Runtime::Wayfern if self.wayfern.is_some() => {
+            Runtime::Wayfern if self.supports(&Runtime::Wayfern) => {
                 WayfernAdapter.profile_path(root, profile_id)
             }
-            Runtime::Bugmini if self.bugmini.is_some() => {
+            Runtime::Bugmini if self.supports(&Runtime::Bugmini) => {
                 BugminiAdapter.profile_path(root, profile_id)
             }
             _ => Err(runtime_not_configured()),
@@ -211,13 +253,15 @@ impl RuntimeTargets {
         let mut specification = match &profile.runtime {
             Runtime::Wayfern => launch_with_adapter(
                 WayfernAdapter,
-                self.wayfern.as_ref().ok_or_else(runtime_not_configured)?,
+                self.target(&Runtime::Wayfern, profile.runtime_version.as_deref())
+                    .ok_or_else(runtime_not_configured)?,
                 profile_path,
                 headless,
             )?,
             Runtime::Bugmini => launch_with_adapter(
                 BugminiAdapter,
-                self.bugmini.as_ref().ok_or_else(runtime_not_configured)?,
+                self.target(&Runtime::Bugmini, profile.runtime_version.as_deref())
+                    .ok_or_else(runtime_not_configured)?,
                 profile_path,
                 headless,
             )?,
@@ -248,6 +292,29 @@ impl RuntimeTargets {
         }
         Ok(specification)
     }
+}
+
+fn compare_runtime_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let left_parts = left.split(|character: char| !character.is_ascii_alphanumeric());
+    let right_parts = right.split(|character: char| !character.is_ascii_alphanumeric());
+    for (left, right) in left_parts.zip(right_parts) {
+        let order = match (left.parse::<u64>(), right.parse::<u64>()) {
+            (Ok(left), Ok(right)) => left.cmp(&right),
+            _ => left.cmp(right),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    left.split(|character: char| !character.is_ascii_alphanumeric())
+        .count()
+        .cmp(
+            &right
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .count(),
+        )
 }
 
 fn launch_with_adapter<A: RuntimeAdapter>(
@@ -461,6 +528,10 @@ pub struct AdapterState {
 impl AdapterState {
     pub fn profiles_root(&self) -> &Path {
         &self.runtime.profiles_root
+    }
+
+    pub(crate) fn runtime_installed_versions_get(&self, runtime: &Runtime) -> Vec<String> {
+        self.runtime.targets.versions(runtime)
     }
     pub fn open(
         repository_root: impl Into<PathBuf>,
@@ -3207,17 +3278,18 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let executable = root.join("bugmini.exe");
         fs::write(&executable, b"bugmini runtime").unwrap();
-        let targets = RuntimeTargets {
-            wayfern: None,
-            bugmini: Some(RuntimeTarget {
+        let mut targets = RuntimeTargets::default();
+        targets.insert(
+            Runtime::Bugmini,
+            RuntimeTarget {
                 binary: RuntimeBinary {
                     path: executable.clone(),
                     version: "146.0.7680.177.4".into(),
                     expected_checksum: checksum(b"bugmini runtime"),
                 },
                 extra_args: vec!["--lang=vi-VN".into()],
-            }),
-        };
+            },
+        );
         let profile = Profile {
             id: ProfileId::from_str("prf_bugmini_runtime").unwrap(),
             name: "Migrated Bugmini".into(),
@@ -3275,6 +3347,98 @@ mod tests {
         assert_eq!(
             targets
                 .profile_path(&Runtime::Wayfern, &root, &profile.id)
+                .unwrap_err()
+                .code,
+            "runtime_not_configured"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_targets_launch_the_profile_version_without_changing_its_data_path() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-runtime-version-switch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(
+            RuntimeTargets::default()
+                .versions(&Runtime::Wayfern)
+                .is_empty()
+        );
+        let old_executable = root.join("wayfern-old.exe");
+        let new_executable = root.join("wayfern-new.exe");
+        fs::write(&old_executable, b"old runtime").unwrap();
+        fs::write(&new_executable, b"new runtime").unwrap();
+        let mut targets = RuntimeTargets::default();
+        for (version, path, bytes) in [
+            ("154.0.8037.57", &old_executable, b"old runtime".as_slice()),
+            ("155.0.8059.79", &new_executable, b"new runtime".as_slice()),
+        ] {
+            targets.insert(
+                Runtime::Wayfern,
+                RuntimeTarget {
+                    binary: RuntimeBinary {
+                        path: path.clone(),
+                        version: version.to_owned(),
+                        expected_checksum: checksum(bytes),
+                    },
+                    extra_args: Vec::new(),
+                },
+            );
+        }
+        assert_eq!(
+            targets.versions(&Runtime::Wayfern),
+            vec!["155.0.8059.79", "154.0.8037.57"]
+        );
+
+        let profile_id = ProfileId::from_str("prf_version_switch").unwrap();
+        let mut profile = Profile {
+            id: profile_id.clone(),
+            name: "Version switch".into(),
+            runtime: Runtime::Wayfern,
+            runtime_version: Some("154.0.8037.57".into()),
+            runtime_config: None,
+            state: ProfileState::Ready,
+            archived: false,
+            fingerprint: None,
+            note: None,
+            proxy_id: None,
+            vpn_id: None,
+            group_ids: Vec::new(),
+            tags: Vec::new(),
+            extension_group_id: None,
+            sync_mode: Some(SyncMode::Local),
+            created_at: "2026-07-23T00:00:00Z".into(),
+            updated_at: "2026-07-23T00:00:00Z".into(),
+        };
+        let profiles_root = root.join("profiles");
+        fs::create_dir_all(&profiles_root).unwrap();
+        let profile_path = targets
+            .profile_path(&Runtime::Wayfern, &profiles_root, &profile_id)
+            .unwrap();
+        let old_launch = targets
+            .launch_specification(&profile, &profile_path, false)
+            .unwrap();
+        assert_eq!(old_launch.version, "154.0.8037.57");
+        assert_eq!(old_launch.executable, old_executable);
+
+        profile.runtime_version = Some("155.0.8059.79".into());
+        let new_launch = targets
+            .launch_specification(&profile, &profile_path, false)
+            .unwrap();
+        assert_eq!(new_launch.version, "155.0.8059.79");
+        assert_eq!(new_launch.executable, new_executable);
+        assert_eq!(new_launch.profile_path, old_launch.profile_path);
+
+        profile.runtime_version = Some("156.0.9000.1".into());
+        assert_eq!(
+            targets
+                .launch_specification(&profile, &profile_path, false)
                 .unwrap_err()
                 .code,
             "runtime_not_configured"

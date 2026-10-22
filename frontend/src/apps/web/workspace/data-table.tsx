@@ -295,13 +295,13 @@ export function EnterpriseDataTable<T>({
             Đã chọn {selectedKeys.size} bản ghi
           </span>
           <div style={{ display: "flex", gap: spacing[2] }}>
-            {bulkActions.map((ba) => (
+            {bulkActions.map((bulkAction) => (
               <Button
-                key={ba.label}
-                variant={ba.variant || "secondary"}
-                onClick={() => void ba.action(selectedItems)}
+                key={bulkAction.label}
+                variant={bulkAction.variant || "secondary"}
+                onClick={() => void bulkAction.action(selectedItems)}
               >
-                {ba.label}
+                {bulkAction.label}
               </Button>
             ))}
             <Button

@@ -59,7 +59,7 @@ pub(crate) fn current_platform_architecture(
 pub(crate) fn has_install_records(root: &Path) -> Result<bool, Problem> {
     let (platform, architecture) = current_platform_architecture("desktop-runtime-bootstrap")?;
     for runtime in [Runtime::Wayfern, Runtime::Bugmini] {
-        if install_record_path(root, &runtime, &platform, &architecture)?.is_file() {
+        if !install_record_paths(root, &runtime, &platform, &architecture)?.is_empty() {
             return Ok(true);
         }
     }
@@ -72,12 +72,7 @@ pub(crate) fn persist_install_record(
     release: &buglogin_browser::runtime::catalog::RuntimeRelease,
     target: &RuntimeTarget,
 ) -> Result<(), Problem> {
-    let record_path = install_record_path(
-        root,
-        &release.runtime,
-        &release.platform,
-        &release.architecture,
-    )?;
+    let record_path = download::runtime_directory(root, release)?.join(".buglogin-install.json");
     let parent = record_path.parent().ok_or_else(|| {
         problem(
             "runtime_install_path_unavailable",
@@ -147,116 +142,177 @@ pub(crate) fn load_installed_targets(
     let (platform, architecture) = current_platform_architecture("desktop-runtime-bootstrap")?;
     let mut targets = RuntimeTargets::default();
     for runtime in [Runtime::Wayfern, Runtime::Bugmini] {
-        let path = install_record_path(root, &runtime, &platform, &architecture)?;
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => metadata,
-            Ok(_) => {
+        for path in install_record_paths(root, &runtime, &platform, &architecture)? {
+            let metadata = fs::symlink_metadata(&path).map_err(|_| {
+                problem(
+                    "runtime_install_record_unavailable",
+                    "Runtime install record unavailable",
+                )
+            })?;
+            if !metadata.file_type().is_file() {
                 return Err(problem(
                     "runtime_install_record_invalid",
                     "Runtime install record invalid",
                 ));
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(_) => {
+            if metadata.len() > MAX_INSTALL_RECORD_BYTES {
                 return Err(problem(
-                    "runtime_install_record_unavailable",
-                    "Runtime install record unavailable",
+                    "runtime_install_record_invalid",
+                    "Runtime install record invalid",
                 ));
             }
-        };
-        if metadata.len() > MAX_INSTALL_RECORD_BYTES {
-            return Err(problem(
-                "runtime_install_record_invalid",
-                "Runtime install record invalid",
-            ));
-        }
-        let bytes = fs::read(&path).map_err(|_| {
-            problem(
-                "runtime_install_record_unavailable",
-                "Runtime install record unavailable",
-            )
-        })?;
-        let record: InstalledRuntimeRecord = serde_json::from_slice(&bytes).map_err(|_| {
-            problem(
-                "runtime_install_record_invalid",
-                "Runtime install record invalid",
-            )
-        })?;
-        if record.schema_version != 1
-            || record.release.runtime != runtime
-            || record.release.platform != platform
-            || record.release.architecture != architecture
-            || record.executable_sha256.len() != 64
-            || !record
-                .executable_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(problem(
-                "runtime_install_record_invalid",
-                "Runtime install record invalid",
-            ));
-        }
-        let catalog = buglogin_browser::runtime::catalog::RuntimeCatalog {
-            schema_version: record.catalog_schema_version,
-            releases: vec![record.release.clone()],
-        };
-        let verified = catalog.verify(verifier).map_err(|_| {
-            problem(
-                "runtime_signature_invalid",
-                "Installed runtime signature is invalid",
-            )
-        })?;
-        let verified_release = verified
-            .first()
-            .ok_or_else(|| problem("runtime_catalog_empty", "Runtime catalog is empty"))?;
-        let runtime_dir = download::runtime_directory(root, &record.release)?;
-        let executable = confined_path(&runtime_dir, Path::new(&record.release.relative_path))?;
-        let (actual_checksum, _) = checksum_reader(File::open(&executable).map_err(|_| {
-            problem(
-                "runtime_executable_missing",
-                "Installed runtime executable is missing",
-            )
-        })?)
-        .map_err(|_| {
-            problem(
-                "runtime_executable_invalid",
-                "Installed runtime executable is invalid",
-            )
-        })?;
-        if actual_checksum != record.executable_sha256.to_ascii_lowercase() {
-            return Err(problem(
-                "runtime_executable_checksum_mismatch",
-                "Installed runtime executable checksum is invalid",
-            ));
-        }
-        let target = RuntimeTarget {
-            binary: RuntimeBinary {
-                path: executable,
-                version: verified_release.release().version.clone(),
-                expected_checksum: actual_checksum,
-            },
-            extra_args: Vec::new(),
-        };
-        match runtime {
-            Runtime::Wayfern => targets.wayfern = Some(target),
-            Runtime::Bugmini => targets.bugmini = Some(target),
-            _ => {}
+            let bytes = fs::read(&path).map_err(|_| {
+                problem(
+                    "runtime_install_record_unavailable",
+                    "Runtime install record unavailable",
+                )
+            })?;
+            let record: InstalledRuntimeRecord = serde_json::from_slice(&bytes).map_err(|_| {
+                problem(
+                    "runtime_install_record_invalid",
+                    "Runtime install record invalid",
+                )
+            })?;
+            if record.schema_version != 1
+                || record.release.runtime != runtime
+                || record.release.platform != platform
+                || record.release.architecture != architecture
+                || record.executable_sha256.len() != 64
+                || !record
+                    .executable_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(problem(
+                    "runtime_install_record_invalid",
+                    "Runtime install record invalid",
+                ));
+            }
+            let catalog = buglogin_browser::runtime::catalog::RuntimeCatalog {
+                schema_version: record.catalog_schema_version,
+                releases: vec![record.release.clone()],
+            };
+            let verified = catalog.verify(verifier).map_err(|_| {
+                problem(
+                    "runtime_signature_invalid",
+                    "Installed runtime signature is invalid",
+                )
+            })?;
+            let verified_release = verified
+                .first()
+                .ok_or_else(|| problem("runtime_catalog_empty", "Runtime catalog is empty"))?;
+            let runtime_dir = path.parent().ok_or_else(|| {
+                problem(
+                    "runtime_install_record_invalid",
+                    "Runtime install record invalid",
+                )
+            })?;
+            let base_dir = download::runtime_directory_for(
+                root,
+                &record.release.runtime,
+                &record.release.platform,
+                &record.release.architecture,
+            )?;
+            let expected_version_dir = download::runtime_directory(root, &record.release)?;
+            let legacy_record = runtime_dir == base_dir;
+            if !legacy_record && runtime_dir != expected_version_dir {
+                return Err(problem(
+                    "runtime_install_record_invalid",
+                    "Runtime install record invalid",
+                ));
+            }
+            let executable = confined_path(runtime_dir, Path::new(&record.release.relative_path))?;
+            let (actual_checksum, _) = checksum_reader(File::open(&executable).map_err(|_| {
+                problem(
+                    "runtime_executable_missing",
+                    "Installed runtime executable is missing",
+                )
+            })?)
+            .map_err(|_| {
+                problem(
+                    "runtime_executable_invalid",
+                    "Installed runtime executable is invalid",
+                )
+            })?;
+            if actual_checksum != record.executable_sha256.to_ascii_lowercase() {
+                return Err(problem(
+                    "runtime_executable_checksum_mismatch",
+                    "Installed runtime executable checksum is invalid",
+                ));
+            }
+            let target = RuntimeTarget {
+                binary: RuntimeBinary {
+                    path: executable,
+                    version: verified_release.release().version.clone(),
+                    expected_checksum: actual_checksum,
+                },
+                extra_args: Vec::new(),
+            };
+            targets.insert(runtime.clone(), target);
         }
     }
     Ok(targets)
 }
 
-fn install_record_path(
+fn install_record_paths(
     root: &Path,
     runtime: &Runtime,
     platform: &RuntimePlatform,
     architecture: &RuntimeArchitecture,
-) -> Result<PathBuf, Problem> {
-    Ok(
-        download::runtime_directory_for(root, runtime, platform, architecture)?
-            .join(".buglogin-install.json"),
-    )
+) -> Result<Vec<PathBuf>, Problem> {
+    let base = download::runtime_directory_for(root, runtime, platform, architecture)?;
+    let mut records = Vec::new();
+    let legacy = base.join(".buglogin-install.json");
+    if legacy.exists() {
+        records.push(legacy);
+    }
+    let versions = base.join("versions");
+    match fs::read_dir(&versions) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|_| {
+                    problem(
+                        "runtime_install_record_unavailable",
+                        "Runtime install record unavailable",
+                    )
+                })?;
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !is_version_directory_name(&name) {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(entry.path()).map_err(|_| {
+                    problem(
+                        "runtime_install_record_unavailable",
+                        "Runtime install record unavailable",
+                    )
+                })?;
+                if !metadata.file_type().is_dir() {
+                    return Err(problem(
+                        "runtime_install_record_invalid",
+                        "Runtime install record invalid",
+                    ));
+                }
+                let record = entry.path().join(".buglogin-install.json");
+                if record.exists() {
+                    records.push(record);
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(problem(
+                "runtime_install_record_unavailable",
+                "Runtime install record unavailable",
+            ));
+        }
+    }
+    Ok(records)
+}
+
+fn is_version_directory_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn replace_file(staged: &Path, target: &Path) -> Result<(), Problem> {
@@ -632,4 +688,125 @@ fn problem(code: &'static str, title: &'static str) -> Problem {
         _ => 500,
     };
     Problem::new(code, title, status, "desktop-runtime-install")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        InstalledRuntimeRecord, current_platform_architecture, load_installed_targets,
+        persist_install_record,
+    };
+    use crate::adapter::RuntimeTarget;
+    use buglogin_browser::runtime::{
+        RuntimeBinary,
+        catalog::{RuntimePackageFormat, RuntimeRelease, RuntimeSignatureVerifier},
+        download,
+    };
+    use buglogin_domain::entities::Runtime;
+    use buglogin_storage::blob::checksum;
+    use std::{fs, path::PathBuf};
+
+    struct ChecksumVerifier;
+
+    impl RuntimeSignatureVerifier for ChecksumVerifier {
+        fn verify(&self, key_id: &str, payload: &[u8], signature: &str) -> bool {
+            key_id == "runtime-test-key" && signature == checksum(payload)
+        }
+    }
+
+    fn release(version: &str, bytes: &[u8]) -> RuntimeRelease {
+        let (platform, architecture) =
+            current_platform_architecture("runtime-install-test").unwrap();
+        let mut release = RuntimeRelease {
+            runtime: Runtime::Wayfern,
+            version: version.to_owned(),
+            platform,
+            architecture,
+            relative_path: "wayfern.exe".to_owned(),
+            package_format: RuntimePackageFormat::Raw,
+            archive_prefix: None,
+            source: "https://runtime.example/wayfern.exe".to_owned(),
+            sha256: checksum(bytes),
+            size_bytes: bytes.len() as u64,
+            key_id: "runtime-test-key".to_owned(),
+            signature: String::new(),
+        };
+        release.signature = checksum(&release.signing_payload());
+        release
+    }
+
+    fn root() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "buglogin-runtime-install-versions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn install_record(root: &std::path::Path, release: &RuntimeRelease, bytes: &[u8]) {
+        let directory = download::runtime_directory(root, release).unwrap();
+        let executable = directory.join(&release.relative_path);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, bytes).unwrap();
+        let target = RuntimeTarget {
+            binary: RuntimeBinary {
+                path: executable,
+                version: release.version.clone(),
+                expected_checksum: checksum(bytes),
+            },
+            extra_args: Vec::new(),
+        };
+        persist_install_record(root, 1, release, &target).unwrap();
+    }
+
+    #[test]
+    fn installed_version_inventory_keeps_multiple_verified_versions_and_legacy_install() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let old_bytes = b"old-wayfern-runtime";
+        let new_bytes = b"new-wayfern-runtime";
+        let old_release = release("154.0.8037.57", old_bytes);
+        let new_release = release("155.0.8059.79", new_bytes);
+        install_record(&root, &old_release, old_bytes);
+        install_record(&root, &new_release, new_bytes);
+
+        // Install records from the previous layout lived at the unversioned platform directory.
+        let base = download::runtime_directory_for(
+            &root,
+            &old_release.runtime,
+            &old_release.platform,
+            &old_release.architecture,
+        )
+        .unwrap();
+        let legacy_bytes = b"legacy-wayfern-runtime";
+        let legacy = release("153.0.7912.91", legacy_bytes);
+        let legacy_executable = base.join(&legacy.relative_path);
+        fs::create_dir_all(legacy_executable.parent().unwrap()).unwrap();
+        fs::write(&legacy_executable, legacy_bytes).unwrap();
+        let legacy_record = InstalledRuntimeRecord {
+            schema_version: 1,
+            catalog_schema_version: 1,
+            release: legacy.clone(),
+            executable_sha256: checksum(legacy_bytes),
+        };
+        fs::write(
+            base.join(".buglogin-install.json"),
+            serde_json::to_vec(&legacy_record).unwrap(),
+        )
+        .unwrap();
+
+        let targets = load_installed_targets(&root, &ChecksumVerifier).unwrap();
+        assert_eq!(targets.versions(&Runtime::Wayfern).len(), 3);
+        assert_eq!(targets.versions(&Runtime::Wayfern)[0], "155.0.8059.79");
+        for release in [&old_release, &new_release, &legacy] {
+            let target = targets
+                .target(&Runtime::Wayfern, Some(&release.version))
+                .unwrap();
+            assert_eq!(target.binary.version, release.version);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

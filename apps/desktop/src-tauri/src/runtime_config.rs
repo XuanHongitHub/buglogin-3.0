@@ -267,21 +267,28 @@ pub fn open() -> Result<DesktopBootstrap, Problem> {
         api_base_url.as_deref(),
         cfg!(debug_assertions),
     );
-    let mut runtime_targets = RuntimeTargets {
-        wayfern: runtime_target("WAYFERN", allow_runtime_environment_overrides)?,
-        bugmini: runtime_target("BUGMINI", allow_runtime_environment_overrides)?,
-    };
+    let mut runtime_targets = RuntimeTargets::default();
+    if let Some(target) = runtime_target("WAYFERN", allow_runtime_environment_overrides)? {
+        runtime_targets.insert(buglogin_domain::entities::Runtime::Wayfern, target);
+    }
+    if let Some(target) = runtime_target("BUGMINI", allow_runtime_environment_overrides)? {
+        runtime_targets.insert(buglogin_domain::entities::Runtime::Bugmini, target);
+    }
     if mode == DeploymentMode::Production {
         let runtime_root = runtime_install_root()?;
         if crate::runtime_install::has_install_records(&runtime_root)? {
             let verifier = pinned_runtime_verifier("desktop-runtime-bootstrap")?;
             let installed =
                 crate::runtime_install::load_installed_targets(&runtime_root, &verifier)?;
-            if runtime_targets.wayfern.is_none() {
-                runtime_targets.wayfern = installed.wayfern;
+            for target in installed.wayfern.into_values() {
+                if !runtime_targets.wayfern.contains_key(&target.binary.version) {
+                    runtime_targets.insert(buglogin_domain::entities::Runtime::Wayfern, target);
+                }
             }
-            if runtime_targets.bugmini.is_none() {
-                runtime_targets.bugmini = installed.bugmini;
+            for target in installed.bugmini.into_values() {
+                if !runtime_targets.bugmini.contains_key(&target.binary.version) {
+                    runtime_targets.insert(buglogin_domain::entities::Runtime::Bugmini, target);
+                }
             }
         }
     }

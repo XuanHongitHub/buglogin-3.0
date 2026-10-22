@@ -1082,22 +1082,22 @@ fn enqueue_runtime_dispatch(
         device_id.to_owned()
     } else {
         match devices.len() {
-        0 => {
-            return Err(problem(
-                "device_offline",
-                "No active desktop device is signed in for this account",
-                503,
-            )
-            .retryable(true));
-        }
-        1 => devices.into_iter().next().expect("one active device"),
-        _ => {
-            return Err(problem(
-                "device_selection_required",
-                "This account has multiple active desktop devices; select a target device",
-                409,
-            ));
-        }
+            0 => {
+                return Err(problem(
+                    "device_offline",
+                    "No active desktop device is signed in for this account",
+                    503,
+                )
+                .retryable(true));
+            }
+            1 => devices.into_iter().next().expect("one active device"),
+            _ => {
+                return Err(problem(
+                    "device_selection_required",
+                    "This account has multiple active desktop devices; select a target device",
+                    409,
+                ));
+            }
         }
     };
     let expires_at = now.checked_add(120).ok_or_else(|| {
@@ -1176,6 +1176,12 @@ fn resolve_scope(
             .clone()
             .map(ResourceScope::account)
             .ok_or_else(|| problem("account_missing", "Account is missing", 401)),
+        "account.list" => Ok(ResourceScope::global()),
+        "account.status.update" => Ok(ResourceScope::account(required_id(
+            input,
+            "accountId",
+            AccountId::from_str,
+        )?)),
         "proxy.list" | "proxy.get" | "proxy.create" | "proxy.update" | "proxy.delete" => Ok(
             ResourceScope::workspace(required_id(input, "workspaceId", WorkspaceId::from_str)?),
         ),
@@ -2282,6 +2288,39 @@ impl McpExecutor for ProductionMcpExecutor {
                     Problem::new("account_not_found", "Account not found", 404, "identity")
                 })?;
                 Ok(serde_json::to_value(account).map_err(serialization_problem)?)
+            }
+            "account.list" => {
+                let mut accounts = state
+                    .control_persistence
+                    .list::<buglogin_domain::account::Account>("control", "account")?;
+                accounts.sort_by(|left, right| left.id.cmp(&right.id));
+                Ok(serde_json::json!({ "items": accounts, "nextCursor": Value::Null }))
+            }
+            "account.status.update" => {
+                let account_id = required_id(&input, "accountId", AccountId::from_str)?;
+                let status: buglogin_domain::account::AccountStatus =
+                    serde_json::from_value(input.get("status").cloned().unwrap_or(Value::Null))
+                        .map_err(serialization_problem)?;
+                let expected_revision = input
+                    .get("expectedRevision")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| problem("invalid_input", "expectedRevision is required", 400))?;
+                let actor_id = principal
+                    .account_id
+                    .as_ref()
+                    .ok_or_else(|| problem("account_missing", "Account is missing", 401))?;
+                let idempotency_key = request.idempotency_key.as_deref().ok_or_else(|| {
+                    problem("idempotency_key_required", "Idempotency key required", 400)
+                })?;
+                let updated = state.update_account_status_for_mcp(
+                    actor_id,
+                    &account_id,
+                    status,
+                    expected_revision,
+                    &request.correlation_id,
+                    idempotency_key,
+                )?;
+                serde_json::to_value(updated).map_err(serialization_problem)
             }
             "organization.create" => {
                 let parsed: OrganizationInput =
@@ -4848,11 +4887,13 @@ mod input_fixture_tests {
         validate_mcp_input(command, &input)
             .expect("hosted launch needs a profile scope and may target an owned device");
         assert!(validate_mcp_input(command, &serde_json::json!({})).is_err());
-        assert!(validate_mcp_input(
-            command,
-            &serde_json::json!({"profileId": "prf_mcp_launch", "unknown": true})
-        )
-        .is_err());
+        assert!(
+            validate_mcp_input(
+                command,
+                &serde_json::json!({"profileId": "prf_mcp_launch", "unknown": true})
+            )
+            .is_err()
+        );
 
         let stop = CommandRegistry::get("profile.stop").expect("profile stop command");
         validate_mcp_input(

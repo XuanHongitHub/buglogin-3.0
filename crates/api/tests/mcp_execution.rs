@@ -9,6 +9,10 @@ use std::{
     },
 };
 
+use axum::{
+    body::Body,
+    http::{Request, StatusCode, header},
+};
 use buglogin_api::mcp::{
     AuditOutcome, AuditRecord, ExecutionRequest, IdempotencyClaim, McpDispatcher,
     McpExecutionPolicy, McpExecutor, McpRequest,
@@ -31,6 +35,7 @@ use buglogin_domain::{
 use buglogin_storage::control::{ControlRecordStore, MemoryControlRecordStore, PutControlRecord};
 use buglogin_sync::coordination::CoordinationBackend;
 use serde_json::{Value, json};
+use tower::ServiceExt;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1121,6 +1126,173 @@ fn production_mcp_grant_list_page_continues_and_legacy_list_keeps_all_items() {
     assert_eq!(compatibility["items"].as_array().unwrap().len(), 3);
     assert!(compatibility["nextCursor"].is_null());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied() {
+    use buglogin_api::http::{ApiState, FirstOwnerBootstrapInput, router};
+    use buglogin_domain::permissions::Role;
+    use buglogin_storage::control::MemoryControlRecordStore;
+
+    let state = ApiState::hosted_with_control_store(
+        buglogin_browser::profile::ProfileService::disabled(),
+        MemoryControlRecordStore::default(),
+    )
+    .unwrap();
+    let owner = state
+        .bootstrap_first_owner(FirstOwnerBootstrapInput {
+            account_id: Some("acct_mcp_platform_owner".into()),
+            username: "mcp-platform-owner".into(),
+            email: "mcp-platform-owner@example.test".into(),
+            operator_attested_email: true,
+            password: zeroize::Zeroizing::new("Mcp platform owner 2026!".into()),
+            organization_name: "MCP Admin Org".into(),
+            workspace_name: "MCP Admin Workspace".into(),
+            max_workspaces: 4,
+            max_profiles: 50,
+            max_members: 10,
+            max_storage_bytes: 1_048_576,
+        })
+        .unwrap();
+    let app = router(state.clone());
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/login")
+                .header("content-type", "application/json")
+                .header("origin", "http://127.0.0.1:3000")
+                .header("x-correlation-id", "mcp-admin-login")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "identifier": "mcp-platform-owner",
+                        "password": "Mcp platform owner 2026!"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let set_cookies = login
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect::<Vec<_>>();
+    let session_cookie = set_cookies
+        .iter()
+        .find(|value| value.starts_with("__Host-buglogin_session="))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let csrf_cookie = set_cookies
+        .iter()
+        .find(|value| value.starts_with("__Host-buglogin_csrf="))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let cookies = format!("{session_cookie}; {csrf_cookie}");
+    let csrf = csrf_cookie.split_once('=').unwrap().1;
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let created_key = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/api-tokens")
+                .header("content-type", "application/json")
+                .header("origin", "http://127.0.0.1:3000")
+                .header("cookie", cookies)
+                .header("x-csrf-token", csrf)
+                .header("x-correlation-id", "mcp-admin-api-key-create")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "name": "MCP platform admin",
+                        "scopes": ["CAP-ADM-001:read", "CAP-ADM-001:manage"],
+                        "expiresAt": expires_at
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created_key.status(), StatusCode::CREATED);
+    let key_body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(created_key.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let token = key_body["token"].as_str().unwrap().to_owned();
+    assert!(token.starts_with("blapi_"));
+    let mut dispatcher = production_dispatcher(&state);
+    let accounts = dispatcher
+        .dispatch(production_request(
+            "account_list",
+            "cor_mcp_platform_account_list",
+            Some(&token),
+            None,
+            json!({}),
+        ))
+        .unwrap();
+
+    assert_eq!(accounts["items"].as_array().unwrap().len(), 1);
+    assert_eq!(accounts["items"][0]["id"], owner.account_id.as_str());
+
+    let command = buglogin_api::commands::CommandRegistry::get("account.list").unwrap();
+    let principal = Principal {
+        account_id: Some(owner.account_id.clone()),
+        roles: [Role::Account].into_iter().collect(),
+        ..Principal::default()
+    };
+    let mut policy = buglogin_api::mcp::ProductionMcpPolicy::new(state);
+    assert_eq!(
+        policy
+            .authorize(&principal, command, &ResourceScope::global())
+            .unwrap_err()
+            .status,
+        403
+    );
+    let status_command =
+        buglogin_api::commands::CommandRegistry::get("account.status.update").unwrap();
+    assert_eq!(
+        policy
+            .authorize(
+                &principal,
+                status_command,
+                &ResourceScope::account(owner.account_id.clone()),
+            )
+            .unwrap_err()
+            .status,
+        403
+    );
+
+    let updated = dispatcher
+        .dispatch(production_request(
+            "account_status_update",
+            "cor_mcp_platform_account_status_update",
+            Some(&token),
+            Some("mcp-platform-account-status-update-01"),
+            json!({
+                "accountId": owner.account_id.as_str(),
+                "status": "suspended",
+                "expectedRevision": accounts["items"][0]["revision"],
+            }),
+        ))
+        .unwrap();
+    assert_eq!(updated["status"], "suspended");
+    assert!(
+        updated["revision"].as_u64().unwrap() > accounts["items"][0]["revision"].as_u64().unwrap()
+    );
 }
 
 #[test]

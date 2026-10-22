@@ -7,16 +7,30 @@ import { parse, stringify } from "yaml";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = resolve(root, "docs/contracts/command-registry-v1.yaml");
 const openApiSourcePath = resolve(root, "crates/api/openapi/openapi-v1.yaml");
-const openApiContractOutputPath = resolve(root, "docs/contracts/openapi-v1.yaml");
-const frontendOutputPath = resolve(root, "frontend/src/generated/command-registry.ts");
-const adapterOutputPath = resolve(root, "docs/contracts/adapter-contract-v1.yaml");
+const openApiContractOutputPath = resolve(
+  root,
+  "docs/contracts/openapi-v1.yaml",
+);
+const frontendOutputPath = resolve(
+  root,
+  "frontend/src/generated/command-registry.ts",
+);
+const adapterOutputPath = resolve(
+  root,
+  "docs/contracts/adapter-contract-v1.yaml",
+);
 const rustOutputPath = resolve(root, "crates/api/src/commands/generated.rs");
-const checkOnly = process.argv.includes("--check") || process.argv.includes("--check-rust");
-const rustOnly = process.argv.includes("--rust-only") || process.argv.includes("--check-rust");
+const checkOnly =
+  process.argv.includes("--check") || process.argv.includes("--check-rust");
+const rustOnly =
+  process.argv.includes("--rust-only") || process.argv.includes("--check-rust");
 
 const source = (await readFile(sourcePath, "utf8")).replace(/\r\n/g, "\n");
 const registry = parse(source);
-const openApiSource = (await readFile(openApiSourcePath, "utf8")).replace(/\r\n/g, "\n");
+const openApiSource = (await readFile(openApiSourcePath, "utf8")).replace(
+  /\r\n/g,
+  "\n",
+);
 const openApi = parse(openApiSource);
 
 if (
@@ -44,10 +58,19 @@ for (const command of commands) {
   }
 }
 
-const mcpInputs = [...new Set(
-  commands.filter((command) => command.adapters.includes("mcp")).map((command) => command.input),
-)];
-const mcpInputSchemas = Object.fromEntries(mcpInputs.map((name) => [name, makeMcpInputSchema(name, openApi?.components?.schemas)]));
+const mcpInputs = [
+  ...new Set(
+    commands
+      .filter((command) => command.adapters.includes("mcp"))
+      .map((command) => command.input),
+  ),
+];
+const mcpInputSchemas = Object.fromEntries(
+  mcpInputs.map((name) => [
+    name,
+    makeMcpInputSchema(name, openApi?.components?.schemas),
+  ]),
+);
 
 const sourceHash = createHash("sha256").update(source).digest("hex");
 const openApiHash = createHash("sha256").update(openApiSource).digest("hex");
@@ -123,9 +146,14 @@ const profileTypes = [
   ["VersionedProfile", schemas?.VersionedProfile],
   ["VersionedProfilePage", schemas?.VersionedProfilePage],
 ].map(([name, schema]) => renderOpenApiType(name, schema));
-const generatedSchemaNames = new Set(profileTypes.flatMap((type) => [...type.matchAll(/^export type (\w+)/gm)].map((match) => match[1])));
+const generatedSchemaNames = new Set(
+  profileTypes.flatMap((type) =>
+    [...type.matchAll(/^export type (\w+)/gm)].map((match) => match[1]),
+  ),
+);
 for (const [name, schema] of Object.entries(schemas ?? {})) {
-  if (!generatedSchemaNames.has(name)) profileTypes.push(renderOpenApiType(name, schema));
+  if (!generatedSchemaNames.has(name))
+    profileTypes.push(renderOpenApiType(name, schema));
 }
 const frontendOutput = render({
   registryId: requiredString(registry.registryId, "registryId"),
@@ -157,7 +185,10 @@ if (checkOnly) {
 }
 
 async function checkGenerated(path, expected) {
-  const existing = (await readFile(path, "utf8").catch(() => null))?.replace(/\r\n/g, "\n");
+  const existing = (await readFile(path, "utf8").catch(() => null))?.replace(
+    /\r\n/g,
+    "\n",
+  );
   if (existing !== expected.replace(/\r\n/g, "\n")) {
     console.error(`Generated file is stale: ${path}`);
     process.exitCode = 1;
@@ -166,7 +197,9 @@ async function checkGenerated(path, expected) {
 
 function renderOpenApiType(name, schema) {
   if (!schema || typeof schema !== "object") {
-    throw new Error(`OpenAPI schema ${name} is required for generated frontend types`);
+    throw new Error(
+      `OpenAPI schema ${name} is required for generated frontend types`,
+    );
   }
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     const values = JSON.stringify(schema.enum);
@@ -186,19 +219,28 @@ function schemaToTypeScript(schema, owner) {
     return schema.enum.map((value) => JSON.stringify(value)).join(" | ");
   }
   if (Array.isArray(schema.anyOf)) {
-    return schema.anyOf.map((variant) => schemaToTypeScript(variant, owner)).join(" | ");
+    return schema.anyOf
+      .map((variant) => schemaToTypeScript(variant, owner))
+      .join(" | ");
   }
   if (Array.isArray(schema.oneOf)) {
-    return schema.oneOf.map((variant) => schemaToTypeScript(variant, owner)).join(" | ");
+    return schema.oneOf
+      .map((variant) => schemaToTypeScript(variant, owner))
+      .join(" | ");
   }
   if (Array.isArray(schema.allOf)) {
-    return schema.allOf.map((variant) => schemaToTypeScript(variant, owner)).join(" & ");
+    return schema.allOf
+      .map((variant) => schemaToTypeScript(variant, owner))
+      .join(" & ");
   }
   if (Array.isArray(schema.type)) {
-    return schema.type.map((type) => schemaToTypeScript({ ...schema, type }, owner)).join(" | ");
+    return schema.type
+      .map((type) => schemaToTypeScript({ ...schema, type }, owner))
+      .join(" | ");
   }
   if (schema.type === "array") {
-    if (!schema.items) throw new Error(`OpenAPI array ${owner} is missing items`);
+    if (!schema.items)
+      throw new Error(`OpenAPI array ${owner} is missing items`);
     return `Array<${schemaToTypeScript(schema.items, owner)}>`;
   }
   if (schema.type === "object") {
@@ -206,22 +248,36 @@ function schemaToTypeScript(schema, owner) {
       if (schema.required !== undefined && !Array.isArray(schema.required)) {
         throw new Error(`OpenAPI object ${owner} has invalid required fields`);
       }
-      if (Object.keys(schema.properties).length === 0 && schema.additionalProperties === false) {
+      if (
+        Object.keys(schema.properties).length === 0 &&
+        schema.additionalProperties === false
+      ) {
         return "Record<string, never>";
       }
-      const fields = Object.entries(schema.properties).map(([field, property]) => {
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Invalid ${owner} field name: ${field}`);
-        const optional = (schema.required ?? []).includes(field) ? "" : "?";
-        return `  ${field}${optional}: ${schemaToTypeScript(property, `${owner}.${field}`)};`;
-      });
-      if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
-        fields.push(`  [key: string]: ${schemaToTypeScript(schema.additionalProperties, `${owner} additional property`)};`);
+      const fields = Object.entries(schema.properties).map(
+        ([field, property]) => {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field))
+            throw new Error(`Invalid ${owner} field name: ${field}`);
+          const optional = (schema.required ?? []).includes(field) ? "" : "?";
+          return `  ${field}${optional}: ${schemaToTypeScript(property, `${owner}.${field}`)};`;
+        },
+      );
+      if (
+        schema.additionalProperties &&
+        typeof schema.additionalProperties === "object"
+      ) {
+        fields.push(
+          `  [key: string]: ${schemaToTypeScript(schema.additionalProperties, `${owner} additional property`)};`,
+        );
       } else if (schema.additionalProperties === true) {
         fields.push("  [key: string]: unknown;");
       }
       return `{\n${fields.join("\n")}\n}`;
     }
-    if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+    if (
+      schema.additionalProperties &&
+      typeof schema.additionalProperties === "object"
+    ) {
       return `Record<string, ${schemaToTypeScript(schema.additionalProperties, owner)}>`;
     }
     return "Record<string, unknown>";
@@ -252,9 +308,7 @@ function renderAdapters(commands, sourceHash) {
       : {}),
   });
   const requiresIdempotency = (command) =>
-    command.idempotency === "required"
-      ? { requires: ["Idempotency-Key"] }
-      : {};
+    command.idempotency === "required" ? { requires: ["Idempotency-Key"] } : {};
   const projections = commands.map((command) => ({
     ...metadata(command),
     adapters: command.adapters,
@@ -275,8 +329,8 @@ function renderAdapters(commands, sourceHash) {
           command.auth === "public"
             ? "public"
             : command.auth === "optional-local"
-            ? "optional-local-bearer-token"
-            : "bearer-token",
+              ? "optional-local-bearer-token"
+              : "bearer-token",
         authorization: "canonical-capability-acl",
         scope: "canonical-resource-scope",
         secrets: "never-returned",
@@ -293,8 +347,8 @@ function renderAdapters(commands, sourceHash) {
           command.auth === "public"
             ? "public"
             : command.auth === "optional-local"
-            ? "optional-local-auth"
-            : "bearer-token-or-session",
+              ? "optional-local-auth"
+              : "bearer-token-or-session",
         authorization: "canonical-capability-acl",
         scope: "canonical-resource-scope",
         errors: "Problem",
@@ -311,8 +365,8 @@ function renderAdapters(commands, sourceHash) {
           command.auth === "public"
             ? "public"
             : command.auth === "optional-local"
-            ? "optional-local-session"
-            : "canonical-session",
+              ? "optional-local-session"
+              : "canonical-session",
         authorization: "canonical-capability-acl",
         scope: "canonical-resource-scope",
         filesystem: "rust-only",
@@ -414,8 +468,16 @@ function normalizeCommand(command, defaults, index) {
   if (!/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(id)) {
     throw new Error(`Invalid command id: ${id}`);
   }
-  assertOneOf(kind, ["query", "command", "operation", "subscription"], `${id}.kind`);
-  assertOneOf(action, ["read", "create", "update", "delete", "execute", "share", "manage"], `${id}.action`);
+  assertOneOf(
+    kind,
+    ["query", "command", "operation", "subscription"],
+    `${id}.kind`,
+  );
+  assertOneOf(
+    action,
+    ["read", "create", "update", "delete", "execute", "share", "manage"],
+    `${id}.action`,
+  );
   for (const adapter of adapters) {
     assertOneOf(adapter, ["tauri", "rest", "mcp"], `${id}.adapters`);
   }
@@ -507,7 +569,9 @@ function renderRust(commands, sourceHash, mcpInputSchemas) {
   const inputSchemaArms = Object.entries(mcpInputSchemas)
     .map(([name, schema]) => {
       const serialized = JSON.stringify(schema);
-      const hashes = [...serialized.matchAll(/"#+/g)].map((match) => match[0].length);
+      const hashes = [...serialized.matchAll(/"#+/g)].map(
+        (match) => match[0].length,
+      );
       const delimiter = "#".repeat(Math.max(1, ...hashes));
       return `        CommandSchema::${name} => r${delimiter}\"${serialized}\"${delimiter},`;
     })
@@ -534,7 +598,9 @@ ${inputSchemaArms}
 
 function makeMcpInputSchema(name, components) {
   if (!components || !Object.hasOwn(components, name)) {
-    throw new Error(`MCP command input schema is missing from OpenAPI: ${name}`);
+    throw new Error(
+      `MCP command input schema is missing from OpenAPI: ${name}`,
+    );
   }
   const definitions = {};
   const visit = (schema) => {
@@ -542,22 +608,35 @@ function makeMcpInputSchema(name, components) {
     if (!schema || typeof schema !== "object") return schema;
     if (typeof schema.$ref === "string") {
       const match = schema.$ref.match(/^#\/components\/schemas\/([^/]+)$/);
-      if (!match) throw new Error(`Unsupported MCP input schema reference: ${schema.$ref}`);
+      if (!match)
+        throw new Error(
+          `Unsupported MCP input schema reference: ${schema.$ref}`,
+        );
       const target = match[1];
-      if (!Object.hasOwn(components, target)) throw new Error(`Unknown OpenAPI schema reference: ${schema.$ref}`);
+      if (!Object.hasOwn(components, target))
+        throw new Error(`Unknown OpenAPI schema reference: ${schema.$ref}`);
       if (!Object.hasOwn(definitions, target)) {
         definitions[target] = {};
         definitions[target] = visit(components[target]);
       }
       return { ...schema, $ref: `#/$defs/${target}` };
     }
-    return Object.fromEntries(Object.entries(schema).map(([key, value]) => [key, visit(value)]));
+    return Object.fromEntries(
+      Object.entries(schema).map(([key, value]) => [key, visit(value)]),
+    );
   };
   const root = visit({ $ref: `#/components/schemas/${name}` });
   return { ...root, $defs: definitions };
 }
 
-function render({ registryId, version, sourceHash, openApiHash, profileTypes, commands }) {
+function render({
+  registryId,
+  version,
+  sourceHash,
+  openApiHash,
+  profileTypes,
+  commands,
+}) {
   const quote = (value) => JSON.stringify(value);
   const array = (values) => `[${values.map(quote).join(", ")}]`;
   const metadata = commands

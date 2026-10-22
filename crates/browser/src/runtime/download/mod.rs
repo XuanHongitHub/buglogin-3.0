@@ -7,7 +7,10 @@ use std::{
 };
 
 use buglogin_domain::errors::Problem;
-use buglogin_storage::{blob::checksum_reader, paths::confined_path};
+use buglogin_storage::{
+    blob::{checksum, checksum_reader},
+    paths::confined_path,
+};
 
 use super::catalog::{RuntimePackageFormat, RuntimeRelease, VerifiedRuntimeRelease};
 
@@ -40,8 +43,11 @@ pub fn install(
     if release.package_format == RuntimePackageFormat::Dmg {
         return install_dmg(root, release, source);
     }
+    let runtime_root = runtime_directory(root, release)?;
+    fs::create_dir_all(&runtime_root)
+        .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
     let relative = Path::new(&release.relative_path);
-    let target = confined_path(root, relative)?;
+    let target = confined_path(&runtime_root, relative)?;
     let parent = target
         .parent()
         .ok_or_else(|| problem("runtime_path_invalid", "Runtime path invalid"))?;
@@ -439,12 +445,14 @@ fn verify_staged_artifact(path: &Path, release: &RuntimeRelease) -> Result<(), P
 }
 
 pub fn runtime_directory(root: &Path, release: &RuntimeRelease) -> Result<PathBuf, Problem> {
-    runtime_directory_for(
+    let runtime_root = runtime_directory_for(
         root,
         &release.runtime,
         &release.platform,
         &release.architecture,
-    )
+    )?;
+    let version_key = checksum(release.version.as_bytes());
+    Ok(runtime_root.join("versions").join(version_key))
 }
 
 pub fn runtime_directory_for(
@@ -941,7 +949,8 @@ pub fn rollback(root: &Path, release: &VerifiedRuntimeRelease) -> Result<(), Pro
     ) {
         return rollback_directory(root, release.release());
     }
-    let target = confined_path(root, Path::new(&release.release().relative_path))?;
+    let runtime_root = runtime_directory(root, release.release())?;
+    let target = confined_path(&runtime_root, Path::new(&release.release().relative_path))?;
     let backup = rollback_path(&target)?;
     let backup_metadata = fs::symlink_metadata(&backup).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {

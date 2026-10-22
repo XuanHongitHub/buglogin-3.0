@@ -133,8 +133,6 @@ fn dmg_install_is_rejected_on_non_macos_before_downloading_or_writing() {
 fn verified_runtime_install_is_atomic_and_rollback_restores_previous_binary() {
     let root = root("rollback");
     let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("wayfern")).unwrap();
-    fs::write(root.join("wayfern/wayfern.exe"), b"old-runtime").unwrap();
     let bytes = b"new-runtime";
     let release = RuntimeCatalog {
         schema_version: 1,
@@ -143,6 +141,12 @@ fn verified_runtime_install_is_atomic_and_rollback_restores_previous_binary() {
     .verify(&ChecksumVerifier)
     .unwrap()
     .remove(0);
+    let previous_binary =
+        buglogin_browser::runtime::download::runtime_directory(&root, release.release())
+            .unwrap()
+            .join(&release.release().relative_path);
+    fs::create_dir_all(previous_binary.parent().unwrap()).unwrap();
+    fs::write(&previous_binary, b"old-runtime").unwrap();
 
     let receipt = install(&root, &release, &MemorySource(bytes.to_vec())).unwrap();
     assert!(receipt.rollback_available);
@@ -153,11 +157,43 @@ fn verified_runtime_install_is_atomic_and_rollback_restores_previous_binary() {
 }
 
 #[test]
+fn installing_another_runtime_version_keeps_both_versions_available() {
+    let root = root("multiple-versions");
+    let _ = fs::remove_dir_all(&root);
+    let old_bytes = b"old-runtime";
+    let new_bytes = b"new-runtime";
+    let old_release = signed_release(old_bytes);
+    let mut new_release = signed_release(new_bytes);
+    new_release.version = "2.0.0".into();
+    new_release.signature = checksum(&new_release.signing_payload());
+    let verified = RuntimeCatalog {
+        schema_version: 1,
+        releases: vec![old_release, new_release],
+    }
+    .verify(&ChecksumVerifier)
+    .unwrap();
+
+    let old = verified
+        .iter()
+        .find(|release| release.release().version == "1.0.0")
+        .unwrap();
+    let new = verified
+        .iter()
+        .find(|release| release.release().version == "2.0.0")
+        .unwrap();
+    let old_receipt = install(&root, old, &MemorySource(old_bytes.to_vec())).unwrap();
+    let new_receipt = install(&root, new, &MemorySource(new_bytes.to_vec())).unwrap();
+
+    assert_ne!(old_receipt.installed_path, new_receipt.installed_path);
+    assert_eq!(fs::read(old_receipt.installed_path).unwrap(), old_bytes);
+    assert_eq!(fs::read(new_receipt.installed_path).unwrap(), new_bytes);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn invalid_rollback_backup_does_not_remove_the_installed_runtime() {
     let root = root("invalid-rollback-backup");
     let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("wayfern")).unwrap();
-    fs::write(root.join("wayfern/wayfern.exe"), b"old-runtime").unwrap();
     let bytes = b"new-runtime";
     let release = RuntimeCatalog {
         schema_version: 1,
@@ -166,9 +202,15 @@ fn invalid_rollback_backup_does_not_remove_the_installed_runtime() {
     .verify(&ChecksumVerifier)
     .unwrap()
     .remove(0);
+    let previous_binary =
+        buglogin_browser::runtime::download::runtime_directory(&root, release.release())
+            .unwrap()
+            .join(&release.release().relative_path);
+    fs::create_dir_all(previous_binary.parent().unwrap()).unwrap();
+    fs::write(&previous_binary, b"old-runtime").unwrap();
 
     let receipt = install(&root, &release, &MemorySource(bytes.to_vec())).unwrap();
-    let backup = root.join("wayfern/wayfern.exe.rollback");
+    let backup = previous_binary.with_file_name("wayfern.exe.rollback");
     fs::remove_file(&backup).unwrap();
     fs::create_dir(&backup).unwrap();
 
@@ -183,9 +225,6 @@ fn invalid_rollback_backup_does_not_remove_the_installed_runtime() {
 fn invalid_signature_or_checksum_never_replaces_existing_binary() {
     let root = root("integrity");
     let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("wayfern")).unwrap();
-    let target = root.join("wayfern/wayfern.exe");
-    fs::write(&target, b"old-runtime").unwrap();
     let bytes = b"new-runtime";
     let mut unsigned = signed_release(bytes);
     unsigned.signature = "invalid".into();
@@ -207,6 +246,11 @@ fn invalid_signature_or_checksum_never_replaces_existing_binary() {
     .verify(&ChecksumVerifier)
     .unwrap()
     .remove(0);
+    let target = buglogin_browser::runtime::download::runtime_directory(&root, release.release())
+        .unwrap()
+        .join(&release.release().relative_path);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"old-runtime").unwrap();
     let checksum_error =
         install(&root, &release, &MemorySource(b"tampered!!!".to_vec())).unwrap_err();
     assert_eq!(checksum_error.code, "runtime_checksum_mismatch");
@@ -219,9 +263,6 @@ fn invalid_signature_or_checksum_never_replaces_existing_binary() {
 fn installer_enforces_signed_size_even_when_source_ignores_limit() {
     let root = root("oversized");
     let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("wayfern")).unwrap();
-    let target = root.join("wayfern/wayfern.exe");
-    fs::write(&target, b"old-runtime").unwrap();
     let release = RuntimeCatalog {
         schema_version: 1,
         releases: vec![signed_release(b"new-runtime")],
@@ -229,6 +270,11 @@ fn installer_enforces_signed_size_even_when_source_ignores_limit() {
     .verify(&ChecksumVerifier)
     .unwrap()
     .remove(0);
+    let target = buglogin_browser::runtime::download::runtime_directory(&root, release.release())
+        .unwrap()
+        .join(&release.release().relative_path);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"old-runtime").unwrap();
 
     assert_eq!(
         install(&root, &release, &OversizedSource).unwrap_err().code,
@@ -236,7 +282,7 @@ fn installer_enforces_signed_size_even_when_source_ignores_limit() {
     );
     assert_eq!(fs::read(&target).unwrap(), b"old-runtime");
     assert_eq!(
-        fs::read_dir(root.join("wayfern"))
+        fs::read_dir(target.parent().unwrap())
             .unwrap()
             .filter_map(Result::ok)
             .count(),

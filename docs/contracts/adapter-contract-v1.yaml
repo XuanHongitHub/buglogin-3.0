@@ -2,7 +2,7 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: 423bc36c6ebbcf555923caf57f1066819af15675b05a44dcacd00f08af47f4b9
+sourceSha256: b9fc4eefa402c1b917bc7e8337a89faf7d92c7b2a275135f97730c8a69078cb0
 projectionCount: 135
 projections:
   - commandId: runtime.catalog.get
@@ -1335,9 +1335,11 @@ projections:
     adapters:
       - tauri
       - rest
+      - mcp
     names:
       tauri: account_list
       rest: account.list
+      mcp: account_list
   - commandId: account.status.update
     kind: command
     capability: CAP-ADM-001
@@ -1351,9 +1353,11 @@ projections:
     adapters:
       - tauri
       - rest
+      - mcp
     names:
       tauri: account_status_update
       rest: account.status.update
+      mcp: account_status_update
   - commandId: organization.list
     kind: query
     capability: CAP-ORG-001
@@ -2821,6 +2825,40 @@ mcp:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         secrets: never-returned
+    - name: account_list
+      commandId: account.list
+      kind: query
+      capability: CAP-ADM-001
+      action: read
+      inputSchema: Empty
+      outputSchema: AccountPage
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: account_status_update
+      commandId: account.status.update
+      kind: command
+      capability: CAP-ADM-001
+      action: manage
+      inputSchema: AccountStatusUpdateCommandInput
+      outputSchema: Account
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
     - name: organization_list
       commandId: organization.list
       kind: query

@@ -689,14 +689,14 @@ commands:
     kind: query
     capability: CAP-ADM-001
     action: read
-    adapters: [tauri, rest]
+    adapters: [tauri, rest, mcp]
     input: Empty
     output: AccountPage
   - id: account.status.update
     kind: command
     capability: CAP-ADM-001
     action: manage
-    adapters: [tauri, rest]
+    adapters: [tauri, rest, mcp]
     input: AccountStatusUpdateCommandInput
     output: Account
     idempotency: required

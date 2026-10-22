@@ -12,7 +12,10 @@ const read = (path) => readFile(resolve(root, path), "utf8");
 const parseYaml = async (path) => YAML.parse(await read(path));
 const execFileAsync = promisify(execFile);
 
-const registrySource = await read("docs/contracts/command-registry-v1.yaml");
+const registrySource = (await read("docs/contracts/command-registry-v1.yaml")).replace(
+  /\r\n/g,
+  "\n",
+);
 const registry = YAML.parse(registrySource);
 const adapterContract = await parseYaml("docs/contracts/adapter-contract-v1.yaml");
 const canonicalOpenApi = await parseYaml("docs/contracts/openapi-v1.yaml");
@@ -405,7 +408,10 @@ test("legacy Tauri MCP advertises no non-canonical tools", async () => {
 test("Generated frontend registry matches its canonical source", async () => {
   const generated = await read("frontend/src/generated/command-registry.ts");
   const sourceHash = createHash("sha256").update(registrySource).digest("hex");
-  const openApiSource = await read("crates/api/openapi/openapi-v1.yaml");
+  const openApiSource = (await read("crates/api/openapi/openapi-v1.yaml")).replace(
+    /\r\n/g,
+    "\n",
+  );
   const openApiHash = createHash("sha256").update(openApiSource).digest("hex");
   assert.match(
     generated,

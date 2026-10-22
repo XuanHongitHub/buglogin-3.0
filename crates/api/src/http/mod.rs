@@ -848,6 +848,115 @@ impl ApiState {
         self.account_persistence.load(account_id)
     }
 
+    pub(crate) fn update_account_status_for_mcp(
+        &self,
+        actor_id: &AccountId,
+        account_id: &AccountId,
+        status: AccountStatus,
+        expected_revision: u64,
+        correlation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Account, Problem> {
+        let current = checked_now(correlation_id)?;
+        let (account, stored_revision) = self
+            .account_persistence
+            .load_versioned(account_id)?
+            .ok_or_else(|| {
+                Problem::new("account_not_found", "Account not found", 404, "identity")
+            })?;
+        if account.revision != stored_revision {
+            return Err(Problem::new(
+                "account_revision_conflict",
+                "Account revision changed; reload and retry",
+                409,
+                "identity",
+            ));
+        }
+        let updated = account.transition_status(expected_revision, status, current.to_string())?;
+        let body = serde_json::to_value(&updated).map_err(|_| {
+            Problem::new(
+                "account_record_invalid",
+                "Account record is invalid",
+                500,
+                "identity",
+            )
+        })?;
+        let input_value = serde_json::json!({
+            "accountId": account_id,
+            "status": status,
+            "expectedRevision": expected_revision,
+        });
+        let input_hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&input_value).map_err(|_| {
+                Problem::new(
+                    "serialization_failed",
+                    "Request could not be serialized",
+                    400,
+                    "mcp",
+                )
+            })?)
+        );
+        let key_material = format!(
+            "{}:{}:{}",
+            actor_id.as_str(),
+            account_id.as_str(),
+            idempotency_key
+        );
+        let store_key = format!(
+            "mcp-account-status-{:x}",
+            Sha256::digest(key_material.as_bytes())
+        );
+
+        let mut auth = self.auth.write().map_err(|_| {
+            Problem::new(
+                "auth_unavailable",
+                "Authentication unavailable",
+                503,
+                "identity",
+            )
+        })?;
+        let mut puts = vec![ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: "account".into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(stored_revision),
+            value: body.clone(),
+        }];
+        let session_puts = auth.account_session_revocation_puts(account_id, current)?;
+        let revoked_session_families = session_puts
+            .iter()
+            .filter(|put| put.record_type == "session_family")
+            .count();
+        puts.extend(session_puts);
+        let token_puts = self
+            .api_tokens
+            .account_revocation_puts(account_id, current)?;
+        let revoked_api_tokens = token_puts.len();
+        puts.extend(token_puts);
+        self.persist_control_aggregate_with_puts(
+            "account.status.update",
+            store_key,
+            actor_id.as_str().to_owned(),
+            true,
+            &input_hash,
+            serde_json::json!({
+                "correlationId": correlation_id,
+                "accountId": account_id,
+                "status": status,
+                "expectedRevision": expected_revision,
+                "inputHash": input_hash,
+                "revokedSessionFamilies": revoked_session_families,
+                "revokedApiTokens": revoked_api_tokens,
+            }),
+            StatusCode::OK.as_u16(),
+            body,
+            puts,
+        )?;
+        auth.mark_account_sessions_revoked(account_id, current);
+        Ok(updated)
+    }
+
     pub fn operator_reset_platform_admin_password(
         &self,
         account_id: &AccountId,

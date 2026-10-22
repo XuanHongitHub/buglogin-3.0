@@ -470,9 +470,9 @@ pub async fn plan_proxy_distribution(
         return Ok(json!({ "assignments": assignments }));
     }
 
-    let strat = strategy.unwrap_or_else(|| "round_robin".to_string());
+    let selection_strategy = strategy.unwrap_or_else(|| "round_robin".to_string());
     for (idx, p_id) in profile_ids.iter().enumerate() {
-        let proxy_id = match strat.as_str() {
+        let proxy_id = match selection_strategy.as_str() {
             "random" => &proxy_ids[idx % proxy_ids.len()],
             _ => &proxy_ids[idx % proxy_ids.len()],
         };
@@ -483,7 +483,7 @@ pub async fn plan_proxy_distribution(
     }
 
     Ok(json!({
-        "strategy": strat,
+        "strategy": selection_strategy,
         "assignments": assignments,
         "total_profiles": profile_ids.len(),
         "total_proxies": proxy_ids.len(),
