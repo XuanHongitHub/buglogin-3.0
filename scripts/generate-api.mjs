@@ -157,8 +157,8 @@ if (checkOnly) {
 }
 
 async function checkGenerated(path, expected) {
-  const existing = await readFile(path, "utf8").catch(() => null);
-  if (existing !== expected) {
+  const existing = (await readFile(path, "utf8").catch(() => null))?.replace(/\r\n/g, "\n");
+  if (existing !== expected.replace(/\r\n/g, "\n")) {
     console.error(`Generated file is stale: ${path}`);
     process.exitCode = 1;
   }
