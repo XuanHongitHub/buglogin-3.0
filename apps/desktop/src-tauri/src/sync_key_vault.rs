@@ -205,43 +205,6 @@ impl SyncKeyVault {
         Ok(None)
     }
 
-    pub fn store_recovered(
-        &self,
-        workspace_id: &WorkspaceId,
-        resource_id: &ResourceId,
-        client: ClientKey,
-        recovery: RecoveryKey,
-        correlation_id: &str,
-    ) -> Result<(), Problem> {
-        let key = resource_secret_key(workspace_id, resource_id, correlation_id)?;
-        let mut vault = self.vault.lock().map_err(|_| unavailable(correlation_id))?;
-        let mut bytes = Vec::with_capacity(KEY_BYTES * 2);
-        bytes.extend_from_slice(client.as_bytes());
-        bytes.extend_from_slice(recovery.as_bytes());
-        let value = SecretValue::new(bytes).map_err(|_| unavailable(correlation_id))?;
-        match vault.create(&key, value) {
-            Ok(_) => Ok(()),
-            Err(SecretError::VersionConflict) => {
-                let (stored, _) = vault
-                    .read(&key)
-                    .map_err(|error| vault_problem(error, correlation_id))?;
-                let existing = decode_keys(stored.as_bytes(), correlation_id)?;
-                if existing.client == client && existing.recovery.as_bytes() == recovery.as_bytes()
-                {
-                    Ok(())
-                } else {
-                    Err(Problem::new(
-                        "sync_key_vault_conflict",
-                        "Different profile keys are already stored on this device",
-                        409,
-                        correlation_id,
-                    ))
-                }
-            }
-            Err(error) => Err(vault_problem(error, correlation_id)),
-        }
-    }
-
     pub fn replace_recovered_for_manifest(
         &self,
         workspace_id: &WorkspaceId,
