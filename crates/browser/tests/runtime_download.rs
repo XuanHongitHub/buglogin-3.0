@@ -91,6 +91,39 @@ fn signed_release(bytes: &[u8]) -> RuntimeRelease {
     release
 }
 
+fn signed_zip_release(version: &str, bytes: &[u8]) -> RuntimeRelease {
+    let mut release = RuntimeRelease {
+        runtime: Runtime::Wayfern,
+        version: version.into(),
+        platform: RuntimePlatform::Windows,
+        architecture: RuntimeArchitecture::X64,
+        relative_path: "wayfern.exe".into(),
+        package_format: RuntimePackageFormat::Zip,
+        archive_prefix: None,
+        source: "https://releases.buglogin.example/wayfern.zip".into(),
+        sha256: checksum(bytes),
+        size_bytes: bytes.len() as u64,
+        key_id: "release-key-1".into(),
+        signature: String::new(),
+    };
+    release.signature = checksum(&release.signing_payload_v2());
+    release
+}
+
+fn wayfern_zip(executable: &[u8]) -> Vec<u8> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut archive = zip::ZipWriter::new(cursor);
+    archive
+        .start_file(
+            "wayfern.exe",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+    archive.write_all(executable).unwrap();
+    archive.finish().unwrap().into_inner()
+}
+
 #[cfg(not(target_os = "macos"))]
 fn signed_dmg_release(bytes: &[u8]) -> RuntimeRelease {
     let mut release = RuntimeRelease {
@@ -187,6 +220,57 @@ fn installing_another_runtime_version_keeps_both_versions_available() {
     assert_ne!(old_receipt.installed_path, new_receipt.installed_path);
     assert_eq!(fs::read(old_receipt.installed_path).unwrap(), old_bytes);
     assert_eq!(fs::read(new_receipt.installed_path).unwrap(), new_bytes);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cold_zip_install_and_version_switch_keep_each_verified_runtime_available() {
+    let root = root("cold-zip-version-switch");
+    let _ = fs::remove_dir_all(&root);
+    let first_executable = b"first wayfern runtime";
+    let second_executable = b"second wayfern runtime";
+    let first_archive = wayfern_zip(first_executable);
+    let second_archive = wayfern_zip(second_executable);
+    let first_release = signed_zip_release("154.0.8037.57", &first_archive);
+    let second_release = signed_zip_release("155.0.8059.79", &second_archive);
+    let verified = RuntimeCatalog {
+        schema_version: 2,
+        releases: vec![first_release, second_release],
+    }
+    .verify(&ChecksumVerifier)
+    .unwrap();
+    let first = verified
+        .iter()
+        .find(|release| release.release().version == "154.0.8037.57")
+        .unwrap();
+    let second = verified
+        .iter()
+        .find(|release| release.release().version == "155.0.8059.79")
+        .unwrap();
+
+    assert!(
+        !root.exists(),
+        "the first install must start without any runtime"
+    );
+    let first_receipt = install(&root, first, &MemorySource(first_archive)).unwrap();
+    assert!(!first_receipt.rollback_available);
+    assert_eq!(
+        fs::read(&first_receipt.installed_path).unwrap(),
+        first_executable
+    );
+
+    let second_receipt = install(&root, second, &MemorySource(second_archive)).unwrap();
+    assert!(!second_receipt.rollback_available);
+    assert_ne!(first_receipt.installed_path, second_receipt.installed_path);
+    assert_eq!(
+        fs::read(&first_receipt.installed_path).unwrap(),
+        first_executable
+    );
+    assert_eq!(
+        fs::read(&second_receipt.installed_path).unwrap(),
+        second_executable
+    );
+
     let _ = fs::remove_dir_all(root);
 }
 

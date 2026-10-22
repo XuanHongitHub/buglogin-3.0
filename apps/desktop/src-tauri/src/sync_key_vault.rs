@@ -369,3 +369,69 @@ fn vault_problem(error: SecretError, correlation_id: &str) -> Problem {
         correlation_id,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn recovered_manifest_key_replaces_stale_local_key() {
+        use buglogin_storage::secrets::OsVault;
+
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let workspace = WorkspaceId::new(format!("ws_recover_{suffix}")).unwrap();
+        let resource = ResourceId::new(format!("res_recover_{suffix}")).unwrap();
+        let correlation_id = "sync-key-vault-recovery-test";
+        let stale = ResourceKeys {
+            client: ClientKey::from_bytes([0x17; KEY_BYTES]),
+            recovery: RecoveryKey::from_bytes([0x27; KEY_BYTES]),
+        };
+        let recovered = ResourceKeys {
+            client: ClientKey::from_bytes([0x37; KEY_BYTES]),
+            recovery: RecoveryKey::from_bytes([0x47; KEY_BYTES]),
+        };
+        let vault = SyncKeyVault::native();
+
+        vault
+            .replace_recovered_for_manifest(
+                &workspace,
+                &resource,
+                stale.client,
+                stale.recovery,
+                &key_version(&ClientKey::from_bytes([0x17; KEY_BYTES])),
+                correlation_id,
+            )
+            .unwrap();
+        let expected = key_version(&recovered.client);
+        vault
+            .replace_recovered_for_manifest(
+                &workspace,
+                &resource,
+                recovered.client,
+                recovered.recovery,
+                &expected,
+                correlation_id,
+            )
+            .unwrap();
+
+        let loaded = vault
+            .load_for_manifest(&workspace, &resource, &expected, correlation_id)
+            .unwrap()
+            .expect("recovered key should replace stale local key");
+        assert_eq!(loaded.client.as_bytes(), &[0x37; KEY_BYTES]);
+        assert_eq!(loaded.recovery.as_bytes(), &[0x47; KEY_BYTES]);
+
+        let key = resource_secret_key(&workspace, &resource, correlation_id).unwrap();
+        let mut native_vault = NativeVault::new();
+        let (_, version) = native_vault.read(&key).unwrap();
+        native_vault.remove(&key, version).unwrap();
+    }
+}

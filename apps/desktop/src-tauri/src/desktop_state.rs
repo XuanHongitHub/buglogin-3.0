@@ -3640,11 +3640,20 @@ impl ProductionDesktopState {
             })?;
         let recovery = buglogin_sync::crypto::RecoveryKey::parse_code(recovery_code)?;
         let client = envelope.unwrap(&binding.workspace_id, &binding.resource_id, &recovery)?;
-        self.sync_key_vault.store_recovered(
+        let key_version = encryption.key_version.as_deref().ok_or_else(|| {
+            Problem::new(
+                "profile_key_version_missing",
+                "Profile sync manifest has no active resource key version",
+                409,
+                correlation_id,
+            )
+        })?;
+        self.sync_key_vault.replace_recovered_for_manifest(
             &binding.workspace_id,
             &binding.resource_id,
             client,
             recovery,
+            key_version,
             correlation_id,
         )
     }

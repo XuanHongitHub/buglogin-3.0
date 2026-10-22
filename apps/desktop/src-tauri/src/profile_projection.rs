@@ -2815,6 +2815,135 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn recovery_envelope_hydrates_matching_profile_content_on_independent_devices() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-cross-device-recovery-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let source_projection = ProfileProjection::open(&root.join("source")).unwrap();
+        let workspace = WorkspaceId::new("ws_cross_device_recovery").unwrap();
+        let resource = ResourceId::new("res_cross_device_recovery").unwrap();
+        let source = root.join("source-profile");
+        fs::create_dir_all(source.join("Default")).unwrap();
+        fs::write(
+            source.join("Default/Preferences"),
+            b"same encrypted profile state on each device",
+        )
+        .unwrap();
+        let previous = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            1,
+            1,
+            None,
+            b"",
+            Vec::new(),
+        )
+        .unwrap();
+        let client_key = ClientKey::from_bytes([0x71; 32]);
+        let recovery_key = RecoveryKey::from_bytes([0x81; 32]);
+        let (descriptor, objects, manifest) = source_projection
+            .snapshot_with_proxy_encryption(&source, &previous, 2, None, &client_key, &recovery_key)
+            .unwrap();
+        descriptor.verify_manifest(&manifest).unwrap();
+        let remote_objects: BTreeMap<_, _> = objects
+            .iter()
+            .map(|object| (object.key.clone(), object.read_bytes().unwrap()))
+            .collect();
+        let envelope_bytes = remote_objects
+            .get(RESOURCE_KEY_ENVELOPE_KEY)
+            .expect("encrypted manifest includes the recovery envelope");
+        let envelope: ResourceKeyEnvelope = serde_json::from_slice(envelope_bytes).unwrap();
+        let recovery_code = recovery_key.recovery_code();
+
+        // Each device independently imports the user-held recovery material and
+        // unwraps the same scoped envelope; no OS-vault state is shared here.
+        let device_a_recovery = RecoveryKey::parse_code(&recovery_code).unwrap();
+        let device_b_recovery = RecoveryKey::parse_code(&recovery_code).unwrap();
+        let device_a_key = envelope
+            .unwrap(&workspace, &resource, &device_a_recovery)
+            .unwrap();
+        let device_b_key = envelope
+            .unwrap(&workspace, &resource, &device_b_recovery)
+            .unwrap();
+        assert_eq!(device_a_key, device_b_key);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let accepted =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+                let Ok(Ok((mut stream, _))) = accepted else {
+                    break;
+                };
+                let request = read_http_request(&mut stream).await;
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default();
+                let object_key = remote_objects
+                    .keys()
+                    .map(String::as_str)
+                    .find(|key| path.contains(&key.replace('/', "%2F")))
+                    .unwrap_or_else(|| panic!("unexpected blob request: {path}"));
+                let body = remote_objects.get(object_key).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        });
+
+        let client_a =
+            RemoteApiClient::new(&format!("http://{address}"), "device-a".into()).unwrap();
+        let client_b =
+            RemoteApiClient::new(&format!("http://{address}"), "device-b".into()).unwrap();
+        let auth_a = CoordinationAuth::new("device-a", "lease-a").unwrap();
+        let auth_b = CoordinationAuth::new("device-b", "lease-b").unwrap();
+        let projection_a = ProfileProjection::open(&root.join("device-a")).unwrap();
+        let projection_b = ProfileProjection::open(&root.join("device-b")).unwrap();
+        let profile_id = ProfileId::new("prf_cross_device_recovery").unwrap();
+        let (receipt_a, _) = projection_a
+            .hydrate_encrypted_with_proxy_credentials(
+                &client_a,
+                &auth_a,
+                &profile_id,
+                &manifest,
+                Some(&device_a_key),
+                Some(&device_a_recovery),
+                "cross-device-recovery-a",
+            )
+            .await
+            .unwrap();
+        let (receipt_b, _) = projection_b
+            .hydrate_encrypted_with_proxy_credentials(
+                &client_b,
+                &auth_b,
+                &profile_id,
+                &manifest,
+                Some(&device_b_key),
+                Some(&device_b_recovery),
+                "cross-device-recovery-b",
+            )
+            .await
+            .unwrap();
+
+        let restored_a = fs::read(receipt_a.path.join("Default/Preferences")).unwrap();
+        let restored_b = fs::read(receipt_b.path.join("Default/Preferences")).unwrap();
+        assert_eq!(checksum(&restored_a), checksum(&restored_b));
+        assert_eq!(restored_a, b"same encrypted profile state on each device");
+        assert_eq!(receipt_a.root_checksum, receipt_b.root_checksum);
+
+        server.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn verified_generation_skips_profile_blobs_but_keeps_sync_metadata_downloads() {
         let proxy_id = ProxyId::new("prx_projection_cache").unwrap();
