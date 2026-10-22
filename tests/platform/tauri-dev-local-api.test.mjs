@@ -47,22 +47,24 @@ test("Tauri local API launcher rejects remote, credentialed, and path URLs", () 
   }
 });
 
-test("Tauri local API launcher refuses C: and F: build caches on Windows", () => {
+test("Tauri local API launcher refuses C:, E:, and F: build caches on Windows", () => {
   assert.equal(isForbiddenTauriDevCargoTargetDir("F:\\buglogin-target", "win32"), true);
   assert.equal(isForbiddenTauriDevCargoTargetDir("C:\\buglogin-target", "win32"), true);
-  assert.equal(isForbiddenTauriDevCargoTargetDir("E:\\buglogin-target", "win32"), false);
+  assert.equal(isForbiddenTauriDevCargoTargetDir("E:\\buglogin-target", "win32"), true);
+  assert.equal(isForbiddenTauriDevCargoTargetDir("G:\\buglogin-target", "win32"), false);
   assert.equal(isForbiddenTauriDevCargoTargetDir("\\\\?\\C:\\buglogin-target", "win32"), true);
   assert.equal(isForbiddenTauriDevCargoTargetDir("F:\\buglogin-target", "linux"), false);
 });
 
-test("Windows builds share only the canonical E: Cargo target", () => {
-  assert.equal(resolveBuildTargetDir(undefined, "win32"), "E:\\buglogin-target");
+test("Windows builds share only the canonical G: Cargo target", () => {
+  assert.equal(resolveBuildTargetDir(undefined, "win32"), "G:\\buglogin-target");
   assert.equal(
-    resolveBuildTargetDir("e:/BUGLOGIN-TARGET/", "win32"),
-    "E:\\buglogin-target",
+    resolveBuildTargetDir("g:/BUGLOGIN-TARGET/", "win32"),
+    "G:\\buglogin-target",
   );
   for (const path of [
     "C:\\buglogin-target",
+    "E:\\buglogin-target",
     "F:\\buglogin-target",
     "D:\\buglogin-target",
     "E:\\another-target",

@@ -37,7 +37,7 @@ export interface Theme {
 export const THEMES: Theme[] = [
   {
     id: "donut-mono",
-    name: "Donut Mono",
+    name: "BugLogin Mono",
     mode: "dark",
     colors: {
       "--background": "#070707",

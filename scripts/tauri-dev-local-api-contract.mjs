@@ -53,7 +53,7 @@ export function parseTauriDevApiBaseUrl(value) {
 export function isForbiddenTauriDevCargoTargetDir(value, platform = process.platform) {
   if (platform !== "win32") return false;
   const drive = /^(?:\\\\\?\\)?([a-z]):[\\/]/i.exec(value)?.[1]?.toLowerCase();
-  return drive === "c" || drive === "f";
+  return drive === "c" || drive === "e" || drive === "f";
 }
 
 export function findMissingTauriDevOperations(openApi) {

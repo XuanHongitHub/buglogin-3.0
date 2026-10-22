@@ -2,7 +2,7 @@
 
 Spec: `docs/superpowers/specs/2026-10-22-tauri-native-updater-design.md`.
 
-Status: **active; release blocked pending credentials and full platform evidence.**
+Status: **active; release blocked pending API parity, native platform artifacts, install/update evidence, and final publication.**
 
 ## Phase 1 — Replace fake updater behavior
 
@@ -14,29 +14,45 @@ Status: **active; release blocked pending credentials and full platform evidence
 
 - [x] Inject the updater public key and HTTPS endpoint through the signing-build config without writing the private key into the repository.
 - [x] Require the protected Tauri updater private key in signing jobs and collect platform updater bundles/signatures.
-- [x] Assemble a version-bound `latest.json` for Windows x64, macOS arm64, and macOS x64; reject missing or inconsistent inputs.
-- [x] Publish downloadable prerelease candidates and add a protected stable promotion workflow that verifies checksums/feed and changes only release metadata.
+- [x] Assemble a version-bound `latest.json` for Windows x64 and macOS arm64; reject missing or inconsistent inputs. Intel Mac is excluded because the official Wayfern manifest has no macOS x64 runtime.
+- [x] Wire immutable RC artifacts and a separate RC updater feed for BugLogin 3.0 to the existing DigitalOcean Spaces storage namespace `releases/desktop/v3/`; stable promotion publishes a separate stable feed after validating the selected artifacts.
 
 ## Phase 3 — Client integration and verification
 
 - [x] Expose Rust-authoritative check/download/install commands and progress/ready events.
 - [x] Mount the existing update prompt hook in the active desktop entrypoint under the existing UI component.
 - [ ] Add Windows/macOS clean-install and previous-version update E2E, invalid-signature rejection, interruption recovery, and rollback-channel checks.
-- [ ] Update release policy/docs and close the release gate only after keys and platform evidence exist.
+- [x] Update static release policy and infrastructure/updater documentation for the S3 layout; keep the release gate open until credentials and platform evidence exist.
 
 ## Current evidence and constraints
 
 - Official Tauri v2 updater uses mandatory artifact signatures, a pinned public key, and HTTPS in production. Its signature format is distinct from the existing Ed25519 evidence manifest; the latter is not a valid install trust root.
-- Source integration and release-feed assembly are implemented. This does not prove the Rust plugin code compiles or that a released app can upgrade.
-- `pnpm --filter @buglogin/desktop typecheck` currently fails on existing UI/API DTO and missing-symbol errors across cookies, extensions, profiles, proxy, workspace/member, and group-sharing components. The updater entrypoint introduces no diagnostic in the reported set; those UI paths must be reconciled by IO-UI against canonical Rust/API contracts, without inventing DTO fields.
-- The current `E:\buglogin-target` has only about 30 MiB free. No Rust/Tauri compile or app launch was started; clean the one approved E: build target before the next native gate, and keep C: and F: out of build output.
-- Local release credentials are absent. GitHub signing environments/keys and actual Windows/macOS update E2E remain unverified.
+- Source integration and release-feed assembly are implemented. The feed assembler and verifier accept immutable Spaces URLs, and the workflows upload RC/stable feed metadata separately. Static source checks do not prove that Actions can write/read the bucket or that a released app can upgrade.
+- Release target is `XuanHongitHub/buglogin-3.0`; the previous `keyduc91/Malvanut-Login` findings are legacy 1.0 evidence only. Apple, S3, and Tauri updater secret/variable names have been configured in the 3.0 repo. The updater key is unencrypted; no password secret is needed. Secret values remain outside source and logs.
+- The repo's current source is version `3.0.0`; the native Windows desktop `cargo check -p buglogin-desktop-app --target x86_64-pc-windows-msvc` passed using `G:\buglogin-target`. `pnpm release:verify` passes 15/15. An authenticated DigitalOcean Spaces preflight uploaded a disposable object under the isolated v3 preflight prefix, downloaded it publicly, matched SHA-256, deleted it, and confirmed it was no longer readable. This validates current write/read/cleanup credentials, not a workflow release.
+- Windows Authenticode is not required by the user's manual-installer policy. The local `.github/workflows/signing.yml` patch removes that requirement; Windows Tauri updater signatures remain required for in-app updates. No Actions signing run, installer, macOS artifact, app update, or release publication has been verified.
+- Direct production check with `node scripts/release/verify-staging-api.mjs` fails: 94 paths / 100 operations served vs source 110 / 122; 23 operations missing, including `auth.desktop.login` and `runtime.catalog.get`; runtime-catalog readiness header absent. `/v1/runtime/catalog` returns 404. API agent confirmed this is deployment drift: current source has the routes, while production serves an older binary or a different routed service. The API is reachable but cannot serve the 3.0 desktop contract.
+- Public `releases/desktop/v2/rc/latest.json` and `stable/latest.json` checks are historical pre-3.0 observations. BugLogin 3.0 publishes under `releases/desktop/v3/`; a disposable write/download/checksum/delete preflight passed, but no release artifact/feed has been published.
 
 ## Verification record — 2026-10-22
 
-- `node scripts/tauri-cargo.mjs check -p buglogin-desktop-app --all-targets --target x86_64-pc-windows-msvc` — passed after cleaning the sole E: target; updater plugin and active Tauri command code compile for Windows.
-- `pnpm release:verify` — 13/13 passed; updater config/feed/workflow tests — 18/18 passed; `actionlint` passed for release, signing, and stable-promotion workflows.
-- `pnpm --filter @buglogin/desktop typecheck` — blocked by 80+ existing IO-UI contract and missing-symbol errors. Do not add unsupported API fields to make these pass.
-- No Windows installer, macOS artifact, signed update, installed-app upgrade, staging rollout, or GitHub release has been verified.
-- Do not build locally until the single-target cleanup prerequisite is resolved; do not write build outputs to C: or F:.
-- Release credentials are not available in the local checkout. This blocks artifact publication, not source work.
+- `cargo check -p buglogin-desktop-app --target x86_64-pc-windows-msvc` with `CARGO_TARGET_DIR=G:\buglogin-target` — passed; updater plugin and active Tauri command code compile for Windows.
+- `pnpm release:verify` — 15/15 passed; `git diff --check` passed (line-ending warnings only). Actionlint and full package/sign/notarize builds still need current-run evidence.
+- `pnpm --filter @buglogin/desktop typecheck` — passed on the current worktree after the About updater UX change.
+- No Windows installer, macOS artifact, signed update, installed-app upgrade, S3 upload, staging rollout, or GitHub release has been verified. The existing 1.0 Spaces catalog remains separate and unchanged.
+- The sole local/hosted Windows build target is `G:\buglogin-target`. `cargo clean` removed the old exact BugLogin targets on C: (8.7 GiB) and E: (108.5 GiB); both are empty. Do not start new builds on C:, E:, or F:.
+- GitHub repo `XuanHongitHub/buglogin-3.0` now contains the configured updater private-key secret and `BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY` variable; Apple/S3 secret names are configured there as well. GitHub will not return saved secret values. The local workflow removes Windows Authenticode requirements. macOS signing/notarization and release artifact/update evidence still need native Actions runs.
+
+## Runtime catalog and current Windows package — 2026-10-22
+
+- The current official Wayfern manifest reports `155.0.8059.79`, with Windows x64 ZIP and Apple Silicon macOS DMG. It does not publish macOS x64. Both packages were downloaded to G staging, inspected, SHA-256 hashed, and entered in a BugLogin Ed25519-signed catalog; the existing v154 Windows entry remains in that catalog for compatibility. The Mac DMG contains `Wayfern.app/Contents/MacOS/Wayfern`.
+- `BUGLOGIN_RUNTIME_CATALOG_SIGNING_PRIVATE_KEY` is configured in the 3.0 repo. The corresponding public trust key and refreshed catalog still need to be committed and included in a rebuilt app before clients can verify v155.
+- The signed catalog and public trust list have been installed under `/var/lib/buglogin3/runtime-catalog` on the isolated BugLogin 3.0 VPS. Two path variables were added to `/etc/buglogin3/api.env`, with a root-only backup retained. The running API has not been restarted or updated yet; live catalog publication remains pending the attested API deployment.
+- The first local Windows release package is still compiling under `G:\buglogin-target`; it must be rebuilt after the public trust key/catalog source update before it can be treated as current release evidence.
+- The first local Tauri v2 Windows build produced the signed NSIS installer `.exe` and `.exe.sig`, with no `.nsis.zip`. The release workflow/feed had incorrectly expected the legacy archive suffix. They now consume the actual v2 `.exe` plus detached `.exe.sig`; static release checks pass 15/15 and actionlint passes. The local artifact was built before the v155 trust-map update and is not the release candidate; a fresh build is required.
+
+## Development-build updater behavior — 2026-10-22
+
+- Root cause of the About toast `app_updater_not_configured`: local/debug builds intentionally do not embed the Tauri updater public key, so the Rust command correctly reports that updater checks are unavailable. The UI previously surfaced this expected dev state as an error.
+- Opening About no longer triggers a manual check; the user can press **Check for updates** to request one. That action shows a localized informational message for `app_updater_not_configured`; other network/feed/signature failures remain errors. Startup checking suppresses only the expected unconfigured-dev log. Rust also skips the three-hour background task when no updater key is embedded, and `build.rs` tracks updater key/endpoint environment changes to avoid stale Cargo artifacts.
+- Verification: desktop TypeScript typecheck, Biome lint with formatting disabled, Rust format check, Windows desktop `cargo check --all-targets`, and `git diff --check` passed. Native interaction in the running desktop has not yet been visually rechecked.

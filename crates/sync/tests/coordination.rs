@@ -513,6 +513,89 @@ mod live_redis {
     }
 
     #[tokio::test]
+    async fn independent_clients_contend_for_one_profile_lease_and_fence_reacquisition() {
+        let Some(url) = redis_test_url() else {
+            return;
+        };
+        let namespace = format!("test-two-client-lock-{}", std::process::id());
+        let first_client = RedisCoordination::connect(
+            RedisCoordinationConfig::new(url.clone(), namespace.clone()),
+            Arc::new(AllowAll),
+        )
+        .await
+        .unwrap();
+        let second_client = RedisCoordination::connect(
+            RedisCoordinationConfig::new(url, namespace),
+            Arc::new(AllowAll),
+        )
+        .await
+        .unwrap();
+
+        let workspace = WorkspaceId::new("workspace-1").unwrap();
+        let resource = ResourceId::new("resource-two-client-lock-1").unwrap();
+        let first_auth = CoordinationAuth::new("device-one", "device-one-test-credential").unwrap();
+        let second_auth =
+            CoordinationAuth::new("device-two", "device-two-test-credential").unwrap();
+        let first_scope = || CoordinationScope {
+            workspace_id: &workspace,
+            auth: &first_auth,
+        };
+        let second_scope = || CoordinationScope {
+            workspace_id: &workspace,
+            auth: &second_auth,
+        };
+
+        let first_lease = first_client
+            .acquire_lease_idempotent(
+                first_scope(),
+                &resource,
+                Duration::from_secs(10),
+                "two-client-acquire-first-0001",
+            )
+            .await
+            .unwrap();
+        let blocked = second_client
+            .acquire_lease_idempotent(
+                second_scope(),
+                &resource,
+                Duration::from_secs(10),
+                "two-client-acquire-competing-01",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(blocked.code, "lease_held");
+
+        first_client
+            .release_lease_idempotent(
+                first_scope(),
+                &resource,
+                &first_lease.owner_token,
+                "two-client-release-first-0001",
+            )
+            .await
+            .unwrap();
+        let second_lease = second_client
+            .acquire_lease_idempotent(
+                second_scope(),
+                &resource,
+                Duration::from_secs(10),
+                "two-client-acquire-after-release-01",
+            )
+            .await
+            .unwrap();
+        assert!(second_lease.fencing_token > first_lease.fencing_token);
+        second_client
+            .release_lease_idempotent(
+                second_scope(),
+                &resource,
+                &second_lease.owner_token,
+                "two-client-release-second-0001",
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn manifest_atomic_commit_flow() {
         let Some(url) = redis_test_url() else {
             return;
@@ -827,12 +910,7 @@ mod live_redis {
     fn redis_test_url() -> Option<String> {
         match std::env::var("BUGLOGIN_REDIS_TEST_URL") {
             Ok(url) if !url.trim().is_empty() => Some(url),
-            _ if std::env::var("BUGLOGIN_LIVE_ADAPTER_STRICT")
-                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")) =>
-            {
-                panic!("missing required live-test variable BUGLOGIN_REDIS_TEST_URL")
-            }
-            _ => None,
+            _ => panic!("BUGLOGIN_REDIS_TEST_URL is required when redis-tests is enabled"),
         }
     }
 

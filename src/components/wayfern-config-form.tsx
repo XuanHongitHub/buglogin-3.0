@@ -123,7 +123,6 @@ export function WayfernConfigForm({
   config,
   onConfigChange,
   className = "",
-  isCreating = false,
   forceAdvanced = false,
   readOnly = false,
   limitedMode = false,
@@ -138,25 +137,6 @@ export function WayfernConfigForm({
   const [currentOS] = useState<WayfernOS>(getCurrentOS);
 
   const selectedOS = config.os || currentOS;
-
-  useEffect(() => {
-    if (isCreating && typeof window !== "undefined") {
-      const screenWidth = window.screen.width;
-      const screenHeight = window.screen.height;
-
-      if (!config.screen_max_width) {
-        onConfigChange("screen_max_width", screenWidth);
-      }
-      if (!config.screen_max_height) {
-        onConfigChange("screen_max_height", screenHeight);
-      }
-    }
-  }, [
-    isCreating,
-    config.screen_max_width,
-    config.screen_max_height,
-    onConfigChange,
-  ]);
 
   useEffect(() => {
     if (config.fingerprint) {

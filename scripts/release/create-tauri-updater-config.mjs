@@ -7,9 +7,20 @@ if (!output) throw new Error("usage: create-tauri-updater-config.mjs <output-jso
 const publicKey = process.env.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY?.trim();
 const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY?.trim();
 const endpoint = process.env.BUGLOGIN_TAURI_UPDATER_ENDPOINT?.trim()
-  || "https://github.com/keyduc91/Malvanut-Login/releases/latest/download/latest.json";
+  || "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json";
 
-if (!publicKey || !/^RW[A-Za-z0-9+/=]+$/.test(publicKey)) {
+let parsedPublicKey;
+try {
+  parsedPublicKey = Buffer.from(publicKey ?? "", "base64").toString("utf8");
+} catch {
+  parsedPublicKey = "";
+}
+if (
+  !publicKey ||
+  !/^[A-Za-z0-9+/=\r\n]+$/.test(publicKey) ||
+  !parsedPublicKey.startsWith("untrusted comment: minisign public key:") ||
+  !/^RW[A-Za-z0-9+/=]+$/m.test(parsedPublicKey)
+) {
   throw new Error("BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY is missing or invalid");
 }
 if (!signingKey) throw new Error("TAURI_SIGNING_PRIVATE_KEY is required for release artifacts");

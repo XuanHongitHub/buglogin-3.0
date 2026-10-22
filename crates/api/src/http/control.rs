@@ -5451,7 +5451,9 @@ async fn get_resource_blob(
                 correlation(&headers),
             )
         })?;
-    let admission = super::large_transfer_body_slot().map_err(response_problem)?;
+    let admission = super::large_transfer_body_slot()
+        .await
+        .map_err(response_problem)?;
     let bytes = state
         .get_remote_chunk(
             &payload_object_key(
@@ -5602,7 +5604,9 @@ async fn put_resource_blob(
             correlation(&headers),
         ));
     }
-    let _admission = super::large_transfer_body_slot().map_err(response_problem)?;
+    let _admission = super::large_transfer_body_slot()
+        .await
+        .map_err(response_problem)?;
     let body = axum::body::to_bytes(body, MAX_PROFILE_SYNC_OBJECT_BYTES as usize)
         .await
         .map_err(|_| {

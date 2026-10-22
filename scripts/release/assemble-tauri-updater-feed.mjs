@@ -1,19 +1,23 @@
 import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
-const [inputRootArg, outputRootArg, version, repository] = process.argv.slice(2);
+const [inputRootArg, outputRootArg, version, repository, artifactBaseUrlArg] = process.argv.slice(2);
 if (!inputRootArg || !outputRootArg || !version || !repository) {
-  throw new Error("usage: assemble-tauri-updater-feed.mjs <incoming-root> <output-root> <version> <owner/repo>");
+  throw new Error("usage: assemble-tauri-updater-feed.mjs <incoming-root> <output-root> <version> <owner/repo> [artifact-base-url]");
 }
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error("invalid updater version");
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("invalid GitHub repository");
 
 const inputRoot = resolve(inputRootArg);
 const outputRoot = resolve(outputRootArg);
+const artifactBaseUrl = new URL(artifactBaseUrlArg || `https://github.com/${repository}/releases/download/v${version}/`);
+const versionPath = version.replaceAll(".", "\\.").replaceAll("+", "\\+");
+if (artifactBaseUrl.protocol !== "https:" || artifactBaseUrl.username || artifactBaseUrl.password || artifactBaseUrl.search || artifactBaseUrl.hash || !new RegExp(`/v${versionPath}/(?:[0-9]+/)?$`).test(artifactBaseUrl.pathname)) {
+  throw new Error("artifact base URL must be credential-free HTTPS and end with /v<version>/");
+}
 const platforms = [
-  { directory: `buglogin-v${version}-windows-x64-signed`, key: "windows-x86_64", suffix: ".nsis.zip" },
+  { directory: `buglogin-v${version}-windows-x64-signed`, key: "windows-x86_64", suffix: ".exe" },
   { directory: `buglogin-v${version}-macos-arm64-signed`, key: "darwin-aarch64", suffix: ".app.tar.gz" },
-  { directory: `buglogin-v${version}-macos-x64-signed`, key: "darwin-x86_64", suffix: ".app.tar.gz" },
 ];
 const manifestPlatforms = {};
 const assets = [];
@@ -34,7 +38,7 @@ for (const platform of platforms) {
   const artifactPath = join(directory, artifactName);
   const artifactBytes = await readFile(artifactPath);
   if (artifactBytes.length === 0) throw new Error(`${platform.key}: updater artifact is empty`);
-  const url = `https://github.com/${repository}/releases/download/v${version}/${encodeURIComponent(artifactName)}`;
+  const url = new URL(encodeURIComponent(artifactName), artifactBaseUrl).toString();
   manifestPlatforms[platform.key] = { signature, url };
   assets.push([artifactPath, artifactName], [join(directory, signatureName), signatureName]);
 }

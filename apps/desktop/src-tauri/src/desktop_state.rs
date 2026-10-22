@@ -512,8 +512,8 @@ impl ProductionDesktopState {
         let coordination = auth.clone().map(|auth| ManagedCoordination {
             backend: Arc::new(client.clone()),
             auth,
-            lease_ttl: Duration::from_secs(120),
-            heartbeat_interval: Duration::from_secs(30),
+            lease_ttl: Duration::from_secs(60),
+            heartbeat_interval: Duration::from_secs(15),
         });
         let profile_runtime =
             spawn_profile_runtime(SystemProcessController::new(approved), coordination);
@@ -1011,8 +1011,8 @@ impl ProductionDesktopState {
             .set_coordination(Some(ManagedCoordination {
                 backend: Arc::new(self.client.clone()),
                 auth: auth.clone(),
-                lease_ttl: Duration::from_secs(120),
-                heartbeat_interval: Duration::from_secs(30),
+                lease_ttl: Duration::from_secs(60),
+                heartbeat_interval: Duration::from_secs(15),
             }))
             .await?;
         *self
@@ -3970,7 +3970,7 @@ impl ProductionDesktopState {
                 .acquire_lease_idempotent(
                     scope.clone(),
                     &binding.resource_id,
-                    Duration::from_secs(120),
+                    Duration::from_secs(60),
                     &lease_key,
                 )
                 .await?;
@@ -5918,13 +5918,17 @@ impl ProductionDesktopState {
                         Err(problem)
                             if problem.retryable
                                 && upload_attempt
-                                    < if problem.code == "sync_object_cleanup_in_progress" {
-                                        5
-                                    } else {
-                                        1
+                                    < match problem.code.as_str() {
+                                        "sync_object_cleanup_in_progress" => 5,
+                                        "large_transfer_capacity_exhausted" => 6,
+                                        _ => 1,
                                     } =>
                         {
-                            let delay_ms = if problem.code == "sync_object_cleanup_in_progress" {
+                            let delay_ms = if matches!(
+                                problem.code.as_str(),
+                                "sync_object_cleanup_in_progress"
+                                    | "large_transfer_capacity_exhausted"
+                            ) {
                                 250_u64.saturating_mul(1_u64 << upload_attempt.min(4))
                             } else {
                                 250

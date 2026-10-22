@@ -68,18 +68,43 @@ use profile_cookie_manager::{
 
 pub fn run() {
     let mut builder = tauri::Builder::default().plugin(tauri_plugin_deep_link::init());
-    if option_env!("BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY")
-        .is_some_and(|public_key| !public_key.trim().is_empty())
-    {
+    let updater_configured = option_env!("BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY")
+        .is_some_and(|public_key| !public_key.trim().is_empty());
+    if updater_configured {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     builder
-        .setup(|app| {
+        .setup(move |app| {
             let state = build_state().unwrap_or_else(DesktopState::unavailable);
             state.start_background_auth_refresh();
             app.manage(state);
             app.manage(event_stream::EventStreamManager::default());
+            if updater_configured {
+                let update_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(3 * 60 * 60));
+                    // The UI checks once on startup. Skip Tokio's immediate first
+                    // tick so this task only performs periodic checks afterwards.
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        match system_features::check_for_app_updates(update_app.clone()).await {
+                            Ok(Some(update)) => {
+                                if let Err(error) = update_app.emit("app-update-available", update)
+                                {
+                                    eprintln!("Could not announce BugLogin app update: {error}");
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                eprintln!("Could not check for BugLogin app updates: {error}");
+                            }
+                        }
+                    }
+                });
+            }
             setup_system_tray(app.handle()).map_err(|error| error.to_string())?;
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             let _ = app.deep_link().register_all();

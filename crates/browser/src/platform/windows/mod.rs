@@ -40,6 +40,7 @@ public static class BugLoginJob {
         public uint pageFaults, totalProcesses, activeProcesses, terminatedProcesses;
     }
     [StructLayout(LayoutKind.Sequential)] struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int left, top, right, bottom; }
     [StructLayout(LayoutKind.Explicit)] struct PROPVARIANT {
         [FieldOffset(0)] public ushort vt;
         [FieldOffset(8)] public IntPtr pointer;
@@ -60,10 +61,6 @@ public static class BugLoginJob {
     static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool QueryInformationJobObject(IntPtr job, int kind, IntPtr info, uint length, IntPtr returned);
-    [DllImport("shell32.dll", CharSet=CharSet.Unicode)]
-    static extern uint ExtractIconEx(string file, int index, out IntPtr large, out IntPtr small, uint count);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-    static extern uint PrivateExtractIcons(string file, int index, int width, int height, out IntPtr icon, out uint iconId, uint count, uint flags);
     [DllImport("user32.dll")]
     static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
     [DllImport("user32.dll")]
@@ -113,58 +110,75 @@ public static class BugLoginJob {
             return processIds;
         } finally { Marshal.FreeHGlobal(buffer); }
     }
-    static string ProfileInitials(string profileName) {
-        var words = profileName.Trim().Split(new char[] {' ', '\t', '-', '_'}, StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length == 0) return "?";
-        if (words.Length > 1) return (words[0][0].ToString() + words[1][0].ToString()).ToUpperInvariant();
-        var value = words[0];
-        return value.Substring(0, Math.Min(2, value.Length)).ToUpperInvariant();
-    }
-    static IntPtr CreateProfileIcon(string executable, string profileName) {
-        IntPtr sourceHandle = IntPtr.Zero;
-        uint iconId;
-        if (PrivateExtractIcons(executable, 0, 256, 256, out sourceHandle, out iconId, 1, 0) == 0 || sourceHandle == IntPtr.Zero) {
-            IntPtr unusedSmall;
-            if (ExtractIconEx(executable, 0, out sourceHandle, out unusedSmall, 1) == 0) return IntPtr.Zero;
-            if (unusedSmall != IntPtr.Zero) DestroyIcon(unusedSmall);
-        }
+    static Color ParseProfileColor(string value) {
+        if (String.IsNullOrEmpty(value) || value.Length != 6) return Color.FromArgb(214, 59, 43);
         try {
-            using (var source = Icon.FromHandle(sourceHandle).ToBitmap())
-            using (var bitmap = new Bitmap(256, 256, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-            using (var graphics = Graphics.FromImage(bitmap)) {
+            int red = Convert.ToInt32(value.Substring(0, 2), 16);
+            int green = Convert.ToInt32(value.Substring(2, 2), 16);
+            int blue = Convert.ToInt32(value.Substring(4, 2), 16);
+            return Color.FromArgb(red, green, blue);
+        } catch { return Color.FromArgb(214, 59, 43); }
+    }
+    static Color ProfileTextColor(Color background) {
+        Func<int, double> linear = channel => {
+            double value = channel / 255.0;
+            return value <= 0.04045 ? value / 12.92 : Math.Pow((value + 0.055) / 1.055, 2.4);
+        };
+        double luminance = 0.2126 * linear(background.R) + 0.7152 * linear(background.G) + 0.0722 * linear(background.B);
+        double darkContrast = (luminance + 0.05) / (linear(28) + 0.05);
+        double lightContrast = (linear(250) + 0.05) / (luminance + 0.05);
+        return darkContrast >= lightContrast ? Color.FromArgb(28, 28, 32) : Color.FromArgb(250, 250, 252);
+    }
+    static void DrawProfileLine(Graphics graphics, string value, RectangleF area, float emSize, Brush brush) {
+        if (String.IsNullOrEmpty(value)) return;
+        using (var family = new FontFamily("Segoe UI")) {
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath()) {
+                path.AddString(value, family, (int)FontStyle.Bold, emSize, new PointF(0, 0), StringFormat.GenericTypographic);
+                RectangleF bounds = path.GetBounds();
+                float x = area.Left + (area.Width - bounds.Width) / 2 - bounds.Left;
+                float y = area.Top + (area.Height - bounds.Height) / 2 - bounds.Top;
+                using (var transform = new System.Drawing.Drawing2D.Matrix()) {
+                    transform.Translate(x, y);
+                    path.Transform(transform);
+                }
+                graphics.FillPath(brush, path);
+            }
+        }
+    }
+    static IntPtr CreateProfileIcon(string profileSummary, string profileColor) {
+        Color backgroundColor = ParseProfileColor(profileColor);
+        Color textColor = ProfileTextColor(backgroundColor);
+        using (var bitmap = new Bitmap(256, 256, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            using (var graphics = Graphics.FromImage(bitmap))
+            using (var background = new SolidBrush(backgroundColor))
+            using (var text = new SolidBrush(textColor)) {
                 graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
                 graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                 graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-                graphics.DrawImage(source, 0, 0, 256, 256);
-                const int badgeSize = 92;
-                const int badgeX = 256 - badgeSize - 2;
-                const int badgeY = 256 - badgeSize - 2;
-                using (var border = new SolidBrush(Color.White))
-                using (var fill = new SolidBrush(Color.FromArgb(214, 59, 43)))
-                using (var font = new Font("Segoe UI", 43, FontStyle.Bold, GraphicsUnit.Pixel))
-                using (var text = new SolidBrush(Color.White)) {
-                    graphics.FillEllipse(border, badgeX - 4, badgeY - 4, badgeSize + 8, badgeSize + 8);
-                    graphics.FillEllipse(fill, badgeX, badgeY, badgeSize, badgeSize);
-                    var initials = ProfileInitials(profileName);
-                    var measured = graphics.MeasureString(initials, font);
-                    graphics.DrawString(initials, font, text, badgeX + (badgeSize - measured.Width) / 2, badgeY + (badgeSize - measured.Height) / 2 - 2);
+                graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                graphics.FillRectangle(background, 0, 0, 256, 256);
+                var summary = String.IsNullOrWhiteSpace(profileSummary) ? "PROFILE" : profileSummary;
+                var lines = summary.Split(new[] { '\n' }, 2, StringSplitOptions.None);
+                var firstLine = lines[0];
+                var secondLine = lines.Length > 1
+                    ? lines[1]
+                    : summary.Length > 4 ? summary.Substring(4, Math.Min(3, summary.Length - 4)) : "";
+                if (String.IsNullOrEmpty(secondLine)) {
+                    DrawProfileLine(graphics, firstLine, new RectangleF(16, 45, 224, 166), 88, text);
+                } else {
+                    float emSize = 88f * Math.Min(1f, 4f / Math.Max(firstLine.Length, secondLine.Length));
+                    DrawProfileLine(graphics, firstLine, new RectangleF(4, 30, 248, 86), emSize, text);
+                    DrawProfileLine(graphics, secondLine, new RectangleF(4, 140, 248, 86), emSize, text);
                 }
                 return bitmap.GetHicon();
-            }
-        } finally { DestroyIcon(sourceHandle); }
+        }
     }
-    public static void ApplyWindowIcon(uint[] processIds, string executable, string profileName) {
+    public static void ApplyWindowIcon(uint[] processIds, string profileSummary, string profileColor) {
         if (largeIcon == IntPtr.Zero || smallIcon == IntPtr.Zero) {
-            IntPtr extractedLarge, extractedSmall;
-            largeIcon = CreateProfileIcon(executable, profileName);
-            if (largeIcon == IntPtr.Zero) {
-                if (ExtractIconEx(executable, 0, out extractedLarge, out extractedSmall, 1) == 0) return;
-                largeIcon = extractedLarge;
-                smallIcon = extractedSmall;
-            } else {
-                smallIcon = CreateProfileIcon(executable, profileName);
-                if (smallIcon == IntPtr.Zero) smallIcon = largeIcon;
-            }
+            largeIcon = CreateProfileIcon(profileSummary, profileColor);
+            if (largeIcon == IntPtr.Zero) return;
+            smallIcon = CreateProfileIcon(profileSummary, profileColor);
+            if (smallIcon == IntPtr.Zero) smallIcon = largeIcon;
         }
         var processSet = new System.Collections.Generic.HashSet<uint>(processIds);
         EnumWindows((window, parameter) => {
@@ -191,8 +205,8 @@ public static class BugLoginJob {
         try { return store.SetValue(ref key, ref value) >= 0 && store.Commit() >= 0; }
         finally { PropVariantClear(ref value); Marshal.ReleaseComObject(store); }
     }
-    public static void ApplyWindowIdentity(uint[] processIds, string executable, string appUserModelId, string profileName) {
-        ApplyWindowIcon(processIds, executable, profileName);
+    public static void ApplyWindowIdentity(uint[] processIds, string appUserModelId, string profileSummary, string profileColor) {
+        ApplyWindowIcon(processIds, profileSummary, profileColor);
         var processSet = new System.Collections.Generic.HashSet<uint>(processIds);
         EnumWindows((window, parameter) => {
             uint ownerProcessId;
@@ -212,7 +226,11 @@ public static class BugLoginJob {
 }
 '@
 $null = [BugLoginJob]::Create()
-$process = Start-Process -FilePath $env:BUGLOGIN_EXECUTABLE -ArgumentList $env:BUGLOGIN_ARGUMENTS -PassThru
+$launchArguments = $env:BUGLOGIN_ARGUMENTS
+if ($env:BUGLOGIN_APPLY_WINDOW_IDENTITY -eq '1' -and $launchArguments -notmatch '(^|\s)--headless(?:\s|$)') {
+    $launchArguments += ' --start-maximized'
+}
+$process = Start-Process -FilePath $env:BUGLOGIN_EXECUTABLE -ArgumentList $launchArguments -PassThru
 $null = [BugLoginJob]::OwnProcess($process)
 $ticks = $process.StartTime.ToUniversalTime().Ticks
 [Console]::Out.WriteLine("BUGLOGIN {0} {1}", $process.Id, $ticks)
@@ -224,8 +242,8 @@ while ([BugLoginJob]::ActiveProcesses() -gt 0) {
         $owner = Get-Process -Id $ownerPid -ErrorAction Stop
         if ($owner.StartTime.ToUniversalTime().Ticks -ne $ownerTicks) { break }
     } catch { break }
-    if ($env:BUGLOGIN_OWNER_EXECUTABLE) {
-        try { [BugLoginJob]::ApplyWindowIdentity([BugLoginJob]::ProcessIds(), $env:BUGLOGIN_OWNER_EXECUTABLE, $env:BUGLOGIN_APP_USER_MODEL_ID, $env:BUGLOGIN_PROFILE_NAME) } catch { }
+    if ($env:BUGLOGIN_APPLY_WINDOW_IDENTITY -eq '1') {
+        try { [BugLoginJob]::ApplyWindowIdentity([BugLoginJob]::ProcessIds(), $env:BUGLOGIN_APP_USER_MODEL_ID, $env:BUGLOGIN_PROFILE_SUMMARY, $env:BUGLOGIN_PROFILE_COLOR) } catch { }
     }
     Start-Sleep -Milliseconds 200
     $process.Refresh()
@@ -248,6 +266,49 @@ fn profile_app_user_model_id(profile_path: &Path) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("BugLogin.Wayfern.{suffix}")
+}
+
+fn profile_icon_summary(profile_name: &str) -> String {
+    let mut summary = Vec::with_capacity(7);
+    let mut separator_index = None;
+    for character in profile_name.chars() {
+        if character == '-' || character == '|' {
+            if !summary.is_empty() && separator_index.is_none() {
+                separator_index = Some(summary.len());
+            }
+            continue;
+        }
+        if !character.is_alphanumeric() {
+            continue;
+        }
+        for uppercase in character.to_uppercase() {
+            if summary.len() == 7 {
+                break;
+            }
+            summary.push(uppercase);
+        }
+        if summary.len() == 7 {
+            break;
+        }
+    }
+    if summary.is_empty() {
+        "PROFILE".to_owned()
+    } else {
+        let split_at = separator_index
+            .filter(|index| *index <= 4 && *index < summary.len())
+            .unwrap_or_else(|| summary.len().min(4));
+        let first = summary[..split_at].iter().collect::<String>();
+        let second = summary[split_at..].iter().collect::<String>();
+        format!("{first}\n{second}")
+    }
+}
+
+fn profile_icon_color(args: &[String]) -> String {
+    args.iter()
+        .find_map(|argument| argument.strip_prefix("--wayfern-profile-color="))
+        .filter(|value| value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .unwrap_or("d63b2b")
+        .to_owned()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -306,14 +367,7 @@ impl WindowsJobController {
         let owner_ticks = query_process(&self.powershell, owner_pid)
             .map(|(_, ticks)| ticks)
             .ok_or_else(identity_unverified)?;
-        let owner_executable = if use_buglogin_window_icon {
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| path.to_str().map(str::to_owned))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let apply_window_identity = if use_buglogin_window_icon { "1" } else { "" };
         let mut helper = Command::new(&self.powershell)
             .args([
                 "-NoLogo",
@@ -326,17 +380,20 @@ impl WindowsJobController {
             .env("BUGLOGIN_ARGUMENTS", windows_command_line(args))
             .env("BUGLOGIN_OWNER_PID", owner_pid.to_string())
             .env("BUGLOGIN_OWNER_TICKS", owner_ticks)
-            .env("BUGLOGIN_OWNER_EXECUTABLE", owner_executable)
+            .env("BUGLOGIN_APPLY_WINDOW_IDENTITY", apply_window_identity)
             .env(
                 "BUGLOGIN_APP_USER_MODEL_ID",
                 profile_app_user_model_id(profile_path),
             )
             .env(
-                "BUGLOGIN_PROFILE_NAME",
-                args.iter()
-                    .find_map(|argument| argument.strip_prefix("--wayfern-profile-label="))
-                    .unwrap_or("Browser"),
+                "BUGLOGIN_PROFILE_SUMMARY",
+                profile_icon_summary(
+                    args.iter()
+                        .find_map(|argument| argument.strip_prefix("--wayfern-profile-label="))
+                        .unwrap_or("Profile"),
+                ),
             )
+            .env("BUGLOGIN_PROFILE_COLOR", profile_icon_color(args))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -667,7 +724,7 @@ fn problem(code: &str, title: &str, status: u16) -> Problem {
 
 #[cfg(test)]
 mod tests {
-    use super::{profile_app_user_model_id, quote_windows_argument};
+    use super::{profile_app_user_model_id, profile_icon_summary, quote_windows_argument};
     use std::path::Path;
 
     #[test]
@@ -692,5 +749,14 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.starts_with("BugLogin.Wayfern."));
         assert!(!first.contains("profile-one"));
+    }
+
+    #[test]
+    fn profile_icon_summary_balances_four_and_three_character_rows() {
+        assert_eq!(profile_icon_summary(" TEST-PRO | 02 "), "TEST\nPRO");
+        assert_eq!(profile_icon_summary("ZH-GO4"), "ZH\nGO4");
+        assert_eq!(profile_icon_summary("TESTPRO02"), "TEST\nPRO");
+        assert_eq!(profile_icon_summary("KJAKJS -01"), "KJAK\nJS0");
+        assert_eq!(profile_icon_summary("---|||"), "PROFILE");
     }
 }

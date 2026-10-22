@@ -109,14 +109,6 @@ const getCurrentOS = (): WayfernOS => {
 
 const defaultWayfernConfig = (): WayfernConfig => ({
   os: getCurrentOS(),
-  screen_max_width:
-    typeof window === "undefined" ? 1920 : window.screen.width || 1920,
-  screen_max_height:
-    typeof window === "undefined" ? 1080 : window.screen.height || 1080,
-  screen_min_width:
-    typeof window === "undefined" ? 1920 : window.screen.width || 1920,
-  screen_min_height:
-    typeof window === "undefined" ? 1080 : window.screen.height || 1080,
 });
 
 interface CreateProfileDialogProps {
@@ -1267,8 +1259,10 @@ export function CreateProfileDialog({
                     {t("createProfile.fingerprintSummary.screen")}
                   </span>
                   <span className="font-mono text-[11px] text-foreground truncate block">
-                    {wayfernConfig.screen_max_width ?? 1920} ×{" "}
-                    {wayfernConfig.screen_max_height ?? 1080}
+                    {wayfernConfig.screen_max_width &&
+                    wayfernConfig.screen_max_height
+                      ? `${wayfernConfig.screen_max_width} × ${wayfernConfig.screen_max_height}`
+                      : t("createProfile.fingerprintSummary.screenAuto")}
                   </span>
                 </div>
 

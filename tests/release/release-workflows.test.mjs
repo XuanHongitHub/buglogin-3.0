@@ -9,7 +9,8 @@ import { verifyPlatformText, verifyReleaseText, verifyReleaseWorkflows, verifySi
 test("release workflows satisfy fail-closed static policy", async () => {
   const { release, signing, platform, promotion } = await verifyReleaseWorkflows();
   assert.match(release, /workflow_dispatch:/);
-  assert.match(signing, /WINDOWS_CERTIFICATE_PFX_BASE64/);
+  assert.match(signing, /Create Windows updater build configuration/);
+  assert.doesNotMatch(signing, /WINDOWS_CERTIFICATE_PFX_BASE64|Get-AuthenticodeSignature/);
   verifyPlatformText(platform);
   assert.match(promotion, /QA_EVIDENCE_URL/);
 });
@@ -28,15 +29,19 @@ test("release publishes verified platform bundles as a downloadable prerelease c
   assert.match(release, /actions\/download-artifact@[0-9a-f]{40}/);
   assert.match(release, /find \. -maxdepth 1 -type f ! -name SHA256SUMS\.txt[\s\S]*sha256sum > SHA256SUMS\.txt/);
   assert.match(release, /assemble-tauri-updater-feed\.mjs/);
+  assert.match(release, /Publish immutable RC artifacts and feed to DigitalOcean Spaces/);
+  assert.match(release, /secrets\.S3_ACCESS_KEY_ID/);
+  assert.match(release, /releases\/desktop\/v3\/rc\/latest\.json/);
   const updaterFeed = await readFile("scripts/release/assemble-tauri-updater-feed.mjs", "utf8");
   assert.match(updaterFeed, /latest\.json/);
   assert.match(release, /--prerelease --verify-tag/);
   assert.doesNotMatch(release, /--draft/);
   assert.doesNotMatch(release, /--latest|--make-latest/);
-  assert.match(release, /ref: \$\{\{ github\.event_name == 'push' && github\.ref_name \|\| inputs\.release_ref \}\}/);
-  assert.match(release, /CURRENT_REF_TYPE" != "tag" \|\| "\$CURRENT_REF" != "\$RELEASE_REF" \|\| "\$REF_PROTECTED" != "true"/);
+  assert.match(release, /ref: \$\{\{ inputs\.release_ref \}\}/);
+  assert.match(release, /workflow_dispatch:[\s\S]*?release_ref:/);
+  assert.doesNotMatch(release, /^\s+push:/m);
   assert.match(release, /CURRENT_REF_TYPE" != "branch" \|\| "\$CURRENT_REF" != "\$DEFAULT_BRANCH"/);
-  assert.match(release, /release_ref is required for manual verification/);
+  assert.match(release, /release_ref is required/);
   assert.doesNotMatch(release, /git fetch --force --tags/);
 });
 
@@ -51,25 +56,44 @@ test("stable promotion validates RC assets and changes metadata without rebuildi
   assert.match(promotion, /sha256sum --check SHA256SUMS\.txt/);
   assert.match(promotion, /verify-tauri-updater-feed\.mjs/);
   assert.match(promotion, /gh release edit[\s\S]*?--prerelease=false --latest/);
+  assert.match(promotion, /Publish stable updater feed to DigitalOcean Spaces/);
   assert.doesNotMatch(promotion, /gh release create|tauri build|cargo build|--clobber/);
-  assert.match(promotion, /isDraft\|\|!r\.isPrerelease/);
+  assert.match(promotion, /isDraft\|\|\(!r\.isPrerelease&&!r\.isLatest\)/);
   assert.match(await readFile("scripts/release/verify-tauri-updater-feed.mjs", "utf8"), /stable updater feed requires/);
 });
 
-test("stable updater feed binds exactly three platform assets to the selected release", async () => {
+test("stable updater feed binds supported Windows and Apple Silicon Mac assets to the selected release", async () => {
   const directory = await mkdtemp(join(tmpdir(), "buglogin-stable-feed-"));
   try {
     const manifestPath = join(directory, "latest.json");
     const platforms = {
-      "windows-x86_64": { signature: "signed", url: "https://github.com/owner/repo/releases/download/v1.2.3/BugLogin_1.2.3_x64-setup.nsis.zip" },
+      "windows-x86_64": { signature: "signed", url: "https://github.com/owner/repo/releases/download/v1.2.3/BugLogin_1.2.3_x64-setup.exe" },
       "darwin-aarch64": { signature: "signed", url: "https://github.com/owner/repo/releases/download/v1.2.3/BugLogin_1.2.3_aarch64.app.tar.gz" },
-      "darwin-x86_64": { signature: "signed", url: "https://github.com/owner/repo/releases/download/v1.2.3/BugLogin_1.2.3_x64.app.tar.gz" },
     };
     await writeFile(manifestPath, JSON.stringify({ version: "1.2.3", platforms }));
     run("scripts/release/verify-tauri-updater-feed.mjs", manifestPath, "1.2.3", "owner/repo");
-    platforms["windows-x86_64"].url = "https://github.com/owner/repo/releases/download/v1.2.2/BugLogin_1.2.3_x64-setup.nsis.zip";
+    platforms["windows-x86_64"].url = "https://github.com/owner/repo/releases/download/v1.2.2/BugLogin_1.2.3_x64-setup.exe";
     await writeFile(manifestPath, JSON.stringify({ version: "1.2.3", platforms }));
     assert.throws(() => run("scripts/release/verify-tauri-updater-feed.mjs", manifestPath, "1.2.3", "owner/repo"), /updater URL does not reference/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("stable updater feed validates version-bound Spaces artifact URLs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "buglogin-spaces-feed-"));
+  try {
+    const manifestPath = join(directory, "latest.json");
+    const base = "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/artifacts/";
+    const platforms = {
+      "windows-x86_64": { signature: "signed", url: `${base}v1.2.3/12345/BugLogin_1.2.3_x64-setup.exe` },
+      "darwin-aarch64": { signature: "signed", url: `${base}v1.2.3/12345/BugLogin_1.2.3_aarch64.app.tar.gz` },
+    };
+    await writeFile(manifestPath, JSON.stringify({ version: "1.2.3", platforms }));
+    run("scripts/release/verify-tauri-updater-feed.mjs", manifestPath, "1.2.3", "owner/repo", base);
+    platforms["windows-x86_64"].url = `${base}v1.2.2/12345/BugLogin_1.2.3_x64-setup.exe`;
+    await writeFile(manifestPath, JSON.stringify({ version: "1.2.3", platforms }));
+    assert.throws(() => run("scripts/release/verify-tauri-updater-feed.mjs", manifestPath, "1.2.3", "owner/repo", base));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -81,8 +105,18 @@ test("signing verifier rejects floating runners and bypassed failures", () => {
 });
 
 test("signing verifier rejects missing notarization and provenance checks", () => {
-  const unsafe = `runs-on: windows-2025\nrunner: macos-14\nrunner: macos-15-intel\nRUST_TOOLCHAIN: 1.95.0`;
+  const unsafe = `runs-on: windows-2025\nrunner: macos-14\nRUST_TOOLCHAIN: 1.95.0`;
   assert.throws(() => verifySigningText(unsafe), /missing/);
+});
+
+test("Windows release installer does not require Authenticode credentials", async () => {
+  const { signing } = await verifyReleaseWorkflows();
+  const windows = signing.match(/^  windows:\n([\s\S]*?)(?=^  macos:\n)/m)?.[1];
+  assert.ok(windows, "expected Windows build job");
+  assert.match(windows, /Build Windows installer and signed updater artifact/);
+  assert.match(windows, /Expected Windows app executable and one NSIS installer/);
+  assert.match(windows, /Expected the Tauri updater signature for the NSIS installer/);
+  assert.doesNotMatch(windows, /WINDOWS_CERTIFICATE|WINDOWS_TIMESTAMP|Authenticode|TimeStamperCertificate/);
 });
 
 test("signing workflow maps existing Apple secret names and derives the team identity", async () => {

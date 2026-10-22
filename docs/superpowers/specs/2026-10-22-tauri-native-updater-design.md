@@ -14,6 +14,8 @@ Use the supported Tauri v2 updater plugin for Windows and macOS binary installat
 
 The updater endpoint is HTTPS and serves the Tauri static JSON schema. The release pipeline must assemble one immutable `latest.json` from the signed Windows x64, macOS arm64, and macOS x64 updater artifacts. RC and stable channels must not share mutable metadata. Promotion changes channel metadata to point to already verified artifact URLs and hashes; it does not rebuild artifacts.
 
+BugLogin 3.0 uses the existing DigitalOcean Spaces bucket `mavelnut-login` without modifying the 1.0 feed. Store immutable 3.0 updater artifacts under `releases/desktop/v3/artifacts/v<version>/<run-id>/`; publish RC and stable Tauri feeds separately at `releases/desktop/v3/rc/latest.json` and `releases/desktop/v3/stable/latest.json`. Stable updater builds pin the stable HTTPS endpoint. The 1.0 `releases/desktop/latest.json` is a download catalog with null signatures/checksums and is not compatible with the Tauri updater schema.
+
 The update key pair is a release credential. The private key is only a protected GitHub environment secret, never generated or stored by application code. The public key is injected into the release build as a Tauri config overlay and is safe to publish. Local development builds have no update endpoint and must report updater unavailable without failing startup.
 
 ## Behavior
@@ -28,7 +30,7 @@ The update key pair is a release credential. The private key is only a protected
 
 - Protected release environment owns the updater private key; only signing jobs can read it.
 - Public key pin is embedded in each signed release. Key rotation requires a dual-key transition release and a tested revocation/rollback procedure.
-- GitHub `latest.json`, installer signatures, artifact checksums, SBOM, and provenance must refer to the same immutable version/artifacts.
+- The S3 stable `latest.json`, GitHub release assets, installer signatures, artifact checksums, SBOM, and provenance must refer to the same immutable version/artifacts.
 - Windows/macOS clean install and previous-version-to-current-version update are required before stable promotion.
 - Until the updater key, Windows Authenticode credentials, Apple notarization credentials, and protected release environment are available, code may be validated but no production-ready release may be claimed.
 

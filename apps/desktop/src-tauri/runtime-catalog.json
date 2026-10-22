@@ -3,6 +3,19 @@
   "releases": [
     {
       "runtime": "wayfern",
+      "version": "155.0.8059.79",
+      "platform": "macos",
+      "architecture": "arm64",
+      "relativePath": "Wayfern.app/Contents/MacOS/Wayfern",
+      "packageFormat": "dmg",
+      "source": "https://download.wayfern.com/wayfern_155.0.8059.79-1.1_macos.dmg",
+      "sha256": "4a4e1f58e489eda94cdd9bb1ed7a44fc88127ea831082870ea4f96541413c248",
+      "sizeBytes": 1453563936,
+      "keyId": "buglogin-runtime-2026-10-22",
+      "signature": "434c4722663b2336e71175faf9700b07fb823c53214040778004b6225d87bf8c71060661397b5fd1850243444d3b84a3c9ff820359be9f91cbcb41c73c4a2808"
+    },
+    {
+      "runtime": "wayfern",
       "version": "154.0.8037.57",
       "platform": "windows",
       "architecture": "x64",
@@ -14,6 +27,20 @@
       "sizeBytes": 1683221729,
       "keyId": "wayfern-release-2026",
       "signature": "fc9f68c9f252f0ad91169e36438d32b754b9a65a624d67aa7b41145e411d16d465e01b8739a29967d4dd9a8d03db76f3b61e80029b70e40884520626c8c90204"
+    },
+    {
+      "runtime": "wayfern",
+      "version": "155.0.8059.79",
+      "platform": "windows",
+      "architecture": "x64",
+      "relativePath": "chrome.exe",
+      "packageFormat": "zip",
+      "archivePrefix": "wayfern-155.0.8059.79_windows_x64",
+      "source": "https://download.wayfern.com/wayfern-155.0.8059.79_windows_x64.zip",
+      "sha256": "43925a0841c254f66289565cd1d65f7d783c1f1e40b2a77fd402253c59b3e8b1",
+      "sizeBytes": 1599626910,
+      "keyId": "buglogin-runtime-2026-10-22",
+      "signature": "a29fffac411bdfc5d740bd6281f0d1c00b07bd994576a30bf0b2fd205678f6d7dacfff5a32ca20e7c379f0e81fde098b5c5f2c7b1587c16f39f39df18b17d10c"
     }
   ]
 }

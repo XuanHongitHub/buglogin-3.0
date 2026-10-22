@@ -96,20 +96,32 @@ interface PendingUrl {
 
 export default function Home({
   onShareProfiles,
+  onCheckForUpdates,
+  isCheckingForUpdates,
 }: {
   onShareProfiles?: ShareProfilesHandler;
+  onCheckForUpdates?: () => void;
+  isCheckingForUpdates?: boolean;
 } = {}) {
   return process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "web" ? (
     <WebRouteHost initialPath="/" />
   ) : (
-    <DesktopHome onShareProfiles={onShareProfiles} />
+    <DesktopHome
+      onShareProfiles={onShareProfiles}
+      onCheckForUpdates={onCheckForUpdates}
+      isCheckingForUpdates={isCheckingForUpdates}
+    />
   );
 }
 
 function DesktopHome({
   onShareProfiles,
+  onCheckForUpdates,
+  isCheckingForUpdates,
 }: {
   onShareProfiles?: ShareProfilesHandler;
+  onCheckForUpdates?: () => void;
+  isCheckingForUpdates?: boolean;
 } = {}) {
   const { t } = useTranslation();
   // Use the profile events hook for centralized profile management
@@ -1815,6 +1827,8 @@ function DesktopHome({
 
       <AboutDialog
         isOpen={aboutDialogOpen}
+        onCheckForUpdates={onCheckForUpdates}
+        isCheckingForUpdates={isCheckingForUpdates}
         onClose={() => {
           setAboutDialogOpen(false);
         }}

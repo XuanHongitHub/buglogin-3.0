@@ -331,6 +331,7 @@ interface TableMeta {
   isProfileLockUnknown: (profileId: string) => boolean;
   getProfileLockEmail: (profileId: string) => string | undefined;
   getProfileLockInfo: (profileId: string) => ProfileLockInfo | undefined;
+  refreshProfileLockStatus: () => Promise<void>;
 
   // Synchronizer
   getProfileSyncInfo: (profileId: string) =>
@@ -1858,6 +1859,7 @@ export function ProfilesDataTable({
     isProfileLockUnknown,
     getLockInfo,
     runtimeRunningProfileIds,
+    refetchLocks,
   } = useTeamLocks(user?.id, workspaceId, profiles, runningProfiles);
 
   const [proxyOverrides, setProxyOverrides] = React.useState<
@@ -2560,6 +2562,7 @@ export function ProfilesDataTable({
         getLockInfo(profileId)?.ownerLabel ??
         getLockInfo(profileId)?.lockedByEmail,
       getProfileLockInfo: getLockInfo,
+      refreshProfileLockStatus: refetchLocks,
 
       // Synchronizer
       getProfileSyncInfo: getProfileSyncInfo ?? (() => undefined),
@@ -2622,6 +2625,7 @@ export function ProfilesDataTable({
       isProfileLocked,
       isProfileLockUnknown,
       getLockInfo,
+      refetchLocks,
       getProfileSyncInfo,
       onLaunchWithSync,
     ],
@@ -2743,6 +2747,8 @@ export function ProfilesDataTable({
                 return next;
               });
               throw error;
+            } finally {
+              void meta.refreshProfileLockStatus();
             }
           };
 
@@ -2758,6 +2764,7 @@ export function ProfilesDataTable({
                 next.delete(profile.id);
                 return next;
               });
+              void meta.refreshProfileLockStatus();
             }
           };
 
@@ -2826,7 +2833,9 @@ export function ProfilesDataTable({
                     aria-label={
                       isRunning
                         ? meta.t("profiles.actions.stop")
-                        : meta.t("profiles.actions.launch")
+                        : isLockedByAnother || isLockUnknown
+                          ? tooltipContent
+                          : meta.t("profiles.actions.launch")
                     }
                     className={cn(
                       "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",
@@ -2849,6 +2858,13 @@ export function ProfilesDataTable({
                         <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
                       ) : isRunning ? (
                         <LuSquare className="size-3 fill-current" />
+                      ) : isLockedByAnother || isLockUnknown ? (
+                        <LuLock
+                          className={cn(
+                            "size-3.5",
+                            isLockUnknown && "text-warning",
+                          )}
+                        />
                       ) : (
                         <LuPlay className="size-3 translate-x-px fill-current" />
                       )}

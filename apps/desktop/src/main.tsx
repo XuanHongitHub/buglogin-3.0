@@ -15,7 +15,7 @@ if (!root) throw new Error("Desktop root element not found");
 const api = createTauriDesktopApi();
 
 function DesktopRoot() {
-  useAppUpdateNotifications();
+  const appUpdates = useAppUpdateNotifications();
   const [share, setShare] = useState<{
     profiles: BrowserProfile[];
     workspaceId: string;
@@ -23,6 +23,8 @@ function DesktopRoot() {
   return (
     <>
       <DesktopHome
+        onCheckForUpdates={appUpdates.checkForAppUpdatesManual}
+        isCheckingForUpdates={appUpdates.isCheckingForUpdates}
         onShareProfiles={(profiles, workspaceId) =>
           setShare({ profiles, workspaceId })
         }

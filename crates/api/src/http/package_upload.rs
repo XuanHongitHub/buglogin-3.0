@@ -155,7 +155,7 @@ pub(super) async fn put_package_file(
             .with_field("maxBytes", MAX_FILE_BYTES),
         ));
     }
-    let _admission = super::large_transfer_body_slot().map_err(response)?;
+    let _admission = super::large_transfer_body_slot().await.map_err(response)?;
     let body = axum::body::to_bytes(body, MAX_FILE_BYTES)
         .await
         .map_err(|_| {

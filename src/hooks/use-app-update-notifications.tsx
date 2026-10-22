@@ -10,16 +10,40 @@ import { translateBackendError } from "@/lib/backend-errors";
 import { showToast } from "@/lib/toast-utils";
 import type { AppUpdateInfo, AppUpdateProgress } from "@/types";
 
+function isUpdaterNotConfigured(error: unknown): boolean {
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "";
+  return message.includes("app_updater_not_configured");
+}
+
 export function useAppUpdateNotifications() {
   const { t } = useTranslation();
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
   const [updateProgress, setUpdateProgress] =
     useState<AppUpdateProgress | null>(null);
   const [updateReady, setUpdateReady] = useState(false);
   const [isClient, setIsClient] = useState(false);
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const autoDownloadedVersion = useRef<string | null>(null);
+  const updateCheckRef = useRef<Promise<AppUpdateInfo | null> | null>(null);
+
+  const requestAppUpdateCheck = useCallback(() => {
+    if (updateCheckRef.current) return updateCheckRef.current;
+    const request = invoke<AppUpdateInfo | null>("check_for_app_updates_manual");
+    const pending = request.finally(() => {
+      if (updateCheckRef.current === pending) updateCheckRef.current = null;
+    });
+    updateCheckRef.current = pending;
+    return pending;
+  }, []);
 
   // Ensure we're on the client side to prevent hydration mismatches
   useEffect(() => {
@@ -30,9 +54,8 @@ export function useAppUpdateNotifications() {
     if (!isClient) return;
 
     try {
-      const update = await invoke<AppUpdateInfo | null>(
-        "check_for_app_updates",
-      );
+      setIsCheckingForUpdates(true);
+      const update = await requestAppUpdateCheck();
 
       // Don't show update if this version was already dismissed
       if (update && update.new_version !== dismissedVersion) {
@@ -41,27 +64,49 @@ export function useAppUpdateNotifications() {
         console.log("Update available but dismissed:", update.new_version);
       }
     } catch (error) {
-      console.error("Failed to check for app updates:", error);
+      if (!isUpdaterNotConfigured(error)) {
+        console.error("Failed to check for app updates:", error);
+      }
+    } finally {
+      setIsCheckingForUpdates(false);
     }
-  }, [isClient, dismissedVersion]);
+  }, [isClient, dismissedVersion, requestAppUpdateCheck]);
 
   const checkForAppUpdatesManual = useCallback(async () => {
     if (!isClient) return;
 
     try {
       console.log("Triggering manual app update check...");
-      const update = await invoke<AppUpdateInfo | null>(
-        "check_for_app_updates_manual",
-      );
+      setIsCheckingForUpdates(true);
+      const update = await requestAppUpdateCheck();
       console.log("Manual check result:", update);
 
       // Always show manual check results, even if previously dismissed
       autoDownloadedVersion.current = null;
       setUpdateInfo(update);
+      if (!update) {
+        showToast({ type: "success", title: t("about.upToDate") });
+      }
     } catch (error) {
+      if (isUpdaterNotConfigured(error)) {
+        showToast({
+          type: "info",
+          title: t("about.updatesReleaseOnly"),
+          description: t("about.updatesReleaseOnlyDescription"),
+        });
+        return;
+      }
       console.error("Failed to manually check for app updates:", error);
+      showToast({
+        type: "error",
+        title: t("about.updateCheckFailed"),
+        description: translateBackendError(t, error),
+        duration: 6000,
+      });
+    } finally {
+      setIsCheckingForUpdates(false);
     }
-  }, [isClient]);
+  }, [isClient, requestAppUpdateCheck, t]);
 
   const handleAppUpdate = useCallback(
     async (appUpdateInfo: AppUpdateInfo) => {
@@ -237,6 +282,7 @@ export function useAppUpdateNotifications() {
   return {
     updateInfo,
     isUpdating,
+    isCheckingForUpdates,
     updateProgress,
     updateReady,
     checkForAppUpdates,

@@ -8,9 +8,8 @@ import test from "node:test";
 
 const script = fileURLToPath(new URL("../../scripts/release/assemble-tauri-updater-feed.mjs", import.meta.url));
 const targets = [
-  ["windows-x64", "windows-x86_64", "BugLogin_1.2.3_x64-setup.nsis.zip"],
+  ["windows-x64", "windows-x86_64", "BugLogin_1.2.3_x64-setup.exe"],
   ["macos-arm64", "darwin-aarch64", "BugLogin_1.2.3_aarch64.app.tar.gz"],
-  ["macos-x64", "darwin-x86_64", "BugLogin_1.2.3_x64.app.tar.gz"],
 ];
 
 async function fixture(root, version = "1.2.3") {
@@ -49,12 +48,30 @@ test("updater feed refuses missing signatures and ambiguous platform artifacts",
   try {
     const incoming = join(root, "incoming");
     await fixture(incoming);
-    await rm(join(incoming, "buglogin-v1.2.3-windows-x64-signed", "BugLogin_1.2.3_x64-setup.nsis.zip.sig"));
+    await rm(join(incoming, "buglogin-v1.2.3-windows-x64-signed", "BugLogin_1.2.3_x64-setup.exe.sig"));
     const result = spawnSync(process.execPath, [script, incoming, join(root, "output"), "1.2.3", "keyduc91/Malvanut-Login"], { encoding: "utf8" });
     assert.notEqual(result.status, 0);
-    await writeFile(join(incoming, "buglogin-v1.2.3-windows-x64-signed", "extra.nsis.zip"), "second artifact");
+    await writeFile(join(incoming, "buglogin-v1.2.3-windows-x64-signed", "extra.exe"), "second artifact");
     const duplicate = spawnSync(process.execPath, [script, incoming, join(root, "output-duplicate"), "1.2.3", "keyduc91/Malvanut-Login"], { encoding: "utf8" });
     assert.notEqual(duplicate.status, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("updater feed can point signed assets at an immutable BugLogin Spaces version path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "buglogin-updater-spaces-"));
+  try {
+    const incoming = join(root, "incoming");
+    const output = join(root, "output");
+    await fixture(incoming);
+    const base = "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/artifacts/v1.2.3/12345/";
+    const result = spawnSync(process.execPath, [script, incoming, output, "1.2.3", "keyduc91/Malvanut-Login", base], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const manifest = JSON.parse(await readFile(join(output, "latest.json"), "utf8"));
+    for (const [, key, artifact] of targets) assert.equal(manifest.platforms[key].url, `${base}${encodeURIComponent(artifact)}`);
+    const invalid = spawnSync(process.execPath, [script, incoming, join(root, "invalid"), "1.2.3", "keyduc91/Malvanut-Login", "http://spaces.example.test/v1.2.3/"], { encoding: "utf8" });
+    assert.notEqual(invalid.status, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -296,7 +296,7 @@ export const LOCAL_API_EXAMPLES: readonly ApiExample<LocalApiExampleId>[] = [
     response: JSON.stringify(
       {
         openapi: "3.1.0",
-        info: { title: "donutbrowser", version: "…" },
+        info: { title: "BugLogin", version: "…" },
         paths: { "/v1/profiles": {} },
       },
       null,
@@ -327,7 +327,7 @@ export const REMOTE_MCP_EXAMPLES: readonly ApiExample<
           tools: [
             {
               name: "list_profiles",
-              description: "List all Wayfern browser profiles",
+              description: "List all Chromium browser profiles",
             },
           ],
         },

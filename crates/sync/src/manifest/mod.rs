@@ -19,12 +19,22 @@ const EPHEMERAL_PROFILE_DIRECTORIES: &[&str] = &[
     "gpu cache",
     "grshadercache",
     "dawncache",
+    "dawngraphitecache",
+    "dawnwebgpucache",
     "shadercache",
     "scriptcache",
     "media cache",
+    "cachestorage",
+    "session storage",
+    "blob_storage",
     "crashpad",
     "crash_reports",
     "crash reports",
+    "browsermetrics",
+    "component_crx_cache",
+    "optimization_guide_model_store",
+    "safe browsing",
+    "safebrowsing",
 ];
 
 pub fn is_ephemeral_profile_path(path: &str) -> bool {

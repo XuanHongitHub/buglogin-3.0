@@ -5,6 +5,7 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock, RwLock},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -5656,13 +5657,26 @@ pub fn router(state: ApiState) -> Router {
 
 static LARGE_TRANSFER_BODY_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 
-pub(crate) fn large_transfer_body_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Problem> {
-    Arc::clone(LARGE_TRANSFER_BODY_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))))
-        .try_acquire_owned()
+pub(crate) async fn large_transfer_body_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Problem>
+{
+    let semaphore = Arc::clone(
+        LARGE_TRANSFER_BODY_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))),
+    );
+    tokio::time::timeout(Duration::from_secs(30), semaphore.acquire_owned())
+        .await
         .map_err(|_| {
             Problem::new(
                 "large_transfer_capacity_exhausted",
-                "Large transfer capacity is busy; retry the request",
+                "Large transfer capacity remained busy for 30 seconds; retry the request",
+                503,
+                "api",
+            )
+            .retryable(true)
+        })?
+        .map_err(|_| {
+            Problem::new(
+                "large_transfer_capacity_unavailable",
+                "Large transfer capacity is unavailable",
                 503,
                 "api",
             )

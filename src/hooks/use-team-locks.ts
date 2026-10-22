@@ -5,9 +5,9 @@ import type { ProfileLockInfo } from "@/types";
 
 const BUGLOGIN_DESKTOP =
   process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop";
-const RUNTIME_LEASE_TTL_MS = 120_000;
-const RUNTIME_HEARTBEAT_INTERVAL_MS = 30_000;
-const RUNTIME_HEARTBEAT_JITTER_MS = 5_000;
+const RUNTIME_LEASE_TTL_MS = 60_000;
+const RUNTIME_HEARTBEAT_INTERVAL_MS = 15_000;
+const RUNTIME_HEARTBEAT_JITTER_MS = 3_000;
 const MIN_LEASE_REMAINING_FOR_RUNNING_MS =
   RUNTIME_LEASE_TTL_MS -
   RUNTIME_HEARTBEAT_INTERVAL_MS -
@@ -48,12 +48,17 @@ export function useTeamLocks(
   >(new Set());
   const [localDeviceId, setLocalDeviceId] = useState<string | null>(null);
   const requestSequence = useRef(0);
+  const requestInProgress = useRef(false);
+  const refreshQueued = useRef(false);
+  const fetchLocksRef = useRef<
+    (onlyProfileIds?: string[], queueIfBusy?: boolean) => Promise<void>
+  >(async () => {});
   const profileIds = useMemo(
     () => profiles.map((profile) => profile.id),
     [profiles],
   );
 
-  const fetchLocks = useCallback(async () => {
+  const executeFetchLocks = useCallback(async (onlyProfileIds?: string[]) => {
     const sequence = ++requestSequence.current;
     if (BUGLOGIN_DESKTOP) {
       if (!workspaceId || profileIds.length === 0) {
@@ -66,8 +71,12 @@ export function useTeamLocks(
       const checked = new Set<string>();
       const unconfirmed = new Set<string>();
       const runtimeRunning = new Set<string>();
+      const targetIds = onlyProfileIds
+        ? profileIds.filter((profileId) => onlyProfileIds.includes(profileId))
+        : profileIds;
+      if (targetIds.length === 0) return;
       await Promise.all(
-        profileIds.map(async (profileId) => {
+        targetIds.map(async (profileId) => {
           try {
             const correlationId = `lease-status-${crypto.randomUUID()}`;
             const bindingResult = await invoke<CommandResult<ProfileBinding>>(
@@ -141,14 +150,40 @@ export function useTeamLocks(
       );
       // The server is authoritative; a failed read must not leave stale locks visible.
       if (sequence !== requestSequence.current) return;
-      setLocks(nextLocks);
-      setUnknownProfileIds(
-        new Set([
-          ...profileIds.filter((profileId) => !checked.has(profileId)),
-          ...unconfirmed,
-        ]),
-      );
-      setRuntimeRunningProfileIds(runtimeRunning);
+      if (onlyProfileIds) {
+        const refreshedIds = new Set(targetIds);
+        setLocks((current) => [
+          ...current.filter((lock) => !refreshedIds.has(lock.profileId)),
+          ...nextLocks,
+        ]);
+        setUnknownProfileIds((current) => {
+          const next = new Set(
+            [...current].filter((profileId) => !refreshedIds.has(profileId)),
+          );
+          for (const profileId of targetIds) {
+            if (!checked.has(profileId) || unconfirmed.has(profileId)) {
+              next.add(profileId);
+            }
+          }
+          return next;
+        });
+        setRuntimeRunningProfileIds((current) => {
+          const next = new Set(
+            [...current].filter((profileId) => !refreshedIds.has(profileId)),
+          );
+          for (const profileId of runtimeRunning) next.add(profileId);
+          return next;
+        });
+      } else {
+        setLocks(nextLocks);
+        setUnknownProfileIds(
+          new Set([
+            ...profileIds.filter((profileId) => !checked.has(profileId)),
+            ...unconfirmed,
+          ]),
+        );
+        setRuntimeRunningProfileIds(runtimeRunning);
+      }
       return;
     }
     try {
@@ -164,6 +199,35 @@ export function useTeamLocks(
       setRuntimeRunningProfileIds(new Set());
     }
   }, [localDeviceId, locallyRunningProfileIds, profileIds, workspaceId]);
+
+  const fetchLocks = useCallback(
+    async (onlyProfileIds?: string[], queueIfBusy = false) => {
+      if (requestInProgress.current) {
+        if (queueIfBusy) refreshQueued.current = true;
+        return;
+      }
+      requestInProgress.current = true;
+      try {
+        await executeFetchLocks(onlyProfileIds);
+      } finally {
+        requestInProgress.current = false;
+        if (refreshQueued.current) {
+          refreshQueued.current = false;
+          window.setTimeout(() => void fetchLocksRef.current(), 0);
+        }
+      }
+    },
+    [executeFetchLocks],
+  );
+
+  useEffect(() => {
+    fetchLocksRef.current = fetchLocks;
+  }, [fetchLocks]);
+
+  const refetchLocks = useCallback(
+    () => fetchLocks(undefined, true),
+    [fetchLocks],
+  );
 
   useEffect(() => {
     if (!BUGLOGIN_DESKTOP) return;
@@ -184,7 +248,20 @@ export function useTeamLocks(
     void fetchLocks();
     if (BUGLOGIN_DESKTOP) {
       const interval = window.setInterval(() => void fetchLocks(), 15_000);
-      return () => window.clearInterval(interval);
+      const refreshWhenActive = () => {
+        if (document.visibilityState === "visible") {
+          void fetchLocks(undefined, true);
+        }
+      };
+      window.addEventListener("focus", refreshWhenActive);
+      window.addEventListener("online", refreshWhenActive);
+      document.addEventListener("visibilitychange", refreshWhenActive);
+      return () => {
+        window.clearInterval(interval);
+        window.removeEventListener("focus", refreshWhenActive);
+        window.removeEventListener("online", refreshWhenActive);
+        document.removeEventListener("visibilitychange", refreshWhenActive);
+      };
     }
 
     const unlistenChanged = listen<{
@@ -198,6 +275,15 @@ export function useTeamLocks(
       });
     };
   }, [fetchLocks]);
+
+  useEffect(() => {
+    if (!BUGLOGIN_DESKTOP || unknownProfileIds.size === 0) return;
+    const interval = window.setInterval(
+      () => void fetchLocks([...unknownProfileIds]),
+      2_500,
+    );
+    return () => window.clearInterval(interval);
+  }, [fetchLocks, unknownProfileIds]);
 
   const isProfileLocked = useCallback(
     (profileId: string): boolean => {
@@ -228,6 +314,6 @@ export function useTeamLocks(
     isProfileLockUnknown,
     runtimeRunningProfileIds,
     getLockInfo,
-    refetchLocks: fetchLocks,
+    refetchLocks,
   };
 }

@@ -229,6 +229,7 @@ impl RuntimeTargets {
                 profile.name.as_str(),
                 profile.id.as_str(),
             );
+            append_wayfern_default_start_page(&mut specification.args);
         }
         let fingerprint_target =
             target_from_runtime_config(profile.runtime_config.as_ref(), "runtime")?;
@@ -349,15 +350,42 @@ fn append_wayfern_profile_chrome_args(
             format!("--wayfern-profile-label={}", profile_name.trim()),
         );
     }
+    let profile_color = crate::legacy_compat::profile_window_color(profile_id);
+    push_or_replace_arg(
+        args,
+        format!(
+            "--wayfern-profile-color={}",
+            profile_color.trim_start_matches('#')
+        ),
+    );
+}
+
+pub(crate) fn profile_color_for_id(profile_id: &str) -> String {
     let mut hash = 2_166_136_261_u32;
     for byte in profile_id.as_bytes() {
         hash = (hash ^ u32::from(*byte)).wrapping_mul(16_777_619);
     }
-    let (red, green, blue) = hsl_to_rgb(f64::from(hash % 360), 0.6, 0.8);
-    push_or_replace_arg(
-        args,
-        format!("--wayfern-profile-color={red:02x}{green:02x}{blue:02x}"),
-    );
+    // Spread profiles across vivid, readable hues instead of the pale pastel
+    // range that made unrelated profiles look nearly identical in the taskbar.
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x7feb_352d);
+    hash ^= hash >> 15;
+    hash = hash.wrapping_mul(0x846c_a68b);
+    hash ^= hash >> 16;
+    let hue = f64::from(hash % 360);
+    let saturation = 0.68 + f64::from((hash >> 9) % 26) / 100.0;
+    let lightness = 0.49 + f64::from((hash >> 17) % 22) / 100.0;
+    let (red, green, blue) = hsl_to_rgb(hue, saturation, lightness);
+    format!("#{red:02x}{green:02x}{blue:02x}")
+}
+
+fn append_wayfern_default_start_page(args: &mut Vec<String>) {
+    // The desktop launch path must never inherit a vendor landing page from
+    // runtime configuration. Wayfern handles this as its normal new-tab page.
+    args.retain(|argument| argument.starts_with('-'));
+    push_or_replace_arg(args, "--no-first-run".to_owned());
+    push_or_replace_arg(args, "--no-default-browser-check".to_owned());
+    push_or_replace_arg(args, "chrome://newtab/".to_owned());
 }
 
 fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (u8, u8, u8) {
@@ -2861,6 +2889,45 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn profile_taskbar_colors_are_vivid_and_deterministic_per_profile() {
+        fn color_for(profile_id: &str) -> String {
+            let mut args = Vec::new();
+            append_wayfern_profile_chrome_args(&mut args, "Profile", profile_id);
+            args.into_iter()
+                .find_map(|arg| {
+                    arg.strip_prefix("--wayfern-profile-color=")
+                        .map(str::to_owned)
+                })
+                .expect("profile color is appended")
+        }
+
+        let first = color_for("profile-a");
+        assert_eq!(first, color_for("profile-a"));
+        assert_ne!(first, color_for("profile-b"));
+        assert_eq!(first.len(), 6);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(
+            first,
+            crate::legacy_compat::profile_window_color("profile-a").trim_start_matches('#')
+        );
+    }
+
+    #[test]
+    fn wayfern_start_page_disables_first_run_and_opens_new_tab() {
+        let mut args = vec![
+            "--user-data-dir=C:\\BugLogin\\profile".to_owned(),
+            "https://donutbrowser.com".to_owned(),
+        ];
+
+        append_wayfern_default_start_page(&mut args);
+
+        assert!(args.iter().any(|arg| arg == "--no-first-run"));
+        assert!(args.iter().any(|arg| arg == "--no-default-browser-check"));
+        assert!(args.iter().any(|arg| arg == "chrome://newtab/"));
+        assert!(!args.iter().any(|arg| arg.contains("donutbrowser.com")));
+    }
 
     #[derive(Clone, Default)]
     struct TestController {

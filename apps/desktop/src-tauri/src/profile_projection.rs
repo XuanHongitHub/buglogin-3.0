@@ -2077,7 +2077,7 @@ fn collect_files(
             .map_err(|_| unavailable())?
             .to_string_lossy()
             .replace('\\', "/");
-        if is_projection_control_file(&relative) {
+        if is_ephemeral_profile_file(&relative) {
             continue;
         }
         validate_profile_file_size(metadata.len())?;
@@ -2121,7 +2121,7 @@ fn collect_file_paths(
             .map_err(|_| unavailable())?
             .to_string_lossy()
             .replace('\\', "/");
-        if is_projection_control_file(&relative) {
+        if is_ephemeral_profile_file(&relative) {
             continue;
         }
         validate_profile_file_size(metadata.len())?;
@@ -2140,6 +2140,14 @@ fn is_ephemeral_profile_directory(path: &Path) -> bool {
 
 fn is_projection_control_file(path: &str) -> bool {
     !path.contains('/') && path.starts_with(".buglogin-")
+}
+
+fn is_ephemeral_profile_file(path: &str) -> bool {
+    is_projection_control_file(path)
+        || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().starts_with("browsermetrics"))
 }
 
 fn cleanup_abandoned_staging(root: &Path) -> Result<(), Problem> {

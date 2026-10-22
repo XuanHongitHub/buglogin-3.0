@@ -11,8 +11,8 @@ test("Tauri Cargo uses the selected build target for frontend assets", () => {
     "win32",
   );
 
-  assert.equal(config.targetDir, "E:\\buglogin-target");
-  assert.equal(config.frontendDist, "E:\\buglogin-target\\desktop-dist");
+  assert.equal(config.targetDir, "G:\\buglogin-target");
+  assert.equal(config.frontendDist, "G:\\buglogin-target\\desktop-dist");
   assert.equal(config.env.CARGO_TARGET_DIR, config.targetDir);
   assert.equal(
     JSON.parse(config.env.TAURI_CONFIG).build.frontendDist,
@@ -22,10 +22,10 @@ test("Tauri Cargo uses the selected build target for frontend assets", () => {
 });
 
 test("Tauri Cargo rejects forbidden Windows target drives", () => {
-  for (const targetDir of ["C:\\buglogin-target", "F:\\buglogin-target"]) {
+  for (const targetDir of ["C:\\buglogin-target", "E:\\buglogin-target", "F:\\buglogin-target"]) {
     assert.throws(
       () => tauriCargoEnvironment({ CARGO_TARGET_DIR: targetDir }, "win32"),
-      /single target E:\\buglogin-target/,
+      /single target G:\\buglogin-target/,
     );
   }
 });

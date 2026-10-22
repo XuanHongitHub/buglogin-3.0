@@ -204,10 +204,10 @@
       "setAsDefault": "Đặt làm trình duyệt mặc định",
       "alreadyDefault": "Đã là trình duyệt mặc định",
       "description": "Khi được đặt làm mặc định, BugLogin sẽ xử lý các liên kết web và cho phép bạn chọn hồ sơ để sử dụng.",
-      "setSuccess": "Donut Browser hiện là trình duyệt mặc định của bạn",
+      "setSuccess": "BugLogin Browser hiện là trình duyệt mặc định của bạn",
       "setFailed": "Không thể đặt trình duyệt mặc định",
       "finishInSystemSettings": "Hoàn tất trong Cài đặt Windows",
-      "finishInSystemSettingsDescription": "Donut Browser đã được đăng ký. Cài đặt Windows đang mở: chọn Donut Browser trong mục Trình duyệt web để hoàn tất."
+      "finishInSystemSettingsDescription": "BugLogin Browser đã được đăng ký. Cài đặt Windows đang mở: chọn BugLogin Browser trong mục Trình duyệt web để hoàn tất."
     },
     "permissions": {
       "title": "Quyền hệ thống",
@@ -299,9 +299,9 @@
       "chooseTitle": "Chọn một thư mục cho thư mục dữ liệu",
       "move": "Chuyển",
       "willMoveTo": "Mọi thứ sẽ chuyển đến",
-      "moved": "Đã chuyển thư mục dữ liệu. Khởi động lại Donut Browser để dùng nó.",
+      "moved": "Đã chuyển thư mục dữ liệu. Khởi động lại BugLogin Browser để dùng nó.",
       "reading": "Đang đọc thư mục dữ liệu…",
-      "restartRequired": "Khởi động lại Donut Browser để dùng vị trí mới. Đến lúc đó nó vẫn chạy từ vị trí cũ.",
+      "restartRequired": "Khởi động lại BugLogin Browser để dùng vị trí mới. Đến lúc đó nó vẫn chạy từ vị trí cũ.",
       "environmentOverride": "DONUTBROWSER_DATA_DIR đã được đặt, nên ứng dụng dùng vị trí đó dù bạn chọn gì ở đây.",
       "missing": "Không thấy thư mục dữ liệu đã chọn. Nếu nó nằm trên ổ rời, hãy cắm lại và khởi động lại.",
       "useDefault": "Dùng lại vị trí mặc định",
@@ -416,9 +416,9 @@
       "stopFollower": "Đang đi theo hành động của {{leaderName}}",
       "desyncedTooltip": "Đồng bộ thất bại tại {{url}}",
       "paidFeature": "Trình đồng bộ là tính năng trả phí",
-      "wayfernOnly": "Chỉ hồ sơ Wayfern mới có thể đồng bộ",
+      "wayfernOnly": "Chỉ hồ sơ trình duyệt mới có thể đồng bộ",
       "selectFollowers": "Chọn hồ sơ đi theo",
-      "selectFollowersDesc": "Chọn các hồ sơ sẽ phản chiếu hành động của hồ sơ dẫn đầu. Chỉ hồ sơ Wayfern đã dừng mới có thể chọn.",
+      "selectFollowersDesc": "Chọn các hồ sơ sẽ phản chiếu hành động của hồ sơ dẫn đầu. Chỉ hồ sơ trình duyệt đã dừng mới có thể chọn.",
       "leader": "Dẫn đầu",
       "follower": "Đi theo",
       "startSession": "Bắt đầu phiên đồng bộ",
@@ -563,7 +563,7 @@
       "upgradeAvailable": "Đã có phiên bản mới hơn ({{version}}) của {{browser}}."
     },
     "chromiumLabel": "Chromium",
-    "chromiumSubtitle": "Dựa trên Wayfern",
+    "chromiumSubtitle": "Chromium với dữ liệu riêng cho từng profile",
     "platformUnavailable": "{{browser}} chưa khả dụng trên nền tảng của bạn.",
     "metadataOnlyRuntimeUnavailable": "Danh mục runtime hiện không khả dụng. Bạn vẫn có thể tạo cấu hình hồ sơ; cài đặt và khởi chạy trình duyệt sẽ hoạt động sau khi runtime đã ký được phát hành.",
     "createMetadataOnly": "Tạo cấu hình hồ sơ",
@@ -578,7 +578,7 @@
     "hourlyLimit": {
       "reached": "Gói của bạn cho phép tạo {{limit}} hồ sơ mới mỗi giờ. Bạn có thể tạo hồ sơ tiếp theo sau khoảng {{minutes}} phút.",
       "warningTitle": "Bạn đang tạo hồ sơ quá nhanh",
-      "warning": "Vui lòng đợi một chút. Tạo quá nhiều hồ sơ trong một giờ sẽ dẫn đến việc bị chặn tạm thời từ 24 giờ trở lên, trong thời gian đó bạn không thể tạo danh tính mới. Nếu cần giới hạn mỗi giờ cao hơn, hãy cân nhắc ủng hộ Donut bằng một gói trả phí."
+      "warning": "Hãy đợi trước khi tạo profile tiếp theo. Bạn đã đạt giới hạn tạo profile trong giờ này."
     },
     "fingerprintSummary": {
       "title": "Tổng quan vân tay",
@@ -587,6 +587,7 @@
       "browser": "Nhân trình duyệt",
       "network": "Mạng / IP đầu ra",
       "screen": "Độ phân giải màn hình",
+      "screenAuto": "Tự động theo thiết bị",
       "hardware": "CPU & Bộ nhớ RAM",
       "canvas": "Canvas",
       "webgl": "WebGL / GPU",
@@ -1012,10 +1013,10 @@
       "onThisComputer": "Trên máy tính này",
       "addToAll_one": "Thêm vào cả {{count}}",
       "addToAll_other": "Thêm vào cả {{count}}",
-      "addedToMany_one": "Đã thêm Donut vào {{count}} ứng dụng",
-      "addedToMany_other": "Đã thêm Donut vào {{count}} ứng dụng",
-      "addFailed": "Không thể thêm Donut vào {{names}}.",
-      "noneFound": "Không tìm thấy ứng dụng AI nào trên máy tính này. Bạn vẫn có thể thêm Donut vào bất kỳ ứng dụng nào dưới đây.",
+      "addedToMany_one": "Đã thêm BugLogin vào {{count}} ứng dụng",
+      "addedToMany_other": "Đã thêm BugLogin vào {{count}} ứng dụng",
+      "addFailed": "Không thể thêm BugLogin vào {{names}}.",
+      "noneFound": "Không tìm thấy ứng dụng AI nào trên máy tính này. Bạn vẫn có thể thêm BugLogin vào bất kỳ ứng dụng nào dưới đây.",
       "showMore_one": "Hiện thêm {{count}} ứng dụng khách",
       "showMore_other": "Hiện thêm {{count}} ứng dụng khách",
       "showFewer": "Hiện ít ứng dụng khách hơn",
@@ -1027,7 +1028,7 @@
         "title": "Công cụ mà tác tử thấy",
         "description": "Tác tử tải mô tả của mọi công cụ mà nó thấy. Chỉ chọn những nhóm nó cần để nó khởi động nhanh hơn và có thêm chỗ để làm việc. Các ứng dụng đã kết nối được cập nhật ngay.",
         "core": "Profile, điều khiển trình duyệt và các công cụ giữ bạn trong vòng làm việc luôn được bật.",
-        "failed": "Không thể cập nhật {{names}}. Hãy gỡ Donut ở đó rồi thêm lại.",
+        "failed": "Không thể cập nhật {{names}}. Hãy gỡ BugLogin ở đó rồi thêm lại.",
         "names": {
           "organize": {
             "label": "Sắp xếp",
@@ -1084,7 +1085,7 @@
     "tokenCopied": "Đã sao chép token",
     "mcpEnableLabel": "Bật máy chủ MCP (Model Context Protocol)",
     "mcpEnableDescription": "Cho phép trợ lý AI như Claude Desktop điều khiển trình duyệt.",
-    "mcpAcceptTermsFirst": "(Chấp nhận điều khoản Wayfern trong Cài đặt trước)",
+    "mcpAcceptTermsFirst": "(Chấp nhận điều khoản trình duyệt trong Cài đặt trước)",
     "mcpStarted": "Máy chủ MCP đã khởi động trên cổng {{port}}",
     "mcpStopped": "Máy chủ MCP đã dừng",
     "mcpToggleFailed": "Bật/tắt máy chủ MCP thất bại",
@@ -1152,8 +1153,8 @@
     "tabRemote": "MCP từ xa",
     "remote": {
       "enableLabel": "Điều khiển từ xa",
-      "enableDescription": "Cho phép Donut cloud điều khiển trình duyệt này, để một tác nhân trên donutbrowser.com có thể điều khiển nó. Không có gì lắng nghe kết nối đến: ứng dụng này gọi ra ngoài và có thể ngắt bất cứ lúc nào.",
-      "signInRequired": "Đăng nhập tài khoản Donut để dùng điều khiển từ xa.",
+      "enableDescription": "Cho phép BugLogin cloud điều khiển trình duyệt này, để một tác nhân trên app3.buglogin.com có thể điều khiển nó. Không có gì lắng nghe kết nối đến: ứng dụng này gọi ra ngoài và có thể ngắt bất cứ lúc nào.",
+      "signInRequired": "Đăng nhập tài khoản BugLogin để dùng điều khiển từ xa.",
       "connected": "Đã kết nối với tên",
       "connecting": "Đang kết nối với tên",
       "notConnected": "Chưa kết nối",
@@ -1180,7 +1181,7 @@
   },
   "config": {
     "wayfern": {
-      "title": "Cấu hình Wayfern",
+      "title": "Cấu hình trình duyệt",
       "fingerprint": {
         "title": "Vân tay",
         "randomize": "Tạo ngẫu nhiên khi khởi chạy",
@@ -1233,7 +1234,7 @@
       "sourcePlaceholder": "Chọn profile để sao chép cookie từ",
       "running": "(đang chạy)",
       "targetProfiles": "Profile đích ({{count}})",
-      "noOtherTargets": "Chưa chọn profile Wayfern nào khác",
+      "noOtherTargets": "Chưa chọn profile trình duyệt nào khác",
       "selectSourceFirst": "Hãy chọn profile nguồn trước",
       "selectionStatus": "(đã chọn {{selected}}/{{total}})",
       "searchPlaceholder": "Tìm kiếm tên miền hoặc cookie...",
@@ -1454,7 +1455,7 @@
     "serverError": "Lỗi máy chủ. Vui lòng thử lại sau.",
     "unknownError": "Đã xảy ra lỗi không xác định. Vui lòng thử lại.",
     "noProfilesForUrl": "Không có profile nào. Vui lòng tạo profile trước khi mở URL.",
-    "updateWayfernConfigFailed": "Cập nhật cấu hình wayfern thất bại: {{error}}",
+    "updateWayfernConfigFailed": "Cập nhật cấu hình trình duyệt thất bại: {{error}}",
     "createProfileFailed": "Tạo profile thất bại: {{error}}",
     "launchBrowserFailed": "Khởi chạy trình duyệt thất bại: {{error}}",
     "profileRuntimeVersionMissing": "Profile này chưa chọn phiên bản runtime trình duyệt. Hãy sửa profile và chọn phiên bản đã xác minh trước khi mở.",
@@ -1463,7 +1464,7 @@
     "renameProfileFailed": "Đổi tên profile thất bại: {{error}}",
     "killBrowserFailed": "Dừng trình duyệt thất bại: {{error}}",
     "deleteSelectedProfilesFailed": "Xóa các profile đã chọn thất bại: {{error}}",
-    "cookieCopyUnsupportedBrowser": "Sao chép cookie chỉ hoạt động với profile Wayfern",
+    "cookieCopyUnsupportedBrowser": "Sao chép cookie chỉ hoạt động với profile trình duyệt",
     "updateSyncSettingsFailed": "Cập nhật cài đặt đồng bộ thất bại",
     "cloneProfileFailed": "Nhân bản profile thất bại: {{error}}",
     "loadSupportedBrowsersFailed": "Tải danh sách trình duyệt hỗ trợ thất bại",
@@ -1491,7 +1492,7 @@
     "crossOsLimitations": "Giả mạo vân tay xuyên hệ điều hành có giới hạn. Các API cấp hệ thống vẫn có thể phản ánh hệ điều hành thực tế của bạn, và một số tính năng có thể bị giảm hiệu suất.",
     "unavailableInBuild": "Bản này chưa hỗ trợ",
     "localOsOnly": "Bản này chỉ tạo được vân tay cho hệ điều hành đang chạy trên thiết bị. Hãy chọn hệ điều hành của thiết bị này trước khi lưu.",
-    "generatedOnLaunch": "Wayfern áp dụng vân tay đã chọn khi mở profile và sẽ tạo vân tay nếu profile chưa có.",
+    "generatedOnLaunch": "trình duyệt áp dụng vân tay đã chọn khi mở profile và sẽ tạo vân tay nếu profile chưa có.",
     "osLabel": "Vân tay hệ điều hành",
     "selectOSPlaceholder": "Chọn hệ điều hành",
     "generateRandomOnLaunch": "Tạo vân tay ngẫu nhiên mỗi lần khởi chạy",
@@ -1614,7 +1615,7 @@
     "regenerateConfirmTitle": "Tạo lại vân tay này?",
     "regenerateConfirmDescription": "Hồ sơ vẫn giữ cookie và phiên đăng nhập, nhưng sẽ hiện ra như một thiết bị khác. Các trang đã biết hồ sơ này có thể yêu cầu bạn đăng nhập lại, bắt bạn xác minh, hoặc khóa tài khoản. Chỉ tạo lại hồ sơ mà bạn chưa dùng, hoặc hồ sơ bạn chấp nhận mất. Không thể hoàn tác thao tác này.",
     "launchArgs": "Tham số khởi chạy",
-    "launchArgsDescription": "Nhập một tham số trên mỗi dòng, dạng --name hoặc --name=value. Chỉ chấp nhận các tham số được hỗ trợ, ví dụ --disable-gpu, --mute-audio hoặc --disable-features=Name. Donut quản lý các tham số hồ sơ, proxy, cửa sổ và gỡ lỗi.",
+    "launchArgsDescription": "Nhập một tham số trên mỗi dòng, dạng --name hoặc --name=value. Chỉ chấp nhận các tham số được hỗ trợ, ví dụ --disable-gpu, --mute-audio hoặc --disable-features=Name. BugLogin quản lý các tham số hồ sơ, proxy, cửa sổ và gỡ lỗi.",
     "launchArgsSkipped": "Các tham số khởi chạy tùy chỉnh không được dùng cho {{profile}}. {{reason}}"
   },
   "warnings": {
@@ -1755,7 +1756,7 @@
       "cannotWhileRunning": "Dừng profile trước khi thay đổi mật khẩu."
     },
     "fingerprint": {
-      "notSupported": "Chỉnh sửa vân tay chỉ khả dụng cho profile Wayfern.",
+      "notSupported": "Chỉnh sửa vân tay chỉ khả dụng cho profile trình duyệt.",
       "lockedTitle": "Xem và chỉnh sửa vân tay là tính năng Pro",
       "lockedDescription": "Thông tin thiết bị của bạn được bảo vệ trong mọi profile. Việc xem và chỉnh sửa vân tay của profile yêu cầu gói trả phí đang hoạt động."
     },
@@ -2164,8 +2165,8 @@
     "createButton": "Tạo"
   },
   "wayfernTerms": {
-    "title": "Điều khoản và điều kiện Wayfern",
-    "description": "Trước khi sử dụng BugLogin, bạn phải đọc và đồng ý với Điều khoản và Điều kiện của Wayfern.",
+    "title": "Điều khoản runtime trình duyệt",
+    "description": "Trước khi sử dụng BugLogin, hãy xem và chấp nhận điều khoản từ nhà cung cấp runtime trình duyệt.",
     "reviewLabel": "Vui lòng xem lại Điều khoản và Điều kiện tại:",
     "agreeNotice": "Bằng cách nhấn \"Tôi chấp nhận\", bạn đồng ý bị ràng buộc bởi các điều khoản này.",
     "acceptButton": "Tôi chấp nhận",
@@ -2493,11 +2494,11 @@
     "proxyNotWorking": "Proxy đã chọn không hoạt động, nên profile chưa được tạo.",
     "proxyPaymentRequired": "Proxy đã chọn yêu cầu thanh toán (402) — gói đăng ký của nó có thể đã hết hạn — nên profile chưa được tạo.",
     "vpnNotWorking": "VPN đã chọn không hoạt động, nên profile chưa được tạo.",
-    "camoufoxImportDeprecated": "Việc nhập loại hồ sơ này không còn được hỗ trợ. Vui lòng sử dụng Wayfern thay thế.",
+    "camoufoxImportDeprecated": "Việc nhập loại hồ sơ này không còn được hỗ trợ. Vui lòng sử dụng trình duyệt thay thế.",
     "updateChecksumsUnavailable": "Không thể xác minh bản cập nhật {{version}} vì không thể tải tệp checksum. Bản cập nhật chưa được cài đặt; sẽ thử lại sau.",
     "updateChecksumMismatch": "Tệp cập nhật đã tải xuống {{file}} không vượt qua kiểm tra checksum và đã bị loại bỏ. Vui lòng thử lại.",
     "nameCannotBeEmpty": "Tên không được để trống",
-    "wayfernVersionNotAvailable": "Phiên bản Wayfern {{requested}} không có sẵn để tải xuống. Phiên bản hiện tại là {{current}}.",
+    "wayfernVersionNotAvailable": "Phiên bản trình duyệt {{requested}} không có sẵn để tải xuống. Phiên bản hiện tại là {{current}}.",
     "profileNameExists": "Hồ sơ có tên \"{{name}}\" đã tồn tại",
     "importSourceNotFound": "Đường dẫn nguồn không tồn tại",
     "importNoItems": "Chưa chọn mục nào để nhập",
@@ -2516,7 +2517,7 @@
     "extensionNotADirectory": "Đường dẫn đó không phải là thư mục.",
     "extensionManifestMissing": "Thư mục đó không có manifest.json. Hãy chọn thư mục chứa manifest.json của tiện ích.",
     "extensionManifestInvalid": "Không đọc được manifest.json trong thư mục đó.",
-    "extensionDirTooLarge": "Thư mục đó quá lớn để sao chép vào Donut (giới hạn là 256 MB và 20.000 tệp). Hãy liên kết thư mục thay vì sao chép.",
+    "extensionDirTooLarge": "Thư mục đó quá lớn để sao chép vào BugLogin (giới hạn là 256 MB và 20.000 tệp). Hãy liên kết thư mục thay vì sao chép.",
     "extensionPathHasComma": "Đường dẫn thư mục có dấu phẩy nên Chromium không tải được. Hãy đổi tên hoặc di chuyển thư mục.",
     "extensionLinkRequiresDirectory": "Chỉ có thể tải tại chỗ một thư mục. Hãy tắt liên kết để thêm tệp nén.",
     "extensionLinkedCannotSync": "Tiện ích này được tải từ một thư mục trên máy này nên không có gì để đồng bộ.",
@@ -2526,20 +2527,20 @@
     "cookieImportNoCookies": "Không tìm thấy cookie nào trong nội dung bạn đã dán.",
     "browserChecksumUnavailable": "Không thể xác minh {{browser}} {{version}} vì không thể tải tệp checksum. Quá trình tải xuống đã dừng; sẽ thử lại sau.",
     "browserChecksumMismatch": "Kho lưu trữ {{browser}} {{version}} đã tải xuống không vượt qua kiểm tra checksum và đã bị loại bỏ. Vui lòng thử lại.",
-    "proxySidecarVersionMismatch": "Một số tệp Donut Browser thuộc các phiên bản khác nhau. Hãy cài đặt lại bản cập nhật mới nhất; hồ sơ của bạn vẫn được giữ an toàn.",
+    "proxySidecarVersionMismatch": "Một số tệp BugLogin Browser thuộc các phiên bản khác nhau. Hãy cài đặt lại bản cập nhật mới nhất; hồ sơ của bạn vẫn được giữ an toàn.",
     "updateProfilesRunning": "Hãy dừng tất cả hồ sơ đang chạy trước khi cài đặt bản cập nhật.",
-    "updatePreparationFailed": "Donut Browser không thể dừng an toàn một tiến trình mạng chạy nền. Hãy khởi động lại máy tính rồi thử cập nhật lại.",
-    "wayfernTermsRequired": "Hãy chấp nhận Điều khoản và Điều kiện của Wayfern để sử dụng Wayfern.",
+    "updatePreparationFailed": "BugLogin Browser không thể dừng an toàn một tiến trình mạng chạy nền. Hãy khởi động lại máy tính rồi thử cập nhật lại.",
+    "wayfernTermsRequired": "Hãy chấp nhận Điều khoản và Điều kiện của trình duyệt để sử dụng tính năng này.",
     "apiPortUnavailable": "Máy chủ API không tìm thấy cổng khả dụng.",
     "mcpAgentUnknown": "Ứng dụng MCP này không được hỗ trợ.",
-    "mcpAgentInstallFailed": "Không thể thêm Donut Browser vào ứng dụng MCP: {{detail}}",
-    "mcpAgentRemoveFailed": "Không thể xóa Donut Browser khỏi ứng dụng MCP: {{detail}}",
+    "mcpAgentInstallFailed": "Không thể thêm BugLogin Browser vào ứng dụng MCP: {{detail}}",
+    "mcpAgentRemoveFailed": "Không thể xóa BugLogin Browser khỏi ứng dụng MCP: {{detail}}",
     "vlessConfigInvalid": "Liên kết chia sẻ không hợp lệ.",
     "xrayUnavailable": "Xray-core không khả dụng trên hệ thống này.",
     "xrayUnsupportedOs": "Proxy VLESS, VMess, Trojan và Hysteria2 yêu cầu macOS 12 trở lên.",
     "xrayStartFailed": "Không thể khởi động Xray-core.",
-    "cloudNotSignedIn": "Hãy đăng nhập tài khoản Donut Browser để dùng tính năng này.",
-    "cloudUnreachable": "Không kết nối được tới máy chủ Donut Browser. Hãy kiểm tra kết nối và thử lại.",
+    "cloudNotSignedIn": "Hãy đăng nhập tài khoản BugLogin Browser để dùng tính năng này.",
+    "cloudUnreachable": "Không kết nối được tới máy chủ BugLogin Browser. Hãy kiểm tra kết nối và thử lại.",
     "cloudRequestFailed": "Yêu cầu thất bại. Hãy thử lại sau giây lát.",
     "remoteRateLimited": "Quá nhiều yêu cầu. Hãy đợi một lát rồi thử lại.",
     "remoteNoCapacity": "Hiện không có máy từ xa nào rảnh. Hãy thử lại sau vài phút.",
@@ -2582,20 +2583,20 @@
     "vpnWorkerStartFailed": "Không thể khởi động kết nối VPN: {{detail}}",
     "exitProbeFailed": "Không thể kết nối tới nút thoát của proxy để kiểm tra vị trí.",
     "vlessUnsupported": {
-      "security": "Liên kết này dùng một thiết lập bảo mật mà Donut không hỗ trợ. Donut hỗ trợ none, TLS và REALITY, và REALITY chỉ qua RAW (TCP), gRPC hoặc XHTTP.",
-      "flow": "Liên kết này dùng một flow mà Donut không hỗ trợ. XTLS Vision chỉ hoạt động với VLESS qua RAW (TCP) kèm TLS hoặc REALITY.",
-      "transport": "Liên kết này dùng một phương thức truyền tải, hoặc một chế độ truyền tải, mà Donut không hỗ trợ. Donut hỗ trợ RAW (TCP), WebSocket, gRPC, HTTPUpgrade và XHTTP, nhưng không hỗ trợ mKCP, HTTP/2 hay QUIC.",
-      "encryption": "Liên kết này dùng một thiết lập mã hóa mà Donut không hỗ trợ.",
-      "headerType": "Liên kết này dùng một kiểu làm rối header mà Donut không hỗ trợ.",
-      "fingerprint": "Liên kết này yêu cầu một dấu vân tay TLS mà Donut không hỗ trợ.",
+      "security": "Liên kết này dùng một thiết lập bảo mật mà BugLogin không hỗ trợ. BugLogin hỗ trợ none, TLS và REALITY, và REALITY chỉ qua RAW (TCP), gRPC hoặc XHTTP.",
+      "flow": "Liên kết này dùng một flow mà BugLogin không hỗ trợ. XTLS Vision chỉ hoạt động với VLESS qua RAW (TCP) kèm TLS hoặc REALITY.",
+      "transport": "Liên kết này dùng một phương thức truyền tải, hoặc một chế độ truyền tải, mà BugLogin không hỗ trợ. BugLogin hỗ trợ RAW (TCP), WebSocket, gRPC, HTTPUpgrade và XHTTP, nhưng không hỗ trợ mKCP, HTTP/2 hay QUIC.",
+      "encryption": "Liên kết này dùng một thiết lập mã hóa mà BugLogin không hỗ trợ.",
+      "headerType": "Liên kết này dùng một kiểu làm rối header mà BugLogin không hỗ trợ.",
+      "fingerprint": "Liên kết này yêu cầu một dấu vân tay TLS mà BugLogin không hỗ trợ.",
       "sni": "Liên kết thiếu tên máy chủ (sni) hợp lệ.",
       "publicKey": "Liên kết thiếu khóa công khai REALITY (pbk).",
-      "obfs": "Liên kết Hysteria2 này dùng một kiểu làm rối mà Donut không hỗ trợ. Donut chỉ hỗ trợ Salamander.",
+      "obfs": "Liên kết Hysteria2 này dùng một kiểu làm rối mà BugLogin không hỗ trợ. BugLogin chỉ hỗ trợ Salamander.",
       "scheme": "Đây không phải liên kết chia sẻ được hỗ trợ. Nó phải bắt đầu bằng vless://, vmess://, trojan://, hysteria2:// hoặc hy2://.",
-      "parameter": "Liên kết chứa một tùy chọn mà Donut không hỗ trợ.",
+      "parameter": "Liên kết chứa một tùy chọn mà BugLogin không hỗ trợ.",
       "malformed": "Liên kết chia sẻ không hợp lệ."
     },
-    "camoufoxRemoved": "Camoufox không còn được hỗ trợ. Hãy tạo lại hồ sơ này bằng Wayfern.",
+    "camoufoxRemoved": "Camoufox không còn được hỗ trợ. Hãy tạo lại hồ sơ này bằng trình duyệt.",
     "noE2ePasswordSet": "Chưa đặt mật khẩu mã hóa đầu cuối. Hãy đặt trước khi đồng bộ dữ liệu đã mã hóa.",
     "importSourceNotChromium": "Thư mục này không phải hồ sơ trình duyệt Chromium",
     "importSourceNotChromiumNamed": "Không thể nhập hồ sơ {{family}}; chỉ hỗ trợ các trình duyệt nền Chromium",
@@ -2615,20 +2616,20 @@
     "profileExportFailed": "Không thể xuất hồ sơ này. {{detail}}",
     "profileExportTooLarge": "Hồ sơ này quá lớn để xuất. Hãy xóa bớt dữ liệu duyệt web rồi thử lại.",
     "profileImportFailed": "Không thể đọc tệp lưu trữ này. {{detail}}",
-    "profileImportTooNew": "Tệp này được tạo bởi phiên bản Donut Browser mới hơn. Hãy cập nhật ứng dụng rồi thử lại.",
+    "profileImportTooNew": "Tệp này được tạo bởi phiên bản BugLogin Browser mới hơn. Hãy cập nhật ứng dụng rồi thử lại.",
     "profileImportUnsafeArchive": "Tệp này cố ghi ra ngoài thư mục hồ sơ nên đã bị từ chối.",
     "recordingAlreadyRunning": "Đã có một bản ghi đang chạy. Hãy dừng nó trước khi bắt đầu bản mới.",
     "profileNotRunning": "Trình duyệt của hồ sơ này chưa chạy. Hãy khởi động nó trước.",
-    "wayfern152Required": "Ghi lại cần Wayfern 152 trở lên. Hãy cập nhật trình duyệt cho hồ sơ này.",
+    "wayfern152Required": "Ghi lại cần trình duyệt 152 trở lên. Hãy cập nhật trình duyệt cho hồ sơ này.",
     "recordingFailed": "Không thể bắt đầu ghi. {{detail}}",
-    "mcpRemoteRequiresSignIn": "Đăng nhập tài khoản Donut trước khi bật điều khiển từ xa.",
-    "mcpRemoteUnauthorized": "Donut cloud đã từ chối thông tin xác thực của thiết bị này. Hãy đăng xuất rồi đăng nhập lại.",
-    "mcpRemoteSlotTaken": "Một phiên bản Donut khác trên tài khoản này đã kết nối. Mỗi lần chỉ điều khiển từ xa được một máy.",
+    "mcpRemoteRequiresSignIn": "Đăng nhập tài khoản BugLogin trước khi bật điều khiển từ xa.",
+    "mcpRemoteUnauthorized": "BugLogin cloud đã từ chối thông tin xác thực của thiết bị này. Hãy đăng xuất rồi đăng nhập lại.",
+    "mcpRemoteSlotTaken": "Một phiên bản BugLogin khác trên tài khoản này đã kết nối. Mỗi lần chỉ điều khiển từ xa được một máy.",
     "mcpRemoteNotEntitled": "Gói của bạn không bao gồm MCP từ xa.",
-    "mcpRemoteUnreachable": "Hiện không kết nối được tới Donut cloud. Đang tự động kết nối lại.",
+    "mcpRemoteUnreachable": "Hiện không kết nối được tới BugLogin cloud. Đang tự động kết nối lại.",
     "mcpRemoteKeyMissing": "Thiết bị này chưa có thông tin xác thực MCP từ xa. Hãy tạo một thông tin trước, rồi thêm lại ứng dụng khách.",
     "mcpRemoteKeyLimit": "Tài khoản này đã có số thông tin xác thực MCP tối đa có thể giữ. Hãy thu hồi một cái trên trang tài khoản rồi thử lại.",
-    "mcpRemoteKeyUnavailable": "Donut cloud hiện không thể cấp thông tin xác thực MCP. Hãy thử lại sau giây lát.",
+    "mcpRemoteKeyUnavailable": "BugLogin cloud hiện không thể cấp thông tin xác thực MCP. Hãy thử lại sau giây lát.",
     "urlSchemeNotAllowed": "Chỉ có thể mở địa chỉ http và https.",
     "toolIsLocalOnly": "Thao tác này cần một tệp trên máy tính này nên không thể thực hiện từ xa.",
     "typingTooLong": "Văn bản đó sẽ mất khoảng {{seconds}} giây để gõ, trong khi mỗi yêu cầu chỉ được tối đa {{limit}} giây. Hãy gửi thành nhiều phần nhỏ hơn.",
@@ -2675,12 +2676,12 @@
     "syncDisplayTooSmall": "Màn hình quá nhỏ cho {{windows}} cửa sổ theo cách xếp đó.",
     "syncArrangeFailed": "Không cửa sổ nào được di chuyển.",
     "extensionPathInvalid": "Đường dẫn đó không được phép: nó chứa '..'.",
-    "systemProxyUnreachable": "Donut không thể kết nối qua proxy hệ thống {{proxy}}. Hãy sửa hoặc tắt proxy trong cài đặt mạng của hệ thống rồi thử lại.",
+    "systemProxyUnreachable": "BugLogin không thể kết nối qua proxy hệ thống {{proxy}}. Hãy sửa hoặc tắt proxy trong cài đặt mạng của hệ thống rồi thử lại.",
     "profileRouteRequired": "Hồ sơ này không có proxy hoặc VPN. Việc khởi chạy khi không có chúng đang bị chặn trong Cài đặt, mục Quyền riêng tư.",
     "profileRouteUnavailable": "Proxy hoặc VPN của hồ sơ này không khả dụng, nên việc khởi chạy đã dừng để giữ địa chỉ IP của bạn được ẩn. Hãy gán cho hồ sơ một proxy hoặc VPN hoạt động được.",
     "wayfernLaunchArgsRequiresPro": "Tham số khởi chạy tùy chỉnh yêu cầu gói Pro trở lên. Xóa các tham số hoặc nâng cấp gói của bạn.",
     "wayfernLaunchArgInvalid": "Dùng --name hoặc --name=value cho mỗi tham số. Không cho phép ký tự điều khiển.",
-    "wayfernLaunchArgReserved": "Donut quản lý {{argument}}. Hãy xóa tham số này.",
+    "wayfernLaunchArgReserved": "BugLogin quản lý {{argument}}. Hãy xóa tham số này.",
     "wayfernLaunchArgNotAllowed": "{{argument}} không phải là tham số khởi chạy được hỗ trợ. Hãy xóa nó.",
     "wayfernLaunchArgValueInvalid": "Giá trị của {{argument}} không được hỗ trợ.",
     "wayfernLaunchArgsLimit": "Dùng tối đa {{count}} tham số khởi chạy, mỗi tham số tối đa {{length}} ký tự.",
@@ -2704,7 +2705,7 @@
     "proxyRotationUrlMissing": "Proxy này chưa có liên kết đổi IP. Hãy thêm khi chỉnh sửa proxy.",
     "proxyRotationFailed": "Nhà cung cấp từ chối đổi IP (HTTP {{status}}).",
     "proxyRotationTimeout": "Nhà cung cấp không phản hồi yêu cầu đổi IP trong 30 giây.",
-    "proxyRotationUnreachable": "Donut không thể truy cập liên kết đổi IP của nhà cung cấp.",
+    "proxyRotationUnreachable": "BugLogin không thể truy cập liên kết đổi IP của nhà cung cấp.",
     "startUrlInvalid": "\"{{url}}\" không phải là trang web. Trang khởi động phải là địa chỉ http:// hoặc https://.",
     "startUrlsTooMany": "Mỗi profile có tối đa 20 trang khởi động.",
     "totpKeyInvalid": "Đây không phải khóa 2FA. Hãy dán khóa bí mật hoặc liên kết otpauth:// mà trang web hiển thị.",
@@ -2732,7 +2733,7 @@
     "localStorageBrowserRunning": "Hãy đóng trình duyệt trước khi nhập trạng thái lưu trữ.",
     "localStorageRemoteSession": "Một phiên từ xa đang dùng profile này. Hãy đợi đến khi công việc của nó trở lại đây.",
     "scheduledAutomationNotEntitled": "Công thức theo lịch có trong Solo, Pro, Team và Enterprise.",
-    "agentScheduleInvalid": "Đám mây Donut không chấp nhận lịch chạy này. Hãy kiểm tra ngày, giờ và profile.",
+    "agentScheduleInvalid": "Đám mây BugLogin không chấp nhận lịch chạy này. Hãy kiểm tra ngày, giờ và profile.",
     "agentScheduleNotFound": "Lịch chạy này không còn tồn tại.",
     "teamRoleReadOnly": "Vai trò nhóm của bạn có thể mở hồ sơ nhưng không thể thay đổi chúng. Hãy nhờ chủ sở hữu hoặc quản trị viên của nhóm.",
     "teamActivityForbidden": "Chỉ chủ sở hữu và quản trị viên của nhóm mới xem được hoạt động của nhóm.",
@@ -2753,15 +2754,15 @@
     "restorePointsUnsupported": "Máy chủ đồng bộ quá cũ để dùng điểm khôi phục. Hãy cập nhật.",
     "restorePointFailed": "Điểm khôi phục thất bại: {{detail}}",
     "restorePointsNeedSync": "Điểm khôi phục cần bật đồng bộ cho hồ sơ này.",
-    "accountSyncSignInRequired": "Hãy đăng nhập tài khoản Donut để dùng máy chủ đồng bộ riêng.",
+    "accountSyncSignInRequired": "Hãy đăng nhập tài khoản BugLogin để dùng máy chủ đồng bộ riêng.",
     "accountSyncPlanRequired": "Máy chủ đồng bộ riêng cần gói trả phí.",
     "syncServerUrlInvalid": "Nhập địa chỉ đầy đủ của máy chủ, ví dụ https://sync.example.com.",
     "syncServerUnreachable": "Không kết nối được tới máy chủ đồng bộ.",
     "syncServerStorageUnreachable": "Máy chủ đồng bộ có phản hồi, nhưng máy tính này không kết nối được tới bộ lưu trữ tại {{endpoint}}.",
-    "syncServerNoAccounts": "Máy chủ này không chấp nhận tài khoản Donut. Hãy đặt SYNC_PUBLIC_URL trên máy chủ.",
+    "syncServerNoAccounts": "Máy chủ này không chấp nhận tài khoản BugLogin. Hãy đặt SYNC_PUBLIC_URL trên máy chủ.",
     "syncServerAddressMismatch": "Địa chỉ của máy chủ là {{address}}. Hãy nhập địa chỉ đó.",
-    "remoteNeedsDonutSync": "Phiên từ xa và Cookie Bot lấy hồ sơ từ đồng bộ Donut cloud. Máy tính này đồng bộ với máy chủ riêng của bạn.",
-    "accountSyncUnavailable": "Donut chưa thể đăng nhập vào máy chủ riêng của bạn. Hãy thử lại sau.",
+    "remoteNeedsDonutSync": "Phiên từ xa và Cookie Bot lấy hồ sơ từ đồng bộ BugLogin cloud. Máy tính này đồng bộ với máy chủ riêng của bạn.",
+    "accountSyncUnavailable": "BugLogin chưa thể đăng nhập vào máy chủ riêng của bạn. Hãy thử lại sau.",
     "groupNotEmpty": "Không thể xóa nhóm: nhóm vẫn còn chứa hồ sơ hoặc tiện ích mở rộng."
   },
   "rail": {
@@ -2859,7 +2860,7 @@
     },
     "selfHosted": {
       "title": "Máy chủ đồng bộ tự lưu trữ",
-      "description": "Trỏ BugLogin đến máy chủ donut-sync của riêng bạn để đồng bộ profile, proxy, nhóm và tiện ích mà không cần sử dụng đám mây.",
+      "description": "Trỏ BugLogin đến máy chủ BugLogin Sync của riêng bạn để đồng bộ profile, proxy, nhóm và tiện ích mà không cần sử dụng đám mây.",
       "disabledWhileLoggedIn": "Đồng bộ tự lưu trữ không khả dụng khi bạn đã đăng nhập vào tài khoản BugLogin. Đăng xuất để sử dụng máy chủ tùy chỉnh.",
       "connectionStatus": "Kết nối:",
       "statusUnknown": "Chưa kiểm tra",
@@ -2874,16 +2875,16 @@
     "viewTeamUsage": "Xem mức dùng của nhóm",
     "ownServer": {
       "title": "Máy chủ đồng bộ riêng của bạn",
-      "description": "Đồng bộ tài khoản này với máy chủ donut-sync do bạn vận hành, thay vì Donut cloud. Giới hạn hồ sơ của gói và vai trò, quyền truy cập nhóm của đội bạn vẫn giữ nguyên.",
+      "description": "Đồng bộ tài khoản này với máy chủ BugLogin Sync do bạn vận hành, thay vì BugLogin cloud. Giới hạn hồ sơ của gói và vai trò, quyền truy cập nhóm của đội bạn vẫn giữ nguyên.",
       "current": "Đang đồng bộ với {{server}}",
-      "currentCloud": "Đang đồng bộ với Donut cloud",
-      "donutCloud": "Donut cloud",
-      "useDonutCloud": "Dùng Donut cloud",
-      "accountsOn": "Máy chủ này chấp nhận tài khoản Donut.",
-      "cloudOnly": "Phiên từ xa và Cookie Bot cần đồng bộ với Donut cloud.",
+      "currentCloud": "Đang đồng bộ với BugLogin cloud",
+      "donutCloud": "BugLogin cloud",
+      "useDonutCloud": "Dùng BugLogin cloud",
+      "accountsOn": "Máy chủ này chấp nhận tài khoản BugLogin.",
+      "cloudOnly": "Phiên từ xa và Cookie Bot cần đồng bộ với BugLogin cloud.",
       "teamNote": "Tất cả thành viên trong đội phải dùng cùng một máy chủ.",
       "saved": "Đã lưu máy chủ đồng bộ.",
-      "backToCloud": "Đang đồng bộ lại với Donut cloud."
+      "backToCloud": "Đang đồng bộ lại với BugLogin cloud."
     }
   },
   "shortcutsPage": {
@@ -2938,7 +2939,7 @@
     "steps": {
       "createProfile": {
         "title": "Tạo hồ sơ đầu tiên của bạn",
-        "content": "Nhấn vào đây để tạo hồ sơ đầu tiên của bạn. Chọn Wayfern làm trình duyệt — Chromium được khuyến nghị, có bảo vệ vân tay."
+        "content": "Nhấn vào đây để tạo hồ sơ đầu tiên của bạn. Chọn trình duyệt làm trình duyệt — Chromium được khuyến nghị, có bảo vệ vân tay."
       },
       "dnsBlocking": {
         "title": "Chặn DNS",
@@ -2971,7 +2972,7 @@
     },
     "ready": {
       "title": "Đang thiết lập",
-      "descDownloading": "Đang tải trình duyệt đầu tiên của bạn (Wayfern). Quá trình thiết lập một lần này chạy ngầm — vui lòng chờ.",
+      "descDownloading": "Đang tải runtime trình duyệt cho profile đầu tiên. Quá trình thiết lập một lần này chạy ngầm — vui lòng chờ.",
       "descReady": "Trình duyệt của bạn đã sẵn sàng. Hãy tạo hồ sơ đầu tiên của bạn.",
       "cta": "Tạo hồ sơ đầu tiên của tôi",
       "downloading": "Đang tải xuống…",
@@ -3026,11 +3027,17 @@
     "unknownError": "Đã xảy ra lỗi không xác định"
   },
   "cookieCopy": {
-    "noOtherTargets": "Chưa chọn profile Wayfern nào khác"
+    "noOtherTargets": "Chưa chọn profile trình duyệt nào khác"
   },
   "about": {
     "title": "Giới thiệu",
     "version": "Phiên bản {{version}}",
+    "checkUpdates": "Kiểm tra cập nhật",
+    "checkingUpdates": "Đang kiểm tra…",
+    "upToDate": "BugLogin đã là phiên bản mới nhất",
+    "updateCheckFailed": "Không thể kiểm tra cập nhật",
+    "updatesReleaseOnly": "Bản dev này không hỗ trợ kiểm tra cập nhật",
+    "updatesReleaseOnlyDescription": "Hãy dùng bản BugLogin đã ký để kiểm tra và cài đặt cập nhật. Bạn có thể tải bản mới nhất tại buglogin.com.",
     "portableBadge": "bản portable",
     "licenseNotice": "Trình duyệt chống phát hiện mã nguồn mở, được cấp phép theo AGPL-3.0.",
     "website": "Trang web",
@@ -3043,7 +3050,7 @@
       "found": "Bạn đã tìm thấy ngăn đồ ăn vặt.",
       "finished": "Chỉ còn vụn bánh. Không có cookie.",
       "takeBite": "Cắn một miếng",
-      "again": "Thêm một chiếc donut"
+      "again": "Mở lại ngăn đồ ăn vặt"
     }
   },
   "clearOnClose": {
@@ -3169,7 +3176,7 @@
   },
   "profileTransfer": {
     "exportTitle": "Xuất hồ sơ",
-    "archiveFilter": "Tệp lưu trữ hồ sơ Donut",
+    "archiveFilter": "Tệp lưu trữ hồ sơ BugLogin",
     "exportDescription": "Ghi hồ sơ này ra một tệp mà máy khác đọc được. Tệp lưu trữ mang theo cấu hình và, nếu bạn muốn, dữ liệu trình duyệt: cookie, phiên đăng nhập và trạng thái tiện ích.",
     "includeData": "Kèm dữ liệu trình duyệt",
     "protectedNotice": "Hồ sơ này được bảo vệ bằng mật khẩu nên dữ liệu ở lại máy này. Tệp lưu trữ chỉ mang theo cấu hình.",
@@ -3195,7 +3202,7 @@
       "https": "Được mã hóa bằng DNS over HTTPS ({{server}}). Truy vấn đi qua proxy hoặc VPN của profile này. Nếu máy chủ không phản hồi, trang sẽ không tải.",
       "tls": "Được mã hóa bằng DNS over TLS ({{server}}). Truy vấn đi qua proxy hoặc VPN của profile này. Nếu máy chủ không phản hồi, trang sẽ không tải.",
       "tcp": "Không mã hóa: DNS thường tới {{server}}. Proxy có thể đọc và thay đổi câu trả lời. Nếu máy chủ không phản hồi, trang sẽ không tải.",
-      "upgraded": "Địa chỉ này cũng hỗ trợ DNS mã hóa nên Donut sử dụng nó. Bắt đầu bằng tcp:// để giữ DNS thường."
+      "upgraded": "Địa chỉ này cũng hỗ trợ DNS mã hóa nên BugLogin sử dụng nó. Bắt đầu bằng tcp:// để giữ DNS thường."
     }
   },
   "profileStatuses": {
@@ -3222,12 +3229,12 @@
     "deleteDescription": "Các profile có trạng thái này sẽ không còn trạng thái. Không thể hoàn tác."
   },
   "startPages": {
-    "description": "Các trang mà mỗi lần khởi chạy từ Donut sẽ mở thay cho phiên trước, mỗi dòng một trang. Lần chạy có URL riêng chỉ mở URL đó.",
+    "description": "Các trang mà mỗi lần khởi chạy từ BugLogin sẽ mở thay cho phiên trước, mỗi dòng một trang. Lần chạy có URL riêng chỉ mở URL đó.",
     "placeholder": "https://mail.example.com\nhttps://shop.example.com"
   },
   "totp": {
     "toolTitle": "Mã 2FA",
-    "toolDescription": "Dán khóa 2FA để xem mã hiện tại. Donut không lưu khóa.",
+    "toolDescription": "Dán khóa 2FA để xem mã hiện tại. BugLogin không lưu khóa.",
     "keyLabel": "Khóa 2FA",
     "keyPlaceholder": "Khóa bí mật hoặc liên kết otpauth://",
     "expiresIn": "Đổi sau {{seconds}} giây",
@@ -3628,16 +3635,16 @@
     "vpnExtensionConfirmed": "Công cụ VPN hoặc proxy đã biết",
     "vpnExtensionLikely": "Có vẻ là công cụ VPN hoặc proxy",
     "vpnExtensionCapability": "Có quyền proxy",
-    "vpnExtensionExplainer": "Nếu một trong số đó chuyển lưu lượng của bạn đi nơi khác, vị trí thực của trình duyệt sẽ không còn khớp với múi giờ, ngôn ngữ và vị trí địa lý mà hồ sơ này được tạo ra, và Donut không thể phát hiện điều đó từ bên ngoài.",
+    "vpnExtensionExplainer": "Nếu một trong số đó chuyển lưu lượng của bạn đi nơi khác, vị trí thực của trình duyệt sẽ không còn khớp với múi giờ, ngôn ngữ và vị trí địa lý mà hồ sơ này được tạo ra, và BugLogin không thể phát hiện điều đó từ bên ngoài.",
     "proxyCapableHeading": "Các tiện ích có thể thay đổi proxy",
-    "proxyCapableIntro": "Chúng không giống VPN, nhưng có quyền proxy của Chromium, thứ mà trình quản lý tải xuống và công cụ gỡ lỗi cũng cần. Donut không thể biết liệu có tiện ích nào đang dùng quyền đó hay không:",
-    "sourceDonut": "Do Donut quản lý",
+    "proxyCapableIntro": "Chúng không giống VPN, nhưng có quyền proxy của Chromium, thứ mà trình quản lý tải xuống và công cụ gỡ lỗi cũng cần. BugLogin không thể biết liệu có tiện ích nào đang dùng quyền đó hay không:",
+    "sourceDonut": "Do BugLogin quản lý",
     "sourceBrowser": "Đã cài trong hồ sơ",
     "measurementUnreliable": "Một tiện ích trong hồ sơ này có quyền proxy, nên kết quả kiểm tra điểm ra có thể không phản ánh tuyến đường mà trình duyệt thực sự dùng.",
-    "scanIncompleteEncrypted": "Hồ sơ này được mã hóa nên chỉ có thể kiểm tra các tiện ích do Donut quản lý.",
-    "scanIncompleteEphemeral": "Hồ sơ này chưa có dữ liệu nên chỉ có thể kiểm tra các tiện ích do Donut quản lý.",
+    "scanIncompleteEncrypted": "Hồ sơ này được mã hóa nên chỉ có thể kiểm tra các tiện ích do BugLogin quản lý.",
+    "scanIncompleteEphemeral": "Hồ sơ này chưa có dữ liệu nên chỉ có thể kiểm tra các tiện ích do BugLogin quản lý.",
     "scanIncompletePartial": "Quá trình quét tiện ích bị ngắt giữa chừng nên có thể thiếu một số tiện ích.",
-    "probePending": "Điểm ra của proxy chưa được đo. Donut sẽ kiểm tra trong lúc khởi động và dừng lại nếu không khớp.",
+    "probePending": "Điểm ra của proxy chưa được đo. BugLogin sẽ kiểm tra trong lúc khởi động và dừng lại nếu không khớp.",
     "launchAnyway": "Vẫn khởi chạy",
     "dontBlockAgain": "Không chặn lại với đúng sai lệch này",
     "dontWarnExtensions": "Không cảnh báo lại về các tiện ích này",
@@ -3645,7 +3652,7 @@
     "cancelledSummary": "Đã hủy {{cancelled}} trên {{total}} lượt khởi chạy",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "vpnExtensionEntryNoVersion": " — {{capability}}, {{source}}",
-    "scanIncompleteMissing": "Hồ sơ này chưa từng được khởi chạy nên chỉ có thể kiểm tra các tiện ích do Donut quản lý.",
+    "scanIncompleteMissing": "Hồ sơ này chưa từng được khởi chạy nên chỉ có thể kiểm tra các tiện ích do BugLogin quản lý.",
     "exitUnverifiedTimezone": "Vân tay của hồ sơ này không khai báo múi giờ nào nên việc kiểm tra điểm ra không thể xác minh. Khởi chạy không bị chặn, nhưng cũng không có gì được so sánh.",
     "exitUnverifiedLanguage": "Ngôn ngữ vân tay của hồ sơ này không thể so sánh với quốc gia thoát, nên kiểm tra đó là chưa xác minh chứ không phải đã đạt."
   },
@@ -3707,7 +3714,7 @@
   "easterEgg": {
     "konami": {
       "title": "Đã chấp nhận mã bí mật",
-      "description": "Đã thêm 30 chiếc bánh donut. Chúng chỉ để trang trí."
+      "description": "Đã thêm 30 điểm nhấn màu sắc để trang trí."
     }
   },
   "trash": {
@@ -3748,7 +3755,7 @@
     "confirmEmptyDescription": "Bạn có chắc chắn muốn xóa vĩnh viễn tất cả mục trong thùng rác không? Hành động này không thể hoàn tác."
   },
   "agent": {
-    "description": "Xem tác nhân AI của bạn làm gì trong Donut, trả lời câu hỏi của nó và can thiệp khi một trang cần đến bạn.",
+    "description": "Xem tác nhân AI của bạn làm gì trong BugLogin, trả lời câu hỏi của nó và can thiệp khi một trang cần đến bạn.",
     "tabs": {
       "conversation": "Hội thoại",
       "profiles": "Hồ sơ",
@@ -3774,19 +3781,19 @@
     },
     "setup": {
       "signedOutTitle": "Đăng nhập để làm việc với tác nhân của bạn",
-      "signedOutBody": "Tác nhân kết nối với Donut qua tài khoản Donut của bạn. Hãy đăng nhập để kết nối.",
+      "signedOutBody": "Tác nhân kết nối với BugLogin qua tài khoản BugLogin của bạn. Hãy đăng nhập để kết nối.",
       "signedOutAction": "Mở Tài khoản",
       "planTitle": "Gói của bạn không có điều khiển từ xa",
       "planBody": "Để kết nối tác nhân của riêng bạn, bạn cần gói có điều khiển từ xa.",
       "planAction": "Mở Tài khoản",
       "remoteOffTitle": "Điều khiển từ xa đang tắt",
-      "remoteOffBody": "Tác nhân kết nối với Donut qua điều khiển từ xa. Hãy bật nó, rồi thêm Donut vào tác nhân của bạn.",
+      "remoteOffBody": "Tác nhân kết nối với BugLogin qua điều khiển từ xa. Hãy bật nó, rồi thêm BugLogin vào tác nhân của bạn.",
       "remoteOffAction": "Bật điều khiển từ xa",
-      "remoteOffInline": "Điều khiển từ xa đang tắt nên lúc này tác nhân không thể kết nối với Donut.",
+      "remoteOffInline": "Điều khiển từ xa đang tắt nên lúc này tác nhân không thể kết nối với BugLogin.",
       "waitingTitle": "Đang chờ tác nhân của bạn",
-      "waitingBody": "Thêm Donut vào tác nhân, rồi dán hướng dẫn bên dưới vào đó để nó trao đổi với bạn trong khi làm việc.",
+      "waitingBody": "Thêm BugLogin vào tác nhân, rồi dán hướng dẫn bên dưới vào đó để nó trao đổi với bạn trong khi làm việc.",
       "starterLabel": "Hướng dẫn cho tác nhân",
-      "starter": "Bạn có thể điều khiển các hồ sơ Donut Browser của tôi bằng các công cụ Donut. Khi bắt đầu và giữa các bước, hãy gọi get_human_updates để đọc ghi chú của tôi và xem tôi đang dùng hồ sơ nào. Nếu không chắc phải làm gì, hãy hỏi tôi bằng ask_human. Nếu một trang cần đến người thật, chẳng hạn để đăng nhập, xác minh hoặc thanh toán, hãy gọi request_human_help và chờ đến khi tôi trả lại hồ sơ. Trong các công việc dài, hãy gọi report_progress để tôi biết bạn đã làm đến đâu.",
+      "starter": "Bạn có thể điều khiển các hồ sơ BugLogin Browser của tôi bằng các công cụ BugLogin. Khi bắt đầu và giữa các bước, hãy gọi get_human_updates để đọc ghi chú của tôi và xem tôi đang dùng hồ sơ nào. Nếu không chắc phải làm gì, hãy hỏi tôi bằng ask_human. Nếu một trang cần đến người thật, chẳng hạn để đăng nhập, xác minh hoặc thanh toán, hãy gọi request_human_help và chờ đến khi tôi trả lại hồ sơ. Trong các công việc dài, hãy gọi report_progress để tôi biết bạn đã làm đến đâu.",
       "starterCopied": "Đã sao chép hướng dẫn",
       "remoteUnavailableTitle": "Tác nhân từ xa không khả dụng"
     },
@@ -3826,7 +3833,7 @@
       "progress": "{{done}}/{{total}}",
       "showEarlier": "Hiện mục cũ hơn ({{count}})",
       "hideEarlier": "Ẩn mục cũ hơn",
-      "website": "Trang web Donut"
+      "website": "Trang web BugLogin"
     },
     "thread": {
       "label": "Hội thoại",
@@ -3843,7 +3850,7 @@
       "noteSeen": "Đã xem",
       "joined": "{{agent}} đã tham gia",
       "left": "{{agent}} đã rời đi",
-      "feedbackSent": "đã gửi phản hồi cho đội ngũ Donut",
+      "feedbackSent": "đã gửi phản hồi cho đội ngũ BugLogin",
       "feedbackLogs": "Đã đính kèm nhật ký"
     },
     "composer": {
@@ -3905,7 +3912,7 @@
       "recording": {
         "record": "Ghi lại",
         "recording": "Đang ghi",
-        "description": "Hãy làm tác vụ một lần trong trình duyệt của hồ sơ và Donut sẽ ghi lại các bước. Mật khẩu không bao giờ được ghi.",
+        "description": "Hãy làm tác vụ một lần trong trình duyệt của hồ sơ và BugLogin sẽ ghi lại các bước. Mật khẩu không bao giờ được ghi.",
         "stop": "Dừng ghi",
         "steps": "Đã ghi {{count}} bước",
         "hint": "Chọn một hồ sơ đang chạy để ghi.",
@@ -4040,7 +4047,7 @@
   },
   "groupBookmarks": {
     "title": "Dấu trang của {{name}}",
-    "description": "Mọi hồ sơ trong nhóm này nhận các dấu trang trong một thư mục do Donut quản lý. Các dấu trang khác được giữ nguyên.",
+    "description": "Mọi hồ sơ trong nhóm này nhận các dấu trang trong một thư mục do BugLogin quản lý. Các dấu trang khác được giữ nguyên.",
     "editTooltip": "Dấu trang của nhóm ({{n}})",
     "empty": "Nhóm này chưa có dấu trang dùng chung.",
     "addRow": "Thêm dấu trang",
@@ -4092,7 +4099,7 @@
       "fingerprintGate": {
         "label": "Kiểm tra dấu vân tay",
         "title": "Giữ dấu vân tay khớp với điểm ra",
-        "body": "Trước khi khởi chạy, Donut so sánh múi giờ và ngôn ngữ của điểm ra proxy với dấu vân tay của hồ sơ và chặn khi không khớp. Hãy sửa dấu vân tay, hoặc tắt kiểm tra trong Nâng cao nếu bạn biết mình đang làm gì.",
+        "body": "Trước khi khởi chạy, BugLogin so sánh múi giờ và ngôn ngữ của điểm ra proxy với dấu vân tay của hồ sơ và chặn khi không khớp. Hãy sửa dấu vân tay, hoặc tắt kiểm tra trong Nâng cao nếu bạn biết mình đang làm gì.",
         "action": "Mở cài đặt nâng cao"
       },
       "profilePassword": {
@@ -4110,7 +4117,7 @@
       "defaultBrowser": {
         "label": "Trình duyệt mặc định",
         "title": "Mở mọi liên kết trong đúng hồ sơ",
-        "body": "Đặt Donut làm trình duyệt mặc định và mỗi liên kết từ ứng dụng khác sẽ hỏi nên mở bằng hồ sơ nào.",
+        "body": "Đặt BugLogin làm trình duyệt mặc định và mỗi liên kết từ ứng dụng khác sẽ hỏi nên mở bằng hồ sơ nào.",
         "action": "Mở cài đặt trình duyệt mặc định"
       },
       "extensionGroups": {
@@ -4122,7 +4129,7 @@
       "selfHostedSync": {
         "label": "Đồng bộ tự lưu trữ",
         "title": "Sao lưu lên máy chủ của riêng bạn",
-        "body": "Trỏ Donut đến máy chủ donut-sync tự lưu trữ và hồ sơ, proxy, nhóm sẽ được phản chiếu lên đó. Thêm mật khẩu đầu cuối và máy chủ chỉ thấy văn bản đã mã hóa.",
+        "body": "Trỏ BugLogin đến máy chủ BugLogin Sync tự lưu trữ và hồ sơ, proxy, nhóm sẽ được phản chiếu lên đó. Thêm mật khẩu đầu cuối và máy chủ chỉ thấy văn bản đã mã hóa.",
         "action": "Mở Tài khoản"
       },
       "trash": {
@@ -4133,7 +4140,7 @@
       },
       "localApi": {
         "label": "API và MCP",
-        "title": "Tự động hóa Donut từ script và tác nhân",
+        "title": "Tự động hóa BugLogin từ script và tác nhân",
         "body": "REST API cục bộ cho phép script liệt kê, tạo và cấu hình hồ sơ. Bật nó trong Tích hợp và sao chép mã thông báo.",
         "action": "Mở Tích hợp"
       },
@@ -4164,7 +4171,7 @@
       "agent": {
         "label": "Tác nhân của riêng bạn",
         "title": "Làm việc cùng tác nhân AI của bạn",
-        "body": "Kết nối Claude Code, Cursor hoặc tác nhân khác với Donut. Nó sẽ hỏi bạn khi không chắc chắn, và bạn có thể tiếp quản một hồ sơ rồi trả lại bất cứ lúc nào.",
+        "body": "Kết nối Claude Code, Cursor hoặc tác nhân khác với BugLogin. Nó sẽ hỏi bạn khi không chắc chắn, và bạn có thể tiếp quản một hồ sơ rồi trả lại bất cứ lúc nào.",
         "action": "Mở Tác nhân"
       },
       "team": {
@@ -4175,7 +4182,7 @@
       },
       "remoteControl": {
         "label": "Điều khiển từ xa",
-        "title": "Điều khiển máy này từ donutbrowser.com",
+        "title": "Điều khiển máy này từ app3.buglogin.com",
         "body": "Khi bật điều khiển từ xa, các tác nhân trên trang web tiếp cận hồ sơ của máy này qua một cầu nối đi ra. Bật trong Tích hợp.",
         "action": "Mở Tích hợp"
       },
@@ -4195,7 +4202,7 @@
   },
   "feedback": {
     "title": "Gửi phản hồi",
-    "description": "Hãy cho đội ngũ Donut biết bạn nghĩ gì. Chúng tôi đọc mọi tin nhắn.",
+    "description": "Hãy cho đội ngũ BugLogin biết bạn nghĩ gì. Chúng tôi đọc mọi tin nhắn.",
     "kindLabel": "Loại phản hồi",
     "kinds": {
       "bug": {
@@ -4204,7 +4211,7 @@
       },
       "idea": {
         "label": "Ý tưởng",
-        "placeholder": "Điều gì sẽ giúp Donut tốt hơn cho bạn?"
+        "placeholder": "Điều gì sẽ giúp BugLogin tốt hơn cho bạn?"
       },
       "praise": {
         "label": "Lời khen",
@@ -4230,12 +4237,12 @@
       "placeholder": "ban@example.com",
       "signedIn": "Phản hồi sẽ được gửi tới {{email}}."
     },
-    "included": "Cũng được gửi: Donut {{version}}, {{os}} {{arch}}",
+    "included": "Cũng được gửi: BugLogin {{version}}, {{os}} {{arch}}",
     "send": "Gửi",
     "success": {
       "title": "Cảm ơn bạn!",
-      "body": "Phản hồi của bạn đã đến đội ngũ Donut.",
-      "bodyWithLogs": "Phản hồi và nhật ký của bạn đã đến đội ngũ Donut.",
+      "body": "Phản hồi của bạn đã đến đội ngũ BugLogin.",
+      "bodyWithLogs": "Phản hồi và nhật ký của bạn đã đến đội ngũ BugLogin.",
       "reply": "Nếu cần thêm chi tiết, chúng tôi sẽ viết thư tới {{email}}.",
       "done": "Xong"
     }
@@ -4248,7 +4255,7 @@
     "description": "Những gì thành viên đã làm với hồ sơ và mục dùng chung của nhóm, mới nhất trước. Lưu 90 ngày, hoặc 365 ngày với Enterprise.",
     "empty": "Chưa có hoạt động nào.",
     "loadMore": "Tải thêm",
-    "system": "Donut",
+    "system": "BugLogin",
     "formerMember": "Một cựu thành viên",
     "noTarget": "một mục",
     "changedFields": "Đã thay đổi: {{fields}}",

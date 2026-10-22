@@ -244,19 +244,14 @@ pub(super) async fn import_sync(
             .with_field("maxBytes", MAX_SYNC_IMPORT_REQUEST_BYTES),
         ));
     }
-    let _admission = sync_import_request_slot()?;
+    let _import_admission = sync_import_request_slot()?;
+    let _transfer_admission = super::large_transfer_body_slot().await.map_err(response)?;
     let input = parse_sync_import_input(body, MAX_SYNC_IMPORT_REQUEST_BYTES).await?;
     let receipt = import_sync_authorized(&state, &headers, &principal, input).await?;
     Ok((StatusCode::OK, Json(receipt)).into_response())
 }
 
-fn sync_import_request_slot() -> Result<
-    (
-        tokio::sync::OwnedSemaphorePermit,
-        tokio::sync::OwnedSemaphorePermit,
-    ),
-    Response,
-> {
+fn sync_import_request_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
     let import_permit =
         Arc::clone(SYNC_IMPORT_REQUEST_SLOT.get_or_init(|| Arc::new(Semaphore::new(1))))
             .try_acquire_owned()
@@ -270,8 +265,7 @@ fn sync_import_request_slot() -> Result<
                     .retryable(true),
                 )
             })?;
-    let transfer_permit = super::large_transfer_body_slot().map_err(response)?;
-    Ok((import_permit, transfer_permit))
+    Ok(import_permit)
 }
 
 async fn parse_sync_import_input(

@@ -204,10 +204,10 @@
       "setAsDefault": "Set as Default Browser",
       "alreadyDefault": "Already Default Browser",
       "description": "When set as default, BugLogin will handle web links and allow you to choose which profile to use.",
-      "setSuccess": "Donut Browser is now your default browser",
+      "setSuccess": "BugLogin Browser is now your default browser",
       "setFailed": "Could not set the default browser",
       "finishInSystemSettings": "Finish in Windows Settings",
-      "finishInSystemSettingsDescription": "Donut Browser is registered. Windows Settings is open: choose Donut Browser under Web browser to finish."
+      "finishInSystemSettingsDescription": "BugLogin Browser is registered. Windows Settings is open: choose BugLogin Browser under Web browser to finish."
     },
     "permissions": {
       "title": "System Permissions",
@@ -299,9 +299,9 @@
       "chooseTitle": "Choose a folder for the data directory",
       "move": "Move",
       "willMoveTo": "Everything moves to",
-      "moved": "Data directory moved. Restart Donut Browser to use it.",
+      "moved": "Data directory moved. Restart BugLogin Browser to use it.",
       "reading": "Reading the data directory...",
-      "restartRequired": "Restart Donut Browser to use the new location. Until then it keeps working from the old one.",
+      "restartRequired": "Restart BugLogin Browser to use the new location. Until then it keeps working from the old one.",
       "environmentOverride": "DONUTBROWSER_DATA_DIR is set, so the app uses that location whatever is chosen here.",
       "missing": "The chosen data directory is not there. If it is on a removable drive, plug it back in and restart.",
       "useDefault": "Use the default location again",
@@ -416,9 +416,9 @@
       "stopFollower": "Following actions of {{leaderName}}",
       "desyncedTooltip": "Synchronization failed at {{url}}",
       "paidFeature": "Synchronizer is a paid feature",
-      "wayfernOnly": "Only Wayfern profiles can be synchronized",
+      "wayfernOnly": "Only browser profiles can be synchronized",
       "selectFollowers": "Select Follower Profiles",
-      "selectFollowersDesc": "Choose profiles that will mirror the actions of the leader profile. Only stopped Wayfern profiles can be selected.",
+      "selectFollowersDesc": "Choose profiles that will mirror the actions of the leader profile. Only stopped browser profiles can be selected.",
       "leader": "Leader",
       "follower": "Follower",
       "startSession": "Start Sync Session",
@@ -563,7 +563,7 @@
       "upgradeAvailable": "A newer version ({{version}}) of {{browser}} is available."
     },
     "chromiumLabel": "Chromium",
-    "chromiumSubtitle": "Powered by Wayfern",
+    "chromiumSubtitle": "Chromium with profile isolation",
     "platformUnavailable": "{{browser}} is not available on your platform yet.",
     "metadataOnlyRuntimeUnavailable": "The runtime catalog is unavailable. You can create this profile's settings now, but browser install and launch will work after the signed runtime is published.",
     "createMetadataOnly": "Create profile settings",
@@ -578,7 +578,7 @@
     "hourlyLimit": {
       "reached": "Your plan allows {{limit}} new profiles per hour. You can create the next one in about {{minutes}} min.",
       "warningTitle": "You're creating profiles too quickly",
-      "warning": "Please wait a little. Creating too many profiles in one hour leads to a temporary block of 24 hours or more, during which you can't generate new identities. If you need a higher hourly limit, consider supporting Donut with a paid plan."
+      "warning": "Please wait before creating another profile. The hourly creation limit has been reached."
     },
     "fingerprintSummary": {
       "title": "Fingerprint Overview",
@@ -587,6 +587,7 @@
       "browser": "Browser Core",
       "network": "Network / Exit IP",
       "screen": "Screen Display",
+      "screenAuto": "Auto for this device",
       "hardware": "CPU & Memory",
       "canvas": "Canvas",
       "webgl": "WebGL / GPU",
@@ -1012,10 +1013,10 @@
       "onThisComputer": "On this computer",
       "addToAll_one": "Add to all {{count}}",
       "addToAll_other": "Add to all {{count}}",
-      "addedToMany_one": "Added Donut to {{count}} app",
-      "addedToMany_other": "Added Donut to {{count}} apps",
-      "addFailed": "Could not add Donut to {{names}}.",
-      "noneFound": "No AI apps found on this computer. You can still add Donut to any of these.",
+      "addedToMany_one": "Added BugLogin to {{count}} app",
+      "addedToMany_other": "Added BugLogin to {{count}} apps",
+      "addFailed": "Could not add BugLogin to {{names}}.",
+      "noneFound": "No AI apps found on this computer. You can still add BugLogin to any of these.",
       "showMore_one": "Show {{count}} more client",
       "showMore_other": "Show {{count}} more clients",
       "showFewer": "Show fewer clients",
@@ -1027,7 +1028,7 @@
         "title": "Tools agents see",
         "description": "An agent loads a description of every tool it can see. Choose only the groups it needs, and it starts faster and has more room to work. Connected apps update at once.",
         "core": "Profiles, browser control and the tools that keep you in the loop are always on.",
-        "failed": "Could not update {{names}}. Remove Donut there and add it again.",
+        "failed": "Could not update {{names}}. Remove BugLogin there and add it again.",
         "names": {
           "organize": {
             "label": "Organize",
@@ -1084,7 +1085,7 @@
     "tokenCopied": "Token copied",
     "mcpEnableLabel": "Enable MCP Server (Model Context Protocol)",
     "mcpEnableDescription": "Allow AI assistants like Claude Desktop to control browsers.",
-    "mcpAcceptTermsFirst": "(Accept Wayfern terms in Settings first)",
+    "mcpAcceptTermsFirst": "(Accept browser terms in Settings first)",
     "mcpStarted": "MCP server started on port {{port}}",
     "mcpStopped": "MCP server stopped",
     "mcpToggleFailed": "Failed to toggle MCP server",
@@ -1152,8 +1153,8 @@
     "tabRemote": "Remote MCP",
     "remote": {
       "enableLabel": "Remote control",
-      "enableDescription": "Let Donut cloud drive this browser, so an agent on donutbrowser.com can control it. Nothing listens for incoming connections: this app dials out and can hang up at any time.",
-      "signInRequired": "Sign in to your Donut account to use remote control.",
+      "enableDescription": "Let BugLogin cloud drive this browser, so an agent on app3.buglogin.com can control it. Nothing listens for incoming connections: this app dials out and can hang up at any time.",
+      "signInRequired": "Sign in to your BugLogin account to use remote control.",
       "connected": "Connected as",
       "connecting": "Connecting as",
       "notConnected": "Not connected",
@@ -1180,7 +1181,7 @@
   },
   "config": {
     "wayfern": {
-      "title": "Wayfern Configuration",
+      "title": "Chromium Configuration",
       "fingerprint": {
         "title": "Fingerprint",
         "randomize": "Randomize on Launch",
@@ -1233,7 +1234,7 @@
       "sourcePlaceholder": "Select a profile to copy cookies from",
       "running": "(running)",
       "targetProfiles": "Target Profiles ({{count}})",
-      "noOtherTargets": "No other Wayfern profiles selected",
+      "noOtherTargets": "No other browser profiles selected",
       "selectSourceFirst": "Select a source profile first",
       "selectionStatus": "({{selected}} of {{total}} selected)",
       "searchPlaceholder": "Search domains or cookies...",
@@ -1454,7 +1455,7 @@
     "serverError": "Server error. Please try again later.",
     "unknownError": "An unknown error occurred. Please try again.",
     "noProfilesForUrl": "No profiles available. Please create a profile first before opening URLs.",
-    "updateWayfernConfigFailed": "Failed to update wayfern config: {{error}}",
+    "updateWayfernConfigFailed": "Failed to update browser config: {{error}}",
     "createProfileFailed": "Failed to create profile: {{error}}",
     "launchBrowserFailed": "Failed to launch browser: {{error}}",
     "profileRuntimeVersionMissing": "This profile has no browser runtime version selected. Edit the profile and choose a verified version before launching it.",
@@ -1463,7 +1464,7 @@
     "renameProfileFailed": "Failed to rename profile: {{error}}",
     "killBrowserFailed": "Failed to kill browser: {{error}}",
     "deleteSelectedProfilesFailed": "Failed to delete selected profiles: {{error}}",
-    "cookieCopyUnsupportedBrowser": "Cookie copy only works with Wayfern profiles",
+    "cookieCopyUnsupportedBrowser": "Cookie copy only works with browser profiles",
     "updateSyncSettingsFailed": "Failed to update sync settings",
     "cloneProfileFailed": "Failed to clone profile: {{error}}",
     "loadSupportedBrowsersFailed": "Failed to load supported browsers",
@@ -1491,7 +1492,7 @@
     "crossOsLimitations": "Cross-OS fingerprinting has limitations. System-level APIs may still reflect your actual operating system, and some features may have degraded performance.",
     "unavailableInBuild": "Unavailable in this build",
     "localOsOnly": "This build can generate fingerprints only for the operating system running on this device. Change the target to this device's operating system before saving.",
-    "generatedOnLaunch": "Wayfern applies the selected fingerprint when the profile launches and generates it when needed.",
+    "generatedOnLaunch": "Chromium applies the selected fingerprint when the profile launches and generates it when needed.",
     "osLabel": "Operating System Fingerprint",
     "selectOSPlaceholder": "Select operating system",
     "generateRandomOnLaunch": "Generate random fingerprint on every launch",
@@ -1614,7 +1615,7 @@
     "regenerateConfirmTitle": "Regenerate this fingerprint?",
     "regenerateConfirmDescription": "The profile keeps its cookies and logins but will present a different device. Sites that already know this profile can ask you to sign in again, challenge you, or block the account. Only regenerate a profile you have not used yet, or one you are willing to lose. This cannot be undone.",
     "launchArgs": "Launch arguments",
-    "launchArgsDescription": "Enter one argument per line, as --name or --name=value. Only supported arguments are accepted, for example --disable-gpu, --mute-audio or --disable-features=Name. Donut controls the profile, proxy, window and debugging arguments.",
+    "launchArgsDescription": "Enter one argument per line, as --name or --name=value. Only supported arguments are accepted, for example --disable-gpu, --mute-audio or --disable-features=Name. BugLogin controls the profile, proxy, window and debugging arguments.",
     "launchArgsSkipped": "Custom launch arguments were not used for {{profile}}. {{reason}}"
   },
   "warnings": {
@@ -1755,7 +1756,7 @@
       "cannotWhileRunning": "Stop the profile before changing its password."
     },
     "fingerprint": {
-      "notSupported": "Fingerprint editing is only available for Wayfern profiles.",
+      "notSupported": "Fingerprint editing is only available for browser profiles.",
       "lockedTitle": "Viewing & editing the fingerprint is a Pro feature",
       "lockedDescription": "Your device information is protected in every profile. Viewing and editing a profile's fingerprint requires an active paid plan."
     },
@@ -2164,8 +2165,8 @@
     "createButton": "Create"
   },
   "wayfernTerms": {
-    "title": "Wayfern Terms and Conditions",
-    "description": "Before using BugLogin, you must read and agree to Wayfern's Terms and Conditions.",
+    "title": "Browser runtime terms",
+    "description": "Before using BugLogin, review and accept the terms from the browser runtime provider.",
     "reviewLabel": "Please review the Terms and Conditions at:",
     "agreeNotice": "By clicking \"I Accept\", you agree to be bound by these terms.",
     "acceptButton": "I Accept",
@@ -2493,11 +2494,11 @@
     "proxyNotWorking": "The selected proxy isn't working, so the profile wasn't created.",
     "proxyPaymentRequired": "The selected proxy requires payment (402) — its subscription may have expired — so the profile wasn't created.",
     "vpnNotWorking": "The selected VPN isn't working, so the profile wasn't created.",
-    "camoufoxImportDeprecated": "Importing this profile type is no longer supported. Please use Wayfern instead.",
+    "camoufoxImportDeprecated": "Importing this profile type is no longer supported. Please use browser instead.",
     "updateChecksumsUnavailable": "The update {{version}} could not be verified because its checksum file could not be retrieved. The update was not installed; it will be retried later.",
     "updateChecksumMismatch": "The downloaded update file {{file}} failed checksum verification and was discarded. Please try again.",
     "nameCannotBeEmpty": "Name cannot be empty",
-    "wayfernVersionNotAvailable": "Wayfern version {{requested}} is not available for download. The current version is {{current}}.",
+    "wayfernVersionNotAvailable": "browser version {{requested}} is not available for download. The current version is {{current}}.",
     "profileNameExists": "A profile named \"{{name}}\" already exists",
     "importSourceNotFound": "The source path does not exist",
     "importNoItems": "Nothing selected to import",
@@ -2516,7 +2517,7 @@
     "extensionNotADirectory": "That path is not a folder.",
     "extensionManifestMissing": "There is no manifest.json in that folder. Choose the folder that holds the extension's manifest.json.",
     "extensionManifestInvalid": "The manifest.json in that folder could not be read.",
-    "extensionDirTooLarge": "That folder is too large to copy into Donut (the limit is 256 MB and 20,000 files). Link it in place instead.",
+    "extensionDirTooLarge": "That folder is too large to copy into BugLogin (the limit is 256 MB and 20,000 files). Link it in place instead.",
     "extensionPathHasComma": "That folder's path contains a comma, which Chromium cannot load. Rename or move the folder.",
     "extensionLinkRequiresDirectory": "Only a folder can be loaded in place. Turn linking off to add an archive.",
     "extensionLinkedCannotSync": "This extension is loaded from a folder on this machine, so there is nothing to sync.",
@@ -2526,20 +2527,20 @@
     "cookieImportNoCookies": "No cookies were found in what you pasted.",
     "browserChecksumUnavailable": "{{browser}} {{version}} could not be verified because its checksum file could not be retrieved. The download was stopped; it will be retried later.",
     "browserChecksumMismatch": "The downloaded {{browser}} {{version}} archive failed checksum verification and was discarded. Please try again.",
-    "proxySidecarVersionMismatch": "Some Donut Browser files are from different versions. Reinstall the latest update; your profiles will stay safe.",
+    "proxySidecarVersionMismatch": "Some BugLogin Browser files are from different versions. Reinstall the latest update; your profiles will stay safe.",
     "updateProfilesRunning": "Stop all running profiles before installing the update.",
-    "updatePreparationFailed": "Donut Browser could not safely stop a background network process. Restart your computer, then try the update again.",
-    "wayfernTermsRequired": "Accept the Wayfern Terms and Conditions to use Wayfern.",
+    "updatePreparationFailed": "BugLogin Browser could not safely stop a background network process. Restart your computer, then try the update again.",
+    "wayfernTermsRequired": "Accept the browser Terms and Conditions to use this feature.",
     "apiPortUnavailable": "The API server could not find an available port.",
     "mcpAgentUnknown": "This MCP client is not supported.",
-    "mcpAgentInstallFailed": "Could not add Donut Browser to the MCP client: {{detail}}",
-    "mcpAgentRemoveFailed": "Could not remove Donut Browser from the MCP client: {{detail}}",
+    "mcpAgentInstallFailed": "Could not add BugLogin Browser to the MCP client: {{detail}}",
+    "mcpAgentRemoveFailed": "Could not remove BugLogin Browser from the MCP client: {{detail}}",
     "vlessConfigInvalid": "The share link is invalid.",
     "xrayUnavailable": "Xray-core is unavailable on this system.",
     "xrayUnsupportedOs": "VLESS, VMess, Trojan and Hysteria2 proxies require macOS 12 or newer.",
     "xrayStartFailed": "Xray-core could not start.",
-    "cloudNotSignedIn": "Sign in to your Donut Browser account to use this.",
-    "cloudUnreachable": "Could not reach Donut Browser's servers. Check your connection and try again.",
+    "cloudNotSignedIn": "Sign in to your BugLogin Browser account to use this.",
+    "cloudUnreachable": "Could not reach BugLogin Browser's servers. Check your connection and try again.",
     "cloudRequestFailed": "The request failed. Please try again in a moment.",
     "remoteRateLimited": "Too many requests. Wait a moment and try again.",
     "remoteNoCapacity": "No remote host is free right now. Try again in a few minutes.",
@@ -2582,20 +2583,20 @@
     "vpnWorkerStartFailed": "Couldn't start the VPN connection: {{detail}}",
     "exitProbeFailed": "Couldn't reach the proxy exit node to check its location.",
     "vlessUnsupported": {
-      "security": "This link uses a security setting Donut does not support. Donut supports none, TLS and REALITY, and REALITY only over RAW (TCP), gRPC or XHTTP.",
-      "flow": "This link uses a flow Donut does not support. XTLS Vision works only with VLESS over RAW (TCP) with TLS or REALITY.",
-      "transport": "This link uses a transport, or a transport mode, that Donut does not support. Donut supports RAW (TCP), WebSocket, gRPC, HTTPUpgrade and XHTTP, but not mKCP, HTTP/2 or QUIC.",
-      "encryption": "This link uses an encryption setting Donut does not support.",
-      "headerType": "This link uses a header obfuscation Donut does not support.",
-      "fingerprint": "This link asks for a TLS fingerprint Donut does not support.",
+      "security": "This link uses a security setting BugLogin does not support. BugLogin supports none, TLS and REALITY, and REALITY only over RAW (TCP), gRPC or XHTTP.",
+      "flow": "This link uses a flow BugLogin does not support. XTLS Vision works only with VLESS over RAW (TCP) with TLS or REALITY.",
+      "transport": "This link uses a transport, or a transport mode, that BugLogin does not support. BugLogin supports RAW (TCP), WebSocket, gRPC, HTTPUpgrade and XHTTP, but not mKCP, HTTP/2 or QUIC.",
+      "encryption": "This link uses an encryption setting BugLogin does not support.",
+      "headerType": "This link uses a header obfuscation BugLogin does not support.",
+      "fingerprint": "This link asks for a TLS fingerprint BugLogin does not support.",
       "sni": "The link is missing a valid server name (sni).",
       "publicKey": "The link is missing the REALITY public key (pbk).",
-      "obfs": "This Hysteria2 link uses an obfuscation Donut does not support. Donut supports Salamander only.",
+      "obfs": "This Hysteria2 link uses an obfuscation BugLogin does not support. BugLogin supports Salamander only.",
       "scheme": "That is not a supported share link. It must start with vless://, vmess://, trojan://, hysteria2:// or hy2://.",
-      "parameter": "The link contains an option Donut does not support.",
+      "parameter": "The link contains an option BugLogin does not support.",
       "malformed": "The share link is invalid."
     },
-    "camoufoxRemoved": "Camoufox is no longer supported. Recreate this profile with Wayfern.",
+    "camoufoxRemoved": "Camoufox is no longer supported. Recreate this profile with browser.",
     "noE2ePasswordSet": "No end-to-end encryption password is set. Set one before syncing encrypted data.",
     "importSourceNotChromium": "This folder is not a Chromium browser profile",
     "importSourceNotChromiumNamed": "{{family}} profiles cannot be imported; only Chromium-based browsers are supported",
@@ -2615,20 +2616,20 @@
     "profileExportFailed": "This profile could not be exported. {{detail}}",
     "profileExportTooLarge": "This profile is too large to export. Clear some of its browsing data and try again.",
     "profileImportFailed": "This archive could not be read. {{detail}}",
-    "profileImportTooNew": "This archive was written by a newer version of Donut Browser. Update the app and try again.",
+    "profileImportTooNew": "This archive was written by a newer version of BugLogin Browser. Update the app and try again.",
     "profileImportUnsafeArchive": "This archive tries to write outside the profile folder, so it was refused.",
     "recordingAlreadyRunning": "A recording is already running. Stop it before starting another.",
     "profileNotRunning": "This profile's browser is not running. Start it first.",
-    "wayfern152Required": "Recording needs Wayfern 152 or newer. Update the browser for this profile.",
+    "wayfern152Required": "Recording needs browser 152 or newer. Update the browser for this profile.",
     "recordingFailed": "The recording could not be started. {{detail}}",
-    "mcpRemoteRequiresSignIn": "Sign in to your Donut account before enabling remote control.",
-    "mcpRemoteUnauthorized": "Donut cloud refused this device's credentials. Sign out and sign in again.",
-    "mcpRemoteSlotTaken": "Another Donut instance on this account is already connected. Only one at a time can be controlled remotely.",
+    "mcpRemoteRequiresSignIn": "Sign in to your BugLogin account before enabling remote control.",
+    "mcpRemoteUnauthorized": "BugLogin cloud refused this device's credentials. Sign out and sign in again.",
+    "mcpRemoteSlotTaken": "Another BugLogin instance on this account is already connected. Only one at a time can be controlled remotely.",
     "mcpRemoteNotEntitled": "Your plan does not include remote MCP.",
-    "mcpRemoteUnreachable": "Cannot reach Donut cloud right now. Reconnecting automatically.",
+    "mcpRemoteUnreachable": "Cannot reach BugLogin cloud right now. Reconnecting automatically.",
     "mcpRemoteKeyMissing": "This device has no remote MCP credential yet. Create one first, then add the client again.",
     "mcpRemoteKeyLimit": "This account already has the most MCP credentials it can hold. Revoke one on the account page and try again.",
-    "mcpRemoteKeyUnavailable": "Donut cloud could not issue an MCP credential right now. Try again in a moment.",
+    "mcpRemoteKeyUnavailable": "BugLogin cloud could not issue an MCP credential right now. Try again in a moment.",
     "urlSchemeNotAllowed": "Only http and https addresses can be opened.",
     "toolIsLocalOnly": "That action needs a file on this computer, so it cannot be done remotely.",
     "typingTooLong": "That text would take about {{seconds}} seconds to type, and a single request may take at most {{limit}}. Send it in smaller pieces.",
@@ -2675,12 +2676,12 @@
     "syncDisplayTooSmall": "The display is too small for {{windows}} windows in that layout.",
     "syncArrangeFailed": "No window could be moved.",
     "extensionPathInvalid": "That path is not allowed: it contains '..'.",
-    "systemProxyUnreachable": "Donut could not connect through the system proxy {{proxy}}. Fix or turn off the proxy in your system network settings, then try again.",
+    "systemProxyUnreachable": "BugLogin could not connect through the system proxy {{proxy}}. Fix or turn off the proxy in your system network settings, then try again.",
     "profileRouteRequired": "This profile has no proxy or VPN. Launches without one are blocked in Settings, under Privacy.",
     "profileRouteUnavailable": "The proxy or VPN of this profile is not available, so the launch was stopped to keep your IP address hidden. Assign a working proxy or VPN to the profile.",
     "wayfernLaunchArgsRequiresPro": "Custom launch arguments require Pro or a higher plan. Clear the arguments or upgrade your plan.",
     "wayfernLaunchArgInvalid": "Use --name or --name=value for each argument. Control characters are not permitted.",
-    "wayfernLaunchArgReserved": "Donut controls {{argument}}. Remove this argument.",
+    "wayfernLaunchArgReserved": "BugLogin controls {{argument}}. Remove this argument.",
     "wayfernLaunchArgNotAllowed": "{{argument}} is not a supported launch argument. Remove it.",
     "wayfernLaunchArgValueInvalid": "The value of {{argument}} is not supported.",
     "wayfernLaunchArgsLimit": "Use at most {{count}} launch arguments, each up to {{length}} characters.",
@@ -2704,7 +2705,7 @@
     "proxyRotationUrlMissing": "This proxy has no change IP link. Add one when you edit the proxy.",
     "proxyRotationFailed": "The provider refused the IP change (HTTP {{status}}).",
     "proxyRotationTimeout": "The provider did not answer the IP change within 30 seconds.",
-    "proxyRotationUnreachable": "Donut could not reach the provider's change IP link.",
+    "proxyRotationUnreachable": "BugLogin could not reach the provider's change IP link.",
     "startUrlInvalid": "\"{{url}}\" is not a web page. Start pages must be http:// or https:// addresses.",
     "startUrlsTooMany": "A profile can have at most 20 start pages.",
     "totpKeyInvalid": "This is not a 2FA key. Paste the secret key or the otpauth:// link that the site shows.",
@@ -2732,7 +2733,7 @@
     "localStorageBrowserRunning": "Close the browser before you import a storage state.",
     "localStorageRemoteSession": "A remote session owns this profile. Wait until its work is back here.",
     "scheduledAutomationNotEntitled": "Scheduled recipes are part of Solo, Pro, Team and Enterprise.",
-    "agentScheduleInvalid": "Donut cloud did not accept this schedule. Check the days, the time and the profiles.",
+    "agentScheduleInvalid": "BugLogin cloud did not accept this schedule. Check the days, the time and the profiles.",
     "agentScheduleNotFound": "This schedule no longer exists.",
     "teamRoleReadOnly": "Your team role can open profiles but not change them. Ask a team owner or admin.",
     "teamActivityForbidden": "Only team owners and admins can see the team's activity.",
@@ -2753,15 +2754,15 @@
     "restorePointsUnsupported": "The sync server is too old for restore points. Update it.",
     "restorePointFailed": "The restore point failed: {{detail}}",
     "restorePointsNeedSync": "Restore points need sync on for this profile.",
-    "accountSyncSignInRequired": "Sign in to your Donut account to use your own sync server.",
+    "accountSyncSignInRequired": "Sign in to your BugLogin account to use your own sync server.",
     "accountSyncPlanRequired": "Your own sync server needs a paid plan.",
     "syncServerUrlInvalid": "Enter the full server address, for example https://sync.example.com.",
     "syncServerUnreachable": "Could not connect to the sync server.",
     "syncServerStorageUnreachable": "The sync server answers, but this computer cannot connect to its storage at {{endpoint}}.",
-    "syncServerNoAccounts": "This server does not accept Donut accounts. Set SYNC_PUBLIC_URL on the server.",
+    "syncServerNoAccounts": "This server does not accept BugLogin accounts. Set SYNC_PUBLIC_URL on the server.",
     "syncServerAddressMismatch": "The server's address is {{address}}. Enter that address.",
-    "remoteNeedsDonutSync": "Remote sessions and Cookie Bot get profiles from Donut cloud sync. This computer syncs with your own server.",
-    "accountSyncUnavailable": "Donut cannot sign in to your own server yet. Try again later.",
+    "remoteNeedsDonutSync": "Remote sessions and Cookie Bot get profiles from BugLogin cloud sync. This computer syncs with your own server.",
+    "accountSyncUnavailable": "BugLogin cannot sign in to your own server yet. Try again later.",
     "groupNotEmpty": "Cannot delete group: it still contains profiles or extensions."
   },
   "rail": {
@@ -2859,7 +2860,7 @@
     },
     "selfHosted": {
       "title": "Self-hosted sync server",
-      "description": "Point BugLogin at your own donut-sync server to sync profiles, proxies, groups, and extensions without using the hosted cloud.",
+      "description": "Point BugLogin at your own BugLogin Sync server to sync profiles, proxies, groups, and extensions without using the hosted cloud.",
       "disabledWhileLoggedIn": "Self-hosted sync is unavailable while you're signed into your BugLogin account. Sign out to use a custom server.",
       "connectionStatus": "Connection:",
       "statusUnknown": "Untested",
@@ -2874,16 +2875,16 @@
     "viewTeamUsage": "View team usage",
     "ownServer": {
       "title": "Your own sync server",
-      "description": "Sync this account with a donut-sync server that you run, not with Donut cloud. Your plan's profile limit and your team's roles and group access stay the same.",
+      "description": "Sync this account with a BugLogin Sync server that you run, not with BugLogin cloud. Your plan's profile limit and your team's roles and group access stay the same.",
       "current": "Syncing with {{server}}",
-      "currentCloud": "Syncing with Donut cloud",
-      "donutCloud": "Donut cloud",
-      "useDonutCloud": "Use Donut cloud",
-      "accountsOn": "This server accepts Donut accounts.",
-      "cloudOnly": "Remote sessions and Cookie Bot need Donut cloud sync.",
+      "currentCloud": "Syncing with BugLogin cloud",
+      "donutCloud": "BugLogin cloud",
+      "useDonutCloud": "Use BugLogin cloud",
+      "accountsOn": "This server accepts BugLogin accounts.",
+      "cloudOnly": "Remote sessions and Cookie Bot need BugLogin cloud sync.",
       "teamNote": "All members of your team must use the same server.",
       "saved": "Sync server saved.",
-      "backToCloud": "Syncing with Donut cloud again."
+      "backToCloud": "Syncing with BugLogin cloud again."
     }
   },
   "shortcutsPage": {
@@ -2938,7 +2939,7 @@
     "steps": {
       "createProfile": {
         "title": "Create your first profile",
-        "content": "Click here to create your first profile. Pick Wayfern as the browser — the recommended, fingerprint-protected Chromium."
+        "content": "Click here to create your first profile. Pick browser as the browser — the recommended, fingerprint-protected Chromium."
       },
       "dnsBlocking": {
         "title": "DNS blocking",
@@ -2971,7 +2972,7 @@
     },
     "ready": {
       "title": "Setting things up",
-      "descDownloading": "Downloading your first browser (Wayfern). This one-time setup runs in the background — hang tight.",
+      "descDownloading": "Downloading the browser runtime for your first profile. This one-time setup runs in the background — hang tight.",
       "descReady": "Your browser is ready. Let's create your first profile.",
       "cta": "Create my first profile",
       "downloading": "Downloading…",
@@ -3026,11 +3027,17 @@
     "unknownError": "Unknown error occurred"
   },
   "cookieCopy": {
-    "noOtherTargets": "No other Wayfern profiles selected"
+    "noOtherTargets": "No other browser profiles selected"
   },
   "about": {
     "title": "About",
     "version": "Version {{version}}",
+    "checkUpdates": "Check for updates",
+    "checkingUpdates": "Checking…",
+    "upToDate": "BugLogin is up to date",
+    "updateCheckFailed": "Could not check for updates",
+    "updatesReleaseOnly": "Update checks are unavailable in this development build",
+    "updatesReleaseOnlyDescription": "Use a signed BugLogin release to check for and install updates. You can download the latest release from buglogin.com.",
     "portableBadge": "portable",
     "licenseNotice": "Open-source anti-detect browser, licensed under AGPL-3.0.",
     "website": "Website",
@@ -3043,7 +3050,7 @@
       "found": "You found the snack drawer.",
       "finished": "All crumbs. No cookies.",
       "takeBite": "Take a bite",
-      "again": "One more donut"
+      "again": "Open the snack drawer again"
     }
   },
   "clearOnClose": {
@@ -3169,7 +3176,7 @@
   },
   "profileTransfer": {
     "exportTitle": "Export profile",
-    "archiveFilter": "Donut profile archive",
+    "archiveFilter": "BugLogin profile archive",
     "exportDescription": "Write this profile to a file another machine can read. The archive carries its configuration and, if you ask for it, its browser data: cookies, logins and extension state.",
     "includeData": "Include the browser data",
     "protectedNotice": "This profile is password protected, so its data stays on this machine. The archive carries its configuration only.",
@@ -3195,7 +3202,7 @@
       "https": "Encrypted with DNS over HTTPS ({{server}}). Queries go through this profile's proxy or VPN. If the server does not answer, pages do not load.",
       "tls": "Encrypted with DNS over TLS ({{server}}). Queries go through this profile's proxy or VPN. If the server does not answer, pages do not load.",
       "tcp": "Not encrypted: plain DNS to {{server}}. The proxy can read and change the answers. If the server does not answer, pages do not load.",
-      "upgraded": "This address also serves encrypted DNS, so Donut uses it. Start with tcp:// to keep plain DNS."
+      "upgraded": "This address also serves encrypted DNS, so BugLogin uses it. Start with tcp:// to keep plain DNS."
     }
   },
   "profileStatuses": {
@@ -3222,12 +3229,12 @@
     "deleteDescription": "Profiles with this status will have no status. You cannot undo this."
   },
   "startPages": {
-    "description": "Pages that every launch from Donut opens, one per line, instead of the last session. A run with its own URL opens only that URL.",
+    "description": "Pages that every launch from BugLogin opens, one per line, instead of the last session. A run with its own URL opens only that URL.",
     "placeholder": "https://mail.example.com\nhttps://shop.example.com"
   },
   "totp": {
     "toolTitle": "2FA code",
-    "toolDescription": "Paste a 2FA key to see its current code. Donut does not keep the key.",
+    "toolDescription": "Paste a 2FA key to see its current code. BugLogin does not keep the key.",
     "keyLabel": "2FA key",
     "keyPlaceholder": "Secret key or otpauth:// link",
     "expiresIn": "Changes in {{seconds}} s",
@@ -3628,16 +3635,16 @@
     "vpnExtensionConfirmed": "Known VPN or proxy tool",
     "vpnExtensionLikely": "Looks like a VPN or proxy tool",
     "vpnExtensionCapability": "Holds the proxy permission",
-    "vpnExtensionExplainer": "If one of these routes your traffic elsewhere, the browser's real location will no longer match the timezone, language and geolocation this profile was created with, and Donut cannot detect that from the outside.",
+    "vpnExtensionExplainer": "If one of these routes your traffic elsewhere, the browser's real location will no longer match the timezone, language and geolocation this profile was created with, and BugLogin cannot detect that from the outside.",
     "proxyCapableHeading": "Extensions that can change the proxy",
-    "proxyCapableIntro": "These don't look like VPNs, but they hold Chromium's proxy permission, which download managers and debugging tools need too. Donut cannot tell whether any of them is using it:",
-    "sourceDonut": "Managed by Donut",
+    "proxyCapableIntro": "These don't look like VPNs, but they hold Chromium's proxy permission, which download managers and debugging tools need too. BugLogin cannot tell whether any of them is using it:",
+    "sourceDonut": "Managed by BugLogin",
     "sourceBrowser": "Installed in the profile",
     "measurementUnreliable": "An extension in this profile holds the proxy permission, so the exit check may not describe the route the browser actually takes.",
-    "scanIncompleteEncrypted": "This profile is encrypted, so only Donut-managed extensions could be checked.",
-    "scanIncompleteEphemeral": "This profile has no data yet, so only Donut-managed extensions could be checked.",
+    "scanIncompleteEncrypted": "This profile is encrypted, so only BugLogin-managed extensions could be checked.",
+    "scanIncompleteEphemeral": "This profile has no data yet, so only BugLogin-managed extensions could be checked.",
     "scanIncompletePartial": "The extension scan was cut short, so some extensions may not be listed.",
-    "probePending": "The proxy exit hasn't been measured yet. Donut will check it while starting and stop if it doesn't match.",
+    "probePending": "The proxy exit hasn't been measured yet. BugLogin will check it while starting and stop if it doesn't match.",
     "launchAnyway": "Launch anyway",
     "dontBlockAgain": "Don't block again for this exact mismatch",
     "dontWarnExtensions": "Don't warn again about these extensions",
@@ -3645,7 +3652,7 @@
     "cancelledSummary": "{{cancelled}} of {{total}} launches cancelled",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "vpnExtensionEntryNoVersion": " — {{capability}}, {{source}}",
-    "scanIncompleteMissing": "This profile has not been launched yet, so only Donut-managed extensions could be checked.",
+    "scanIncompleteMissing": "This profile has not been launched yet, so only BugLogin-managed extensions could be checked.",
     "exitUnverifiedTimezone": "This profile's fingerprint declares no timezone, so the exit check cannot verify one. The launch isn't blocked, but nothing was compared either.",
     "exitUnverifiedLanguage": "This profile's fingerprint language cannot be compared against the exit country, so that check is unverified rather than passed."
   },
@@ -3707,7 +3714,7 @@
   "easterEgg": {
     "konami": {
       "title": "Cheat code accepted",
-      "description": "30 extra donuts added. They are decorative."
+      "description": "30 colorful accents added. They are decorative."
     }
   },
   "trash": {
@@ -3748,7 +3755,7 @@
     "confirmEmptyDescription": "Are you sure you want to permanently delete all items in trash? This action cannot be undone."
   },
   "agent": {
-    "description": "See what your AI agent does in Donut, answer its questions and step in when a page needs you.",
+    "description": "See what your AI agent does in BugLogin, answer its questions and step in when a page needs you.",
     "tabs": {
       "conversation": "Conversation",
       "profiles": "Profiles",
@@ -3774,19 +3781,19 @@
     },
     "setup": {
       "signedOutTitle": "Sign in to work with your agent",
-      "signedOutBody": "Your agent reaches Donut through your Donut account. Sign in to connect it.",
+      "signedOutBody": "Your agent reaches BugLogin through your BugLogin account. Sign in to connect it.",
       "signedOutAction": "Open Account",
       "planTitle": "Remote control is not part of your plan",
       "planBody": "Connecting your own agent needs a plan that includes remote control.",
       "planAction": "Open Account",
       "remoteOffTitle": "Remote control is off",
-      "remoteOffBody": "Your agent connects to Donut through remote control. Turn it on, then add Donut to your agent.",
+      "remoteOffBody": "Your agent connects to BugLogin through remote control. Turn it on, then add BugLogin to your agent.",
       "remoteOffAction": "Turn on remote control",
-      "remoteOffInline": "Remote control is off, so your agents cannot reach Donut right now.",
+      "remoteOffInline": "Remote control is off, so your agents cannot reach BugLogin right now.",
       "waitingTitle": "Waiting for your agent",
-      "waitingBody": "Add Donut to your agent, then paste the instructions below into it so it checks in with you while it works.",
+      "waitingBody": "Add BugLogin to your agent, then paste the instructions below into it so it checks in with you while it works.",
       "starterLabel": "Instructions for your agent",
-      "starter": "You can control my Donut Browser profiles with the Donut tools. When you start, and between steps, call get_human_updates to read my notes and to see which profiles I am using. If you are not sure what to do, ask me with ask_human. If a page needs a person, such as a sign-in, a verification or a payment, call request_human_help and wait until I hand the profile back. During long jobs, call report_progress so I can see how far you are.",
+      "starter": "You can control my BugLogin Browser profiles with the BugLogin tools. When you start, and between steps, call get_human_updates to read my notes and to see which profiles I am using. If you are not sure what to do, ask me with ask_human. If a page needs a person, such as a sign-in, a verification or a payment, call request_human_help and wait until I hand the profile back. During long jobs, call report_progress so I can see how far you are.",
       "starterCopied": "Instructions copied",
       "remoteUnavailableTitle": "Remote Agent Unavailable"
     },
@@ -3826,7 +3833,7 @@
       "progress": "{{done}} of {{total}}",
       "showEarlier": "Show earlier ({{count}})",
       "hideEarlier": "Hide earlier",
-      "website": "Donut website"
+      "website": "BugLogin website"
     },
     "thread": {
       "label": "Conversation",
@@ -3843,7 +3850,7 @@
       "noteSeen": "Seen",
       "joined": "{{agent}} joined",
       "left": "{{agent}} left",
-      "feedbackSent": "sent feedback to the Donut team",
+      "feedbackSent": "sent feedback to the BugLogin team",
       "feedbackLogs": "Logs attached"
     },
     "composer": {
@@ -3905,7 +3912,7 @@
       "recording": {
         "record": "Record",
         "recording": "Recording",
-        "description": "Do the task once in the profile's browser and Donut writes down the steps. Passwords are never recorded.",
+        "description": "Do the task once in the profile's browser and BugLogin writes down the steps. Passwords are never recorded.",
         "stop": "Stop recording",
         "steps": "{{count}} steps recorded",
         "hint": "Choose a running profile to record.",
@@ -4040,7 +4047,7 @@
   },
   "groupBookmarks": {
     "title": "Bookmarks for {{name}}",
-    "description": "Every profile in this group gets these bookmarks in a folder Donut manages. Other bookmarks are left alone.",
+    "description": "Every profile in this group gets these bookmarks in a folder BugLogin manages. Other bookmarks are left alone.",
     "editTooltip": "Group bookmarks ({{n}})",
     "empty": "This group has no shared bookmarks yet.",
     "addRow": "Add bookmark",
@@ -4092,7 +4099,7 @@
       "fingerprintGate": {
         "label": "Fingerprint gate",
         "title": "Keep the fingerprint true to the exit",
-        "body": "Before a launch, Donut compares the proxy exit's timezone and language with the profile's fingerprint and stops a mismatch. Fix the fingerprint, or turn the gate off under Advanced if you know what you are doing.",
+        "body": "Before a launch, BugLogin compares the proxy exit's timezone and language with the profile's fingerprint and stops a mismatch. Fix the fingerprint, or turn the gate off under Advanced if you know what you are doing.",
         "action": "Open Advanced settings"
       },
       "profilePassword": {
@@ -4110,7 +4117,7 @@
       "defaultBrowser": {
         "label": "Default browser",
         "title": "Open every link in the right profile",
-        "body": "Make Donut your default browser and each link from another app asks which profile should open it.",
+        "body": "Make BugLogin your default browser and each link from another app asks which profile should open it.",
         "action": "Open default browser settings"
       },
       "extensionGroups": {
@@ -4122,7 +4129,7 @@
       "selfHostedSync": {
         "label": "Self-hosted sync",
         "title": "Back up to your own server",
-        "body": "Point Donut at a self-hosted donut-sync server and profiles, proxies and groups mirror to it. Add an end-to-end password and the server only ever sees ciphertext.",
+        "body": "Point BugLogin at a self-hosted BugLogin Sync server and profiles, proxies and groups mirror to it. Add an end-to-end password and the server only ever sees ciphertext.",
         "action": "Open Account"
       },
       "trash": {
@@ -4133,7 +4140,7 @@
       },
       "localApi": {
         "label": "API and MCP",
-        "title": "Automate Donut from scripts and agents",
+        "title": "Automate BugLogin from scripts and agents",
         "body": "The local REST API lets scripts list, create and configure profiles. Turn it on under Integrations and copy the token.",
         "action": "Open Integrations"
       },
@@ -4164,7 +4171,7 @@
       "agent": {
         "label": "Your own agent",
         "title": "Work alongside your AI agent",
-        "body": "Connect Claude Code, Cursor or another agent to Donut. It asks you when it is unsure, and you can take over a profile and hand it back at any time.",
+        "body": "Connect Claude Code, Cursor or another agent to BugLogin. It asks you when it is unsure, and you can take over a profile and hand it back at any time.",
         "action": "Open Agent"
       },
       "team": {
@@ -4175,7 +4182,7 @@
       },
       "remoteControl": {
         "label": "Remote control",
-        "title": "Drive this desktop from donutbrowser.com",
+        "title": "Drive this desktop from app3.buglogin.com",
         "body": "With remote control on, agents on the website reach this machine's profiles over an outbound bridge. Turn it on under Integrations.",
         "action": "Open Integrations"
       },
@@ -4195,7 +4202,7 @@
   },
   "feedback": {
     "title": "Send feedback",
-    "description": "Tell the Donut team what is on your mind. We read every message.",
+    "description": "Tell the BugLogin team what is on your mind. We read every message.",
     "kindLabel": "Type of feedback",
     "kinds": {
       "bug": {
@@ -4204,7 +4211,7 @@
       },
       "idea": {
         "label": "Idea",
-        "placeholder": "What would make Donut better for you?"
+        "placeholder": "What would make BugLogin better for you?"
       },
       "praise": {
         "label": "Praise",
@@ -4230,12 +4237,12 @@
       "placeholder": "you@example.com",
       "signedIn": "Replies go to {{email}}."
     },
-    "included": "Also sent: Donut {{version}}, {{os}} {{arch}}",
+    "included": "Also sent: BugLogin {{version}}, {{os}} {{arch}}",
     "send": "Send",
     "success": {
       "title": "Thank you!",
-      "body": "Your feedback is with the Donut team.",
-      "bodyWithLogs": "Your feedback and logs are with the Donut team.",
+      "body": "Your feedback is with the BugLogin team.",
+      "bodyWithLogs": "Your feedback and logs are with the BugLogin team.",
       "reply": "If we need more details, we will write to {{email}}.",
       "done": "Done"
     }
@@ -4248,7 +4255,7 @@
     "description": "What members did with the team's profiles and shared items, newest first. Kept for 90 days, or 365 days on Enterprise.",
     "empty": "No activity yet.",
     "loadMore": "Load more",
-    "system": "Donut",
+    "system": "BugLogin",
     "formerMember": "A former member",
     "noTarget": "an item",
     "changedFields": "Changed: {{fields}}",

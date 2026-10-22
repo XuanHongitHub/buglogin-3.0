@@ -19,6 +19,8 @@ import { RippleButton } from "./ui/ripple";
 interface AboutDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  onCheckForUpdates?: () => void;
+  isCheckingForUpdates?: boolean;
 }
 
 interface SystemInfo {
@@ -34,7 +36,12 @@ const SPIN_PER_CLICK = 540; // deg/s
 const ESCAPE_VELOCITY = 2200; // deg/s
 const SPIN_FRICTION = 1.1; // fraction of velocity lost per second
 
-export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
+export function AboutDialog({
+  isOpen,
+  onClose,
+  onCheckForUpdates,
+  isCheckingForUpdates = false,
+}: AboutDialogProps) {
   const { t } = useTranslation();
   const reducedMotion = useReducedMotion();
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
@@ -174,6 +181,14 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           </p>
 
           <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isCheckingForUpdates}
+              onClick={() => onCheckForUpdates?.()}
+            >
+              {t(isCheckingForUpdates ? "about.checkingUpdates" : "about.checkUpdates")}
+            </Button>
             <Button
               variant="outline"
               size="sm"

@@ -1,18 +1,18 @@
 param(
-    [string]$BuildRoot = 'E:\buglogin-target',
+    [string]$BuildRoot = 'G:\buglogin-target',
     [int]$WaitSeconds = 8
 )
 
 $ErrorActionPreference = 'Stop'
 $resolvedRoot = [IO.Path]::GetFullPath($BuildRoot)
-if ($resolvedRoot.TrimEnd('\') -ine 'E:\buglogin-target') {
-    throw 'BugLogin Windows smoke must use the single build target E:\buglogin-target.'
+if ($resolvedRoot.TrimEnd('\') -ine 'G:\buglogin-target') {
+    throw 'BugLogin Windows smoke must use the single build target G:\buglogin-target.'
 }
-$executable = Join-Path $resolvedRoot 'release\buglogin-desktop-app.exe'
+$releaseRoot = Join-Path $resolvedRoot 'x86_64-pc-windows-msvc\release'
+$executable = Join-Path $releaseRoot 'buglogin-desktop-app.exe'
 $artifacts = @(
     $executable,
-    (Join-Path $resolvedRoot 'release\bundle\msi\BugLogin_0.1.0_x64_en-US.msi'),
-    (Join-Path $resolvedRoot 'release\bundle\nsis\BugLogin_0.1.0_x64-setup.exe')
+    (Join-Path $releaseRoot 'bundle\nsis\BugLogin_3.0.0_x64-setup.exe')
 )
 foreach ($artifact in $artifacts) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {

@@ -1516,7 +1516,7 @@ export function OrgManagementCenter({
               </div>
               <div className="flex justify-between py-1">
                 <span className="text-muted-foreground">
-                  Nhân Wayfern Core:
+                  Nhân Chromium:
                 </span>
                 <span className="font-mono font-bold text-foreground">
                   v132.0.6834.110 (Mới nhất)

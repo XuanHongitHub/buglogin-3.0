@@ -381,7 +381,7 @@ fn configured_app_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updat
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "app_updater_not_configured".to_owned())?;
     let endpoint = option_env!("BUGLOGIN_TAURI_UPDATER_ENDPOINT").unwrap_or(
-        "https://github.com/keyduc91/Malvanut-Login/releases/latest/download/latest.json",
+        "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json",
     );
     let endpoint =
         url::Url::parse(endpoint).map_err(|_| "app_updater_invalid_endpoint".to_owned())?;

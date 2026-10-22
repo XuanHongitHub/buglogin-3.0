@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { resolve, win32 } from "node:path";
 
-export const WINDOWS_CARGO_TARGET_DIR = "E:\\buglogin-target";
+export const WINDOWS_CARGO_TARGET_DIR = "G:\\buglogin-target";
 
 function canonicalWindowsPath(value) {
   const withoutDevicePrefix = value.replace(/^\\\\\?\\/, "");

@@ -1835,6 +1835,22 @@ pub(crate) fn load_local_profile_settings(profile_id: &str) -> Option<Value> {
     None
 }
 
+pub(crate) fn profile_window_color(profile_id: &str) -> String {
+    load_local_profile_settings(profile_id)
+        .and_then(|settings| {
+            settings
+                .get("window_color")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|color| {
+            let hex = color.strip_prefix('#').unwrap_or(color);
+            hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .map(|color| format!("#{}", color.trim_start_matches('#').to_ascii_lowercase()))
+        .unwrap_or_else(|| crate::adapter::profile_color_for_id(profile_id))
+}
+
 pub(crate) fn has_profile_password(profile_id: &str) -> bool {
     let local = load_local_profile_settings(profile_id);
     let hash = local
@@ -1899,11 +1915,7 @@ fn legacy_profile(profile: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| json!(false));
 
-    let window_color = local
-        .as_ref()
-        .and_then(|l| l.get("window_color"))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let window_color = json!(profile_window_color(id_str));
 
     let launch_hook = local
         .as_ref()

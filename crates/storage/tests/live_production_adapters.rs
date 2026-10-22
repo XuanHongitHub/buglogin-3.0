@@ -375,8 +375,7 @@ fn s3_https_adapter_round_trips_checksum_metadata() {
 fn optional_env(name: &str) -> Option<String> {
     match env::var(name) {
         Ok(value) if !value.trim().is_empty() => Some(value),
-        _ if strict() => panic!("missing required live-test variable {name}"),
-        _ => None,
+        _ => panic!("{name} is required when integration-tests is enabled"),
     }
 }
 
@@ -385,10 +384,6 @@ fn required_companion_env(name: &str) -> Option<String> {
         Ok(value) if !value.trim().is_empty() => Some(value),
         _ => panic!("{name} is required when BUGLOGIN_S3_TEST_ENDPOINT is set"),
     }
-}
-
-fn strict() -> bool {
-    bool_env("BUGLOGIN_LIVE_ADAPTER_STRICT")
 }
 
 fn bool_env(name: &str) -> bool {

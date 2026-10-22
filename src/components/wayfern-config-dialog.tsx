@@ -119,11 +119,11 @@ export function WayfernConfigDialog({
             {isRunning
               ? t("wayfernConfigDialog.titleView", {
                   name: profile.name,
-                  browser: "Wayfern",
+                  browser: "Chromium",
                 })
               : t("wayfernConfigDialog.titleConfigure", {
                   name: profile.name,
-                  browser: "Wayfern",
+                  browser: "Chromium",
                 })}
           </DialogTitle>
         </DialogHeader>
