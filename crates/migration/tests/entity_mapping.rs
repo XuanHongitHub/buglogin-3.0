@@ -265,6 +265,9 @@ fn referenced_proxy_mapping_rejects_symlinked_proxy_directory() {
     std::os::unix::fs::symlink(outside.path(), source.path().join("proxies")).unwrap();
     let ids = BTreeSet::from(["proxy-a".to_owned()]);
 
-    let error = map_legacy_proxies_for_ids(source.path(), "entities", &ids).unwrap_err();
+    let error = match map_legacy_proxies_for_ids(source.path(), "entities", &ids) {
+        Ok(_) => panic!("symlinked proxy directory must be rejected"),
+        Err(error) => error,
+    };
     assert_eq!(error.code, "migration_entity_invalid");
 }
