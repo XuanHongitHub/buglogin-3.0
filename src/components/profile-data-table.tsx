@@ -3092,14 +3092,12 @@ export function ProfilesDataTable({
               <ProfileHandoffStatus
                 profileId={profile.id}
                 ownerLabel={meta.getProfileLockEmail(profile.id)}
-                state={
-                  (() => {
-                    const state = meta.getRemoteHandoff?.(profile.id);
-                    return state === "running" || state === "pending_sync"
-                      ? state
-                      : null;
-                  })()
-                }
+                state={(() => {
+                  const state = meta.getRemoteHandoff?.(profile.id);
+                  return state === "running" || state === "pending_sync"
+                    ? state
+                    : null;
+                })()}
                 syncStatus={meta.syncStatuses[profile.id]}
                 compact
                 onOpenSync={

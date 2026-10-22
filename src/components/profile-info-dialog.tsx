@@ -54,8 +54,8 @@ import { ExportProfileSection } from "@/components/profile-transfer";
 import { RestorePoints } from "@/components/restore-points";
 import { SharedFingerprintConfigForm } from "@/components/shared-fingerprint-config-form";
 import { ProfileTotpSection } from "@/components/totp-code";
-import { AnimatedSwitch } from "@/components/ui/animated-switch";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { AnimatedSwitch } from "@/components/ui/animated-switch";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -101,7 +101,7 @@ import { WindowDragArea } from "@/components/window-drag-area";
 import { useInputModality } from "@/hooks/use-input-modality";
 import { hideOthers } from "@/lib/aria-hidden";
 import { translateBackendError } from "@/lib/backend-errors";
-import { getProfileIcon, getProfileNativeOs } from "@/lib/browser-utils";
+import { getProfileIcon } from "@/lib/browser-utils";
 import { DNS_BLOCKLIST_LEVELS } from "@/lib/dns-blocklist-levels";
 import { formatRelativeTime } from "@/lib/flag-utils";
 import { MOTION_EASE_OUT } from "@/lib/motion";

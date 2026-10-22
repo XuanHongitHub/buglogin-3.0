@@ -187,7 +187,11 @@ export function AboutDialog({
               disabled={isCheckingForUpdates}
               onClick={() => onCheckForUpdates?.()}
             >
-              {t(isCheckingForUpdates ? "about.checkingUpdates" : "about.checkUpdates")}
+              {t(
+                isCheckingForUpdates
+                  ? "about.checkingUpdates"
+                  : "about.checkUpdates",
+              )}
             </Button>
             <Button
               variant="outline"

@@ -14,9 +14,9 @@ const rustOutputPath = resolve(root, "crates/api/src/commands/generated.rs");
 const checkOnly = process.argv.includes("--check") || process.argv.includes("--check-rust");
 const rustOnly = process.argv.includes("--rust-only") || process.argv.includes("--check-rust");
 
-const source = await readFile(sourcePath, "utf8");
+const source = (await readFile(sourcePath, "utf8")).replace(/\r\n/g, "\n");
 const registry = parse(source);
-const openApiSource = await readFile(openApiSourcePath, "utf8");
+const openApiSource = (await readFile(openApiSourcePath, "utf8")).replace(/\r\n/g, "\n");
 const openApi = parse(openApiSource);
 
 if (

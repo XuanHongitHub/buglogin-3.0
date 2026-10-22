@@ -11,12 +11,12 @@ const fail = (message) => {
 
 const json = JSON.parse(await read("docs/contracts/domain-schema-v1.json"));
 const jsonV2 = JSON.parse(await read("docs/contracts/domain-schema-v2.json"));
-const commandSource = await read("docs/contracts/command-registry-v1.yaml");
+const commandSource = (await read("docs/contracts/command-registry-v1.yaml")).replace(/\r\n/g, "\n");
 const commands = YAML.parse(commandSource);
 const generatedRust = await read("crates/api/src/commands/generated.rs");
 const openapiSource = await read("crates/api/openapi/openapi-v1.yaml");
 const openapiMirrorSource = await read("docs/contracts/openapi-v1.yaml");
-if (openapiMirrorSource !== openapiSource) {
+if (openapiMirrorSource.replace(/\r\n/g, "\n") !== openapiSource.replace(/\r\n/g, "\n")) {
   fail(
     "docs/contracts/openapi-v1.yaml must exactly mirror the Rust API OpenAPI contract",
   );

@@ -37,7 +37,9 @@ export function useAppUpdateNotifications() {
 
   const requestAppUpdateCheck = useCallback(() => {
     if (updateCheckRef.current) return updateCheckRef.current;
-    const request = invoke<AppUpdateInfo | null>("check_for_app_updates_manual");
+    const request = invoke<AppUpdateInfo | null>(
+      "check_for_app_updates_manual",
+    );
     const pending = request.finally(() => {
       if (updateCheckRef.current === pending) updateCheckRef.current = null;
     });
