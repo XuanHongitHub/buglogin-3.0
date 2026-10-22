@@ -68,18 +68,22 @@ async fn bugmini_native_profile_lifecycle() {
         repository,
         profiles.clone(),
         RuntimeTargets {
-            wayfern: None,
-            bugmini: Some(RuntimeTarget {
-                binary: RuntimeBinary {
-                    path: binary,
-                    version: "146.0.7680.177.4".into(),
-                    expected_checksum: checksum(&bytes),
+            wayfern: Default::default(),
+            bugmini: [(
+                "146.0.7680.177.4".to_owned(),
+                RuntimeTarget {
+                    binary: RuntimeBinary {
+                        path: binary,
+                        version: "146.0.7680.177.4".into(),
+                        expected_checksum: checksum(&bytes),
+                    },
+                    extra_args: vec![
+                        "--no-first-run".into(),
+                        format!("http://{address}/cookie-check"),
+                    ],
                 },
-                extra_args: vec![
-                    "--no-first-run".into(),
-                    format!("http://{address}/cookie-check"),
-                ],
-            }),
+            )]
+            .into(),
         },
     ) {
         Ok(state) => state,

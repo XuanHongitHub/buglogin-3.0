@@ -66,18 +66,22 @@ async fn wayfern_native_profile_lifecycle() {
         repository,
         profiles.clone(),
         RuntimeTargets {
-            wayfern: Some(RuntimeTarget {
-                binary: RuntimeBinary {
-                    path: binary,
-                    version: version.clone(),
-                    expected_checksum: checksum(&bytes),
+            wayfern: [(
+                version.clone(),
+                RuntimeTarget {
+                    binary: RuntimeBinary {
+                        path: binary,
+                        version: version.clone(),
+                        expected_checksum: checksum(&bytes),
+                    },
+                    extra_args: vec![
+                        "--no-first-run".into(),
+                        format!("http://{address}/profile-check"),
+                    ],
                 },
-                extra_args: vec![
-                    "--no-first-run".into(),
-                    format!("http://{address}/profile-check"),
-                ],
-            }),
-            bugmini: None,
+            )]
+            .into(),
+            bugmini: Default::default(),
         },
     ) {
         Ok(state) => state,
