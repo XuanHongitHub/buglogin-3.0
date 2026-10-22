@@ -107,6 +107,10 @@ impl<C: ProcessController> LifecycleManager<C> {
         }
     }
 
+    pub fn approve_executable(&self, path: &std::path::Path) -> Result<(), Problem> {
+        self.controller.approve_executable(path)
+    }
+
     pub fn launch(
         &mut self,
         profile_path: &Path,
@@ -115,6 +119,11 @@ impl<C: ProcessController> LifecycleManager<C> {
         let key = profile_path.to_path_buf();
         if self.active.contains_key(&key) {
             return Err(already_running());
+        }
+        match self.reconcile_profile(profile_path)? {
+            LifecycleState::Ready | LifecycleState::Stopped => {}
+            LifecycleState::Recovering => return Err(identity_unverified()),
+            _ => return Err(already_running()),
         }
         let mut lock = ProfileLock::acquire(profile_path)?;
         let mut process = self.controller.launch(specification)?;
@@ -182,6 +191,12 @@ impl<C: ProcessController> LifecycleManager<C> {
                 Ok(LifecycleState::Ready)
             }
         }
+    }
+
+    pub fn process_is_verified_running(&mut self, profile_path: &Path) -> bool {
+        self.active
+            .get_mut(profile_path)
+            .is_some_and(|active| matches!(active.process.status(), Ok(ProcessStatus::Running)))
     }
 }
 

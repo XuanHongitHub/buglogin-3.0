@@ -3,11 +3,11 @@ product: buglogin
 source:
   project: DonutBrowser
   repository: https://github.com/zhom/donutbrowser
-  releaseReference: v0.28.2
-  commit: a4ed5c855afc4242b6c89c7d73ad767f2357c7f0
-  commitTimestamp: "2026-07-18T11:06:24+02:00"
-  sourceTreeHash: a0294adfdb92874f6ab915015744f1e470fe09347e422fb988c3ae9d3efe97d8
-  inspectedAt: "2026-07-20"
+  releaseReference: v0.34.0
+  commit: f70a6c9671b17ab03a6e6f87a7362f8076c8339d
+  commitTimestamp: "2026-10-16T00:41:48+04:00"
+  sourceTreeHash: 1f370df747117b3ce1620c755ac9d97839cedd8aa5c3b80427e508475eb6c0d6
+  inspectedAt: "2026-10-19"
 destinationBaseline:
   copiedPaths:
     - src

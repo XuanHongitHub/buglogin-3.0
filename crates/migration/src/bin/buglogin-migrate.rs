@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process;
+use zeroize::Zeroizing;
 
 use buglogin_domain::errors::Problem;
 use buglogin_migration::cutover::{confirm_cutover, promote_staged};
@@ -11,8 +12,10 @@ use buglogin_migration::inspect::{
     InspectReport, SourceIdentity, inspect_source, inspect_source_with_identity,
 };
 use buglogin_migration::legacy::canonicalize_legacy_control_plane_json;
+use buglogin_migration::legacy::{LegacyStoragePolicy, export_read_only_postgres_control_plane};
 use buglogin_migration::package::{
-    NeutralPackage, PackageMetadata, build_encrypted_profile_package, build_neutral_package,
+    NeutralPackage, PackageMetadata, build_control_only_profile_package,
+    build_encrypted_profile_package, build_neutral_package,
 };
 use buglogin_migration::reconcile::{ReconciliationStatus, reconcile_activation};
 use buglogin_migration::rollback::{confirm_rollback, rollback_activation, rollback_cutover};
@@ -40,8 +43,11 @@ fn main() {
 fn run(args: Vec<String>) -> Result<(), Problem> {
     let (command, options) = parse(args)?;
     match command.as_str() {
+        "initialize-keys" => initialize_keys(&options),
         "inspect" => inspect(&options),
         "prepare-source" => prepare_source(&options),
+        "export-control-plane" => export_control_plane(&options),
+        "hydrate-s3-profile-payloads" => hydrate_s3_profile_payloads(&options),
         "snapshot" => snapshot(&options),
         "export" => export(&options),
         "verify" => verify(&options),
@@ -54,6 +60,195 @@ fn run(args: Vec<String>) -> Result<(), Problem> {
             400,
         )),
     }
+}
+
+fn initialize_keys(options: &Options) -> Result<(), Problem> {
+    let encryption_key = SecretKey::new(
+        required(options, "key-namespace")?,
+        required(options, "key-name")?,
+    )
+    .map_err(|_| {
+        problem(
+            "migration_key_invalid",
+            "Migration key reference is invalid",
+            400,
+        )
+    })?;
+    let signing_key = SecretKey::new(
+        required(options, "signing-key-namespace")?,
+        required(options, "signing-key-name")?,
+    )
+    .map_err(|_| {
+        problem(
+            "migration_key_invalid",
+            "Signing key reference is invalid",
+            400,
+        )
+    })?;
+    if encryption_key == signing_key {
+        return Err(problem(
+            "migration_key_reuse_forbidden",
+            "Encryption and signing keys must be distinct",
+            400,
+        ));
+    }
+
+    let output = required_path(options, "env-output")?;
+    let mut encryption_bytes = [0_u8; 32];
+    let mut signing_bytes = [0_u8; 32];
+    getrandom::fill(&mut encryption_bytes)
+        .and_then(|()| getrandom::fill(&mut signing_bytes))
+        .map_err(|_| {
+            problem(
+                "migration_key_generation_failed",
+                "Secure key generation failed",
+                500,
+            )
+        })?;
+    let encryption_hex = Zeroizing::new(hex::encode(encryption_bytes));
+    let signing_hex = Zeroizing::new(hex::encode(signing_bytes));
+    encryption_bytes.fill(0);
+    signing_bytes.fill(0);
+
+    let mut vault = NativeVault::new();
+    let encryption_value = SecretValue::new(hex::decode(&encryption_hex).map_err(|_| {
+        problem(
+            "migration_key_generation_failed",
+            "Secure key generation failed",
+            500,
+        )
+    })?)
+    .map_err(|_| {
+        problem(
+            "migration_key_generation_failed",
+            "Secure key generation failed",
+            500,
+        )
+    })?;
+    let encryption_version = vault
+        .create(&encryption_key, encryption_value)
+        .map_err(|_| {
+            problem(
+                "migration_key_store_failed",
+                "Could not store migration key",
+                503,
+            )
+        })?;
+    let signing_value = SecretValue::new(hex::decode(&signing_hex).map_err(|_| {
+        problem(
+            "migration_key_generation_failed",
+            "Secure key generation failed",
+            500,
+        )
+    })?)
+    .map_err(|_| {
+        problem(
+            "migration_key_generation_failed",
+            "Secure key generation failed",
+            500,
+        )
+    })?;
+    let signing_version = match vault.create(&signing_key, signing_value) {
+        Ok(version) => version,
+        Err(_) => {
+            let _ = vault.remove(&encryption_key, encryption_version);
+            return Err(problem(
+                "migration_key_store_failed",
+                "Could not store signing key",
+                503,
+            ));
+        }
+    };
+
+    let env_content = Zeroizing::new(format!(
+        "BUGLOGIN_MIGRATION_ENCRYPTION_KEY_HEX={}\nBUGLOGIN_MIGRATION_SIGNING_KEY_HEX={}\n",
+        encryption_hex.as_str(),
+        signing_hex.as_str()
+    ));
+    if let Err(error) = write_new(&output, env_content.as_bytes()) {
+        let _ = vault.remove(&signing_key, signing_version);
+        let _ = vault.remove(&encryption_key, encryption_version);
+        return Err(error);
+    }
+    print_json(&json!({
+        "status": "created",
+        "envFile": output,
+        "encryptionKey": {"namespace": encryption_key.namespace(), "name": encryption_key.name()},
+        "signingKey": {"namespace": signing_key.namespace(), "name": signing_key.name()},
+        "keyValuesPrinted": false
+    }))
+}
+
+fn hydrate_s3_profile_payloads(options: &Options) -> Result<(), Problem> {
+    if !options.contains_key("read-only") {
+        return Err(problem(
+            "migration_read_only_required",
+            "Legacy S3 hydration requires read-only source access",
+            400,
+        ));
+    }
+    let source = required_path(options, "source")?;
+    let report = buglogin_migration::legacy::hydrate_legacy_s3_profile_payloads(&source)?;
+    print_json(&json!({
+        "status": "completed",
+        "sourceObjectsModified": false,
+        "hostedProfiles": report.hosted_profiles,
+        "manifestsFound": report.manifests_found,
+        "profilesHydrated": report.profiles_hydrated,
+        "profilesUsingLocalFallback": report.profiles_using_local_fallback,
+        "profilesPreserveOnly": report.profiles_preserve_only,
+        "profilesRejected": report.profiles_rejected,
+        "filesHydrated": report.files_hydrated,
+        "bytesHydrated": report.bytes_hydrated,
+        "proxiesHydrated": report.proxies_hydrated,
+        "proxiesMissing": report.proxies_missing
+    }))
+}
+
+fn export_control_plane(options: &Options) -> Result<(), Problem> {
+    if !options.contains_key("read-only") {
+        return Err(problem(
+            "migration_read_only_required",
+            "Control-plane export requires --read-only",
+            400,
+        ));
+    }
+    let policy: LegacyStoragePolicy = read_json(&required_path(options, "storage-policy")?)?;
+    let database_url = env::var("BUGLOGIN_LEGACY_DATABASE_URL").map_err(|_| {
+        problem(
+            "migration_legacy_database_config_missing",
+            "Legacy source database configuration is missing",
+            503,
+        )
+    })?;
+    let key = migration_key(options)?;
+    let export = export_read_only_postgres_control_plane(
+        &database_url,
+        required(options, "expected-database")?,
+        required(options, "source-instance-id")?,
+        &policy,
+        &key,
+    )?;
+    let output = required_path(options, "output")?;
+    write_new(&output, &export.canonical_json)?;
+    print_json(&json!({
+        "status": "completed",
+        "database": export.database,
+        "output": output,
+        "workspaceCount": export.workspace_count,
+        "membershipCount": export.membership_count,
+        "sourceShareGrantCount": export.source_share_grant_count,
+        "memberShareGrantCount": export.share_grant_count,
+        "pendingShareProvenanceCount": export.pending_share_count,
+        "pendingInviteProvenanceCount": export.pending_invite_count,
+        "groupCount": export.group_count,
+        "profileCount": export.profile_count,
+        "profileGroupAssignmentCount": export.profile_group_assignment_count,
+        "passwordAccountsEncrypted": export.legacy_password_account_count,
+        "googleOnlyAccountsRequireSetup": export.google_only_account_count,
+        "databaseTransactionReadOnly": true,
+        "inviteTokensExported": false
+    }))
 }
 
 fn prepare_source(options: &Options) -> Result<(), Problem> {
@@ -262,13 +457,23 @@ fn export(options: &Options) -> Result<(), Problem> {
         build_neutral_package(&report, &snapshot, &metadata)?
     } else {
         let key = migration_key(options)?;
-        build_encrypted_profile_package(
-            &required_path(options, "source")?,
-            &report,
-            &snapshot,
-            &metadata,
-            &key,
-        )?
+        if options.contains_key("control-only") {
+            build_control_only_profile_package(
+                &required_path(options, "source")?,
+                &report,
+                &snapshot,
+                &metadata,
+                &key,
+            )?
+        } else {
+            build_encrypted_profile_package(
+                &required_path(options, "source")?,
+                &report,
+                &snapshot,
+                &metadata,
+                &key,
+            )?
+        }
     };
     let package = if options.contains_key("unsigned") {
         package

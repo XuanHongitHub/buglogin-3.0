@@ -1,6 +1,7 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -14,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { showErrorToast } from "@/lib/toast-utils";
 import type { BrowserProfile } from "@/types";
+import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
 import { LoadingButton } from "./loading-button";
 import { RippleButton } from "./ui/ripple";
 
@@ -56,10 +58,30 @@ export function CloneProfileDialog({
     if (!name.trim() || isLoading) return;
     setIsLoading(true);
     try {
-      await invoke<BrowserProfile>("clone_profile", {
-        profileId: profile.id,
-        name: name.trim(),
-      });
+      if (process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop") {
+        const revision = profile.revision;
+        if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) {
+          throw new Error(
+            "Profile revision is unavailable. Refresh profiles and retry.",
+          );
+        }
+        await createTauriDesktopApi().cloneProfile({
+          sourceProfileId: profile.id,
+          targetProfileId: `profile_${crypto.randomUUID()}`,
+          name: name.trim(),
+          expectedRevision: revision as number,
+        });
+      } else {
+        await invoke<BrowserProfile>("clone_profile", {
+          profileId: profile.id,
+          name: name.trim(),
+        });
+      }
+      try {
+        await emit("profiles-changed", { profileId: profile.id });
+      } catch {
+        // ignore if not running in tauri context
+      }
       onClose();
       onCloneComplete?.();
     } catch (err: unknown) {
@@ -81,7 +103,11 @@ export function CloneProfileDialog({
         <DialogHeader>
           <DialogTitle>{t("profileInfo.clone.title")}</DialogTitle>
           <DialogDescription>
-            {t("profileInfo.clone.description")}
+            {t(
+              process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop"
+                ? "profileInfo.clone.metadataOnlyDescription"
+                : "profileInfo.clone.description",
+            )}
           </DialogDescription>
         </DialogHeader>
         <Input

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "releases": [
+    {
+      "runtime": "wayfern",
+      "version": "154.0.8037.57",
+      "platform": "windows",
+      "architecture": "x64",
+      "relativePath": "chrome.exe",
+      "packageFormat": "zip",
+      "archivePrefix": "wayfern-154.0.8037.57_windows_x64",
+      "source": "https://github.com/XuanHongitHub/wayfern-windows/releases/download/v154.0.8037.57/wayfern-154.0.8037.57_windows_x64.zip",
+      "sha256": "675daa21195d97a6f1ab5c36dac61b16af019707356fa9df41a7bbdab37457da",
+      "sizeBytes": 1683221729,
+      "keyId": "wayfern-release-2026",
+      "signature": "fc9f68c9f252f0ad91169e36438d32b754b9a65a624d67aa7b41145e411d16d465e01b8739a29967d4dd9a8d03db76f3b61e80029b70e40884520626c8c90204"
+    }
+  ]
+}

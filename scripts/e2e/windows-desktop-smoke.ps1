@@ -1,10 +1,13 @@
 param(
-    [string]$BuildRoot = 'D:\buglogin-build',
+    [string]$BuildRoot = 'E:\buglogin-target',
     [int]$WaitSeconds = 8
 )
 
 $ErrorActionPreference = 'Stop'
 $resolvedRoot = [IO.Path]::GetFullPath($BuildRoot)
+if ($resolvedRoot.TrimEnd('\') -ine 'E:\buglogin-target') {
+    throw 'BugLogin Windows smoke must use the single build target E:\buglogin-target.'
+}
 $executable = Join-Path $resolvedRoot 'release\buglogin-desktop-app.exe'
 $artifacts = @(
     $executable,

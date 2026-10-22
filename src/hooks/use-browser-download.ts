@@ -1,16 +1,17 @@
+const inFlightDownloads = new Map<string, Promise<void>>();
+
 import { invoke } from "@tauri-apps/api/core";
 import type { Event as TauriEvent } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "@/i18n";
+import { translateBackendError } from "@/lib/backend-errors";
 import { getBrowserDisplayName } from "@/lib/browser-utils";
 import { isOnboardingActive } from "@/lib/onboarding-signal";
 import {
   dismissToast,
   showDownloadToast,
   showErrorToast,
-  showSuccessToast,
-  showToast,
 } from "@/lib/toast-utils";
 
 interface GithubRelease {
@@ -24,9 +25,9 @@ interface GithubRelease {
   is_nightly: boolean;
 }
 
-interface BrowserVersionInfo {
-  version: string;
-  date: string;
+interface RuntimeCatalog {
+  schemaVersion: number;
+  releases: Array<{ runtime: string; version: string }>;
 }
 
 interface DownloadProgress {
@@ -38,12 +39,7 @@ interface DownloadProgress {
   speed_bytes_per_sec: number;
   eta_seconds?: number;
   stage: string;
-}
-
-interface BrowserVersionsResult {
-  versions: string[];
-  new_versions_count?: number;
-  total_versions_count: number;
+  error?: string;
 }
 
 export function useBrowserDownload() {
@@ -58,6 +54,21 @@ export function useBrowserDownload() {
   );
   const [downloadProgress, setDownloadProgress] =
     useState<DownloadProgress | null>(null);
+  // Last non-terminal stage seen per browser-version. The backend's terminal
+  // "error" event does not say which phase failed, and only a failed
+  // extraction deletes the archive, so the phase it interrupted is what
+  // decides which message the user gets.
+  const lastDownloadStageRef = useRef(new Map<string, string>());
+
+  const loadCatalogVersions = useCallback(async (browserStr: string) => {
+    const catalog = await invoke<RuntimeCatalog>(
+      "runtime_catalog_current_device_get",
+      { correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}` },
+    );
+    return catalog.releases
+      .filter((release) => release.runtime === browserStr)
+      .map((release) => ({ version: release.version, date: "" }));
+  }, []);
 
   const formatTime = useCallback((seconds: number): string => {
     if (seconds < 60) {
@@ -81,117 +92,70 @@ export function useBrowserDownload() {
     return `${Number.parseFloat((bytes / k ** i).toFixed(1))} ${sizes[i]}`;
   }, []);
 
-  const loadVersions = useCallback(async (browserStr: string) => {
-    const browserName = getBrowserDisplayName(browserStr);
+  const loadVersions = useCallback(
+    async (browserStr: string) => {
+      // Use a simple loading state instead of toast for version fetching
+      console.log(`Fetching ${browserStr} versions...`);
 
-    // Use a simple loading state instead of toast for version fetching
-    console.log(`Fetching ${browserName} versions...`);
+      try {
+        const versionInfos = await loadCatalogVersions(browserStr);
 
-    try {
-      const versionInfos = await invoke<BrowserVersionInfo[]>(
-        "fetch_browser_versions_cached_first",
-        { browserStr },
-      );
-
-      // Convert BrowserVersionInfo to GithubRelease format for compatibility
-      const githubReleases: GithubRelease[] = versionInfos.map(
-        (versionInfo) => ({
-          tag_name: versionInfo.version,
-          assets: [],
-          published_at: versionInfo.date,
-          is_nightly: false,
-        }),
-      );
-
-      setAvailableVersions(githubReleases);
-      return githubReleases;
-    } catch (error) {
-      console.error("Failed to load versions:", error);
-      showErrorToast(
-        i18n.t("browserDownload.toast.fetchVersionsFailed", {
-          browser: browserName,
-        }),
-        {
-          description:
-            error instanceof Error
-              ? error.message
-              : i18n.t("common.errors.unknown"),
-          duration: 4000,
-        },
-      );
-      throw error;
-    }
-  }, []);
-
-  const loadVersionsWithNewCount = useCallback(async (browserStr: string) => {
-    const browserName = getBrowserDisplayName(browserStr);
-
-    try {
-      // Get versions with new count info and cached detailed info
-      const result = await invoke<BrowserVersionsResult>(
-        "fetch_browser_versions_with_count_cached_first",
-        { browserStr },
-      );
-
-      // Get detailed version info for compatibility
-      const versionInfos = await invoke<BrowserVersionInfo[]>(
-        "fetch_browser_versions_cached_first",
-        { browserStr },
-      );
-
-      // Convert BrowserVersionInfo to GithubRelease format for compatibility
-      const githubReleases: GithubRelease[] = versionInfos.map(
-        (versionInfo) => ({
-          tag_name: versionInfo.version,
-          assets: [],
-          published_at: versionInfo.date,
-          is_nightly: false,
-        }),
-      );
-
-      setAvailableVersions(githubReleases);
-
-      // Show notification about new versions if any were found
-      if (result.new_versions_count && result.new_versions_count > 0) {
-        showSuccessToast(
-          i18n.t("browserDownload.toast.foundNewVersions", {
-            count: result.new_versions_count,
-            browser: browserName,
+        // Convert BrowserVersionInfo to GithubRelease format for compatibility
+        const githubReleases: GithubRelease[] = versionInfos.map(
+          (versionInfo) => ({
+            tag_name: versionInfo.version,
+            assets: [],
+            published_at: versionInfo.date,
+            is_nightly: false,
           }),
-          {
-            duration: 3000,
-            description: i18n.t(
-              "browserDownload.toast.totalAvailableVersions",
-              { count: result.total_versions_count },
-            ),
-          },
         );
-      }
 
-      return githubReleases;
-    } catch (error) {
-      console.error("Failed to load versions:", error);
-      showErrorToast(
-        i18n.t("browserDownload.toast.fetchVersionsFailed", {
-          browser: browserName,
-        }),
-        {
-          description:
-            error instanceof Error
-              ? error.message
-              : i18n.t("common.errors.unknown"),
-          duration: 4000,
-        },
-      );
-      throw error;
-    }
-  }, []);
+        setAvailableVersions(githubReleases);
+        return githubReleases;
+      } catch (error) {
+        console.error("Failed to load versions:", error);
+        throw error;
+      }
+    },
+    [loadCatalogVersions],
+  );
+
+  const loadVersionsWithNewCount = useCallback(
+    async (browserStr: string) => {
+      try {
+        // Get versions with new count info and cached detailed info
+        const versionInfos = await loadCatalogVersions(browserStr);
+
+        // Convert BrowserVersionInfo to GithubRelease format for compatibility
+        const githubReleases: GithubRelease[] = versionInfos.map(
+          (versionInfo) => ({
+            tag_name: versionInfo.version,
+            assets: [],
+            published_at: versionInfo.date,
+            is_nightly: false,
+          }),
+        );
+
+        setAvailableVersions(githubReleases);
+
+        // Show notification about new versions if any were found
+        return githubReleases;
+      } catch (error) {
+        console.error("Failed to load versions:", error);
+        throw error;
+      }
+    },
+    [loadCatalogVersions],
+  );
 
   const loadDownloadedVersions = useCallback(async (browserStr: string) => {
     try {
       const versions = await invoke<string[]>(
-        "get_downloaded_browser_versions",
-        { browserStr },
+        "runtime_installed_versions_get",
+        {
+          runtime: browserStr,
+          correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}`,
+        },
       );
       setDownloadedVersionsMap((prev) => ({ ...prev, [browserStr]: versions }));
       return versions;
@@ -208,27 +172,37 @@ export function useBrowserDownload() {
       suppressNotifications = false,
     ) => {
       const browserName = getBrowserDisplayName(browserStr);
+      const downloadKey = `${browserStr}:${version}`;
+      const existing = inFlightDownloads.get(downloadKey);
+      if (existing) {
+        return existing;
+      }
+
       setDownloadingBrowsers((prev) => new Set(prev).add(browserStr));
 
-      try {
-        // Check browser compatibility before attempting download
-        const isSupported = await invoke<boolean>(
-          "is_browser_supported_on_platform",
-          { browserStr },
-        );
-        if (!isSupported) {
-          const supportedBrowsers = await invoke<string[]>(
-            "get_supported_browsers",
-          );
-          throw new Error(
-            `${browserName} is not supported on your platform. Supported browsers: ${supportedBrowsers
-              .map(getBrowserDisplayName)
-              .join(", ")}`,
-          );
+      const downloadTask = (async () => {
+        try {
+          await invoke("runtime_install", {
+            runtime: browserStr,
+            version,
+            correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}`,
+          });
+          await loadDownloadedVersions(browserStr);
+          setDownloadingBrowsers((prev) => {
+            const next = new Set(prev);
+            next.delete(browserStr);
+            return next;
+          });
+          setDownloadProgress(null);
+        } finally {
+          inFlightDownloads.delete(downloadKey);
         }
+      })();
 
-        await invoke("download_browser", { browserStr, version });
-        await loadDownloadedVersions(browserStr);
+      inFlightDownloads.set(downloadKey, downloadTask);
+
+      try {
+        await downloadTask;
       } catch (error) {
         console.error("Failed to download browser:", error);
 
@@ -247,12 +221,15 @@ export function useBrowserDownload() {
 
           // Ensure the long-running download toast is dismissed, and show a finite error toast
           dismissToast(`download-${browserStr}-${version}`);
+          // Same id as the progress listener's error toast, so the concrete
+          // backend message replaces the generic one instead of stacking on it.
           showErrorToast(
             i18n.t("browserDownload.toast.downloadFailed", {
               browser: browserName,
               version,
             }),
             {
+              id: `download-error-${browserStr}-${version}`,
               description: errorMessage,
               duration: 8000,
             },
@@ -271,10 +248,8 @@ export function useBrowserDownload() {
   );
 
   const isVersionDownloaded = useCallback(
-    (version: string) => {
-      return Object.values(downloadedVersionsMap).some((versions) =>
-        versions.includes(version),
-      );
+    (browserStr: string, version: string) => {
+      return downloadedVersionsMap[browserStr]?.includes(version) ?? false;
     },
     [downloadedVersionsMap],
   );
@@ -290,10 +265,9 @@ export function useBrowserDownload() {
   // Legacy isDownloading for backwards compatibility
   const isDownloading = downloadingBrowsers.size > 0;
 
-  // Listen for download progress events (browsers) and GeoIP progress events
+  // Listen for browser download progress events.
   useEffect(() => {
     let unlistenBrowser: (() => void) | null = null;
-    let unlistenGeoip: (() => void) | null = null;
 
     const setupListeners = async () => {
       try {
@@ -304,15 +278,22 @@ export function useBrowserDownload() {
             const progress = event.payload;
             setDownloadProgress(progress);
 
+            const downloadKey = `${progress.browser}-${progress.version}`;
+            const interruptedStage =
+              lastDownloadStageRef.current.get(downloadKey);
+
             if (
               progress.stage === "downloading" ||
               progress.stage === "extracting" ||
               progress.stage === "verifying"
             ) {
+              lastDownloadStageRef.current.set(downloadKey, progress.stage);
               setDownloadingBrowsers((prev) => {
                 if (prev.has(progress.browser)) return prev;
                 return new Set(prev).add(progress.browser);
               });
+            } else {
+              lastDownloadStageRef.current.delete(downloadKey);
             }
 
             const browserName = getBrowserDisplayName(progress.browser);
@@ -326,7 +307,6 @@ export function useBrowserDownload() {
                 ? formatTime(progress.eta_seconds)
                 : i18n.t("browserDownload.toast.calculating");
 
-              const toastId = `download-${browserName.toLowerCase()}-${progress.version}`;
               // During first-run onboarding the welcome dialog shows browser
               // setup progress itself, so suppress the global download toast.
               if (!isOnboardingActive()) {
@@ -338,17 +318,6 @@ export function useBrowserDownload() {
                     percentage: progress.percentage,
                     speed: speedMBps,
                     eta: etaText,
-                  },
-                  {
-                    onCancel: () => {
-                      invoke("cancel_download", {
-                        browserStr: progress.browser,
-                        version: progress.version,
-                      }).catch((err) => {
-                        console.error("Failed to cancel download:", err);
-                      });
-                      dismissToast(toastId);
-                    },
                   },
                 );
               }
@@ -390,15 +359,26 @@ export function useBrowserDownload() {
               // During first-run onboarding the welcome dialog surfaces a
               // concrete setup error itself, so suppress the global toast.
               if (!isOnboardingActive()) {
+                const wasExtracting = interruptedStage === "extracting";
                 showErrorToast(
-                  i18n.t("browserDownload.toast.extractionFailed", {
-                    browser: browserName,
-                    version: progress.version,
-                  }),
+                  i18n.t(
+                    wasExtracting
+                      ? "browserDownload.toast.extractionFailed"
+                      : "browserDownload.toast.downloadFailed",
+                    {
+                      browser: browserName,
+                      version: progress.version,
+                    },
+                  ),
                   {
-                    description: i18n.t(
-                      "browserDownload.toast.extractionFailedDescription",
-                    ),
+                    id: `download-error-${progress.browser}-${progress.version}`,
+                    description: progress.error
+                      ? translateBackendError(i18n.t, progress.error)
+                      : i18n.t(
+                          wasExtracting
+                            ? "browserDownload.toast.extractionFailedDescription"
+                            : "browserDownload.toast.downloadFailedDescription",
+                        ),
                   },
                 );
               }
@@ -423,61 +403,6 @@ export function useBrowserDownload() {
       } catch (error) {
         console.error("Failed to setup download progress listener:", error);
       }
-
-      try {
-        // GeoIP database download progress
-        unlistenGeoip = await listen<{
-          stage: string;
-          percentage: number;
-          message: string;
-          downloaded_bytes?: number;
-          total_bytes?: number;
-          speed_bytes_per_sec?: number;
-          eta_seconds?: number;
-        }>(
-          "geoip-download-progress",
-          (
-            event: TauriEvent<{
-              stage: string;
-              percentage: number;
-              message: string;
-              downloaded_bytes?: number;
-              total_bytes?: number;
-              speed_bytes_per_sec?: number;
-              eta_seconds?: number;
-            }>,
-          ) => {
-            const { stage, percentage, speed_bytes_per_sec, eta_seconds } =
-              event.payload;
-            if (stage === "downloading") {
-              const speedMBps = speed_bytes_per_sec
-                ? (speed_bytes_per_sec / (1024 * 1024)).toFixed(1)
-                : undefined;
-              const etaText = eta_seconds ? formatTime(eta_seconds) : undefined;
-              showToast({
-                id: "geoip-download",
-                type: "download",
-                title: i18n.t("browserDownload.toast.geoipDownloading"),
-                stage: "downloading",
-                progress: {
-                  percentage,
-                  ...(speedMBps ? { speed: speedMBps } : {}),
-                  ...(etaText ? { eta: etaText } : {}),
-                },
-              });
-            } else if (stage === "completed") {
-              showToast({
-                id: "geoip-download",
-                type: "download",
-                title: i18n.t("browserDownload.toast.geoipDownloaded"),
-                stage: "completed",
-              });
-            }
-          },
-        );
-      } catch (error) {
-        console.error("Failed to setup GeoIP progress listener:", error);
-      }
     };
 
     void setupListeners();
@@ -488,13 +413,6 @@ export function useBrowserDownload() {
           unlistenBrowser();
         } catch (error) {
           console.error("Failed to cleanup browser download listener:", error);
-        }
-      }
-      if (unlistenGeoip) {
-        try {
-          unlistenGeoip();
-        } catch (error) {
-          console.error("Failed to cleanup GeoIP progress listener:", error);
         }
       }
     };

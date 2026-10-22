@@ -1,101 +1,44 @@
 "use client";
 
-import { invoke } from "@tauri-apps/api/core";
-import { Eye, EyeOff } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  LuAppWindow,
+  LuActivity,
+  LuBookOpen,
+  LuBot,
   LuCheck,
-  LuCodeXml,
+  LuCode,
+  LuCopy,
+  LuCpu,
+  LuKey,
+  LuLayers,
   LuPlug,
-  LuTerminal,
-  LuTrash2,
+  LuRefreshCw,
+  LuServer,
+  LuShieldCheck,
   LuZap,
 } from "react-icons/lu";
-import { AnimatedSwitch } from "@/components/ui/animated-switch";
-import {
-  AnimatedTabs,
-  AnimatedTabsContent,
-  AnimatedTabsList,
-  AnimatedTabsTrigger,
-} from "@/components/ui/animated-tabs";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { useWayfernTerms } from "@/hooks/use-wayfern-terms";
-import { translateBackendError } from "@/lib/backend-errors";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
-import { CopyToClipboard } from "./ui/copy-to-clipboard";
-
-interface AppSettings {
-  api_enabled: boolean;
-  api_port: number;
-  api_token?: string;
-  mcp_enabled: boolean;
-  mcp_port?: number;
-  mcp_token?: string;
-}
-
-interface McpConfig {
-  port: number;
-  token: string;
-}
-
-type AgentCategory = "desktop-app" | "cli" | "editor" | "editor-ext";
-
-interface McpAgentInfo {
-  id: string;
-  display_name: string;
-  category: AgentCategory;
-  connected: boolean;
-  detected: boolean;
-}
+import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
+import type { DesktopIntegrationStatus } from "../../apps/desktop/src/contracts";
+import type { ApiToken } from "../../frontend/src/generated/command-registry";
 
 interface IntegrationsDialogProps {
   isOpen: boolean;
   onClose: () => void;
   subPage?: boolean;
-  /** Which tab is displayed when the dialog mounts; defaults to "api". */
-  initialTab?: "api" | "mcp";
+  initialTab?: "api" | "remote";
 }
 
-function AgentIcon({ category }: { category: AgentCategory }) {
-  const className = "size-4 text-muted-foreground";
-  switch (category) {
-    case "desktop-app":
-      return <LuAppWindow className={className} />;
-    case "editor":
-      return <LuCodeXml className={className} />;
-    case "editor-ext":
-      return <LuPlug className={className} />;
-    case "cli":
-      return <LuTerminal className={className} />;
-  }
-}
+const desktopApi = createTauriDesktopApi();
 
-function categoryLabel(
-  t: (k: string) => string,
-  category: AgentCategory,
-): string {
-  switch (category) {
-    case "desktop-app":
-      return t("integrations.mcp.category.desktopApp");
-    case "editor":
-      return t("integrations.mcp.category.editor");
-    case "editor-ext":
-      return t("integrations.mcp.category.editorExt");
-    case "cli":
-      return t("integrations.mcp.category.cli");
-  }
-}
+type TabType = "api" | "mcp" | "endpoints";
+type CodeLang = "curl" | "node" | "python";
+type McpClient = "claude" | "cursor" | "antigravity";
 
 export function IntegrationsDialog({
   isOpen,
@@ -104,201 +47,375 @@ export function IntegrationsDialog({
   initialTab = "api",
 }: IntegrationsDialogProps) {
   const { t } = useTranslation();
-  const [settings, setSettings] = useState<AppSettings>({
-    api_enabled: false,
-    api_port: 10108,
-    api_token: undefined,
-    mcp_enabled: false,
-    mcp_port: undefined,
-    mcp_token: undefined,
-  });
-  const [apiServerPort, setApiServerPort] = useState<number | null>(null);
-  const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
-  const [, setMcpRunning] = useState(false);
-  const [showApiToken, setShowApiToken] = useState(false);
-  const [showMcpUrl, setShowMcpUrl] = useState(false);
-  const [isApiStarting, setIsApiStarting] = useState(false);
-  const [isMcpStarting, setIsMcpStarting] = useState(false);
-  const [agents, setAgents] = useState<McpAgentInfo[]>([]);
-  const [busyAgentIds, setBusyAgentIds] = useState<Set<string>>(new Set());
-  const [apiPortDraft, setApiPortDraft] = useState<string>("10108");
+  const [status, setStatus] = useState<DesktopIntegrationStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabType>(
+    initialTab === "remote" ? "mcp" : "api",
+  );
+  const [codeLang, setCodeLang] = useState<CodeLang>("curl");
+  const [mcpClient, setMcpClient] = useState<McpClient>("cursor");
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [apiTokens, setApiTokens] = useState<ApiToken[]>([]);
+  const [newMcpToken, setNewMcpToken] = useState<string | null>(null);
+  const [isManagingMcpToken, setIsManagingMcpToken] = useState(false);
 
-  const { termsAccepted } = useWayfernTerms();
+  // Realtime Ping test state
+  const [isPinging, setIsPinging] = useState(false);
+  const [pingResult, setPingResult] = useState<{
+    latencyMs: number;
+    statusText: string;
+    timestamp: number;
+  } | null>(null);
 
-  const loadSettings = useCallback(async () => {
+  useEffect(() => {
+    setActiveTab(initialTab === "remote" ? "mcp" : "api");
+  }, [initialTab]);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const loaded = await invoke<AppSettings>("get_app_settings");
-      setSettings(loaded);
-      setApiPortDraft(String(loaded.api_port ?? ""));
-    } catch (e) {
-      console.error("Failed to load settings:", e);
-    }
-  }, []);
-
-  const loadMcpConfig = useCallback(async () => {
-    try {
-      const config = await invoke<McpConfig | null>("get_mcp_config");
-      setMcpConfig(config);
-    } catch (e) {
-      console.error("Failed to get MCP config:", e);
-    }
-  }, []);
-
-  const loadMcpServerStatus = useCallback(async () => {
-    try {
-      const isRunning = await invoke<boolean>("get_mcp_server_status");
-      setMcpRunning(isRunning);
-    } catch (e) {
-      console.error("Failed to get MCP server status:", e);
-    }
-  }, []);
-
-  const loadApiServerStatus = useCallback(async () => {
-    try {
-      const port = await invoke<number | null>("get_api_server_status");
-      setApiServerPort(port);
-    } catch (e) {
-      console.error("Failed to get API server status:", e);
-    }
-  }, []);
-
-  const loadAgents = useCallback(async () => {
-    try {
-      const list = await invoke<McpAgentInfo[]>("list_mcp_agents");
-      setAgents(list);
-    } catch (e) {
-      console.error("Failed to list MCP agents:", e);
+      const res = await desktopApi.getIntegrationStatus();
+      setStatus(res);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (isOpen) {
-      void loadSettings();
-      void loadApiServerStatus();
-      void loadMcpConfig();
-      void loadMcpServerStatus();
-      void loadAgents();
-    }
-  }, [
-    isOpen,
-    loadSettings,
-    loadApiServerStatus,
-    loadMcpConfig,
-    loadMcpServerStatus,
-    loadAgents,
-  ]);
+    if (isOpen) void refresh();
+  }, [isOpen, refresh]);
 
-  const handleApiToggle = async (enabled: boolean) => {
-    setIsApiStarting(true);
-    try {
-      if (enabled) {
-        const port = await invoke<number>("start_api_server", {
-          port: settings.api_port,
-        });
-        setApiServerPort(port);
-        const next = await invoke<AppSettings>("save_app_settings", {
-          settings: { ...settings, api_enabled: true },
-        });
-        setSettings(next);
-        showSuccessToast(t("integrations.apiStarted", { port }));
-      } else {
-        await invoke("stop_api_server");
-        setApiServerPort(null);
-        const next = await invoke<AppSettings>("save_app_settings", {
-          settings: { ...settings, api_enabled: false, api_token: null },
-        });
-        setSettings(next);
-        showSuccessToast(t("integrations.apiStopped"));
-      }
-    } catch (e) {
-      console.error("Failed to toggle API:", e);
-      showErrorToast(t("integrations.apiToggleFailed"), {
-        description:
-          e instanceof Error ? e.message : t("integrations.apiUnknownError"),
+  useEffect(() => {
+    if (!isOpen) return;
+    void desktopApi
+      .listApiTokens()
+      .then((page) => setApiTokens(page.tokens))
+      .catch(() => {
+        setApiTokens([]);
       });
-    } finally {
-      setIsApiStarting(false);
+  }, [isOpen]);
+
+  const endpoint = status?.apiEndpoint || "http://127.0.0.1:12345";
+  const mcpUrl = status?.mcpEndpoint || `${endpoint}/v1/mcp`;
+  const isApiConnected = status?.apiReachable ?? true;
+  const mcpEnabled = status?.mcpEnabled === true;
+  const activeMcpTokens = apiTokens.filter(
+    (token) =>
+      token.name === "BugLogin MCP" &&
+      token.revokedAt == null &&
+      token.expiresAt > Math.floor(Date.now() / 1000),
+  );
+
+  const handleCopy = async (
+    text: string,
+    key: string,
+    label = "Đã sao chép vào bộ nhớ tạm",
+  ) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      showSuccessToast(label);
+      setTimeout(() => setCopiedKey(null), 2000);
+    } catch {
+      showErrorToast("Không thể sao chép");
     }
   };
 
-  const handleMcpToggle = async (enabled: boolean) => {
-    setIsMcpStarting(true);
+  const handleCreateMcpToken = async () => {
+    setIsManagingMcpToken(true);
     try {
-      if (enabled) {
-        const port = await invoke<number>("start_mcp_server");
-        const next = await invoke<AppSettings>("save_app_settings", {
-          settings: { ...settings, mcp_enabled: true, mcp_port: port },
-        });
-        setSettings(next);
-        void loadMcpConfig();
-        void loadAgents();
-        showSuccessToast(t("integrations.mcpStarted", { port }));
-      } else {
-        await invoke("stop_mcp_server");
-        const next = await invoke<AppSettings>("save_app_settings", {
-          settings: { ...settings, mcp_enabled: false },
-        });
-        setSettings(next);
-        setMcpConfig(null);
-        showSuccessToast(t("integrations.mcpStopped"));
-      }
-    } catch (e) {
-      console.error("Failed to toggle MCP server:", e);
-      showErrorToast(t("integrations.mcpToggleFailed"), {
-        description:
-          e instanceof Error ? e.message : t("integrations.apiUnknownError"),
+      const expiresAt = Math.floor(Date.now() / 1000) + 90 * 24 * 60 * 60;
+      const created = await desktopApi.createApiToken({
+        name: "BugLogin MCP",
+        scopes: [
+          "profile.read:read",
+          "profile.create:create",
+          "profile.update:update",
+          "profile.delete:delete",
+          "profile.launch:execute",
+          "profile.stop:execute",
+          "CAP-NET-001:read",
+          "sync.manifest:read",
+          "sync.manifest:update",
+        ],
+        expiresAt,
       });
+      setNewMcpToken(created.token);
+      setApiTokens((current) => [
+        created.tokenRecord,
+        ...current.filter((token) => token.id !== created.tokenRecord.id),
+      ]);
+      showSuccessToast("Đã tạo API key MCP. Key chỉ hiển thị một lần.");
+    } catch (cause) {
+      showErrorToast(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setIsMcpStarting(false);
+      setIsManagingMcpToken(false);
     }
   };
 
-  const markAgentBusy = (id: string, busy: boolean) => {
-    setBusyAgentIds((prev) => {
-      const next = new Set(prev);
-      if (busy) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  };
-
-  const handleAddAgent = async (agent: McpAgentInfo) => {
-    markAgentBusy(agent.id, true);
+  const handleRevokeMcpToken = async (tokenId: string) => {
+    setIsManagingMcpToken(true);
     try {
-      await invoke("add_mcp_to_agent", { agentId: agent.id });
-      showSuccessToast(
-        t("integrations.mcp.addedToClient", { name: agent.display_name }),
+      await desktopApi.revokeApiToken(tokenId);
+      setApiTokens((current) =>
+        current.filter((token) => token.id !== tokenId),
       );
-      void loadAgents();
-    } catch (e) {
-      showErrorToast(translateBackendError(t, e), {
-        description: agent.display_name,
-      });
+      setNewMcpToken(null);
+      showSuccessToast("Đã thu hồi API key.");
+    } catch (cause) {
+      showErrorToast(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      markAgentBusy(agent.id, false);
+      setIsManagingMcpToken(false);
     }
   };
 
-  const handleRemoveAgent = async (agent: McpAgentInfo) => {
-    markAgentBusy(agent.id, true);
+  const handlePing = async () => {
+    setIsPinging(true);
+    const start = performance.now();
     try {
-      await invoke("remove_mcp_from_agent", { agentId: agent.id });
-      showSuccessToast(
-        t("integrations.mcp.removedFromClient", { name: agent.display_name }),
-      );
-      void loadAgents();
-    } catch (e) {
-      showErrorToast(translateBackendError(t, e), {
-        description: agent.display_name,
+      // Query through the native desktop bridge. Fetching localhost directly
+      // from the WebView is subject to CORS and can report a false failure even
+      // while the local API is healthy.
+      const integration = await desktopApi.getIntegrationStatus();
+      const elapsed = Math.round(performance.now() - start);
+      if (integration.apiReachable) {
+        setPingResult({
+          latencyMs: elapsed,
+          statusText: `200 OK (${integration.apiService || "buglogin-api"})`,
+          timestamp: Date.now(),
+        });
+        showSuccessToast(`Kiểm tra API thành công (${elapsed}ms)`);
+      } else {
+        setPingResult({
+          latencyMs: elapsed,
+          statusText: "API unreachable",
+          timestamp: Date.now(),
+        });
+        showErrorToast("Không thể kết nối đến máy chủ API cục bộ");
+      }
+    } catch (_err) {
+      showErrorToast("Không thể kết nối đến máy chủ API cục bộ");
+      setPingResult({
+        latencyMs: 0,
+        statusText: "Connection failed",
+        timestamp: Date.now(),
       });
     } finally {
-      markAgentBusy(agent.id, false);
+      setIsPinging(false);
     }
   };
 
-  const mcpUrl = mcpConfig
-    ? `http://127.0.0.1:${mcpConfig.port}/mcp/${mcpConfig.token}`
-    : "";
+  const codeSnippets: Record<CodeLang, { title: string; code: string }> =
+    useMemo(
+      () => ({
+        curl: {
+          title: "cURL / REST API",
+          code: `# 1. Kiểm tra trạng thái máy chủ (Health Check)
+curl ${endpoint}/v1/health
+
+# 2. Lấy danh sách tất cả hồ sơ trình duyệt
+curl ${endpoint}/v1/profiles
+
+# 3. Khởi chạy một hồ sơ trình duyệt (trả về remote debug port)
+curl -X POST ${endpoint}/v1/profiles/PROFILE_ID/launch
+
+# 4. Đóng hồ sơ đang chạy
+curl -X POST ${endpoint}/v1/profiles/PROFILE_ID/stop
+
+# 5. Xuất Cookies của hồ sơ
+curl ${endpoint}/v1/profiles/PROFILE_ID/cookies`,
+        },
+        node: {
+          title: "Node.js (Puppeteer / Playwright)",
+          code: `import puppeteer from "puppeteer-core";
+
+const API_BASE = "${endpoint}";
+const PROFILE_ID = "YOUR_PROFILE_ID"; // Thay bằng ID profile thực tế
+
+// Bước 1: Gọi API khởi chạy Profile
+const launchRes = await fetch(\`\${API_BASE}/v1/profiles/\${PROFILE_ID}/launch\`, {
+  method: "POST",
+});
+const { debug_port, ws_endpoint } = await launchRes.json();
+
+// Bước 2: Kết nối Puppeteer vào trình duyệt BugLogin qua CDP
+const browser = await puppeteer.connect({
+  browserWSEndpoint: ws_endpoint || \`ws://127.0.0.1:\${debug_port}\`,
+});
+
+const page = await browser.newPage();
+await page.goto("https://facebook.com");
+console.log("Đã tải trang thành công:", await page.title());
+
+// Bước 3: Đóng hồ sơ khi hoàn thành tác vụ
+// await fetch(\`\${API_BASE}/v1/profiles/\${PROFILE_ID}/stop\`, { method: "POST" });`,
+        },
+        python: {
+          title: "Python (Playwright / Selenium)",
+          code: `import requests
+from playwright.sync_api import sync_playwright
+
+API_BASE = "${endpoint}"
+PROFILE_ID = "YOUR_PROFILE_ID"
+
+# Bước 1: Khởi chạy Profile qua BugLogin Local API
+resp = requests.post(f"{API_BASE}/v1/profiles/{PROFILE_ID}/launch")
+data = resp.json()
+debug_port = data.get("debug_port")
+
+# Bước 2: Kết nối Playwright điều khiển trình duyệt qua CDP
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+    context = browser.contexts[0]
+    page = context.pages[0] if context.pages else context.new_page()
+    page.goto("https://google.com")
+    print("Tiêu đề trang:", page.title())
+
+# Bước 3: Đóng profile khi xong việc
+# requests.post(f"{API_BASE}/v1/profiles/{PROFILE_ID}/stop")`,
+        },
+      }),
+      [endpoint],
+    );
+
+  const mcpConfigs: Record<
+    McpClient,
+    { name: string; file: string; config: string }
+  > = useMemo(() => {
+    const headers = {
+      Authorization: `Bearer ${newMcpToken ?? "YOUR_BUGLOGIN_API_KEY"}`,
+    };
+    return {
+      cursor: {
+        name: "Cursor AI",
+        file: ".cursor/mcp.json hoặc Cursor Settings -> Features -> MCP",
+        config: JSON.stringify(
+          {
+            mcpServers: {
+              buglogin: {
+                url: mcpUrl,
+                headers,
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      },
+      claude: {
+        name: "Claude Desktop",
+        file: "%APPDATA%\\Claude\\claude_desktop_config.json",
+        config: JSON.stringify(
+          {
+            mcpServers: {
+              buglogin: {
+                type: "http",
+                url: mcpUrl,
+                headers,
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      },
+      antigravity: {
+        name: "Antigravity / Windsurf",
+        file: "~/.gemini/antigravity-cli/mcp_config.json hoặc .codeium/windsurf/mcp_config.json",
+        config: JSON.stringify(
+          {
+            mcpServers: {
+              buglogin: {
+                url: mcpUrl,
+                headers,
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      },
+    };
+  }, [mcpUrl, newMcpToken]);
+
+  const apiEndpointsList = [
+    {
+      method: "GET",
+      path: "/v1/health",
+      desc: "Kiểm tra tình trạng hoạt động của máy chủ API cục bộ",
+      color: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+    },
+    {
+      method: "GET",
+      path: "/v1/readyz",
+      desc: "Kiểm tra mức độ sẵn sàng của các dịch vụ bên dưới",
+      color: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+    },
+    {
+      method: "GET",
+      path: "/v1/profiles",
+      desc: "Lấy danh sách tất cả các hồ sơ trình duyệt trong workspace",
+      color: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+    },
+    {
+      method: "POST",
+      path: "/v1/profiles",
+      desc: "Tạo mới một hồ sơ trình duyệt với cấu hình fingerprint tùy chỉnh",
+      color: "bg-blue-500/15 text-blue-500 border-blue-500/30",
+    },
+    {
+      method: "GET",
+      path: "/v1/profiles/{id}",
+      desc: "Xem chi tiết thông tin và cấu hình vân tay của một hồ sơ",
+      color: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+    },
+    {
+      method: "POST",
+      path: "/v1/profiles/{id}/launch",
+      desc: "Khởi chạy hồ sơ trình duyệt và nhận cổng điều khiển DevTools (CDP)",
+      color: "bg-blue-500/15 text-blue-500 border-blue-500/30",
+    },
+    {
+      method: "POST",
+      path: "/v1/profiles/{id}/stop",
+      desc: "Đóng và dọn dẹp tiến trình trình duyệt đang chạy",
+      color: "bg-amber-500/15 text-amber-500 border-amber-500/30",
+    },
+    {
+      method: "GET",
+      path: "/v1/profiles/{id}/cookies",
+      desc: "Xuất dữ liệu Cookie của hồ sơ dưới định dạng JSON",
+      color: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+    },
+    {
+      method: "POST",
+      path: "/v1/profiles/{id}/clone",
+      desc: "Nhân bản một hồ sơ trình duyệt hiện có",
+      color: "bg-blue-500/15 text-blue-500 border-blue-500/30",
+    },
+    {
+      method: "DELETE",
+      path: "/v1/profiles/{id}",
+      desc: "Xóa hồ sơ trình duyệt khỏi hệ thống",
+      color: "bg-destructive/15 text-destructive border-destructive/30",
+    },
+    {
+      method: "POST",
+      path: "/v1/cookie-jobs",
+      desc: "Tạo tác vụ Cookie Bot (tự động nuôi cookie / lướt web)",
+      color: "bg-blue-500/15 text-blue-500 border-blue-500/30",
+    },
+    {
+      method: "GET",
+      path: "/v1/mcp",
+      desc: "Điểm cuối giao thức Model Context Protocol dành cho AI Agent",
+      color: "bg-purple-500/15 text-purple-400 border-purple-500/30",
+    },
+  ];
 
   return (
     <Dialog
@@ -308,360 +425,747 @@ export function IntegrationsDialog({
       }}
       subPage={subPage}
     >
-      <DialogContent className="flex max-h-[calc(100vh-5rem)] max-w-3xl flex-col">
-        {!subPage && (
-          <DialogHeader className="shrink-0">
-            <DialogTitle>{t("integrations.title")}</DialogTitle>
-          </DialogHeader>
+      <DialogContent
+        className={cn(
+          "flex max-h-[calc(100vh-3rem)] max-w-5xl flex-col p-6",
+          subPage && "border-0 shadow-none bg-transparent p-0 max-w-full",
+        )}
+      >
+        {/* Top Header */}
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border/50 pb-4">
+          <div className="flex items-center gap-3">
+            <div className="grid size-11 place-items-center rounded-xl bg-primary/10 text-primary shadow-2xs">
+              <LuPlug className="size-6 text-primary" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2.5">
+                <DialogTitle className="text-base font-semibold">
+                  {t("integrations.title", {
+                    defaultValue: "Tích hợp & Tự động hóa",
+                  })}
+                </DialogTitle>
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "gap-1.5 px-2.5 py-0.5 text-xs font-medium",
+                    isApiConnected
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
+                      : "border-destructive/30 bg-destructive/10 text-destructive",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "size-1.5 rounded-full",
+                      isApiConnected
+                        ? "bg-emerald-500 animate-pulse"
+                        : "bg-destructive",
+                    )}
+                  />
+                  <span>
+                    {isApiConnected
+                      ? t("integrations.status.connected", {
+                          defaultValue: "Máy chủ đang chạy",
+                        })
+                      : t("integrations.status.disconnected", {
+                          defaultValue: "Chưa kết nối",
+                        })}
+                  </span>
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5 max-w-2xl">
+                {t("integrations.description", {
+                  defaultValue:
+                    "Cung cấp REST API cục bộ và Model Context Protocol (MCP) để tự động hóa trình duyệt qua cURL, Puppeteer, Playwright, Selenium hoặc trợ lý AI.",
+                })}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="gap-2 h-8 text-xs cursor-pointer shadow-2xs"
+              disabled={isPinging}
+              onClick={() => void handlePing()}
+            >
+              <LuActivity
+                className={cn(
+                  "size-3.5 text-primary",
+                  isPinging && "animate-spin",
+                )}
+              />
+              <span>
+                {isPinging
+                  ? t("integrations.pinging", {
+                      defaultValue: "Đang kiểm tra...",
+                    })
+                  : t("integrations.testConnection", {
+                      defaultValue: "Kiểm tra kết nối",
+                    })}
+              </span>
+            </Button>
+
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="gap-2 h-8 text-xs cursor-pointer shadow-2xs"
+              disabled={loading}
+              onClick={() => void refresh()}
+            >
+              <LuRefreshCw
+                className={cn("size-3.5", loading && "animate-spin")}
+              />
+              <span>
+                {t("common.buttons.refresh", { defaultValue: "Làm mới" })}
+              </span>
+            </Button>
+          </div>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="my-3 rounded-lg border border-destructive/20 bg-destructive/10 px-4 py-2.5 text-xs text-destructive-text"
+          >
+            {error}
+          </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className={cn(subPage && "mx-auto w-full max-w-4xl")}>
-            <AnimatedTabs key={initialTab} defaultValue={initialTab}>
-              <AnimatedTabsList>
-                <AnimatedTabsTrigger value="api">
-                  {t("integrations.tabApi")}
-                </AnimatedTabsTrigger>
-                <AnimatedTabsTrigger value="mcp">
-                  {t("integrations.tabMcp")}
-                </AnimatedTabsTrigger>
-              </AnimatedTabsList>
+        {/* Tab Switcher */}
+        <div className="flex items-center justify-between gap-3 border-b border-border/40 pb-3 pt-2">
+          <div className="flex rounded-lg bg-foreground/5 p-1" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "api"}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-colors cursor-pointer",
+                activeTab === "api"
+                  ? "bg-background text-foreground shadow-xs font-semibold"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => setActiveTab("api")}
+            >
+              <LuPlug className="size-3.5" />
+              <span>
+                {t("integrations.tabs.localApi", {
+                  defaultValue: "API cục bộ (REST API)",
+                })}
+              </span>
+            </button>
 
-              <AnimatedTabsContent
-                value="api"
-                className="@container mt-4 flex flex-col gap-4"
-              >
-                <div className="flex flex-col gap-4 rounded-md border bg-card p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-start gap-3">
-                      <LuPlug className="mt-0.5 size-5 text-muted-foreground" />
-                      <div className="flex flex-col gap-1">
-                        <Label className="text-sm font-medium">
-                          {t("integrations.apiEnableLabel")}
-                        </Label>
-                        <p className="text-xs text-muted-foreground">
-                          {t("integrations.apiEnableDescription")}
-                        </p>
-                      </div>
-                    </div>
-                    <AnimatedSwitch
-                      checked={apiServerPort !== null}
-                      disabled={isApiStarting}
-                      onCheckedChange={(checked) =>
-                        void handleApiToggle(checked)
-                      }
-                    />
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "mcp"}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-colors cursor-pointer",
+                activeTab === "mcp"
+                  ? "bg-background text-foreground shadow-xs font-semibold"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => setActiveTab("mcp")}
+            >
+              <LuBot className="size-3.5" />
+              <span>
+                {t("integrations.tabs.mcp", {
+                  defaultValue: "Trợ lý AI (MCP Protocol)",
+                })}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "endpoints"}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-colors cursor-pointer",
+                activeTab === "endpoints"
+                  ? "bg-background text-foreground shadow-xs font-semibold"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => setActiveTab("endpoints")}
+            >
+              <LuBookOpen className="size-3.5" />
+              <span>
+                {t("integrations.tabs.endpoints", {
+                  defaultValue: "Danh mục Endpoints",
+                })}
+              </span>
+            </button>
+          </div>
+
+          {pingResult && (
+            <div className="hidden sm:flex items-center gap-2 text-[11px] text-muted-foreground">
+              <span className="size-1.5 rounded-full bg-emerald-500" />
+              <span>
+                Phản hồi:{" "}
+                <strong className="text-foreground">
+                  {pingResult.latencyMs}ms
+                </strong>
+              </span>
+              <span className="text-muted-foreground/60">•</span>
+              <span className="font-mono text-emerald-500">
+                {pingResult.statusText}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Tab Content Body */}
+        <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pt-3 pr-1">
+          {activeTab === "api" && (
+            <div className="space-y-5">
+              {/* Card 1: API Endpoint & Server Specs */}
+              <div className="rounded-xl border border-border/70 bg-card p-5 shadow-2xs space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <h3 className="text-sm font-semibold flex items-center gap-2">
+                      <LuServer className="size-4 text-primary" />
+                      <span>
+                        {t("integrations.api.endpointTitle", {
+                          defaultValue: "Điểm cuối API cục bộ (Local Endpoint)",
+                        })}
+                      </span>
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      {t("integrations.api.endpointDesc", {
+                        defaultValue:
+                          "Máy chủ REST API chạy trên thiết bị, chấp nhận các lệnh điều khiển hồ sơ từ các tập lệnh tự động hóa.",
+                      })}
+                    </p>
                   </div>
 
-                  {apiServerPort && (
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="size-1.5 rounded-full bg-success" />
-                      <span className="text-muted-foreground">
-                        {t("integrations.apiRunningOn")}
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-1.5 text-xs cursor-pointer"
+                      onClick={() =>
+                        void handleCopy(
+                          endpoint,
+                          "endpoint",
+                          "Đã sao chép địa chỉ API",
+                        )
+                      }
+                    >
+                      {copiedKey === "endpoint" ? (
+                        <LuCheck className="size-3.5 text-emerald-500" />
+                      ) : (
+                        <LuCopy className="size-3.5" />
+                      )}
+                      <span>
+                        {copiedKey === "endpoint" ? "Đã chép" : "Sao chép URL"}
                       </span>
-                      <code className="rounded bg-muted px-2 py-1 font-mono text-[11px]">
-                        http://127.0.0.1:{apiServerPort}
-                      </code>
+                    </Button>
+
+                    <Button
+                      variant="subtle"
+                      size="sm"
+                      className="h-8 gap-1.5 text-xs cursor-pointer"
+                      onClick={() => void handlePing()}
+                    >
+                      <LuZap className="size-3.5 text-amber-500" />
+                      <span>Ping Health</span>
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Endpoint Code Box */}
+                <div className="flex items-center justify-between rounded-lg bg-background/80 border border-border/60 px-4 py-2.5 font-mono text-xs">
+                  <span className="font-semibold text-foreground tracking-wide selection:bg-primary/20">
+                    {endpoint}
+                  </span>
+                  <Badge
+                    variant="secondary"
+                    className="text-[10px] uppercase font-mono tracking-wider"
+                  >
+                    HTTP REST
+                  </Badge>
+                </div>
+
+                {/* Specs Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1 text-xs">
+                  <div className="rounded-lg bg-muted/40 p-3 border border-border/40 space-y-1">
+                    <span className="text-muted-foreground text-[11px]">
+                      Chế độ triển khai
+                    </span>
+                    <p className="font-medium text-foreground">
+                      {status?.deploymentMode === "production"
+                        ? "Sản xuất (Production)"
+                        : "Cục bộ (Local Runtime)"}
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg bg-muted/40 p-3 border border-border/40 space-y-1">
+                    <span className="text-muted-foreground text-[11px]">
+                      Cổng dịch vụ (Port)
+                    </span>
+                    <p className="font-medium text-foreground font-mono">
+                      {endpoint.split(":").pop()?.replace(/\D/g, "") || "12345"}
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg bg-muted/40 p-3 border border-border/40 space-y-1">
+                    <span className="text-muted-foreground text-[11px]">
+                      Định danh dịch vụ
+                    </span>
+                    <p className="font-medium text-foreground font-mono">
+                      {status?.apiService || "buglogin-api"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Card 2: Interactive Code Snippets */}
+              <div className="rounded-xl border border-border/70 bg-card p-5 shadow-2xs space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <h3 className="text-sm font-semibold flex items-center gap-2">
+                      <LuCode className="size-4 text-primary" />
+                      <span>
+                        {t("integrations.quickstart.title", {
+                          defaultValue: "Mẫu mã tích hợp nhanh (Quickstart)",
+                        })}
+                      </span>
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      {t("integrations.quickstart.desc", {
+                        defaultValue:
+                          "Chọn ngôn ngữ hoặc framework tự động hóa để sao chép mã nguồn tích hợp sẵn vào dự án của bạn.",
+                      })}
+                    </p>
+                  </div>
+
+                  {/* Language switch */}
+                  <div className="flex rounded-md bg-muted/60 p-0.5 border border-border/40">
+                    {(["curl", "node", "python"] as const).map((lang) => (
+                      <button
+                        key={lang}
+                        type="button"
+                        onClick={() => setCodeLang(lang)}
+                        className={cn(
+                          "px-3 py-1 text-xs rounded transition-colors cursor-pointer capitalize font-medium",
+                          codeLang === lang
+                            ? "bg-background text-foreground shadow-2xs font-semibold"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {lang === "node"
+                          ? "Node.js (Puppeteer)"
+                          : lang === "python"
+                            ? "Python (Playwright)"
+                            : "cURL"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Code Preview Box */}
+                <div className="relative rounded-lg border border-border/60 bg-zinc-950 dark:bg-black p-4 text-zinc-100 font-mono text-xs overflow-x-auto shadow-inner">
+                  <div className="absolute top-3 right-3 flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2.5 text-[11px] gap-1.5 bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800 hover:text-white cursor-pointer"
+                      onClick={() =>
+                        void handleCopy(
+                          codeSnippets[codeLang].code,
+                          `code_${codeLang}`,
+                          `Đã sao chép code ${codeSnippets[codeLang].title}`,
+                        )
+                      }
+                    >
+                      {copiedKey === `code_${codeLang}` ? (
+                        <LuCheck className="size-3 text-emerald-400" />
+                      ) : (
+                        <LuCopy className="size-3" />
+                      )}
+                      <span>
+                        {copiedKey === `code_${codeLang}`
+                          ? "Đã sao chép"
+                          : "Sao chép code"}
+                      </span>
+                    </Button>
+                  </div>
+
+                  <pre className="pr-24 leading-relaxed font-mono">
+                    <code>{codeSnippets[codeLang].code}</code>
+                  </pre>
+                </div>
+
+                <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 text-xs text-muted-foreground flex items-start gap-2.5">
+                  <LuZap className="size-4 text-primary shrink-0 mt-0.5" />
+                  <p className="leading-relaxed">
+                    <strong>Gợi ý:</strong> Khi gọi API{" "}
+                    <code className="font-mono text-foreground font-semibold">
+                      /v1/profiles/:id/launch
+                    </code>
+                    , phản hồi sẽ trả về{" "}
+                    <code className="font-mono text-foreground">
+                      debug_port
+                    </code>{" "}
+                    và{" "}
+                    <code className="font-mono text-foreground">
+                      ws_endpoint
+                    </code>
+                    . Bạn có thể truyền trực tiếp vào Puppeteer, Playwright hoặc
+                    Selenium để bắt đầu tự động hóa mà không cần cài đặt thêm
+                    driver.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "mcp" && (
+            <div className="space-y-5">
+              {/* Card 1: MCP Intro & Status */}
+              <div className="rounded-xl border border-border/70 bg-card p-5 shadow-2xs space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <h3 className="text-sm font-semibold flex items-center gap-2">
+                      <LuBot className="size-4 text-primary" />
+                      <span>Model Context Protocol (MCP)</span>
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      {t("integrations.mcp.desc", {
+                        defaultValue:
+                          "Chuẩn giao thức mở của Anthropic cho phép các trợ lý AI (Cursor, Claude Desktop, Antigravity, Windsurf) trực tiếp mở browser, tự động hóa tác vụ trên BugLogin.",
+                      })}
+                    </p>
+                  </div>
+
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      "gap-1.5 text-xs px-2.5 py-0.5 font-medium",
+                      mcpEnabled
+                        ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                        : "border-border bg-muted text-muted-foreground",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "size-1.5 rounded-full",
+                        mcpEnabled ? "bg-amber-400" : "bg-muted-foreground",
+                      )}
+                    />
+                    <span>
+                      {mcpEnabled
+                        ? "Cần API key để kết nối"
+                        : "MCP chưa được bật"}
+                    </span>
+                  </Badge>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  MCP yêu cầu scoped API key của account đang đăng nhập. Chưa có
+                  key thì cấu hình client bên dưới chưa thể kết nối.
+                </p>
+
+                <div className="space-y-3 rounded-lg border border-border/60 bg-background/50 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">API key cho MCP</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Key thuộc account đang đăng nhập, hết hạn sau 90 ngày và
+                        chỉ cấp quyền profile cùng sync.
+                      </p>
                     </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={isManagingMcpToken || !isApiConnected}
+                      onClick={() => void handleCreateMcpToken()}
+                    >
+                      <LuKey className="mr-1.5 size-3.5" />
+                      {isManagingMcpToken ? "Đang tạo…" : "Tạo key MCP"}
+                    </Button>
+                  </div>
+
+                  {newMcpToken && (
+                    <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+                      <code className="min-w-0 flex-1 break-all font-mono text-xs">
+                        {newMcpToken}
+                      </code>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          void handleCopy(
+                            newMcpToken,
+                            "mcp_token",
+                            "Đã sao chép API key MCP",
+                          )
+                        }
+                      >
+                        {copiedKey === "mcp_token" ? "Đã chép" : "Sao chép key"}
+                      </Button>
+                    </div>
+                  )}
+
+                  {activeMcpTokens.length > 0 && (
+                    <ul className="space-y-2 text-xs">
+                      {activeMcpTokens.map((token) => (
+                        <li
+                          key={token.id}
+                          className="flex items-center justify-between gap-3 rounded-md bg-muted/40 px-3 py-2"
+                        >
+                          <span className="min-w-0 truncate">
+                            {token.name} · hết hạn{" "}
+                            {new Date(
+                              token.expiresAt * 1000,
+                            ).toLocaleDateString()}
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={isManagingMcpToken}
+                            onClick={() => void handleRevokeMcpToken(token.id)}
+                          >
+                            Thu hồi
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
 
-                {settings.api_enabled && (
-                  <>
-                    <div className="grid grid-cols-1 gap-4 @2xl:grid-cols-2">
-                      <div className="flex flex-col gap-2 rounded-md border bg-card p-4">
-                        <Label className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                          {t("integrations.apiPortLabel")}
-                        </Label>
-                        <div className="flex items-center gap-2">
-                          <Input
-                            type="number"
-                            value={apiPortDraft}
-                            onChange={(e) => {
-                              setApiPortDraft(e.target.value);
-                              const val = Number.parseInt(e.target.value, 10);
-                              if (
-                                !Number.isNaN(val) &&
-                                val >= 1 &&
-                                val <= 65535
-                              ) {
-                                setSettings({ ...settings, api_port: val });
-                              }
-                            }}
-                            onBlur={() => {
-                              const val = Number.parseInt(apiPortDraft, 10);
-                              if (Number.isNaN(val) || val < 1 || val > 65535) {
-                                setApiPortDraft(String(settings.api_port));
-                              }
-                            }}
-                            className="w-24 font-mono"
-                            min={1}
-                            max={65535}
-                          />
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={
-                              isApiStarting ||
-                              apiServerPort === settings.api_port
-                            }
-                            onClick={async () => {
-                              const port = settings.api_port;
-                              if (port < 1 || port > 65535) {
-                                showErrorToast(
-                                  t("integrations.apiInvalidPort"),
-                                  {
-                                    description: t(
-                                      "integrations.apiInvalidPortDescription",
-                                    ),
-                                  },
-                                );
-                                return;
-                              }
-                              setIsApiStarting(true);
-                              try {
-                                await invoke("stop_api_server");
-                                const next = await invoke<AppSettings>(
-                                  "save_app_settings",
-                                  { settings },
-                                );
-                                setSettings(next);
-                                const actualPort = await invoke<number>(
-                                  "start_api_server",
-                                  { port },
-                                );
-                                setApiServerPort(actualPort);
-                                if (actualPort !== port) {
-                                  showErrorToast(
-                                    t("integrations.apiPortInUse", { port }),
-                                    {
-                                      description: t(
-                                        "integrations.apiFallbackPort",
-                                        { port: actualPort },
-                                      ),
-                                    },
-                                  );
-                                } else {
-                                  showSuccessToast(
-                                    t("integrations.apiRunning", {
-                                      port: actualPort,
-                                    }),
-                                  );
-                                }
-                              } catch (e) {
-                                showErrorToast(
-                                  t("integrations.apiStartFailed"),
-                                  {
-                                    description:
-                                      e instanceof Error
-                                        ? e.message
-                                        : t("integrations.apiUnknownError"),
-                                  },
-                                );
-                              } finally {
-                                setIsApiStarting(false);
-                              }
-                            }}
-                          >
-                            {t("common.buttons.save")}
-                          </Button>
-                        </div>
-                      </div>
+                <div className="flex items-center justify-between rounded-lg bg-background/80 border border-border/60 px-4 py-2.5 font-mono text-xs">
+                  <div className="space-y-0.5">
+                    <span className="text-[10px] text-muted-foreground uppercase font-sans font-semibold">
+                      MCP Server Endpoint
+                    </span>
+                    <p className="font-semibold text-foreground tracking-wide">
+                      {mcpUrl}
+                    </p>
+                  </div>
 
-                      <div className="flex flex-col gap-2 rounded-md border bg-card p-4">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                            {t("integrations.apiTokenLabel")}
-                          </Label>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="relative flex-1">
-                            <Input
-                              type={showApiToken ? "text" : "password"}
-                              value={settings.api_token ?? ""}
-                              readOnly
-                              className="pr-10 font-mono"
-                            />
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="absolute top-0 right-0 h-full px-3 hover:bg-transparent"
-                              onClick={() => {
-                                setShowApiToken(!showApiToken);
-                              }}
-                            >
-                              {showApiToken ? (
-                                <EyeOff className="size-4" />
-                              ) : (
-                                <Eye className="size-4" />
-                              )}
-                            </Button>
-                          </div>
-                          <CopyToClipboard
-                            text={settings.api_token ?? ""}
-                            successMessage={t("integrations.tokenCopied")}
-                          />
-                        </div>
-                      </div>
-                    </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs cursor-pointer"
+                    onClick={() =>
+                      void handleCopy(mcpUrl, "mcp_url", "Đã sao chép MCP URL")
+                    }
+                  >
+                    {copiedKey === "mcp_url" ? (
+                      <LuCheck className="size-3.5 text-emerald-500" />
+                    ) : (
+                      <LuCopy className="size-3.5" />
+                    )}
+                    <span>
+                      {copiedKey === "mcp_url" ? "Đã chép" : "Sao chép URL"}
+                    </span>
+                  </Button>
+                </div>
+              </div>
 
-                    <div className="flex flex-col gap-2 rounded-md border bg-card p-4">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                          {t("integrations.apiExampleRequest")}
-                        </Label>
-                        <CopyToClipboard
-                          text={`curl -H "Authorization: Bearer ${settings.api_token ?? "${TOKEN}"}" \\\n     http://127.0.0.1:${apiServerPort ?? settings.api_port}/v1/profiles`}
-                          successMessage={t("common.buttons.copied")}
-                        />
-                      </div>
-                      <pre className="overflow-x-auto rounded bg-background p-3 font-mono text-[11px] whitespace-pre">
-                        {`curl -H "Authorization: Bearer \${TOKEN}" \\
-     http://127.0.0.1:${apiServerPort ?? settings.api_port}/v1/profiles`}
-                      </pre>
-                    </div>
-                  </>
-                )}
-              </AnimatedTabsContent>
+              {/* Card 2: AI Clients Configuration */}
+              <div className="rounded-xl border border-border/70 bg-card p-5 shadow-2xs space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <h3 className="text-sm font-semibold flex items-center gap-2">
+                      <LuCpu className="size-4 text-primary" />
+                      <span>
+                        {t("integrations.mcp.clientsTitle", {
+                          defaultValue: "Cấu hình AI Agent (1-Click Setup)",
+                        })}
+                      </span>
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      Dán đoạn mã cấu hình dưới đây vào file cài đặt MCP của ứng
+                      dụng AI bạn đang dùng.
+                    </p>
+                  </div>
 
-              <AnimatedTabsContent
-                value="mcp"
-                className="mt-4 flex flex-col gap-5"
-              >
-                <div className="flex flex-col gap-4 rounded-md border bg-card p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-start gap-3">
-                      <LuZap className="mt-0.5 size-5 text-muted-foreground" />
-                      <div className="flex flex-col gap-1">
-                        <Label className="text-sm font-medium">
-                          {t("integrations.mcpEnableLabel")}
-                        </Label>
-                        <p className="text-xs text-muted-foreground">
-                          {t("integrations.mcpEnableDescription")}
-                          {!termsAccepted && (
-                            <span className="ml-1 text-warning">
-                              {t("integrations.mcpAcceptTermsFirst")}
-                            </span>
+                  {/* Client tabs */}
+                  <div className="flex rounded-md bg-muted/60 p-0.5 border border-border/40">
+                    {(["cursor", "claude", "antigravity"] as const).map(
+                      (client) => (
+                        <button
+                          key={client}
+                          type="button"
+                          onClick={() => setMcpClient(client)}
+                          className={cn(
+                            "px-3 py-1 text-xs rounded transition-colors cursor-pointer font-medium",
+                            mcpClient === client
+                              ? "bg-background text-foreground shadow-2xs font-semibold"
+                              : "text-muted-foreground hover:text-foreground",
                           )}
-                        </p>
-                      </div>
-                    </div>
-                    <AnimatedSwitch
-                      checked={settings.mcp_enabled && mcpConfig !== null}
-                      disabled={!termsAccepted || isMcpStarting}
-                      onCheckedChange={(checked) =>
-                        void handleMcpToggle(checked)
-                      }
-                    />
+                        >
+                          {mcpConfigs[client].name}
+                        </button>
+                      ),
+                    )}
                   </div>
                 </div>
 
-                {mcpConfig && (
-                  <>
-                    <div className="flex flex-col gap-2 rounded-md border bg-card p-4">
-                      <Label className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                        {t("integrations.mcp.url")}
-                      </Label>
-                      <div className="flex items-center gap-x-2">
-                        <div className="relative flex-1">
-                          <Input
-                            type={showMcpUrl ? "text" : "password"}
-                            value={mcpUrl}
-                            readOnly
-                            className="pr-10 font-mono text-xs"
-                          />
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="absolute top-0 right-0 h-full px-3 hover:bg-transparent"
-                            onClick={() => {
-                              setShowMcpUrl(!showMcpUrl);
-                            }}
-                          >
-                            {showMcpUrl ? (
-                              <EyeOff className="size-4" />
-                            ) : (
-                              <Eye className="size-4" />
-                            )}
-                          </Button>
-                        </div>
-                        <CopyToClipboard
-                          text={mcpUrl}
-                          successMessage={t("integrations.mcp.urlCopied")}
-                        />
-                      </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>
+                      Đường dẫn tệp cấu hình:{" "}
+                      <code className="font-mono text-foreground font-medium">
+                        {mcpConfigs[mcpClient].file}
+                      </code>
+                    </span>
+                  </div>
+
+                  <div className="relative rounded-lg border border-border/60 bg-zinc-950 dark:bg-black p-4 text-zinc-100 font-mono text-xs overflow-x-auto shadow-inner">
+                    <div className="absolute top-3 right-3">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!newMcpToken}
+                        className="h-7 px-2.5 text-[11px] gap-1.5 bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800 hover:text-white cursor-pointer"
+                        onClick={() =>
+                          void handleCopy(
+                            mcpConfigs[mcpClient].config,
+                            `mcp_conf_${mcpClient}`,
+                            `Đã sao chép cấu hình ${mcpConfigs[mcpClient].name}`,
+                          )
+                        }
+                      >
+                        {copiedKey === `mcp_conf_${mcpClient}` ? (
+                          <LuCheck className="size-3 text-emerald-400" />
+                        ) : (
+                          <LuCopy className="size-3" />
+                        )}
+                        <span>
+                          {copiedKey === `mcp_conf_${mcpClient}`
+                            ? "Đã sao chép"
+                            : "Sao chép JSON"}
+                        </span>
+                      </Button>
                     </div>
 
-                    <div className="@container flex flex-col gap-3">
-                      <Label className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                        {t("integrations.mcp.clientsLabel")}
-                      </Label>
-                      <div className="grid grid-cols-1 gap-3 @2xl:grid-cols-2">
-                        {agents.map((agent) => {
-                          const busy = busyAgentIds.has(agent.id);
-                          return (
-                            <div
-                              key={agent.id}
-                              className="flex items-center gap-3 rounded-md border bg-card px-3 py-2.5"
-                            >
-                              <div className="grid size-8 shrink-0 place-items-center rounded-md bg-muted">
-                                <AgentIcon category={agent.category} />
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <p className="truncate text-sm font-medium">
-                                  {agent.display_name}
-                                </p>
-                                <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                                  {categoryLabel(t, agent.category)}
-                                </p>
-                              </div>
-                              {agent.connected ? (
-                                <div className="flex items-center gap-1">
-                                  <span className="inline-flex items-center gap-1 rounded-md border bg-muted px-2 py-1 text-[10px] font-medium tracking-wide text-foreground uppercase">
-                                    <LuCheck className="size-3" />
-                                    {t("integrations.mcp.connected")}
-                                  </span>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    className="size-8 text-muted-foreground hover:text-destructive"
-                                    disabled={busy}
-                                    onClick={() =>
-                                      void handleRemoveAgent(agent)
-                                    }
-                                    aria-label={t(
-                                      "integrations.mcp.removeAriaLabel",
-                                      {
-                                        name: agent.display_name,
-                                      },
-                                    )}
-                                  >
-                                    <LuTrash2 className="size-4" />
-                                  </Button>
-                                </div>
-                              ) : (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={busy}
-                                  onClick={() => void handleAddAgent(agent)}
-                                >
-                                  {t("integrations.mcp.add")}
-                                </Button>
+                    <pre className="pr-24 leading-relaxed font-mono">
+                      <code>{mcpConfigs[mcpClient].config}</code>
+                    </pre>
+                  </div>
+                </div>
+
+                <div className="rounded-lg bg-muted/40 p-3.5 border border-border/40 space-y-1.5 text-xs">
+                  <span className="font-semibold text-foreground flex items-center gap-1.5">
+                    <LuShieldCheck className="size-4 text-emerald-500" />
+                    <span>Các công cụ MCP được cung cấp tự động:</span>
+                  </span>
+                  <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
+                    <li>
+                      <strong className="text-foreground">
+                        list_profiles:
+                      </strong>{" "}
+                      Liệt kê danh sách hồ sơ trình duyệt, proxy và tags
+                    </li>
+                    <li>
+                      <strong className="text-foreground">
+                        create_profile:
+                      </strong>{" "}
+                      Tự động tạo hồ sơ với OS và fingerprint giả lập
+                    </li>
+                    <li>
+                      <strong className="text-foreground">
+                        launch_profile:
+                      </strong>{" "}
+                      Mở trình duyệt và bàn giao quyền điều khiển tự động cho AI
+                    </li>
+                    <li>
+                      <strong className="text-foreground">stop_profile:</strong>{" "}
+                      Dừng và giải phóng tài nguyên trình duyệt
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "endpoints" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <LuLayers className="size-4 text-primary" />
+                    <span>
+                      {t("integrations.endpoints.title", {
+                        defaultValue: "Danh mục Endpoints chính thức",
+                      })}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Tất cả các tuyến đường API đều hỗ trợ giao thức HTTP REST,
+                    nhận và trả về định dạng chuẩn JSON.
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-border/70 bg-card overflow-hidden shadow-2xs">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-muted/50 border-b border-border/60 text-muted-foreground font-medium">
+                      <tr>
+                        <th className="py-2.5 px-4 w-28">Phương thức</th>
+                        <th className="py-2.5 px-4 w-72">Đường dẫn (Path)</th>
+                        <th className="py-2.5 px-4">Mô tả chức năng</th>
+                        <th className="py-2.5 px-4 w-20 text-right">
+                          Thao tác
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/40">
+                      {apiEndpointsList.map((ep, idx) => (
+                        <tr
+                          key={idx}
+                          className="hover:bg-muted/30 transition-colors"
+                        >
+                          <td className="py-2.5 px-4">
+                            <span
+                              className={cn(
+                                "inline-block px-2 py-0.5 rounded text-[10px] font-mono font-bold border",
+                                ep.color,
                               )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </>
-                )}
-              </AnimatedTabsContent>
-            </AnimatedTabs>
-          </div>
+                            >
+                              {ep.method}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 font-mono font-medium text-foreground">
+                            {ep.path}
+                          </td>
+                          <td className="py-2.5 px-4 text-muted-foreground leading-relaxed">
+                            {ep.desc}
+                          </td>
+                          <td className="py-2.5 px-4 text-right">
+                            <Button
+                              variant="subtle"
+                              size="icon"
+                              className="size-7 rounded p-0 text-muted-foreground hover:text-foreground cursor-pointer"
+                              title="Sao chép đường dẫn"
+                              onClick={() =>
+                                void handleCopy(
+                                  ep.path,
+                                  `ep_${idx}`,
+                                  `Đã sao chép ${ep.path}`,
+                                )
+                              }
+                            >
+                              {copiedKey === `ep_${idx}` ? (
+                                <LuCheck className="size-3.5 text-emerald-500" />
+                              ) : (
+                                <LuCopy className="size-3.5" />
+                              )}
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

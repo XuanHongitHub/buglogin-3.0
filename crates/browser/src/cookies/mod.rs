@@ -154,6 +154,62 @@ pub(crate) struct PersistedCookieAuthorityState {
     pub(crate) schema_version: u32,
     pub(crate) generations: Vec<PersistedCookieGeneration>,
     pub(crate) receipts: Vec<PersistedCookieReceipt>,
+    #[serde(default)]
+    pub(crate) stages: Vec<PersistedCookieStage>,
+    #[serde(default)]
+    pub(crate) pending_materializations: Vec<PersistedCookieMaterialization>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersistedCookieMaterialization {
+    pub(crate) workspace_id: String,
+    pub(crate) profile_id: String,
+    pub(crate) command: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) expected_generation: u64,
+    pub(crate) generation: u64,
+    #[serde(default)]
+    pub(crate) fencing_token: Option<u64>,
+    #[serde(default)]
+    pub(crate) staged_import_id: Option<String>,
+    pub(crate) source_workspace_id: Option<String>,
+    pub(crate) source_profile_id: Option<String>,
+    #[serde(default)]
+    pub(crate) hosted_job: Option<PersistedHostedCookieJobBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersistedHostedCookieJobBinding {
+    pub(crate) job_id: String,
+    pub(crate) operation_id: String,
+    pub(crate) device_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersistedCookieStage {
+    pub(crate) stage_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) profile_id: String,
+    pub(crate) expires_at_unix_ms: u64,
+    #[serde(default)]
+    pub(crate) cleanup_pending: bool,
+    pub(crate) cookies: Vec<PersistedCookieStageItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersistedCookieStageItem {
+    pub(crate) name: String,
+    pub(crate) domain: String,
+    pub(crate) path: String,
+    pub(crate) secure: bool,
+    pub(crate) http_only: bool,
+    pub(crate) expires_at: Option<i64>,
+    pub(crate) same_site: i32,
+    pub(crate) version: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -173,6 +229,8 @@ pub(crate) struct PersistedCookieReceipt {
     pub(crate) fingerprint: String,
     pub(crate) report: CookieReport,
     pub(crate) generation: u64,
+    #[serde(default)]
+    pub(crate) hosted_job: Option<PersistedHostedCookieJobBinding>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -248,6 +306,236 @@ impl<V: OsVault> CookieService<V> {
 
     pub(crate) fn authority_state(&self) -> &PersistedCookieAuthorityState {
         &self.authority_state
+    }
+
+    pub(crate) fn commit_authority_state(
+        &mut self,
+        authority_state: &PersistedCookieAuthorityState,
+    ) -> Result<(), CookieError> {
+        persist_records(
+            self.metadata_root.as_deref(),
+            &self.records,
+            authority_state,
+        )?;
+        self.authority_state = authority_state.clone();
+        Ok(())
+    }
+
+    pub(crate) fn persist_stage(
+        &mut self,
+        scope: &CookieScope,
+        stage_id: &str,
+        expires_at_unix_ms: u64,
+        inputs: Vec<CookieInput>,
+    ) -> Result<PersistedCookieStage, CookieError> {
+        if self
+            .authority_state
+            .stages
+            .iter()
+            .any(|stage| stage.stage_id == stage_id)
+        {
+            return Err(CookieError::Duplicate);
+        }
+        let mut secret_values = Vec::with_capacity(inputs.len());
+        let mut stage = PersistedCookieStage {
+            stage_id: stage_id.to_owned(),
+            workspace_id: scope.workspace_id.as_str().to_owned(),
+            profile_id: scope.profile_id.as_str().to_owned(),
+            expires_at_unix_ms,
+            cleanup_pending: false,
+            cookies: Vec::with_capacity(inputs.len()),
+        };
+        for input in inputs {
+            stage.cookies.push(PersistedCookieStageItem {
+                name: input.name.clone(),
+                domain: input.domain.clone(),
+                path: input.path.clone(),
+                secure: input.secure,
+                http_only: input.http_only,
+                expires_at: input.expires_at,
+                same_site: same_site_to_db(input.same_site),
+                version: 0,
+            });
+            secret_values.push(input.value);
+        }
+        let mut authority_state = self.authority_state.clone();
+        authority_state.stages.push(stage.clone());
+        persist_records(
+            self.metadata_root.as_deref(),
+            &self.records,
+            &authority_state,
+        )?;
+        self.authority_state = authority_state;
+
+        for (index, value) in secret_values.into_iter().enumerate() {
+            let item = &stage.cookies[index];
+            let cookie_identity = CookieIdentity {
+                name: item.name.clone(),
+                domain: item.domain.clone(),
+                path: item.path.clone(),
+            };
+            let key = key_for_stage(stage_id, scope, &cookie_identity);
+            let version = match self.vault.create(&key, value) {
+                Ok(version) => version,
+                Err(error) => {
+                    self.discard_stage(scope, &stage)?;
+                    return Err(error.into());
+                }
+            };
+            stage.cookies[index].version = version.generation();
+        }
+        let mut authority_state = self.authority_state.clone();
+        if let Some(entry) = authority_state
+            .stages
+            .iter_mut()
+            .find(|entry| entry.stage_id == stage_id)
+        {
+            *entry = stage.clone();
+        } else {
+            return Err(CookieError::Storage);
+        }
+        if let Err(error) = persist_records(
+            self.metadata_root.as_deref(),
+            &self.records,
+            &authority_state,
+        ) {
+            self.discard_stage(scope, &stage)?;
+            return Err(error);
+        }
+        self.authority_state = authority_state;
+        Ok(stage)
+    }
+
+    pub(crate) fn restore_stage_inputs(
+        &self,
+        scope: &CookieScope,
+        stage: &PersistedCookieStage,
+    ) -> Result<Vec<CookieInput>, CookieError> {
+        stage
+            .cookies
+            .iter()
+            .map(|item| {
+                let cookie_identity = CookieIdentity {
+                    name: item.name.clone(),
+                    domain: item.domain.clone(),
+                    path: item.path.clone(),
+                };
+                let key = key_for_stage(&stage.stage_id, scope, &cookie_identity);
+                let (value, version) = self.vault.read(&key)?;
+                if version.generation() != item.version {
+                    return Err(CookieError::Rollback);
+                }
+                Ok(CookieInput {
+                    name: item.name.clone(),
+                    domain: item.domain.clone(),
+                    path: item.path.clone(),
+                    secure: item.secure,
+                    http_only: item.http_only,
+                    expires_at: item.expires_at,
+                    same_site: same_site_from_db(item.same_site)?,
+                    value,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn materialization_inputs(
+        &self,
+        scope: &CookieScope,
+        principal: &Principal,
+        grants: &[Grant],
+    ) -> Result<Vec<CookieInput>, CookieError> {
+        authorize(scope, Action::Read, principal, grants)?;
+        self.records
+            .get(scope)
+            .into_iter()
+            .flat_map(BTreeMap::iter)
+            .map(|(cookie_identity, record)| {
+                let key = key_for_slot(scope, cookie_identity, record.slot);
+                let (value, version) = self.vault.read(&key)?;
+                if version != record.version {
+                    return Err(CookieError::Rollback);
+                }
+                Ok(CookieInput {
+                    name: record.metadata.name.clone(),
+                    domain: record.metadata.domain.clone(),
+                    path: record.metadata.path.clone(),
+                    secure: record.metadata.secure,
+                    http_only: record.metadata.http_only,
+                    expires_at: record.metadata.expires_at,
+                    same_site: record.metadata.same_site,
+                    value,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn discard_stage(
+        &mut self,
+        scope: &CookieScope,
+        stage: &PersistedCookieStage,
+    ) -> Result<(), CookieError> {
+        for item in &stage.cookies {
+            let identity = CookieIdentity {
+                name: item.name.clone(),
+                domain: item.domain.clone(),
+                path: item.path.clone(),
+            };
+            let key = key_for_stage(&stage.stage_id, scope, &identity);
+            match self.vault.read(&key) {
+                Ok((_, version)) => self.vault.remove(&key, version)?,
+                Err(SecretError::NotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut authority_state = self.authority_state.clone();
+        authority_state
+            .stages
+            .retain(|item| item.stage_id != stage.stage_id);
+        persist_records(
+            self.metadata_root.as_deref(),
+            &self.records,
+            &authority_state,
+        )?;
+        self.authority_state = authority_state;
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_pending_stage(
+        &mut self,
+        scope: &CookieScope,
+        stage: &PersistedCookieStage,
+    ) -> Result<(), CookieError> {
+        for item in &stage.cookies {
+            let identity = CookieIdentity {
+                name: item.name.clone(),
+                domain: item.domain.clone(),
+                path: item.path.clone(),
+            };
+            let key = key_for_stage(&stage.stage_id, scope, &identity);
+            match self.vault.read(&key) {
+                Ok((_, version)) => self.vault.remove(&key, version)?,
+                Err(SecretError::NotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut authority_state = self.authority_state.clone();
+        let Some(entry) = authority_state
+            .stages
+            .iter_mut()
+            .find(|entry| entry.stage_id == stage.stage_id)
+        else {
+            return Err(CookieError::Storage);
+        };
+        entry.cookies.clear();
+        entry.cleanup_pending = true;
+        persist_records(
+            self.metadata_root.as_deref(),
+            &self.records,
+            &authority_state,
+        )?;
+        self.authority_state = authority_state;
+        Ok(())
     }
 
     pub(crate) fn preview_import(
@@ -336,6 +624,7 @@ impl<V: OsVault> CookieService<V> {
         principal: &Principal,
         grants: &[Grant],
         authority_state: &PersistedCookieAuthorityState,
+        stage_id: &str,
     ) -> Result<CookieReport, CookieError> {
         authorize(&scope, Action::Create, principal, grants)?;
         let inputs = inputs
@@ -349,7 +638,24 @@ impl<V: OsVault> CookieService<V> {
                 return Err(CookieError::Duplicate);
             }
         }
-        self.apply_batch_with_authority(&scope, identities, authority_state)
+        // The commit payload marks this stage for cleanup while the pending
+        // materialization receipt keeps its identity for restart recovery.
+        // Read that payload instead of the pre-commit in-memory copy.
+        let stage = authority_state
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == stage_id)
+            .cloned()
+            .ok_or(CookieError::NotFound)?;
+        let mut report = self.apply_batch_with_authority(&scope, identities, authority_state)?;
+        if stage.cleanup_pending {
+            if self.cleanup_pending_stage(&scope, &stage).is_err() {
+                report.cleanup_pending += 1;
+            }
+        } else if self.discard_stage(&scope, &stage).is_err() {
+            report.cleanup_pending += 1;
+        }
+        Ok(report)
     }
 
     pub(crate) fn copy_with_authority_state(
@@ -855,4 +1161,21 @@ fn key_for_slot(scope: &CookieScope, identity: &CookieIdentity, slot: u8) -> Sec
         hasher.update([slot]);
     }
     SecretKey::new("cookies", format!("{:x}", hasher.finalize())).expect("fixed vault key format")
+}
+
+fn key_for_stage(stage_id: &str, scope: &CookieScope, identity: &CookieIdentity) -> SecretKey {
+    let mut hasher = Sha256::new();
+    for value in [
+        stage_id,
+        scope.workspace_id.as_str(),
+        scope.profile_id.as_str(),
+        &identity.name,
+        &identity.domain,
+        &identity.path,
+    ] {
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    SecretKey::new("cookie-staging", format!("{:x}", hasher.finalize()))
+        .expect("fixed vault key format")
 }

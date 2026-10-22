@@ -1,9 +1,8 @@
-use std::{env, sync::Arc};
+use std::sync::Arc;
 
 use buglogin_domain::{
     account::{AccountIdentity, canonical_email, canonical_username},
     errors::Problem,
-    identity::SessionRecord,
     ids::AccountId,
 };
 use buglogin_storage::control::{
@@ -13,10 +12,12 @@ use getrandom::fill;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    control_persistence::ControlPersistence, credentials::CredentialService,
-    identity_persistence::IdentityPersistence,
+    api_tokens::ApiTokenService, control_persistence::ControlPersistence,
+    credentials::CredentialService, identity_persistence::IdentityPersistence,
+    session_persistence::SessionPersistence,
 };
 
 const TENANT: &str = "identity";
@@ -38,69 +39,6 @@ pub struct RecoveryDeliveryMessage {
 pub trait RecoveryDelivery: Send + Sync {
     fn available(&self) -> bool;
     fn deliver(&self, message: RecoveryDeliveryMessage) -> Result<(), Problem>;
-}
-
-pub struct WebhookRecoveryDelivery {
-    url: String,
-    secret: String,
-    client: reqwest::blocking::Client,
-}
-
-impl WebhookRecoveryDelivery {
-    pub fn from_env(production: bool) -> Result<Option<Arc<dyn RecoveryDelivery>>, Problem> {
-        let url = env::var("BUGLOGIN_RECOVERY_WEBHOOK_URL").ok();
-        let secret = env::var("BUGLOGIN_RECOVERY_WEBHOOK_SECRET").ok();
-        if url.is_none() && secret.is_none() {
-            return Ok(None);
-        }
-        let url =
-            url.ok_or_else(|| delivery_config("BUGLOGIN_RECOVERY_WEBHOOK_URL is required"))?;
-        let secret = secret
-            .ok_or_else(|| delivery_config("BUGLOGIN_RECOVERY_WEBHOOK_SECRET is required"))?;
-        if production && !url.starts_with("https://") {
-            return Err(delivery_config(
-                "BUGLOGIN_RECOVERY_WEBHOOK_URL must use HTTPS in production",
-            ));
-        }
-        if secret.len() < 32 || secret.len() > 4096 {
-            return Err(delivery_config(
-                "BUGLOGIN_RECOVERY_WEBHOOK_SECRET length is invalid",
-            ));
-        }
-        let client = reqwest::blocking::Client::builder()
-            .build()
-            .map_err(|_| delivery_config("Recovery delivery client could not initialize"))?;
-        Ok(Some(Arc::new(Self {
-            url,
-            secret,
-            client,
-        })))
-    }
-}
-
-impl RecoveryDelivery for WebhookRecoveryDelivery {
-    fn available(&self) -> bool {
-        true
-    }
-
-    fn deliver(&self, message: RecoveryDeliveryMessage) -> Result<(), Problem> {
-        let response = self
-            .client
-            .post(&self.url)
-            .bearer_auth(&self.secret)
-            .json(&json!({
-                "accountId": message.account_id,
-                "destination": message.destination,
-                "token": message.raw_token,
-                "expiresAt": message.expires_at,
-            }))
-            .send()
-            .map_err(|_| delivery_unavailable())?;
-        if !response.status().is_success() {
-            return Err(delivery_unavailable());
-        }
-        Ok(())
-    }
 }
 
 #[derive(Default)]
@@ -138,6 +76,8 @@ pub struct RecoveryService {
     store: ControlPersistence,
     identities: IdentityPersistence,
     credentials: CredentialService,
+    api_tokens: ApiTokenService,
+    sessions: SessionPersistence,
     delivery: Arc<dyn RecoveryDelivery>,
 }
 
@@ -145,6 +85,8 @@ impl RecoveryService {
     pub fn new(store: ControlPersistence, credentials: CredentialService) -> Self {
         Self {
             identities: IdentityPersistence::new(store.clone()),
+            api_tokens: ApiTokenService::new(store.clone(), credentials.clone()),
+            sessions: SessionPersistence::new(store.clone()),
             store,
             credentials,
             delivery: Arc::new(UnavailableRecoveryDelivery),
@@ -160,9 +102,13 @@ impl RecoveryService {
         if !self.delivery.available() {
             return Err(delivery_unavailable());
         }
-        let rate_id = hex(&sha256(identifier.trim().to_lowercase().as_bytes()));
         let request_nonce = random_token()?;
         let identity = self.find_identity(identifier)?;
+        let rate_subject = identity.as_ref().map_or_else(
+            || format!("identifier:{}", identifier.trim().to_lowercase()),
+            |identity| format!("account:{}", identity.account_id.as_str()),
+        );
+        let rate_id = hex(&sha256(rate_subject.as_bytes()));
         for _ in 0..MAX_RATE_CAS_RETRIES {
             let (rate, rate_revision) = self
                 .store
@@ -193,13 +139,13 @@ impl RecoveryService {
                 value: serde_json::to_value(&next_rate).map_err(|_| corrupt())?,
             }];
             let issued = if let Some(identity) = identity.clone().filter(|_| !suppressed) {
-                let raw_token = random_token()?;
+                let raw_token = Zeroizing::new(random_token()?);
                 let token_hash = sha256(raw_token.as_bytes());
                 let record = RecoveryTokenRecord {
                     account_id: identity.account_id.clone(),
                     token_hash,
                     created_at: now,
-                    expires_at: now.saturating_add(TOKEN_SECONDS),
+                    expires_at: crate::clock::checked_add_seconds(now, TOKEN_SECONDS, "recovery")?,
                     consumed_at: None,
                 };
                 puts.push(ControlPut {
@@ -239,11 +185,11 @@ impl RecoveryService {
             });
             match result {
                 Ok(_) => {
-                    if let Some((identity, record, raw_token)) = issued {
+                    if let Some((identity, record, mut raw_token)) = issued {
                         if let Err(error) = self.delivery.deliver(RecoveryDeliveryMessage {
                             account_id: identity.account_id,
                             destination: identity.email,
-                            raw_token,
+                            raw_token: std::mem::take(&mut *raw_token),
                             expires_at: record.expires_at,
                         }) {
                             self.invalidate(&record, now)?;
@@ -272,7 +218,10 @@ impl RecoveryService {
         idempotency_key: &str,
         now: u64,
     ) -> Result<AccountId, Problem> {
-        if raw_token.len() != 64 || !raw_token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if !self.delivery.available() {
+            return Err(delivery_unavailable());
+        }
+        if !buglogin_domain::security::is_lower_hex_token_64(raw_token) {
             return Err(invalid_token());
         }
         let token_hash = sha256(raw_token.as_bytes());
@@ -284,7 +233,7 @@ impl RecoveryService {
                 .ok_or_else(corrupt)?;
             return AccountId::new(account_id.to_owned()).map_err(|_| corrupt());
         }
-        let Some((mut record, revision)) = self.store.load_versioned::<RecoveryTokenRecord>(
+        let Some((record, _revision)) = self.store.load_versioned::<RecoveryTokenRecord>(
             TENANT,
             TOKEN_RECORD_TYPE,
             &token_id,
@@ -301,35 +250,55 @@ impl RecoveryService {
         let password_put =
             self.credentials
                 .password_reset_put(&record.account_id, new_password, now)?;
-        record.consumed_at = Some(now);
-        let mut puts = vec![
-            password_put,
-            ControlPut {
-                tenant_id: TENANT.into(),
-                record_type: TOKEN_RECORD_TYPE.into(),
-                record_id: token_id,
-                expected_revision: Some(revision),
-                value: serde_json::to_value(&record).map_err(|_| corrupt())?,
-            },
-        ];
-        let mut revoked_sessions = 0;
-        for (session_id, mut session, session_revision) in self
+        let mut recovery_token_puts = Vec::new();
+        let mut current_token_found = false;
+        let pending_tokens = self
             .store
-            .list_versioned::<SessionRecord>(TENANT, "session")?
-        {
-            if session.account_id != record.account_id || session.revoked_at.is_some() {
-                continue;
+            .list_versioned_for_account::<RecoveryTokenRecord>(
+                TENANT,
+                TOKEN_RECORD_TYPE,
+                record.account_id.as_str(),
+            )?;
+        for (record_id, mut pending, token_revision) in pending_tokens {
+            if pending.account_id != record.account_id || record_id != hex(&pending.token_hash) {
+                return Err(corrupt());
             }
-            session.revoked_at = Some(now);
-            puts.push(ControlPut {
-                tenant_id: TENANT.into(),
-                record_type: "session".into(),
-                record_id: session_id,
-                expected_revision: Some(session_revision),
-                value: serde_json::to_value(session).map_err(|_| corrupt())?,
-            });
-            revoked_sessions += 1;
+            if record_id == token_id {
+                current_token_found = true;
+                if pending.consumed_at.is_some() || now >= pending.expires_at {
+                    return Err(invalid_token());
+                }
+            }
+            if pending.consumed_at.is_none() {
+                pending.consumed_at = Some(now);
+                recovery_token_puts.push(ControlPut {
+                    tenant_id: TENANT.into(),
+                    record_type: TOKEN_RECORD_TYPE.into(),
+                    record_id,
+                    expected_revision: Some(token_revision),
+                    value: serde_json::to_value(pending).map_err(|_| corrupt())?,
+                });
+            }
         }
+        if !current_token_found {
+            return Err(corrupt());
+        }
+        let mut puts = Vec::with_capacity(1 + recovery_token_puts.len());
+        puts.push(password_put);
+        puts.extend(recovery_token_puts);
+        let session_revocations = self
+            .sessions
+            .account_session_revocation_puts(&record.account_id, now)?;
+        let revoked_sessions = session_revocations
+            .iter()
+            .filter(|put| matches!(put.record_type.as_str(), "session" | "session_family"))
+            .count();
+        puts.extend(session_revocations);
+        let revoked_api_tokens = self
+            .api_tokens
+            .account_revocation_puts(&record.account_id, now)?;
+        let revoked_api_token_count = revoked_api_tokens.len();
+        puts.extend(revoked_api_tokens);
         self.store.execute(ExecuteControlCommand {
             tenant_id: TENANT.into(),
             command_id: "auth.recovery.complete".into(),
@@ -342,7 +311,11 @@ impl RecoveryService {
                 command_id: "auth.recovery.complete".into(),
                 actor_id: record.account_id.as_str().into(),
                 allowed: true,
-                detail: json!({"state": "consumed", "sessionsRevoked": revoked_sessions}),
+                detail: json!({
+                    "state": "consumed",
+                    "sessionsRevoked": revoked_sessions,
+                    "apiTokensRevoked": revoked_api_token_count,
+                }),
             },
             response: HttpResponse {
                 status: 204,
@@ -409,8 +382,13 @@ impl RecoveryService {
 
 fn random_token() -> Result<String, Problem> {
     let mut bytes = [0u8; 32];
-    fill(&mut bytes).map_err(|_| delivery_unavailable())?;
-    Ok(hex(&bytes))
+    if fill(&mut bytes).is_err() {
+        bytes.zeroize();
+        return Err(delivery_unavailable());
+    }
+    let token = hex(&bytes);
+    bytes.zeroize();
+    Ok(token)
 }
 
 fn sha256(value: &[u8]) -> [u8; 32] {
@@ -428,10 +406,6 @@ fn invalid_token() -> Problem {
         400,
         "identity",
     )
-}
-
-fn delivery_config(detail: &'static str) -> Problem {
-    Problem::new("recovery_delivery_config_invalid", detail, 500, "identity")
 }
 
 fn delivery_unavailable() -> Problem {
@@ -456,7 +430,11 @@ fn corrupt() -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::{
+        sync::Mutex,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use crate::{auth::AuthService, services::session_persistence::SessionPersistence};
     use buglogin_domain::account::AccountIdentity;
@@ -478,6 +456,23 @@ mod tests {
         }
     }
 
+    fn retry_if_credential_capacity_is_busy<T>(
+        mut authenticate: impl FnMut() -> Result<T, Problem>,
+    ) -> Result<T, Problem> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match authenticate() {
+                Err(error)
+                    if error.code == "credential_capacity_exhausted"
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                result => return result,
+            }
+        }
+    }
+
     fn setup() -> (
         RecoveryService,
         CredentialService,
@@ -496,6 +491,8 @@ mod tests {
                     "owner@example.com",
                     "2026-07-23T00:00:00Z",
                 )
+                .unwrap()
+                .verify(1, "2026-07-23T00:00:01Z")
                 .unwrap(),
             )
             .unwrap();
@@ -517,9 +514,10 @@ mod tests {
             credentials.clone(),
         )
         .unwrap();
-        let (_, login_version) = credentials
-            .authenticate_versioned("owner", "correct horse battery staple", 199)
-            .unwrap();
+        let (_, login_version) = retry_if_credential_capacity_is_busy(|| {
+            credentials.authenticate_versioned("owner", "correct horse battery staple", 199)
+        })
+        .unwrap();
         let session = auth
             .issue_browser_with_credential_version(account_id.clone(), 10_000, 199, login_version)
             .unwrap();
@@ -549,16 +547,18 @@ mod tests {
             account_id
         );
         assert_eq!(
-            credentials
-                .authenticate("owner", "correct horse battery staple", 202)
-                .unwrap_err()
-                .code,
+            retry_if_credential_capacity_is_busy(|| {
+                credentials.authenticate("owner", "correct horse battery staple", 202)
+            })
+            .unwrap_err()
+            .code,
             "invalid_credentials"
         );
         assert_eq!(
-            credentials
-                .authenticate("owner", "new correct horse battery staple", 203)
-                .unwrap(),
+            retry_if_credential_capacity_is_busy(|| {
+                credentials.authenticate("owner", "new correct horse battery staple", 203)
+            })
+            .unwrap(),
             account_id
         );
         assert_eq!(
@@ -602,14 +602,48 @@ mod tests {
     }
 
     #[test]
+    fn completing_recovery_consumes_every_other_outstanding_token() {
+        let (recovery, _, delivery, _, account_id) = setup();
+        recovery.request("owner@example.com", 200).unwrap();
+        recovery.request("owner@example.com", 201).unwrap();
+        let messages = std::mem::take(&mut *delivery.messages.lock().unwrap());
+        assert_eq!(messages.len(), 2);
+
+        assert_eq!(
+            recovery
+                .complete(
+                    &messages[0].raw_token,
+                    "new correct horse battery staple",
+                    "recovery-complete-current-token",
+                    202,
+                )
+                .unwrap(),
+            account_id
+        );
+        assert_eq!(
+            recovery
+                .complete(
+                    &messages[1].raw_token,
+                    "another correct horse battery staple",
+                    "recovery-complete-stale-token",
+                    203,
+                )
+                .unwrap_err()
+                .code,
+            "invalid_recovery_token"
+        );
+    }
+
+    #[test]
     fn unknown_identity_and_rate_limit_have_same_success_shape() {
         let (recovery, _, delivery, _, _) = setup();
         recovery.request("missing@example.com", 200).unwrap();
         assert!(delivery.messages.lock().unwrap().is_empty());
 
-        for second in 201..=204 {
+        for second in 201..=203 {
             recovery.request("owner@example.com", second).unwrap();
         }
+        recovery.request("owner", 204).unwrap();
         assert_eq!(delivery.messages.lock().unwrap().len(), 3);
     }
 
@@ -636,7 +670,7 @@ mod tests {
         }
 
         assert_eq!(delivery.messages.lock().unwrap().len(), 3);
-        let rate_id = hex(&sha256(b"owner@example.com"));
+        let rate_id = hex(&sha256(b"account:acct_recovery"));
         let rate = store
             .load::<RecoveryRateRecord>(TENANT, RATE_RECORD_TYPE, &rate_id)
             .unwrap()
@@ -655,6 +689,32 @@ mod tests {
                 .unwrap_err()
                 .code,
             "recovery_delivery_unavailable"
+        );
+    }
+
+    #[test]
+    fn unavailable_delivery_cannot_consume_a_recovery_token() {
+        let store = ControlPersistence::new(MemoryControlRecordStore::default());
+        let credentials = CredentialService::new(store.clone()).unwrap();
+        let recovery = RecoveryService::new(store.clone(), credentials);
+        let token = "a".repeat(64);
+
+        assert_eq!(
+            recovery
+                .complete(&token, "A-long-enough-new-password", "recovery-test", 200)
+                .unwrap_err()
+                .code,
+            "recovery_delivery_unavailable"
+        );
+        assert!(
+            store
+                .load::<RecoveryTokenRecord>(
+                    TENANT,
+                    TOKEN_RECORD_TYPE,
+                    &hex(&sha256(token.as_bytes()))
+                )
+                .unwrap()
+                .is_none()
         );
     }
 }

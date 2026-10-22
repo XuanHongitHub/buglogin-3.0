@@ -53,7 +53,12 @@ fn child_args(pid_file: &Path) -> Vec<String> {
 
 fn launch_tree(controller: &WindowsJobController, pid_file: &Path) -> impl OwnedProcessTree {
     controller
-        .launch(&powershell(), &child_args(pid_file))
+        .launch(
+            &powershell(),
+            &child_args(pid_file),
+            false,
+            Path::new(r"C:\BugLoginTests\profile"),
+        )
         .unwrap()
 }
 
@@ -117,7 +122,14 @@ fn job_launch_preserves_argument_boundaries() {
     ];
     args.extend(expected.iter().cloned());
     let controller = WindowsJobController::system().unwrap();
-    let tree = controller.launch(&powershell(), &args).unwrap();
+    let tree = controller
+        .launch(
+            &powershell(),
+            &args,
+            false,
+            Path::new(r"C:\BugLoginTests\profile"),
+        )
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     while !output.exists() {
         assert!(Instant::now() < deadline, "argument output was not written");

@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isRootTauriDevInvocation } from "./tauri-dev-local-api-contract.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const envPath = resolve(projectRoot, ".env");
@@ -54,7 +55,15 @@ const isWindows = process.platform === "win32";
 const spawnArgs = isWindows
   ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a))
   : args;
-const child = spawn(cmd, spawnArgs, { stdio: "inherit", shell: isWindows });
+const useLocalApiLauncher = isRootTauriDevInvocation(cmd, args);
+const executable = useLocalApiLauncher ? process.execPath : cmd;
+const executableArgs = useLocalApiLauncher
+  ? [resolve(projectRoot, "scripts/tauri-dev-local-api.mjs"), ...args.slice(5)]
+  : spawnArgs;
+const child = spawn(executable, executableArgs, {
+  stdio: "inherit",
+  shell: isWindows && !useLocalApiLauncher,
+});
 child.on("error", (err) => {
   console.error(`Failed to spawn ${cmd}:`, err.message);
   process.exit(1);

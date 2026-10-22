@@ -7,6 +7,7 @@ import Color from "color";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BsCamera, BsMic } from "react-icons/bs";
+import { LuCheck } from "react-icons/lu";
 import { DnsBlocklistDialog } from "@/components/dns-blocklist-dialog";
 import { LoadingButton } from "@/components/loading-button";
 import { useTheme } from "@/components/theme-provider";
@@ -68,6 +69,7 @@ interface AppSettings {
   api_enabled: boolean;
   api_port: number;
   api_token?: string;
+  language?: string | null;
   disable_auto_updates?: boolean;
   keep_decrypted_profiles_in_ram?: boolean;
 }
@@ -83,7 +85,7 @@ interface PermissionInfo {
   description: string;
 }
 
-// Version update progress toasts are handled globally via useVersionUpdater
+// Browser runtime updates are available from the signed runtime catalog in the profile flow.
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -118,10 +120,8 @@ export function SettingsDialog({
     selectedThemeId: null,
     colors: {},
   });
-  const [isDefaultBrowser, setIsDefaultBrowser] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [isSettingDefault, setIsSettingDefault] = useState(false);
   const [isClearingCache, setIsClearingCache] = useState(false);
   const [isClearingTraffic, setIsClearingTraffic] = useState(false);
   const [consistencyWarningEnabled, setConsistencyWarningEnabled] = useState(
@@ -162,7 +162,7 @@ export function SettingsDialog({
     portable: boolean;
   } | null>(null);
 
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { setTheme } = useTheme();
   const {
     requestPermission,
@@ -173,12 +173,12 @@ export function SettingsDialog({
   const { user: cloudUser } = useCloudAuth();
   // Encryption is available to everyone except team members who aren't owners
   const canUseEncryption =
+    process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop" ||
     cloudUser == null ||
     cloudUser.plan !== "team" ||
     cloudUser.teamRole === "owner";
   const {
     currentLanguage,
-    changeLanguage,
     supportedLanguages,
     isLoading: isLanguageLoading,
   } = useLanguage();
@@ -275,6 +275,14 @@ export function SettingsDialog({
       hasLoadedSettingsRef.current = true;
       setHasLoadedSettings(true);
 
+      if (appSettings.language) {
+        setSelectedLanguage(appSettings.language);
+        setOriginalLanguage(appSettings.language);
+      } else {
+        setSelectedLanguage("system");
+        setOriginalLanguage("system");
+      }
+
       // Initialize custom theme state
       if (merged.theme === "custom" && merged.custom_theme) {
         const matchingTheme = getThemeByColors(merged.custom_theme);
@@ -353,27 +361,6 @@ export function SettingsDialog({
     isMicrophoneAccessGranted,
   ]);
 
-  const checkDefaultBrowserStatus = useCallback(async () => {
-    try {
-      const isDefault = await invoke<boolean>("is_default_browser");
-      setIsDefaultBrowser(isDefault);
-    } catch (error) {
-      console.error("Failed to check default browser status:", error);
-    }
-  }, []);
-
-  const handleSetDefaultBrowser = useCallback(async () => {
-    setIsSettingDefault(true);
-    try {
-      await invoke("set_as_default_browser");
-      await checkDefaultBrowserStatus();
-    } catch (error) {
-      console.error("Failed to set as default browser:", error);
-    } finally {
-      setIsSettingDefault(false);
-    }
-  }, [checkDefaultBrowserStatus]);
-
   const handleClearTraffic = useCallback(async () => {
     setIsClearingTraffic(true);
     try {
@@ -446,43 +433,27 @@ export function SettingsDialog({
   const handleSave = useCallback(async () => {
     setIsSaving(true);
     try {
-      // Update settings with current custom theme state
-      let settingsToSave: AppSettings = {
+      const targetLang =
+        selectedLanguage === "system" ? null : selectedLanguage;
+      const settingsToSave: AppSettings = {
         ...settings,
+        language: targetLang,
         custom_theme:
           settings.theme === "custom"
             ? customThemeState.colors
             : settings.custom_theme,
       };
 
-      console.log("[settings-dialog] Saving settings:", {
-        theme: settingsToSave.theme,
-        hasCustomTheme: !!settingsToSave.custom_theme,
-        customThemeKeys: settingsToSave.custom_theme
-          ? Object.keys(settingsToSave.custom_theme).length
-          : 0,
-      });
-
       const savedSettings = await invoke<AppSettings>("save_app_settings", {
         settings: settingsToSave,
       });
 
-      console.log("[settings-dialog] Saved settings response:", {
-        theme: savedSettings.theme,
-        hasCustomTheme: !!savedSettings.custom_theme,
-        customThemeKeys: savedSettings.custom_theme
-          ? Object.keys(savedSettings.custom_theme).length
-          : 0,
-      });
-
       // Update settings with any generated tokens
       setSettings(savedSettings);
-      settingsToSave = savedSettings;
-      // Pass the actual theme value through. Calling setTheme("dark") here
-      // when the user is on "custom" pushes the provider state to "dark",
-      // which triggers its clear-custom-vars effect and wipes the CSS
-      // variables we set just below — that's the bug where saving a custom
-      // theme made it disappear until the app was restarted.
+      setOriginalSettings(savedSettings);
+      originalSettingsRef.current = savedSettings;
+
+      // Pass the actual theme value through
       setTheme(settings.theme);
 
       // Apply or clear custom variables only on Save
@@ -490,7 +461,6 @@ export function SettingsDialog({
         if (Object.keys(customThemeState.colors).length > 0) {
           try {
             const root = document.documentElement;
-            // Clear any previous custom vars first
             THEME_VARIABLES.forEach(({ key }) => {
               root.style.removeProperty(key as string);
             });
@@ -512,33 +482,27 @@ export function SettingsDialog({
         }
       }
 
-      // Save language if changed
-      if (selectedLanguage !== originalLanguage) {
-        await changeLanguage(
-          selectedLanguage === "system"
-            ? null
-            : (selectedLanguage as
-                | "en"
-                | "es"
-                | "pt"
-                | "fr"
-                | "zh"
-                | "ja"
-                | "ko"
-                | "ru"
-                | "vi"),
-        );
-        setOriginalLanguage(selectedLanguage);
-      }
+      // Apply language immediately in UI
+      const langToApply =
+        selectedLanguage === "system" ? "vi" : selectedLanguage || "vi";
+      await i18n.changeLanguage(langToApply);
+      setOriginalLanguage(selectedLanguage);
 
-      setOriginalSettings(settingsToSave);
-      // Keep the ref in sync so the unmount-restore effect re-applies the
-      // just-SAVED theme, not the pre-save one (which reverted the theme
-      // until app restart).
-      originalSettingsRef.current = settingsToSave;
-      onClose();
+      showSuccessToast(
+        t("settings.savedSuccess", {
+          defaultValue: "Đã lưu và áp dụng cài đặt thành công!",
+        }),
+      );
+
+      if (!subPage) {
+        onClose();
+      }
     } catch (error) {
       console.error("Failed to save settings:", error);
+      showErrorToast(
+        t("settings.saveFailed", { defaultValue: "Lỗi lưu cài đặt: " }) +
+          (error instanceof Error ? error.message : String(error)),
+      );
     } finally {
       setIsSaving(false);
     }
@@ -548,8 +512,9 @@ export function SettingsDialog({
     settings,
     customThemeState,
     selectedLanguage,
-    originalLanguage,
-    changeLanguage,
+    subPage,
+    i18n,
+    t,
   ]);
 
   const updateSetting = useCallback(
@@ -626,10 +591,6 @@ export function SettingsDialog({
       loadSettings().catch((err: unknown) => {
         console.error(err);
       });
-      checkDefaultBrowserStatus().catch((err: unknown) => {
-        console.error(err);
-      });
-
       // Check if we're on macOS
       const userAgent = navigator.userAgent;
       const isMac = userAgent.includes("Mac");
@@ -640,20 +601,8 @@ export function SettingsDialog({
       if (isMac) {
         loadPermissions();
       }
-
-      // Set up interval to check default browser status
-      const intervalId = setInterval(() => {
-        checkDefaultBrowserStatus().catch((err: unknown) => {
-          console.error(err);
-        });
-      }, 2000);
-
-      // Cleanup interval on component unmount or dialog close
-      return () => {
-        clearInterval(intervalId);
-      };
     }
-  }, [isOpen, loadPermissions, checkDefaultBrowserStatus, loadSettings]);
+  }, [isOpen, loadPermissions, loadSettings]);
 
   // Initialize language selection when dialog opens or language loads
   useEffect(() => {
@@ -939,42 +888,6 @@ export function SettingsDialog({
                 </p>
               </div>
 
-              {/* Default Browser Section - hidden in portable mode */}
-              {!systemInfo?.portable && (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-base font-medium">
-                      {t("settings.defaultBrowser.title")}
-                    </Label>
-                    <Badge variant={isDefaultBrowser ? "default" : "secondary"}>
-                      {isDefaultBrowser
-                        ? t("common.status.active")
-                        : t("common.status.inactive")}
-                    </Badge>
-                  </div>
-
-                  <LoadingButton
-                    isLoading={isSettingDefault}
-                    onClick={() => {
-                      handleSetDefaultBrowser().catch((err: unknown) => {
-                        console.error(err);
-                      });
-                    }}
-                    disabled={isDefaultBrowser}
-                    variant={isDefaultBrowser ? "outline" : "default"}
-                    className="w-full"
-                  >
-                    {isDefaultBrowser
-                      ? t("settings.defaultBrowser.alreadyDefault")
-                      : t("settings.defaultBrowser.setAsDefault")}
-                  </LoadingButton>
-
-                  <p className="text-xs text-muted-foreground">
-                    {t("settings.defaultBrowser.description")}
-                  </p>
-                </div>
-              )}
-
               {/* Permissions Section - Only show on macOS */}
               {isMacOS && (
                 <div className="space-y-4">
@@ -1033,9 +946,7 @@ export function SettingsDialog({
                   )}
 
                   <p className="text-xs text-muted-foreground">
-                    These permissions allow browsers launched from Donut Browser
-                    to access system resources. Each website will still ask for
-                    your permission individually.
+                    {t("settings.permissions.description")}
                   </p>
                 </div>
               )}
@@ -1237,53 +1148,60 @@ export function SettingsDialog({
                 )}
               </div>
 
-              {/* Commercial License Section */}
-              <div className="space-y-4">
-                <Label className="text-base font-medium">
-                  {t("settings.commercial.title")}
-                </Label>
+              {/* Donut commercial trial/subscription state is not part of BugLogin desktop. */}
+              {process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET !== "desktop" && (
+                <div className="space-y-4">
+                  <Label className="text-base font-medium">
+                    {t("settings.commercial.title")}
+                  </Label>
 
-                <div className="flex items-center justify-between rounded-md border bg-muted/40 p-3">
-                  {cloudUser != null && cloudUser.plan !== "free" ? (
-                    // Paid Donut plan supersedes the local commercial trial —
-                    // the trial only exists to gate commercial use until the
-                    // user subscribes. Showing "Trial expired" to a paying
-                    // customer reads like a billing error, so swap in a
-                    // subscription-active badge instead.
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-success">
-                        {t("settings.commercial.subscriptionActive", {
-                          plan: cloudUser.plan,
-                        })}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {t("settings.commercial.subscriptionActiveDescription")}
-                      </p>
-                    </div>
-                  ) : trialStatus?.type === "Active" ? (
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium">
-                        {t("settings.commercial.trialActive", {
-                          days: trialStatus.days_remaining,
-                          hours: trialStatus.hours_remaining,
-                        })}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {t("settings.commercial.trialActiveDescription")}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-warning">
-                        {t("settings.commercial.trialExpired")}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {t("settings.commercial.trialExpiredDescription")}
-                      </p>
-                    </div>
-                  )}
+                  <div className="flex items-center justify-between rounded-md border bg-muted/40 p-3">
+                    {process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET !==
+                      "desktop" &&
+                    cloudUser != null &&
+                    cloudUser.plan !== "free" ? (
+                      // Paid Donut plan supersedes the local commercial trial —
+                      // the trial only exists to gate commercial use until the
+                      // user subscribes. Showing "Trial expired" to a paying
+                      // customer reads like a billing error, so swap in a
+                      // subscription-active badge instead.
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-success">
+                          {t("settings.commercial.subscriptionActive", {
+                            plan: cloudUser.plan,
+                          })}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {t(
+                            "settings.commercial.subscriptionActiveDescription",
+                          )}
+                        </p>
+                      </div>
+                    ) : trialStatus?.type === "Active" ? (
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium">
+                          {t("settings.commercial.trialActive", {
+                            days: trialStatus.days_remaining,
+                            hours: trialStatus.hours_remaining,
+                          })}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {t("settings.commercial.trialActiveDescription")}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-warning">
+                          {t("settings.commercial.trialExpired")}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {t("settings.commercial.trialExpiredDescription")}
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Advanced Section */}
               <div className="space-y-4">
@@ -1447,7 +1365,7 @@ export function SettingsDialog({
               {systemInfo && (
                 <div className="border-t pt-2">
                   <p className="font-mono text-xs whitespace-pre-line text-muted-foreground select-all">
-                    {`Donut Browser ${systemInfo.app_version}\n${systemInfo.os} ${systemInfo.arch}${systemInfo.portable ? " (portable)" : ""}`}
+                    {`BugLogin ${systemInfo.app_version}\n${systemInfo.os} ${systemInfo.arch}${systemInfo.portable ? " (portable)" : ""}`}
                   </p>
                 </div>
               )}
@@ -1455,7 +1373,25 @@ export function SettingsDialog({
           </div>
 
           {subPage ? (
-            <div className="mx-auto flex w-full max-w-4xl shrink-0 items-center justify-end gap-2 border-t border-border pt-2">
+            <div className="mx-auto flex w-full max-w-4xl shrink-0 items-center justify-between border-t border-border pt-3">
+              <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                {!hasChanges ? (
+                  <span className="inline-flex items-center gap-1.5 text-emerald-600 font-medium">
+                    <LuCheck className="size-3.5" />
+                    <span>
+                      {t("settings.upToDate", {
+                        defaultValue: "Cài đặt đã được đồng bộ và lưu mới nhất",
+                      })}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-amber-600 font-medium">
+                    {t("settings.unsavedChanges", {
+                      defaultValue: "Có thay đổi chưa được lưu",
+                    })}
+                  </span>
+                )}
+              </div>
               <LoadingButton
                 size="sm"
                 isLoading={isSaving}
@@ -1466,7 +1402,9 @@ export function SettingsDialog({
                 }}
                 disabled={isLoading || !hasChanges}
               >
-                {t("common.buttons.saveSettings")}
+                {t("common.buttons.saveSettings", {
+                  defaultValue: "Lưu Cài Đặt",
+                })}
               </LoadingButton>
             </div>
           ) : (

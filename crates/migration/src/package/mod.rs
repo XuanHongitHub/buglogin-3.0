@@ -4,7 +4,7 @@ use buglogin_domain::errors::Problem;
 use buglogin_domain::ids::migration_uuid;
 use serde::{Deserialize, Serialize};
 
-use crate::encrypted_data::encrypt_legacy_profile_data;
+use crate::encrypted_data::{empty_encrypted_profile_data, encrypt_legacy_profile_data};
 use crate::inspect::{CutoverEligibility, InspectReport, MigrationClass, RecordIssue};
 use crate::snapshot::{SourceSnapshot, create_snapshot};
 use buglogin_sync::crypto::ClientKey;
@@ -240,6 +240,27 @@ pub fn build_encrypted_profile_package(
     metadata: &PackageMetadata,
     key: &ClientKey,
 ) -> Result<NeutralPackage, Problem> {
+    build_profile_package(source_root, report, snapshot, metadata, key, true)
+}
+
+pub fn build_control_only_profile_package(
+    source_root: &std::path::Path,
+    report: &InspectReport,
+    snapshot: &SourceSnapshot,
+    metadata: &PackageMetadata,
+    key: &ClientKey,
+) -> Result<NeutralPackage, Problem> {
+    build_profile_package(source_root, report, snapshot, metadata, key, false)
+}
+
+fn build_profile_package(
+    source_root: &std::path::Path,
+    report: &InspectReport,
+    snapshot: &SourceSnapshot,
+    metadata: &PackageMetadata,
+    key: &ClientKey,
+    include_profile_data: bool,
+) -> Result<NeutralPackage, Problem> {
     if report.cutover_eligibility != CutoverEligibility::Eligible
         && !preservation_export_allowed(report)
     {
@@ -259,7 +280,11 @@ pub fn build_encrypted_profile_package(
             "migration",
         ));
     }
-    let encrypted = encrypt_legacy_profile_data(source_root, key)?;
+    let encrypted = if include_profile_data {
+        encrypt_legacy_profile_data(source_root, key)?
+    } else {
+        empty_encrypted_profile_data()
+    };
     let source_after = create_snapshot(source_root)?;
     if !source_before.has_same_integrity(&source_after) {
         return Err(Problem::new(
@@ -290,7 +315,7 @@ pub fn build_encrypted_profile_package(
     let mut files = package.files;
     files.remove("manifest.json");
     files.remove("checksums.sha256");
-    let profiles = crate::legacy::map_legacy_profiles_for_encrypted_package(
+    let mut profiles = crate::legacy::map_legacy_profiles_for_encrypted_package(
         source_root,
         &report.source.instance_id,
     )?;
@@ -417,6 +442,93 @@ pub fn build_encrypted_profile_package(
         })?;
         let control_plane =
             crate::legacy::map_legacy_control_plane_json(&bytes, &report.source.instance_id)?;
+        let legacy_export: crate::legacy::LegacyControlPlaneExport = serde_json::from_slice(&bytes)
+            .map_err(|_| {
+                Problem::new(
+                    "migration_control_plane_invalid",
+                    "Legacy control-plane export is invalid",
+                    422,
+                    "migration",
+                )
+            })?;
+        if let Some(encrypted) = legacy_export.legacy_credentials.as_ref() {
+            let mut credentials = crate::legacy::decrypt_source_credentials(encrypted, key)?;
+            let account_ids = control_plane
+                .accounts
+                .iter()
+                .map(|account| (account.source_ref.id.as_str(), account.id.as_str()))
+                .collect::<BTreeMap<_, _>>();
+            for credential in &mut credentials {
+                credential.source_user_id = account_ids
+                    .get(credential.source_user_id.as_str())
+                    .ok_or_else(|| {
+                        Problem::new(
+                            "migration_legacy_credentials_invalid",
+                            "Encrypted legacy credentials do not match exported accounts",
+                            422,
+                            "migration",
+                        )
+                    })?
+                    .to_string();
+            }
+            let encrypted = crate::legacy::encrypt_package_credentials(&credentials, key)?;
+            insert_json(
+                &mut files,
+                crate::legacy_account_credentials::PACKAGE_PATH,
+                &encrypted,
+            )?;
+        }
+        for hosted in &control_plane.profiles {
+            if let Some(local) = profiles
+                .records
+                .iter_mut()
+                .find(|local| local.id == hosted.id)
+            {
+                let disposition = local.data.source_data_object.disposition.clone();
+                let runtime_config = local.data.legacy_runtime_config.clone();
+                let migration_class = local.data.migration_class.clone();
+                let mut merged = hosted.clone();
+                merged.data.source_data_object = local.data.source_data_object.clone();
+                merged.data.source_data_object.disposition = disposition;
+                merged.data.legacy_runtime_config = runtime_config;
+                merged.data.migration_class = migration_class;
+                *local = merged;
+            } else {
+                profiles.records.push(hosted.clone());
+            }
+        }
+        profiles
+            .records
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        if profiles
+            .records
+            .iter()
+            .any(|profile| !matches!(profile.data.migration_class.as_str(), "direct" | "adapter"))
+            && !manifest
+                .compatibility
+                .required_capabilities
+                .iter()
+                .any(|capability| capability == "migration.preserve-only")
+        {
+            manifest
+                .compatibility
+                .required_capabilities
+                .push("migration.preserve-only".into());
+        }
+        if !control_plane.pending_share_grants.is_empty() {
+            insert_json_lines(
+                &mut files,
+                "reports/pending-share-provenance.jsonl",
+                &control_plane.pending_share_grants,
+            )?;
+        }
+        if !control_plane.pending_invites.is_empty() {
+            insert_json_lines(
+                &mut files,
+                "reports/pending-invite-provenance.jsonl",
+                &control_plane.pending_invites,
+            )?;
+        }
         insert_json_lines(
             &mut files,
             "entities/accounts.jsonl",
@@ -446,7 +558,87 @@ pub fn build_encrypted_profile_package(
             &control_plane.profile_resources,
         )?;
         insert_json_lines(&mut files, "entities/grants.jsonl", &control_plane.grants)?;
+        if !control_plane.groups.is_empty() {
+            let mut merged = files
+                .get("entities/groups.jsonl")
+                .map(|bytes| {
+                    bytes
+                        .split(|byte| *byte == b'\n')
+                        .filter(|line| !line.is_empty())
+                        .map(serde_json::from_slice)
+                        .collect::<Result<Vec<crate::legacy::NeutralGroupRecord>, _>>()
+                })
+                .transpose()
+                .map_err(|_| {
+                    Problem::new(
+                        "migration_package_invalid",
+                        "Legacy group package records are invalid",
+                        422,
+                        "migration",
+                    )
+                })?
+                .unwrap_or_default()
+                .into_iter()
+                .map(|group| (group.id.clone(), group))
+                .collect::<BTreeMap<_, _>>();
+            for group in &control_plane.groups {
+                if merged.get(&group.id).is_some_and(|existing| {
+                    existing.data.name != group.data.name
+                        || existing.data.appearance != group.data.appearance
+                }) {
+                    return Err(Problem::new(
+                        "migration_control_plane_invalid",
+                        "Group data conflicts between profile and control-plane exports",
+                        422,
+                        "migration",
+                    ));
+                }
+                merged.insert(group.id.clone(), group.clone());
+            }
+            insert_json_lines(
+                &mut files,
+                "entities/groups.jsonl",
+                &merged.into_values().collect::<Vec<_>>(),
+            )?;
+        }
+        if !control_plane.group_grants.is_empty() {
+            insert_json_lines(
+                &mut files,
+                "entities/group-grants.jsonl",
+                &control_plane.group_grants,
+            )?;
+        }
+        for assignment in &control_plane.profile_group_assignments {
+            let profile = profiles
+                .records
+                .iter_mut()
+                .find(|profile| profile.id == assignment.profile_id)
+                .ok_or_else(|| {
+                    Problem::new(
+                        "migration_control_plane_invalid",
+                        "Profile group assignment references a missing profile",
+                        422,
+                        "migration",
+                    )
+                })?;
+            if profile
+                .data
+                .group_id
+                .as_deref()
+                .is_some_and(|group_id| group_id != assignment.group_id)
+            {
+                return Err(Problem::new(
+                    "migration_control_plane_invalid",
+                    "Profile group assignment conflicts with profile data",
+                    422,
+                    "migration",
+                ));
+            }
+            profile.data.group_id = Some(assignment.group_id.clone());
+        }
+        insert_json_lines(&mut files, "entities/profiles.jsonl", &profiles.records)?;
     }
+    let contains_profile_state = !encrypted.objects.is_empty();
     insert_json(
         &mut files,
         crate::encrypted_data::index_path(),
@@ -455,8 +647,11 @@ pub fn build_encrypted_profile_package(
     files.extend(encrypted.objects);
 
     manifest.security.encrypted = true;
-    manifest.security.contains_secrets =
-        !proxies.credentials.is_empty() || !vpns.configs.is_empty();
+    manifest.security.contains_secrets = contains_profile_state
+        || !proxies.credentials.is_empty()
+        || !vpns.configs.is_empty()
+        || files.contains_key(crate::legacy_account_credentials::PACKAGE_PATH);
+    manifest.security.contains_cookie_values = contains_profile_state;
     manifest.security.encryption = Some("aes-256-gcm-chunks/1".to_owned());
     manifest.contents = files
         .iter()

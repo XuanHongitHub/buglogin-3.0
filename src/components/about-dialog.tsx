@@ -177,7 +177,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => void openUrl("https://donutbrowser.com")}
+              onClick={() => void openUrl("https://buglogin.com")}
             >
               {t("about.website")}
             </Button>
@@ -185,7 +185,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               variant="outline"
               size="sm"
               onClick={() =>
-                void openUrl("https://github.com/zhom/donutbrowser")
+                void openUrl("https://github.com/XuanHongitHub/buglogin-3.0")
               }
             >
               GitHub

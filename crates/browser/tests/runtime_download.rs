@@ -1,7 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 
 use buglogin_browser::runtime::{
-    catalog::{RuntimeCatalog, RuntimeRelease, RuntimeSignatureVerifier},
+    catalog::{RuntimeCatalog, RuntimePackageFormat, RuntimeRelease, RuntimeSignatureVerifier},
     download::{RuntimeArtifactSource, install, rollback},
 };
 use buglogin_domain::{
@@ -19,7 +19,12 @@ impl RuntimeSignatureVerifier for ChecksumVerifier {
 
 struct MemorySource(Vec<u8>);
 impl RuntimeArtifactSource for MemorySource {
-    fn fetch(&self, _source: &str, maximum_bytes: u64) -> Result<Vec<u8>, Problem> {
+    fn fetch_to(
+        &self,
+        _source: &str,
+        maximum_bytes: u64,
+        output: &mut dyn Write,
+    ) -> Result<(), Problem> {
         if self.0.len() as u64 > maximum_bytes {
             return Err(Problem::new(
                 "runtime_download_too_large",
@@ -28,7 +33,34 @@ impl RuntimeArtifactSource for MemorySource {
                 "test",
             ));
         }
-        Ok(self.0.clone())
+        output.write_all(&self.0).map_err(|_| {
+            Problem::new(
+                "runtime_download_write_failed",
+                "Runtime download write failed",
+                500,
+                "test",
+            )
+        })
+    }
+}
+
+struct OversizedSource;
+impl RuntimeArtifactSource for OversizedSource {
+    fn fetch_to(
+        &self,
+        _source: &str,
+        maximum_bytes: u64,
+        output: &mut dyn Write,
+    ) -> Result<(), Problem> {
+        let bytes = vec![0_u8; maximum_bytes as usize + 1];
+        output.write_all(&bytes).map_err(|_| {
+            Problem::new(
+                "runtime_download_too_large",
+                "Runtime download too large",
+                413,
+                "test",
+            )
+        })
     }
 }
 
@@ -47,6 +79,8 @@ fn signed_release(bytes: &[u8]) -> RuntimeRelease {
         platform: RuntimePlatform::Windows,
         architecture: RuntimeArchitecture::X64,
         relative_path: "wayfern/wayfern.exe".into(),
+        package_format: RuntimePackageFormat::Raw,
+        archive_prefix: None,
         source: "https://releases.buglogin.example/wayfern.exe".into(),
         sha256: checksum(bytes),
         size_bytes: bytes.len() as u64,
@@ -55,6 +89,44 @@ fn signed_release(bytes: &[u8]) -> RuntimeRelease {
     };
     release.signature = checksum(&release.signing_payload());
     release
+}
+
+#[cfg(not(target_os = "macos"))]
+fn signed_dmg_release(bytes: &[u8]) -> RuntimeRelease {
+    let mut release = RuntimeRelease {
+        runtime: Runtime::Wayfern,
+        version: "154.0.8037.57".into(),
+        platform: RuntimePlatform::Macos,
+        architecture: RuntimeArchitecture::Arm64,
+        relative_path: "Wayfern.app/Contents/MacOS/Wayfern".into(),
+        package_format: RuntimePackageFormat::Dmg,
+        archive_prefix: None,
+        source: "https://releases.buglogin.example/wayfern.dmg".into(),
+        sha256: checksum(bytes),
+        size_bytes: bytes.len() as u64,
+        key_id: "release-key-1".into(),
+        signature: String::new(),
+    };
+    release.signature = checksum(&release.signing_payload_v2());
+    release
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn dmg_install_is_rejected_on_non_macos_before_downloading_or_writing() {
+    let root = root("dmg-unsupported-platform");
+    let _ = fs::remove_dir_all(&root);
+    let release = RuntimeCatalog {
+        schema_version: 2,
+        releases: vec![signed_dmg_release(b"verified-dmg")],
+    }
+    .verify(&ChecksumVerifier)
+    .unwrap()
+    .remove(0);
+
+    let error = install(&root, &release, &MemorySource(b"verified-dmg".to_vec())).unwrap_err();
+    assert_eq!(error.code, "runtime_package_format_unsupported");
+    assert!(!root.exists());
 }
 
 #[test]
@@ -77,6 +149,33 @@ fn verified_runtime_install_is_atomic_and_rollback_restores_previous_binary() {
     assert_eq!(fs::read(&receipt.installed_path).unwrap(), bytes);
     rollback(&root, &release).unwrap();
     assert_eq!(fs::read(receipt.installed_path).unwrap(), b"old-runtime");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_rollback_backup_does_not_remove_the_installed_runtime() {
+    let root = root("invalid-rollback-backup");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("wayfern")).unwrap();
+    fs::write(root.join("wayfern/wayfern.exe"), b"old-runtime").unwrap();
+    let bytes = b"new-runtime";
+    let release = RuntimeCatalog {
+        schema_version: 1,
+        releases: vec![signed_release(bytes)],
+    }
+    .verify(&ChecksumVerifier)
+    .unwrap()
+    .remove(0);
+
+    let receipt = install(&root, &release, &MemorySource(bytes.to_vec())).unwrap();
+    let backup = root.join("wayfern/wayfern.exe.rollback");
+    fs::remove_file(&backup).unwrap();
+    fs::create_dir(&backup).unwrap();
+
+    let rollback_error = rollback(&root, &release).unwrap_err();
+    assert_eq!(rollback_error.code, "runtime_backup_invalid");
+    assert_eq!(rollback_error.status, 409);
+    assert_eq!(fs::read(receipt.installed_path).unwrap(), bytes);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -108,13 +207,41 @@ fn invalid_signature_or_checksum_never_replaces_existing_binary() {
     .verify(&ChecksumVerifier)
     .unwrap()
     .remove(0);
-    assert_eq!(
-        install(&root, &release, &MemorySource(b"tampered!!!".to_vec()))
-            .unwrap_err()
-            .code,
-        "runtime_checksum_mismatch"
-    );
+    let checksum_error =
+        install(&root, &release, &MemorySource(b"tampered!!!".to_vec())).unwrap_err();
+    assert_eq!(checksum_error.code, "runtime_checksum_mismatch");
+    assert_eq!(checksum_error.status, 422);
     assert_eq!(fs::read(target).unwrap(), b"old-runtime");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn installer_enforces_signed_size_even_when_source_ignores_limit() {
+    let root = root("oversized");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("wayfern")).unwrap();
+    let target = root.join("wayfern/wayfern.exe");
+    fs::write(&target, b"old-runtime").unwrap();
+    let release = RuntimeCatalog {
+        schema_version: 1,
+        releases: vec![signed_release(b"new-runtime")],
+    }
+    .verify(&ChecksumVerifier)
+    .unwrap()
+    .remove(0);
+
+    assert_eq!(
+        install(&root, &release, &OversizedSource).unwrap_err().code,
+        "runtime_download_too_large"
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"old-runtime");
+    assert_eq!(
+        fs::read_dir(root.join("wayfern"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .count(),
+        1
+    );
     let _ = fs::remove_dir_all(root);
 }
 

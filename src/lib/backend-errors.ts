@@ -1,16 +1,24 @@
 import type { TFunction } from "i18next";
+import { formatError } from "./error-utils";
 
 /**
  * Backend error codes returned from Rust Tauri commands.
  * Keep this list in sync with the codes used in `src-tauri/src/profile/password.rs`.
  */
 export type BackendErrorCode =
+  | "TABLE_PREFERENCES_INVALID"
+  | "TABLE_PREFERENCES_LOAD_FAILED"
+  | "TABLE_PREFERENCES_SAVE_FAILED"
   | "INCORRECT_PASSWORD"
   | "LOCKED_OUT"
   | "PROFILE_NOT_FOUND"
   | "PROFILE_NOT_PROTECTED"
   | "PROFILE_ALREADY_PROTECTED"
   | "PROFILE_RUNNING"
+  | "PROFILE_PAIRED_TWICE"
+  | "URL_SCHEME_NOT_ALLOWED"
+  | "TOOL_IS_LOCAL_ONLY"
+  | "TYPING_TOO_LONG"
   | "PROFILE_EPHEMERAL"
   | "PROFILE_MISSING_SALT"
   | "PROFILE_LOCKED"
@@ -19,27 +27,65 @@ export type BackendErrorCode =
   | "INVALID_LAUNCH_HOOK_URL"
   | "COOKIE_DB_LOCKED"
   | "COOKIE_DB_UNAVAILABLE"
+  | "COOKIE_IMPORT_BROWSER_RUNNING"
+  | "COOKIE_IMPORT_PROFILE_PROTECTED"
+  | "COOKIE_IMPORT_REMOTE_SESSION"
+  | "COOKIE_IMPORT_NO_COOKIES"
   | "SELF_HOSTED_REQUIRES_LOGOUT"
   | "PROXY_NOT_FOUND"
   | "GROUP_NOT_FOUND"
+  | "GROUP_NOT_EMPTY"
   | "GROUP_ALREADY_EXISTS"
   | "NAME_CANNOT_BE_EMPTY"
   | "WAYFERN_VERSION_NOT_AVAILABLE"
   | "VPN_NOT_FOUND"
   | "EXTENSION_NOT_FOUND"
   | "EXTENSION_GROUP_NOT_FOUND"
+  | "EXTENSION_UNSUPPORTED_FILE_TYPE"
+  | "EXTENSION_DIR_NOT_FOUND"
+  | "EXTENSION_NOT_A_DIRECTORY"
+  | "EXTENSION_PATH_INVALID"
+  | "EXTENSION_MANIFEST_MISSING"
+  | "EXTENSION_MANIFEST_INVALID"
+  | "EXTENSION_DIR_TOO_LARGE"
+  | "EXTENSION_PATH_HAS_COMMA"
+  | "EXTENSION_LINK_REQUIRES_DIRECTORY"
+  | "EXTENSION_LINKED_CANNOT_SYNC"
+  | "EXTENSION_URL_INVALID"
+  | "EXTENSION_DOWNLOAD_FAILED"
+  | "EXTENSION_NOT_AN_EXTENSION"
+  | "EXTENSION_TOO_LARGE"
   | "CANNOT_MODIFY_CLOUD_MANAGED_PROXY"
   | "SYNC_LOCKED_BY_PROFILE"
   | "SYNC_NOT_CONFIGURED"
   | "FINGERPRINT_REQUIRES_PRO"
+  | "FINGERPRINT_CUSTOMIZATION_UNSUPPORTED"
+  | "FINGERPRINT_RUNTIME_UNSUPPORTED"
+  | "WAYFERN_LAUNCH_ARGS_REQUIRES_PRO"
+  | "WAYFERN_LAUNCH_ARG_INVALID"
+  | "WAYFERN_LAUNCH_ARG_RESERVED"
+  | "WAYFERN_LAUNCH_ARG_NOT_ALLOWED"
+  | "WAYFERN_LAUNCH_ARG_VALUE_INVALID"
+  | "WAYFERN_LAUNCH_ARGS_LIMIT"
   | "PROXY_NOT_WORKING"
   | "PROXY_PAYMENT_REQUIRED"
+  | "PROXY_TLS_HANDSHAKE_FAILED"
   | "VPN_NOT_WORKING"
   | "CAMOUFOX_IMPORT_DEPRECATED"
+  | "PROXY_SIDECAR_VERSION_MISMATCH"
   | "UPDATE_CHECKSUMS_UNAVAILABLE"
   | "UPDATE_CHECKSUM_MISMATCH"
+  | "BROWSER_CHECKSUM_UNAVAILABLE"
+  | "BROWSER_CHECKSUM_MISMATCH"
+  | "SYSTEM_PROXY_UNREACHABLE"
+  | "PROFILE_ROUTE_REQUIRED"
+  | "PROFILE_ROUTE_UNAVAILABLE"
+  | "UPDATE_PROFILES_RUNNING"
+  | "UPDATE_PREPARATION_FAILED"
   | "PROFILE_NAME_EXISTS"
   | "IMPORT_SOURCE_NOT_FOUND"
+  | "IMPORT_SOURCE_NOT_CHROMIUM"
+  | "IMPORT_SOURCE_BROWSER_RUNNING"
   | "IMPORT_NO_ITEMS"
   | "BROWSER_NOT_DOWNLOADED"
   | "ARCHIVE_EXTRACTION_FAILED"
@@ -51,11 +97,170 @@ export type BackendErrorCode =
   | "UNSUPPORTED_DNS_RULES_FORMAT"
   | "DNS_RULES_SAVE_FAILED"
   | "DNS_RULES_EXPORT_FAILED"
+  | "WAYFERN_TERMS_REQUIRED"
+  | "API_PORT_UNAVAILABLE"
+  | "MCP_AGENT_UNKNOWN"
+  | "MCP_AGENT_INSTALL_FAILED"
+  | "MCP_AGENT_REMOVE_FAILED"
+  | "MCP_REMOTE_REQUIRES_SIGN_IN"
+  | "MCP_REMOTE_UNAUTHORIZED"
+  | "MCP_REMOTE_SLOT_TAKEN"
+  | "MCP_REMOTE_NOT_ENTITLED"
+  | "MCP_REMOTE_UNREACHABLE"
+  | "MCP_REMOTE_KEY_MISSING"
+  | "MCP_REMOTE_KEY_LIMIT"
+  | "MCP_REMOTE_KEY_UNAVAILABLE"
+  | "VLESS_CONFIG_INVALID"
+  | "XRAY_UNAVAILABLE"
+  | "XRAY_UNSUPPORTED_OS"
+  | "XRAY_START_FAILED"
+  | "CLOUD_NOT_SIGNED_IN"
+  | "CLOUD_UNREACHABLE"
+  | "CLOUD_REQUEST_FAILED"
+  | "REMOTE_RATE_LIMITED"
+  | "REMOTE_NO_CAPACITY"
+  // The deployment has no fleet credential at all, which is not the same as a
+  // busy fleet — telling the two apart is the whole reason it is coded.
+  | "REMOTE_NOT_CONFIGURED"
+  // The launch was refused for a reason the user cannot wait out (a bad
+  // request, a profile that will not run). `params.detail` carries the
+  // server's own words.
+  | "REMOTE_LAUNCH_REFUSED"
+  // The fleet never answered a launch (timeout or connection failure), even on
+  // the retry that de-duplicates on the idempotency key. Nothing was refused;
+  // the user can only try again.
+  | "REMOTE_FLEET_UNREACHABLE"
+  // Already at the account's concurrent-session ceiling. `params.limit`/`live`.
+  | "REMOTE_CONCURRENCY_LIMIT"
+  // Asked to drive a session that has not reached `live` yet.
+  | "REMOTE_SESSION_NOT_DRIVABLE"
+  // The profile's OS is not one a leased host serves (e.g. an android
+  // fingerprint). `params.platform` names it.
+  | "REMOTE_PLATFORM_UNSUPPORTED"
+  // Sync is on but no upload has ever completed, so a remote host would pull an
+  // empty profile and overwrite the real one. Refused before any lease.
+  | "REMOTE_PROFILE_NOT_SYNCED"
+  | "REMOTE_NOT_ENTITLED"
+  | "REMOTE_INTERACTIVE_NOT_ENTITLED"
+  // The profile's exit only resolves on this computer, so a leased host cannot
+  // use it. Its own code rather than the Cookie Bot's twin: the two refusals
+  // name different features, and a user told their "Cookie Bot" needs a public
+  // proxy while they were opening a browser by hand cannot act on that.
+  | "REMOTE_REQUIRES_REMOTE_EXIT_NODE"
+  // The exit's PROTOCOL is the problem, not its address. A VLESS server is as
+  // publicly routable as any other, so the reachability check passes and the
+  // sentence above sends the user to fix the one part of their config that was
+  // already right. `params.kind` names the protocol.
+  | "REMOTE_PROXY_KIND_UNSUPPORTED"
+  | "REMOTE_SESSION_REFUSED"
+  | "REMOTE_SESSION_NOT_FOUND"
+  | "REMOTE_SESSION_CONFLICT"
+  | "REMOTE_SYNC_IN_PROGRESS"
+  | "REMOTE_HOURS_EXHAUSTED"
+  | "PROFILE_RUNNING_REMOTELY"
+  | "PROFILE_REMOTE_SYNC_PENDING"
+  | "PROFILE_LOCKED_BY_MEMBER"
+  | "PROFILE_LOCKED_ELSEWHERE"
+  | "PROFILE_LOCK_UNAVAILABLE"
+  | "NOT_TEAM_MEMBER"
+  | "COOKIE_BOT_NOT_ENTITLED"
+  | "COOKIE_BOT_NOT_ENROLLED"
+  | "COOKIE_BOT_SCHEDULE_CONFLICT"
+  | "COOKIE_BOT_RUN_IN_PROGRESS"
+  | "COOKIE_BOT_RUN_NOT_FOUND"
+  | "COOKIE_BOT_INVALID_SCHEDULE"
+  | "COOKIE_BOT_INVALID_TIMEZONE"
+  | "COOKIE_BOT_INVALID_PERIOD"
+  | "COOKIE_BOT_SITE_LIMIT"
+  | "COOKIE_BOT_REQUIRES_CLOUD_SYNC"
+  | "COOKIE_BOT_ENCRYPTED_SYNC_UNSUPPORTED"
+  | "COOKIE_BOT_UNKNOWN_PLATFORM"
+  | "COOKIE_BOT_UNSUPPORTED_PLATFORM"
+  | "COOKIE_BOT_REQUIRES_EXIT_NODE"
+  // The profile HAS an exit, but only this machine can reach it (127.0.0.1, a
+  // LAN address, a `.local` name). Its own code because the fix is different:
+  // "attach a proxy" is unactionable advice for someone whose proxy is plainly
+  // attached.
+  | "COOKIE_BOT_REQUIRES_REMOTE_EXIT_NODE"
+  // ...and its twin for an exit whose PROTOCOL no host can speak. Kept apart
+  // from the address refusal because a VLESS server is publicly routable: the
+  // user is not being asked for a different address, they are being asked for a
+  // different kind of exit. `params.kind` names it.
+  | "COOKIE_BOT_PROXY_KIND_UNSUPPORTED"
+  // The server's own names for two refusals the schedule, profile-state and
+  // run-now routes can return. `COOKIE_BOT_REQUIRES_PROXY` is the
+  // server-side twin of the local `COOKIE_BOT_REQUIRES_EXIT_NODE` precondition;
+  // without a case here the single most important refusal in the feature
+  // rendered as the raw machine identifier.
+  | "COOKIE_BOT_REQUIRES_PROXY"
+  | "COOKIE_BOT_TOUCH_FINGERPRINT_UNSUPPORTED"
+  | "RECIPES_NOT_ENTITLED"
+  | "AGENT_RECIPE_INVALID"
+  | "AGENT_RECIPE_NOT_FOUND"
+  | "AGENT_REQUEST_NOT_FOUND"
+  | "AGENT_REQUEST_CLOSED"
+  | "AGENT_ANSWER_EMPTY"
+  | "AGENT_NOTE_EMPTY"
+  | "AGENT_TEXT_TOO_LONG"
+  | "AGENT_SESSION_NOT_FOUND"
+  | "FEEDBACK_MESSAGE_EMPTY"
+  | "FEEDBACK_MESSAGE_TOO_LONG"
+  | "FEEDBACK_EMAIL_INVALID"
+  | "FEEDBACK_INVALID"
+  | "FEEDBACK_RATE_LIMITED"
+  | "FEEDBACK_SEND_FAILED"
+  | "FEEDBACK_LOGS_UNREADABLE"
+  | "FINGERPRINT_EXIT_MISMATCH"
+  // The launch refuses instead of opening a window on an unmanaged device: a
+  // silent fallback would leave the user browsing a random fingerprint while
+  // the UI reported success, which is the worst failure an anti-detect product
+  // can have. `detail` carries the underlying browser error for support.
+  | "WAYFERN_FINGERPRINT_APPLY_FAILED"
+  | "WAYFERN_FINGERPRINT_GENERATION_FAILED"
+  | "WAYFERN_GENERATION_LIMIT_REACHED"
+  // A cross-OS claim needs an active signed-in session, so an expired or
+  // offline one cannot apply it. Distinct from the generic apply failure because
+  // signing in again is the fix; `detail` names the claimed OS.
+  | "WAYFERN_CROSS_OS_REQUIRES_PLAN"
+  | "WAYFERN_IDENTITY_REFUSED"
+  | "WAYFERN_INSTANCE_LIMIT_REACHED"
+  | "WAYFERN_PLAN_CHECK_UNAVAILABLE"
+  | "WAYFERN_CUSTOM_FINGERPRINT_REQUIRES_PLAN"
+  | "WAYFERN_GENERATION_UNAVAILABLE"
+  // Donut's own hourly cap on Pro accounts, refused locally before the request
+  // reaches Wayfern. `retryAfterSeconds` says when the window reopens.
+  | "PROFILE_GENERATION_LIMIT_REACHED"
+  | "WAYFERN_BROWSER_BUSY"
+  | "WAYFERN_BROWSER_EXITED"
+  | "PROFILE_EXPORT_FAILED"
+  | "PROFILE_EXPORT_TOO_LARGE"
+  | "PROFILE_IMPORT_FAILED"
+  | "PROFILE_IMPORT_TOO_NEW"
+  | "PROFILE_IMPORT_UNSAFE_ARCHIVE"
+  | "RECORDING_ALREADY_RUNNING"
+  | "PROFILE_NOT_RUNNING"
+  | "WAYFERN_152_REQUIRED"
+  | "RECORDING_FAILED"
+  | "LAUNCH_CONSENT_EXPIRED"
+  | "VPN_WORKER_START_FAILED"
+  | "EXIT_PROBE_FAILED"
+  | "CAMOUFOX_REMOVED"
+  | "NO_E2E_PASSWORD_SET"
+  | "TRASH_ENTRY_NOT_FOUND"
+  | "TRASH_RESTORE_CONFLICT"
+  // Synchronised windows.
+  | "SYNC_SESSION_NOT_FOUND"
+  | "SYNC_FOLLOWER_NOT_FOUND"
+  | "SYNC_SESSION_UNAVAILABLE"
+  | "SYNC_DISPLAY_UNAVAILABLE"
+  | "SYNC_DISPLAY_TOO_SMALL"
+  | "SYNC_ARRANGE_FAILED"
   | "INTERNAL_ERROR";
 
 export interface BackendError {
   code: BackendErrorCode;
   params?: Record<string, string>;
+  fallbackMessage?: string;
 }
 
 /**
@@ -64,7 +269,37 @@ export interface BackendError {
  * that doesn't yet emit codes — caller should fall back to showing the raw text).
  */
 export function parseBackendError(err: unknown): BackendError | null {
-  const message = err instanceof Error ? err.message : String(err);
+  if (err && typeof err === "object") {
+    const value = err as Record<string, unknown>;
+    if (typeof value.code === "string") {
+      return {
+        code: value.code.toUpperCase() as BackendErrorCode,
+        params:
+          value.params && typeof value.params === "object"
+            ? (value.params as Record<string, string>)
+            : undefined,
+        fallbackMessage:
+          typeof value.title === "string"
+            ? value.title
+            : typeof value.detail === "string"
+              ? value.detail
+              : typeof value.message === "string"
+                ? value.message
+                : undefined,
+      };
+    }
+    const message =
+      typeof value.title === "string"
+        ? value.title
+        : typeof value.detail === "string"
+          ? value.detail
+          : typeof value.message === "string"
+            ? value.message
+            : undefined;
+    if (message) return { code: "INTERNAL_ERROR", params: { detail: message } };
+  }
+  const message =
+    err instanceof Error ? err.message : typeof err === "string" ? err : "";
   if (!message.startsWith("{")) return null;
   try {
     const parsed = JSON.parse(message);
@@ -85,12 +320,37 @@ export function parseBackendError(err: unknown): BackendError | null {
  * Translate a backend error to a localized string. Falls back to the raw
  * message if the error isn't a structured backend error.
  */
+/**
+ * A leased-host operating system as a person reads it.
+ *
+ * macOS / Windows / Linux are proper nouns, the same in every locale, so they
+ * are not translated — only mapped from the wire value the fleet uses.
+ */
+function remoteOsLabel(platform: string): string {
+  switch (platform) {
+    case "macos":
+      return "macOS";
+    case "windows":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    default:
+      return platform;
+  }
+}
+
 export function translateBackendError(t: TFunction, err: unknown): string {
   const parsed = parseBackendError(err);
   if (!parsed) {
-    return err instanceof Error ? err.message : String(err);
+    return formatError(err);
   }
   switch (parsed.code) {
+    case "TABLE_PREFERENCES_INVALID":
+      return t("backendErrors.tablePreferencesInvalid");
+    case "TABLE_PREFERENCES_LOAD_FAILED":
+      return t("backendErrors.tablePreferencesLoadFailed");
+    case "TABLE_PREFERENCES_SAVE_FAILED":
+      return t("backendErrors.tablePreferencesSaveFailed");
     case "INCORRECT_PASSWORD":
       return t("backendErrors.incorrectPassword");
     case "LOCKED_OUT": {
@@ -105,8 +365,19 @@ export function translateBackendError(t: TFunction, err: unknown): string {
       return t("backendErrors.profileNotProtected");
     case "PROFILE_ALREADY_PROTECTED":
       return t("backendErrors.profileAlreadyProtected");
+    case "TOOL_IS_LOCAL_ONLY":
+      return t("backendErrors.toolIsLocalOnly");
+    case "TYPING_TOO_LONG":
+      return t("backendErrors.typingTooLong", {
+        seconds: parsed.params?.seconds ?? "",
+        limit: parsed.params?.limit ?? "",
+      });
+    case "URL_SCHEME_NOT_ALLOWED":
+      return t("backendErrors.urlSchemeNotAllowed");
     case "PROFILE_RUNNING":
       return t("backendErrors.profileRunning");
+    case "PROFILE_PAIRED_TWICE":
+      return t("backendErrors.profilePairedTwice");
     case "PROFILE_EPHEMERAL":
       return t("backendErrors.profileEphemeral");
     case "PROFILE_MISSING_SALT":
@@ -125,12 +396,24 @@ export function translateBackendError(t: TFunction, err: unknown): string {
       return t("backendErrors.cookieDbLocked");
     case "COOKIE_DB_UNAVAILABLE":
       return t("backendErrors.cookieDbUnavailable");
+    case "COOKIE_IMPORT_BROWSER_RUNNING":
+      return t("backendErrors.cookieImportBrowserRunning");
+    case "COOKIE_IMPORT_PROFILE_PROTECTED":
+      return t("backendErrors.cookieImportProfileProtected");
+    case "COOKIE_IMPORT_REMOTE_SESSION":
+      return t("backendErrors.cookieImportRemoteSession");
+    case "COOKIE_IMPORT_NO_COOKIES":
+      return t("backendErrors.cookieImportNoCookies");
     case "SELF_HOSTED_REQUIRES_LOGOUT":
       return t("backendErrors.selfHostedRequiresLogout");
     case "PROXY_NOT_FOUND":
       return t("backendErrors.proxyNotFound");
     case "GROUP_NOT_FOUND":
       return t("backendErrors.groupNotFound");
+    case "GROUP_NOT_EMPTY":
+      return t("backendErrors.groupNotEmpty", {
+        count: parsed.params?.count ?? 0,
+      });
     case "GROUP_ALREADY_EXISTS":
       return t("backendErrors.groupAlreadyExists");
     case "NAME_CANNOT_BE_EMPTY":
@@ -146,6 +429,34 @@ export function translateBackendError(t: TFunction, err: unknown): string {
       return t("backendErrors.extensionNotFound");
     case "EXTENSION_GROUP_NOT_FOUND":
       return t("backendErrors.extensionGroupNotFound");
+    case "EXTENSION_UNSUPPORTED_FILE_TYPE":
+      return t("backendErrors.extensionUnsupportedFileType");
+    case "EXTENSION_DIR_NOT_FOUND":
+      return t("backendErrors.extensionDirNotFound");
+    case "EXTENSION_NOT_A_DIRECTORY":
+      return t("backendErrors.extensionNotADirectory");
+    case "EXTENSION_PATH_INVALID":
+      return t("backendErrors.extensionPathInvalid");
+    case "EXTENSION_MANIFEST_MISSING":
+      return t("backendErrors.extensionManifestMissing");
+    case "EXTENSION_MANIFEST_INVALID":
+      return t("backendErrors.extensionManifestInvalid");
+    case "EXTENSION_DIR_TOO_LARGE":
+      return t("backendErrors.extensionDirTooLarge");
+    case "EXTENSION_PATH_HAS_COMMA":
+      return t("backendErrors.extensionPathHasComma");
+    case "EXTENSION_LINK_REQUIRES_DIRECTORY":
+      return t("backendErrors.extensionLinkRequiresDirectory");
+    case "EXTENSION_LINKED_CANNOT_SYNC":
+      return t("backendErrors.extensionLinkedCannotSync");
+    case "EXTENSION_URL_INVALID":
+      return t("backendErrors.extensionUrlInvalid");
+    case "EXTENSION_DOWNLOAD_FAILED":
+      return t("backendErrors.extensionDownloadFailed");
+    case "EXTENSION_NOT_AN_EXTENSION":
+      return t("backendErrors.extensionNotAnExtension");
+    case "EXTENSION_TOO_LARGE":
+      return t("backendErrors.extensionTooLarge");
     case "CANNOT_MODIFY_CLOUD_MANAGED_PROXY":
       return t("backendErrors.cannotModifyCloudManagedProxy");
     case "SYNC_LOCKED_BY_PROFILE":
@@ -153,15 +464,50 @@ export function translateBackendError(t: TFunction, err: unknown): string {
     case "SYNC_NOT_CONFIGURED":
       return t("backendErrors.syncNotConfigured");
     case "FINGERPRINT_REQUIRES_PRO":
-      return t("backendErrors.fingerprintRequiresPro");
+      return t("backendErrors.wayfernCrossOsRequiresPlan", {
+        detail: parsed.params?.detail ?? "requested",
+      });
+    case "FINGERPRINT_CUSTOMIZATION_UNSUPPORTED":
+      return t("backendErrors.wayfernCustomFingerprintRequiresPlan");
+    case "FINGERPRINT_RUNTIME_UNSUPPORTED":
+      return t("backendErrors.wayfernCrossOsRequiresPlan", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "WAYFERN_LAUNCH_ARGS_REQUIRES_PRO":
+      return t("backendErrors.wayfernLaunchArgsRequiresPro");
+    case "WAYFERN_LAUNCH_ARG_INVALID":
+      return t("backendErrors.wayfernLaunchArgInvalid");
+    case "WAYFERN_LAUNCH_ARG_RESERVED":
+      return t("backendErrors.wayfernLaunchArgReserved", {
+        argument: parsed.params?.argument ?? "",
+      });
+    case "WAYFERN_LAUNCH_ARG_NOT_ALLOWED":
+      return t("backendErrors.wayfernLaunchArgNotAllowed", {
+        argument: parsed.params?.argument ?? "",
+      });
+    case "WAYFERN_LAUNCH_ARG_VALUE_INVALID":
+      return t("backendErrors.wayfernLaunchArgValueInvalid", {
+        argument: parsed.params?.argument ?? "",
+      });
+    case "WAYFERN_LAUNCH_ARGS_LIMIT":
+      return t("backendErrors.wayfernLaunchArgsLimit", {
+        count: parsed.params?.count ?? "",
+        length: parsed.params?.length ?? "",
+      });
     case "PROXY_NOT_WORKING":
       return t("backendErrors.proxyNotWorking");
     case "PROXY_PAYMENT_REQUIRED":
       return t("backendErrors.proxyPaymentRequired");
+    case "PROXY_TLS_HANDSHAKE_FAILED":
+      return t("backendErrors.proxyTlsHandshakeFailed", {
+        proxy: parsed.params?.proxy ?? "",
+      });
     case "VPN_NOT_WORKING":
       return t("backendErrors.vpnNotWorking");
     case "CAMOUFOX_IMPORT_DEPRECATED":
       return t("backendErrors.camoufoxImportDeprecated");
+    case "PROXY_SIDECAR_VERSION_MISMATCH":
+      return t("backendErrors.proxySidecarVersionMismatch");
     case "UPDATE_CHECKSUMS_UNAVAILABLE":
       return t("backendErrors.updateChecksumsUnavailable", {
         version: parsed.params?.version ?? "",
@@ -170,12 +516,44 @@ export function translateBackendError(t: TFunction, err: unknown): string {
       return t("backendErrors.updateChecksumMismatch", {
         file: parsed.params?.file ?? "",
       });
+    case "BROWSER_CHECKSUM_UNAVAILABLE":
+      return t("backendErrors.browserChecksumUnavailable", {
+        browser: parsed.params?.browser ?? "",
+        version: parsed.params?.version ?? "",
+      });
+    case "PROFILE_ROUTE_REQUIRED":
+      return t("backendErrors.profileRouteRequired");
+    case "PROFILE_ROUTE_UNAVAILABLE":
+      return t("backendErrors.profileRouteUnavailable");
+    case "SYSTEM_PROXY_UNREACHABLE":
+      return t("backendErrors.systemProxyUnreachable", {
+        proxy: parsed.params?.proxy ?? "",
+      });
+    case "BROWSER_CHECKSUM_MISMATCH":
+      return t("backendErrors.browserChecksumMismatch", {
+        browser: parsed.params?.browser ?? "",
+        version: parsed.params?.version ?? "",
+      });
+    case "UPDATE_PROFILES_RUNNING":
+      return t("backendErrors.updateProfilesRunning");
+    case "UPDATE_PREPARATION_FAILED":
+      return t("backendErrors.updatePreparationFailed");
     case "PROFILE_NAME_EXISTS":
       return t("backendErrors.profileNameExists", {
         name: parsed.params?.name ?? "",
       });
     case "IMPORT_SOURCE_NOT_FOUND":
       return t("backendErrors.importSourceNotFound");
+    case "IMPORT_SOURCE_NOT_CHROMIUM":
+      return parsed.params?.family
+        ? t("backendErrors.importSourceNotChromiumNamed", {
+            family: parsed.params.family,
+          })
+        : t("backendErrors.importSourceNotChromium");
+    case "IMPORT_SOURCE_BROWSER_RUNNING":
+      return t("backendErrors.importSourceBrowserRunning", {
+        browser: parsed.params?.browser ?? "",
+      });
     case "IMPORT_NO_ITEMS":
       return t("backendErrors.importNoItems");
     case "BROWSER_NOT_DOWNLOADED":
@@ -202,14 +580,358 @@ export function translateBackendError(t: TFunction, err: unknown): string {
       return t("backendErrors.dnsRulesSaveFailed");
     case "DNS_RULES_EXPORT_FAILED":
       return t("backendErrors.dnsRulesExportFailed");
+    case "WAYFERN_TERMS_REQUIRED":
+      return t("backendErrors.wayfernTermsRequired");
+    case "API_PORT_UNAVAILABLE":
+      return t("backendErrors.apiPortUnavailable");
+    case "MCP_REMOTE_REQUIRES_SIGN_IN":
+      return t("backendErrors.mcpRemoteRequiresSignIn");
+    case "MCP_REMOTE_UNAUTHORIZED":
+      return t("backendErrors.mcpRemoteUnauthorized");
+    case "MCP_REMOTE_SLOT_TAKEN":
+      return t("backendErrors.mcpRemoteSlotTaken");
+    case "MCP_REMOTE_NOT_ENTITLED":
+      return t("backendErrors.mcpRemoteNotEntitled");
+    case "MCP_REMOTE_UNREACHABLE":
+      return t("backendErrors.mcpRemoteUnreachable");
+    case "MCP_REMOTE_KEY_MISSING":
+      return t("backendErrors.mcpRemoteKeyMissing");
+    case "MCP_REMOTE_KEY_LIMIT":
+      return t("backendErrors.mcpRemoteKeyLimit");
+    case "MCP_REMOTE_KEY_UNAVAILABLE":
+      return t("backendErrors.mcpRemoteKeyUnavailable");
+    case "MCP_AGENT_UNKNOWN":
+      return t("backendErrors.mcpAgentUnknown");
+    case "MCP_AGENT_INSTALL_FAILED":
+      return t("backendErrors.mcpAgentInstallFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "MCP_AGENT_REMOVE_FAILED":
+      return t("backendErrors.mcpAgentRemoveFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    // Any Xray share link (VLESS, VMess, Trojan, Hysteria2); the code keeps its
+    // old name because REST clients match on it. Most rejections mean "your
+    // server is a kind we do not support", not "you mistyped". Name the
+    // unsupported part instead of implying a typo.
+    case "VLESS_CONFIG_INVALID": {
+      const reason = parsed.params?.reason;
+      const known = [
+        "security",
+        "flow",
+        "transport",
+        "encryption",
+        "headerType",
+        "fingerprint",
+        "sni",
+        "publicKey",
+        "obfs",
+        "scheme",
+        "parameter",
+        "malformed",
+      ];
+      if (reason && known.includes(reason)) {
+        return t(`backendErrors.vlessUnsupported.${reason}`);
+      }
+      return t("backendErrors.vlessConfigInvalid");
+    }
+    case "XRAY_UNAVAILABLE":
+      return t("backendErrors.xrayUnavailable");
+    case "XRAY_UNSUPPORTED_OS":
+      return t("backendErrors.xrayUnsupportedOs");
+    case "XRAY_START_FAILED":
+      return t("backendErrors.xrayStartFailed");
     case "CLEAR_ON_CLOSE_UNAVAILABLE":
       return t("backendErrors.clearOnCloseUnavailable");
+    case "CLOUD_NOT_SIGNED_IN":
+      return t("backendErrors.cloudNotSignedIn");
+    case "CLOUD_UNREACHABLE":
+      return t("backendErrors.cloudUnreachable");
+    case "CLOUD_REQUEST_FAILED":
+      return t("backendErrors.cloudRequestFailed");
+    case "REMOTE_RATE_LIMITED":
+      return t("backendErrors.remoteRateLimited");
+    case "REMOTE_NO_CAPACITY": {
+      // Newer backends name the platform; older ones (and a bare 503 mapped by
+      // status alone) do not, so fall back to the platform-free line.
+      const platform = parsed.params?.platform;
+      return platform
+        ? t("backendErrors.remoteNoCapacityPlatform", {
+            platform: remoteOsLabel(platform),
+          })
+        : t("backendErrors.remoteNoCapacity");
+    }
+    case "REMOTE_NOT_CONFIGURED":
+      return t("backendErrors.remoteNotConfigured");
+    case "REMOTE_LAUNCH_REFUSED": {
+      // The server's own words, when it gave any. Kept as a diagnostic; the
+      // generic line stands alone when it did not.
+      const detail = parsed.params?.detail?.trim();
+      return detail
+        ? t("backendErrors.remoteLaunchRefusedDetail", { detail })
+        : t("backendErrors.remoteLaunchRefused");
+    }
+    case "REMOTE_FLEET_UNREACHABLE":
+      return t("backendErrors.remoteFleetUnreachable");
+    case "REMOTE_CONCURRENCY_LIMIT":
+      return t("backendErrors.remoteConcurrencyLimit", {
+        live: parsed.params?.live ?? "",
+        limit: parsed.params?.limit ?? "",
+      });
+    case "REMOTE_SESSION_NOT_DRIVABLE":
+      return t("backendErrors.remoteSessionNotDrivable");
+    case "REMOTE_PLATFORM_UNSUPPORTED":
+      return t("backendErrors.remotePlatformUnsupported", {
+        platform: remoteOsLabel(parsed.params?.platform ?? ""),
+      });
+    case "REMOTE_PROFILE_NOT_SYNCED":
+      return t("backendErrors.remoteProfileNotSynced");
+    case "REMOTE_NOT_ENTITLED":
+      return t("backendErrors.remoteNotEntitled");
+    // Distinct from the above: the plan HAS remote hours, it just may not spend
+    // them by hand (solo funds a nightly Cookie Bot only). Telling such a user
+    // "your plan does not include remote execution" while their bot visibly
+    // runs every night is the confusing case this code exists to avoid.
+    case "REMOTE_INTERACTIVE_NOT_ENTITLED":
+      return t("backendErrors.remoteInteractiveNotEntitled");
+    case "REMOTE_REQUIRES_REMOTE_EXIT_NODE":
+      return t("backendErrors.remoteRequiresRemoteExitNode");
+    case "REMOTE_PROXY_KIND_UNSUPPORTED":
+      return t("backendErrors.remoteProxyKindUnsupported", {
+        kind: parsed.params?.kind ?? "",
+      });
+    case "REMOTE_SESSION_REFUSED":
+      return t("backendErrors.remoteSessionRefused");
+    case "REMOTE_SESSION_NOT_FOUND":
+      return t("backendErrors.remoteSessionNotFound");
+    case "REMOTE_SESSION_CONFLICT":
+      return t("backendErrors.remoteSessionConflict");
+    case "REMOTE_SYNC_IN_PROGRESS":
+      return t("backendErrors.remoteSyncInProgress");
+    case "REMOTE_HOURS_EXHAUSTED":
+      return t("backendErrors.remoteHoursExhausted", {
+        granted: parsed.params?.granted ?? "0",
+        used: parsed.params?.used ?? "0",
+      });
+    case "PROFILE_RUNNING_REMOTELY":
+      return t("backendErrors.profileRunningRemotely");
+    case "PROFILE_REMOTE_SYNC_PENDING":
+      return t("backendErrors.profileRemoteSyncPending");
+    case "PROFILE_LOCKED_BY_MEMBER":
+      return t("backendErrors.profileLockedByMember", {
+        email: parsed.params?.email ?? "",
+      });
+    case "PROFILE_LOCKED_ELSEWHERE":
+      return t("backendErrors.profileLockedElsewhere");
+    case "PROFILE_LOCK_UNAVAILABLE":
+      return t("backendErrors.profileLockUnavailable");
+    case "NOT_TEAM_MEMBER":
+      return t("backendErrors.notTeamMember");
+    case "COOKIE_BOT_NOT_ENTITLED":
+      return t("backendErrors.cookieBotNotEntitled");
+    case "COOKIE_BOT_NOT_ENROLLED":
+      return t("backendErrors.cookieBotNotEnrolled");
+    case "COOKIE_BOT_SCHEDULE_CONFLICT":
+      return t("backendErrors.cookieBotScheduleConflict", {
+        email: parsed.params?.email ?? "",
+        time: parsed.params?.time ?? "",
+      });
+    case "COOKIE_BOT_RUN_IN_PROGRESS":
+      return t("backendErrors.cookieBotRunInProgress");
+    case "COOKIE_BOT_RUN_NOT_FOUND":
+      return t("backendErrors.cookieBotRunNotFound");
+    case "COOKIE_BOT_INVALID_SCHEDULE":
+      return t("backendErrors.cookieBotInvalidSchedule");
+    case "COOKIE_BOT_INVALID_TIMEZONE":
+      return t("backendErrors.cookieBotInvalidTimezone", {
+        timezone: parsed.params?.timezone ?? "",
+      });
+    case "COOKIE_BOT_INVALID_PERIOD":
+      return t("backendErrors.cookieBotInvalidPeriod");
+    case "COOKIE_BOT_SITE_LIMIT":
+      // The server sends both bounds. Defaulting `min` to 1 was not the
+      // problem — the message never mentioned a minimum at all, so a user who
+      // submitted no sites was told about a maximum they had not reached.
+      return t("backendErrors.cookieBotSiteLimit", {
+        min: parsed.params?.min ?? "1",
+        max: parsed.params?.max ?? "40",
+      });
+    case "COOKIE_BOT_REQUIRES_CLOUD_SYNC":
+      return t("backendErrors.cookieBotRequiresCloudSync");
+    case "COOKIE_BOT_ENCRYPTED_SYNC_UNSUPPORTED":
+      return t("backendErrors.cookieBotEncryptedSyncUnsupported");
+    case "COOKIE_BOT_UNKNOWN_PLATFORM":
+      return t("backendErrors.cookieBotUnknownPlatform");
+    case "COOKIE_BOT_UNSUPPORTED_PLATFORM":
+      return t("backendErrors.cookieBotUnsupportedPlatform", {
+        platform: parsed.params?.platform ?? "",
+      });
+    case "COOKIE_BOT_REQUIRES_EXIT_NODE":
+    // One condition, two names: the desktop refuses it locally as
+    // REQUIRES_EXIT_NODE and the server refuses it as REQUIRES_PROXY. Both
+    // resolve to the one sentence a user can act on.
+    case "COOKIE_BOT_REQUIRES_PROXY":
+      return t("backendErrors.cookieBotRequiresExitNode");
+    case "COOKIE_BOT_REQUIRES_REMOTE_EXIT_NODE":
+      return t("backendErrors.cookieBotRequiresRemoteExitNode");
+    case "COOKIE_BOT_PROXY_KIND_UNSUPPORTED":
+      return t("backendErrors.cookieBotProxyKindUnsupported", {
+        kind: parsed.params?.kind ?? "",
+      });
+    case "COOKIE_BOT_TOUCH_FINGERPRINT_UNSUPPORTED":
+      return t("backendErrors.cookieBotTouchFingerprintUnsupported");
+    case "RECIPES_NOT_ENTITLED":
+      return t("backendErrors.recipesNotEntitled");
+    case "AGENT_RECIPE_INVALID":
+      return t("backendErrors.agentRecipeInvalid");
+    case "AGENT_RECIPE_NOT_FOUND":
+      return t("backendErrors.agentRecipeNotFound");
+    case "AGENT_REQUEST_NOT_FOUND":
+      return t("backendErrors.agentRequestNotFound");
+    case "AGENT_REQUEST_CLOSED":
+      return t("backendErrors.agentRequestClosed");
+    case "AGENT_ANSWER_EMPTY":
+      return t("backendErrors.agentAnswerEmpty");
+    case "AGENT_NOTE_EMPTY":
+      return t("backendErrors.agentNoteEmpty");
+    case "AGENT_TEXT_TOO_LONG":
+      return t("backendErrors.agentTextTooLong", {
+        max: parsed.params?.max ?? "2000",
+      });
+    case "AGENT_SESSION_NOT_FOUND":
+      return t("backendErrors.agentSessionNotFound");
+    case "FEEDBACK_MESSAGE_EMPTY":
+      return t("backendErrors.feedbackMessageEmpty");
+    case "FEEDBACK_MESSAGE_TOO_LONG":
+      return t("backendErrors.feedbackMessageTooLong", {
+        max: parsed.params?.max ?? "5000",
+      });
+    case "FEEDBACK_EMAIL_INVALID":
+      return t("backendErrors.feedbackEmailInvalid");
+    case "FEEDBACK_INVALID":
+      return t("backendErrors.feedbackInvalid");
+    case "FEEDBACK_RATE_LIMITED":
+      return t("backendErrors.feedbackRateLimited");
+    case "FEEDBACK_SEND_FAILED":
+      return t("backendErrors.feedbackSendFailed");
+    case "FEEDBACK_LOGS_UNREADABLE":
+      return t("backendErrors.feedbackLogsUnreadable");
+    // The launch gate's block. The dialog renders the mismatch detail from
+    // `params` itself; this string is the fallback for anywhere that only has
+    // room for one sentence.
+    case "FINGERPRINT_EXIT_MISMATCH":
+      return t("backendErrors.fingerprintExitMismatch");
+    case "WAYFERN_FINGERPRINT_APPLY_FAILED":
+      return t("backendErrors.wayfernFingerprintApplyFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "WAYFERN_FINGERPRINT_GENERATION_FAILED":
+      return t("backendErrors.wayfernFingerprintGenerationFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "WAYFERN_GENERATION_LIMIT_REACHED":
+      return t("backendErrors.wayfernGenerationLimitReached");
+    case "WAYFERN_CROSS_OS_REQUIRES_PLAN":
+      return t("backendErrors.wayfernCrossOsRequiresPlan", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "WAYFERN_IDENTITY_REFUSED":
+      return t("backendErrors.wayfernIdentityRefused", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "WAYFERN_INSTANCE_LIMIT_REACHED":
+      return t("backendErrors.wayfernInstanceLimitReached");
+    case "WAYFERN_PLAN_CHECK_UNAVAILABLE":
+      return t("backendErrors.wayfernPlanCheckUnavailable");
+    case "WAYFERN_CUSTOM_FINGERPRINT_REQUIRES_PLAN":
+      return t("backendErrors.wayfernCustomFingerprintRequiresPlan");
+    case "WAYFERN_GENERATION_UNAVAILABLE":
+      return t("backendErrors.wayfernGenerationUnavailable");
+    case "PROFILE_GENERATION_LIMIT_REACHED": {
+      const seconds = Number.parseInt(
+        parsed.params?.retryAfterSeconds ?? "",
+        10,
+      );
+      return t("backendErrors.profileGenerationLimitReached", {
+        limit: parsed.params?.limit ?? "",
+        minutes: Number.isFinite(seconds)
+          ? Math.max(1, Math.ceil(seconds / 60))
+          : 60,
+      });
+    }
+    case "WAYFERN_BROWSER_BUSY":
+      return t("backendErrors.wayfernBrowserBusy");
+    case "WAYFERN_BROWSER_EXITED":
+      return t("backendErrors.wayfernBrowserExited", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "PROFILE_EXPORT_FAILED":
+      return t("backendErrors.profileExportFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "PROFILE_EXPORT_TOO_LARGE":
+      return t("backendErrors.profileExportTooLarge");
+    case "PROFILE_IMPORT_FAILED":
+      return t("backendErrors.profileImportFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "PROFILE_IMPORT_TOO_NEW":
+      return t("backendErrors.profileImportTooNew");
+    case "PROFILE_IMPORT_UNSAFE_ARCHIVE":
+      return t("backendErrors.profileImportUnsafeArchive");
+    case "RECORDING_ALREADY_RUNNING":
+      return t("backendErrors.recordingAlreadyRunning");
+    case "PROFILE_NOT_RUNNING":
+      return t("backendErrors.profileNotRunning");
+    case "WAYFERN_152_REQUIRED":
+      return t("backendErrors.wayfern152Required");
+    case "RECORDING_FAILED":
+      return t("backendErrors.recordingFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "LAUNCH_CONSENT_EXPIRED":
+      return t("backendErrors.launchConsentExpired");
+    case "VPN_WORKER_START_FAILED":
+      return t("backendErrors.vpnWorkerStartFailed", {
+        detail: parsed.params?.detail ?? "",
+      });
+    case "EXIT_PROBE_FAILED":
+      return t("backendErrors.exitProbeFailed");
+    case "CAMOUFOX_REMOVED":
+      return t("backendErrors.camoufoxRemoved");
+    case "NO_E2E_PASSWORD_SET":
+      return t("backendErrors.noE2ePasswordSet");
+    case "TRASH_ENTRY_NOT_FOUND":
+      return t("backendErrors.trashEntryNotFound");
+    case "TRASH_RESTORE_CONFLICT":
+      return t("backendErrors.trashRestoreConflict");
+    case "SYNC_SESSION_NOT_FOUND":
+      return t("backendErrors.syncSessionNotFound");
+    case "SYNC_FOLLOWER_NOT_FOUND":
+      return t("backendErrors.syncFollowerNotFound");
+    case "SYNC_SESSION_UNAVAILABLE":
+      return t("backendErrors.syncSessionUnavailable");
+    case "SYNC_DISPLAY_UNAVAILABLE":
+      return t("backendErrors.syncDisplayUnavailable");
+    case "SYNC_DISPLAY_TOO_SMALL":
+      return t("backendErrors.syncDisplayTooSmall", {
+        windows: Number(parsed.params?.count ?? 0),
+      });
+    case "SYNC_ARRANGE_FAILED":
+      return t("backendErrors.syncArrangeFailed");
     case "INTERNAL_ERROR":
       return t("backendErrors.internal", {
         detail: parsed.params?.detail ?? "",
       });
     default:
-      return err instanceof Error ? err.message : String(err);
+      // The payload parsed as a structured error but carries a code this build
+      // does not know: the server can add codes faster than the desktop ships.
+      // Returning the raw message here would render the literal JSON to the
+      // user, so show a translated line that still names the code for support.
+      return (
+        parsed.fallbackMessage ??
+        t("backendErrors.unknownCode", { code: String(parsed.code) })
+      );
   }
 }
 

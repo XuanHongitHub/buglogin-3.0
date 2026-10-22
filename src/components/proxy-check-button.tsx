@@ -13,6 +13,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { extractRootError } from "@/lib/error-utils";
 import { formatRelativeTime } from "@/lib/flag-utils";
 import { MOTION_EASE_OUT } from "@/lib/motion";
 import type { ProxyCheckResult, StoredProxy } from "@/types";
@@ -39,6 +40,8 @@ export function ProxyCheckButton({
   setCheckingProfileId,
 }: ProxyCheckButtonProps) {
   const { t } = useTranslation();
+  const isBugLoginDesktop =
+    process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop";
   const reduceMotion = useReducedMotion();
   const [localResult, setLocalResult] = React.useState<
     ProxyCheckResult | undefined
@@ -53,12 +56,29 @@ export function ProxyCheckButton({
 
     setCheckingProfileId?.(profileId);
     try {
-      const result = await invoke<ProxyCheckResult>("check_proxy_validity", {
-        proxyId: proxy.id,
-        proxySettings: proxy.proxy_settings,
-      });
+      const result: ProxyCheckResult = isBugLoginDesktop
+        ? await invoke<{ status: string; latencyMs: number }>(
+            "check_stored_proxy",
+            { proxyId: proxy.id },
+          ).then((check) => ({
+            ip: "",
+            timestamp: Math.floor(Date.now() / 1000),
+            is_valid: check.status === "healthy",
+            latency_ms: check.latencyMs,
+          }))
+        : await invoke<ProxyCheckResult>("check_proxy_validity", {
+            proxyId: proxy.id,
+            proxySettings: proxy.proxy_settings,
+          });
       setLocalResult(result);
       onCheckComplete?.(result);
+
+      if (isBugLoginDesktop) {
+        toast.success(
+          t("proxyCheck.connected", { latency: result.latency_ms ?? 0 }),
+        );
+        return;
+      }
 
       // Show toast with location
       const locationParts: string[] = [];
@@ -84,8 +104,7 @@ export function ProxyCheckButton({
         </div>,
       );
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
+      const errorMessage = extractRootError(error);
       toast.error(t("proxyCheck.failed", { error: errorMessage }));
 
       // Save failed check result
@@ -110,13 +129,14 @@ export function ProxyCheckButton({
     onCheckFailed,
     setCheckingProfileId,
     t,
+    isBugLoginDesktop,
   ]);
 
   const isCurrentlyChecking = checkingProfileId === profileId;
   const result = localResult;
   const statusKey = isCurrentlyChecking
     ? "checking"
-    : result?.is_valid && result.country_code
+    : result?.is_valid
       ? "valid-location"
       : result && !result.is_valid
         ? "invalid"
@@ -156,13 +176,21 @@ export function ProxyCheckButton({
             >
               {isCurrentlyChecking ? (
                 <span className="size-3 animate-spin rounded-full border border-current border-t-transparent" />
-              ) : result?.is_valid && result.country_code ? (
+              ) : result?.is_valid ? (
                 <span className="relative inline-flex items-center justify-center">
-                  <FlagIcon
-                    countryCode={result.country_code}
-                    className="h-2.5"
+                  {!isBugLoginDesktop && (
+                    <FlagIcon
+                      countryCode={result.country_code}
+                      className="h-2.5"
+                    />
+                  )}
+                  <FiCheck
+                    className={
+                      isBugLoginDesktop
+                        ? "size-3"
+                        : "absolute right-[-4px] bottom-[-6px]"
+                    }
                   />
-                  <FiCheck className="absolute right-[-4px] bottom-[-6px]" />
                 </span>
               ) : result && !result.is_valid ? (
                 <span className="text-sm text-destructive">✕</span>
@@ -178,16 +206,26 @@ export function ProxyCheckButton({
           <p>{t("proxyCheck.tooltipChecking")}</p>
         ) : result?.is_valid ? (
           <div className="space-y-1">
-            <p className="flex items-center gap-1">
-              {result.country_code && (
-                <FlagIcon countryCode={result.country_code} />
-              )}
-              {[result.city, result.country].filter(Boolean).join(", ") ||
-                t("proxyCheck.unknownLocation")}
-            </p>
-            <p className="text-xs text-primary-foreground/70">
-              {t("proxyCheck.tooltipIp", { ip: result.ip })}
-            </p>
+            {isBugLoginDesktop ? (
+              <p>
+                {t("proxyCheck.connected", {
+                  latency: result.latency_ms ?? 0,
+                })}
+              </p>
+            ) : (
+              <>
+                <p className="flex items-center gap-1">
+                  {result.country_code && (
+                    <FlagIcon countryCode={result.country_code} />
+                  )}
+                  {[result.city, result.country].filter(Boolean).join(", ") ||
+                    t("proxyCheck.unknownLocation")}
+                </p>
+                <p className="text-xs text-primary-foreground/70">
+                  {t("proxyCheck.tooltipIp", { ip: result.ip })}
+                </p>
+              </>
+            )}
             <p className="text-xs text-primary-foreground/70">
               {t("proxyCheck.tooltipChecked", {
                 time: formatRelativeTime(result.timestamp),

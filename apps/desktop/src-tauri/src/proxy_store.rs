@@ -1,7 +1,3 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use buglogin_domain::entities::{Proxy, ProxyProtocol};
 use buglogin_domain::errors::Problem;
 use buglogin_domain::ids::{CredentialId, ProxyId};
@@ -10,7 +6,10 @@ use buglogin_storage::local::LocalRepository;
 use buglogin_storage::secrets::{OsVault, SecretKey, SecretValue};
 use buglogin_storage::vault::NativeVault;
 use serde::Serialize;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
+use crate::clock::unix_time_seconds;
 use crate::proxy_bridge::ProxyBridgeSpec;
 use sha2::{Digest, Sha256};
 
@@ -27,7 +26,7 @@ pub struct ImportedProxy {
     pub protocol: String,
     pub host: String,
     pub port: u16,
-    pub username: Option<String>,
+    pub has_credential: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,7 +121,7 @@ impl DesktopProxyStore {
                     protocol: protocol_name(&value.protocol).to_owned(),
                     host: value.host,
                     port: value.port,
-                    username: None,
+                    has_credential: value.credential_ref.is_some(),
                 })
             })
             .collect()
@@ -203,6 +202,7 @@ impl DesktopProxyStore {
 
     fn create(&self, row: ProxyRow, name: String) -> Result<(Proxy, ImportedProxy), Problem> {
         let id = proxy_id(&row)?;
+        let timestamp = now()?;
         let credential_ref = if row.username.is_some() || row.password.is_some() {
             Some(
                 CredentialId::new(format!("credential-{}", id.as_str())).map_err(|_| {
@@ -242,7 +242,6 @@ impl DesktopProxyStore {
         } else {
             None
         };
-        let timestamp = now();
         let proxy = Proxy {
             id: id.clone(),
             name: Some(name.clone()),
@@ -273,7 +272,7 @@ impl DesktopProxyStore {
             protocol: protocol_name(&proxy.protocol).to_owned(),
             host: proxy.host.clone(),
             port: proxy.port,
-            username: row.username,
+            has_credential: credential_ref.is_some(),
         };
         Ok((proxy, imported))
     }
@@ -343,12 +342,8 @@ fn parsed_protocol_name(protocol: &ParsedProtocol) -> &'static str {
     }
 }
 
-fn now() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
+fn now() -> Result<String, Problem> {
+    Ok(unix_time_seconds("proxy_store")?.to_string())
 }
 
 fn secret_problem(error: buglogin_storage::secrets::SecretError) -> Problem {
@@ -458,7 +453,7 @@ mod tests {
             .unwrap();
         assert_eq!(report.imported_count, 1);
         assert_eq!(report.skipped_count, 1);
-        assert_eq!(report.proxies[0].username.as_deref(), Some("alice"));
+        assert!(report.proxies[0].has_credential);
         assert!(!serde_json::to_string(&report).unwrap().contains("secret"));
         assert_eq!(repository.list::<Proxy>().unwrap().len(), 1);
         assert_eq!(vault.values.lock().unwrap().len(), 1);

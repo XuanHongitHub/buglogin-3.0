@@ -72,7 +72,14 @@ impl LeaseStore {
                 });
             }
         }
-        self.sequence = self.sequence.saturating_add(1);
+        let next_sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(LeaseError::SequenceExhausted)?;
+        let expires_at = now
+            .checked_add(ttl_seconds)
+            .ok_or(LeaseError::TimeExhausted)?;
+        self.sequence = next_sequence;
         let lease = Lease {
             lease_id: format!("lease-{}", self.sequence),
             fencing_token: self.sequence,
@@ -81,7 +88,7 @@ impl LeaseStore {
             owner_id,
             token: secure_token().map_err(|_| LeaseError::TokenGeneration)?,
             issued_at: now,
-            expires_at: now.saturating_add(ttl_seconds),
+            expires_at,
         };
         self.leases.insert(resource_id, lease.clone());
         Ok(lease)
@@ -106,7 +113,9 @@ impl LeaseStore {
         if !lease.owns(owner_id, token) {
             return Err(LeaseError::NotOwner);
         }
-        lease.expires_at = now.saturating_add(ttl_seconds);
+        lease.expires_at = now
+            .checked_add(ttl_seconds)
+            .ok_or(LeaseError::TimeExhausted)?;
         Ok(lease.clone())
     }
 
@@ -146,6 +155,8 @@ pub enum LeaseError {
     Expired,
     TokenGeneration,
     TenantMismatch,
+    SequenceExhausted,
+    TimeExhausted,
 }
 
 fn validate_owner(owner_id: String) -> Result<String, LeaseError> {
@@ -262,6 +273,20 @@ mod tests {
             store
                 .acquire(lease.resource_id, lease.workspace_id, "new", 2, 10)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn fencing_sequence_exhaustion_never_reuses_the_last_token() {
+        let (resource, workspace) = ids();
+        let mut store = LeaseStore {
+            leases: BTreeMap::new(),
+            sequence: u64::MAX,
+        };
+
+        assert_eq!(
+            store.acquire(resource, workspace, "owner", 1, 10),
+            Err(LeaseError::SequenceExhausted)
         );
     }
 }

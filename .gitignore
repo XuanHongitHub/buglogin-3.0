@@ -16,3 +16,5 @@ target/
 .gstack/
 apps/desktop/src-tauri/binaries/*
 !apps/desktop/src-tauri/binaries/.gitkeep
+output/
+/donut-browser-daemon

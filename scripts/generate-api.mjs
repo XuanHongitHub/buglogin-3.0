@@ -7,6 +7,7 @@ import { parse, stringify } from "yaml";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = resolve(root, "docs/contracts/command-registry-v1.yaml");
 const openApiSourcePath = resolve(root, "crates/api/openapi/openapi-v1.yaml");
+const openApiContractOutputPath = resolve(root, "docs/contracts/openapi-v1.yaml");
 const frontendOutputPath = resolve(root, "frontend/src/generated/command-registry.ts");
 const adapterOutputPath = resolve(root, "docs/contracts/adapter-contract-v1.yaml");
 const rustOutputPath = resolve(root, "crates/api/src/commands/generated.rs");
@@ -58,6 +59,7 @@ const profileTypes = [
   ["JsonValue", schemas?.JsonValue],
   ["Profile", schemas?.Profile],
   ["ProfileRecord", schemas?.ProfileRecord],
+  ["ProfileResource", schemas?.ProfileResource],
   ["ProfileCreateInput", schemas?.ProfileCreateCommandInput],
   ["ProfileProxyAssignment", schemas?.ProfileProxyAssignment],
   ["ProfileProxyAssignmentGetInput", schemas?.ProfileProxyAssignmentGetInput],
@@ -65,7 +67,11 @@ const profileTypes = [
   ["Group", schemas?.Group],
   ["GroupRecord", schemas?.GroupRecord],
   ["GroupRecordList", schemas?.GroupRecordList],
+  ["GroupShareGrant", schemas?.GroupShareGrant],
+  ["GroupShareGrantList", schemas?.GroupShareGrantList],
   ["GroupCreateInput", schemas?.GroupCreateInput],
+  ["GroupShareCreateInput", schemas?.GroupShareCreateInput],
+  ["GroupShareRevokeInput", schemas?.GroupShareRevokeInput],
   ["GroupUpdateInput", schemas?.GroupUpdateInput],
   ["GroupDeleteInput", schemas?.GroupDeleteInput],
   ["ProfileGroupsReplaceInput", schemas?.ProfileGroupsReplaceInput],
@@ -82,6 +88,8 @@ const profileTypes = [
   ["ProxyView", schemas?.ProxyView],
   ["ProxyRecord", schemas?.ProxyRecord],
   ["ProxyPage", schemas?.ProxyPage],
+  ["ProxyImportInput", schemas?.ProxyImportInput],
+  ["ProxyImportReport", schemas?.ProxyImportReport],
   ["ProxyCreateInput", schemas?.ProxyCreateInput],
   ["ProxyUpdateInput", schemas?.ProxyUpdateInput],
   ["ProxyDeleteInput", schemas?.ProxyDeleteInput],
@@ -132,12 +140,15 @@ const rustOutput = renderRust(commands, sourceHash, mcpInputSchemas);
 
 if (checkOnly) {
   if (!rustOnly) {
+    await checkGenerated(openApiContractOutputPath, openApiSource);
     await checkGenerated(frontendOutputPath, frontendOutput);
     await checkGenerated(adapterOutputPath, adapterOutput);
   }
   await checkGenerated(rustOutputPath, rustOutput);
 } else {
   if (!rustOnly) {
+    await mkdir(dirname(openApiContractOutputPath), { recursive: true });
+    await writeFile(openApiContractOutputPath, openApiSource, "utf8");
     await mkdir(dirname(frontendOutputPath), { recursive: true });
     await writeFile(frontendOutputPath, frontendOutput, "utf8");
     await writeFile(adapterOutputPath, adapterOutput, "utf8");
@@ -173,6 +184,9 @@ function schemaToTypeScript(schema, owner) {
   if (schema.const !== undefined) return JSON.stringify(schema.const);
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     return schema.enum.map((value) => JSON.stringify(value)).join(" | ");
+  }
+  if (Array.isArray(schema.anyOf)) {
+    return schema.anyOf.map((variant) => schemaToTypeScript(variant, owner)).join(" | ");
   }
   if (Array.isArray(schema.oneOf)) {
     return schema.oneOf.map((variant) => schemaToTypeScript(variant, owner)).join(" | ");
@@ -258,7 +272,9 @@ function renderAdapters(commands, sourceHash) {
       ...metadata(command),
       security: {
         authentication:
-          command.auth === "optional-local"
+          command.auth === "public"
+            ? "public"
+            : command.auth === "optional-local"
             ? "optional-local-bearer-token"
             : "bearer-token",
         authorization: "canonical-capability-acl",
@@ -274,7 +290,9 @@ function renderAdapters(commands, sourceHash) {
       ...metadata(command),
       security: {
         authentication:
-          command.auth === "optional-local"
+          command.auth === "public"
+            ? "public"
+            : command.auth === "optional-local"
             ? "optional-local-auth"
             : "bearer-token-or-session",
         authorization: "canonical-capability-acl",
@@ -290,7 +308,9 @@ function renderAdapters(commands, sourceHash) {
       ...metadata(command),
       security: {
         authentication:
-          command.auth === "optional-local"
+          command.auth === "public"
+            ? "public"
+            : command.auth === "optional-local"
             ? "optional-local-session"
             : "canonical-session",
         authorization: "canonical-capability-acl",
@@ -395,7 +415,7 @@ function normalizeCommand(command, defaults, index) {
     throw new Error(`Invalid command id: ${id}`);
   }
   assertOneOf(kind, ["query", "command", "operation", "subscription"], `${id}.kind`);
-  assertOneOf(action, ["read", "create", "update", "delete", "execute", "manage"], `${id}.action`);
+  assertOneOf(action, ["read", "create", "update", "delete", "execute", "share", "manage"], `${id}.action`);
   for (const adapter of adapters) {
     assertOneOf(adapter, ["tauri", "rest", "mcp"], `${id}.adapters`);
   }
@@ -406,7 +426,7 @@ function normalizeCommand(command, defaults, index) {
     `${id}.idempotency`,
   );
   assertOneOf(audit, ["required", "metadata-only"], `${id}.audit`);
-  assertOneOf(auth, ["required", "optional-local"], `${id}.auth`);
+  assertOneOf(auth, ["required", "optional-local", "public"], `${id}.auth`);
   assertOneOf(
     idempotency,
     ["none", "required", "required-for-command-and-long-running-operation"],
@@ -581,7 +601,7 @@ export type CommandMetadata = {
   readonly id: CommandId;
   readonly kind: CommandKind;
   readonly capability: string;
-  readonly action: "read" | "create" | "update" | "delete" | "execute" | "manage";
+  readonly action: "read" | "create" | "update" | "delete" | "execute" | "share" | "manage";
   readonly adapters: readonly string[];
   readonly input: string;
   readonly output: string;

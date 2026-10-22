@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 
+const BUGLOGIN_DESKTOP =
+  process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop";
+
 export interface TrialStatusActive {
   type: "Active";
   remaining_seconds: number;
@@ -28,6 +31,12 @@ export function useCommercialTrial(): UseCommercialTrialReturn {
   const [isLoading, setIsLoading] = useState(true);
 
   const checkTrialStatus = useCallback(async () => {
+    if (BUGLOGIN_DESKTOP) {
+      setTrialStatus(null);
+      setHasAcknowledged(true);
+      setIsLoading(false);
+      return;
+    }
     try {
       const [status, acknowledged] = await Promise.all([
         invoke<TrialStatus>("get_commercial_trial_status"),
@@ -44,6 +53,7 @@ export function useCommercialTrial(): UseCommercialTrialReturn {
 
   useEffect(() => {
     void checkTrialStatus();
+    if (BUGLOGIN_DESKTOP) return;
 
     // Check trial status every minute to update the countdown
     const interval = setInterval(() => {

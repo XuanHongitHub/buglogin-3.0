@@ -51,7 +51,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 9px;
-  color: var(--foreground) !important;
+  color: var(--foreground);
   font-size: 15px;
   font-weight: 650;
   letter-spacing: -0.02em;
@@ -99,7 +99,7 @@
   align-items: center;
   padding: 0 11px;
   border-radius: var(--radius-sm);
-  color: var(--muted-foreground) !important;
+  color: var(--muted-foreground);
   font-size: 13px;
   font-weight: 500;
   text-decoration: none;
@@ -108,12 +108,12 @@
 
 .buglogin-web-nav-link:hover {
   background: var(--muted);
-  color: var(--foreground) !important;
+  color: var(--foreground);
 }
 
 .buglogin-web-nav-link[aria-current="page"] {
   background: var(--accent);
-  color: var(--accent-foreground) !important;
+  color: var(--accent-foreground);
   font-weight: 600;
 }
 
@@ -127,7 +127,7 @@
   border: 1px solid var(--input);
   border-radius: var(--radius-sm);
   background: var(--card);
-  color: var(--foreground) !important;
+  color: var(--foreground);
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
@@ -213,7 +213,7 @@
   min-width: 0;
 }
 
-.buglogin-web-auth .buglogin-web-app-layout {
+:where(.buglogin-web-auth) .buglogin-web-app-layout {
   display: block;
 }
 
@@ -396,7 +396,7 @@
 .buglogin-public-primary {
   border-color: var(--primary);
   background: var(--primary);
-  color: var(--primary-foreground) !important;
+  color: var(--primary-foreground);
 }
 
 .buglogin-public-primary:hover {
@@ -406,7 +406,7 @@
 
 .buglogin-public-secondary {
   background: var(--card);
-  color: var(--foreground) !important;
+  color: var(--foreground);
 }
 
 .buglogin-public-secondary:hover {
@@ -468,7 +468,9 @@
 .buglogin-public-capability-list article > span {
   padding-top: 2px;
   color: var(--muted-foreground);
-  font: 12px/18px var(--font-geist-mono), monospace;
+  font:
+    12px / 18px var(--font-geist-mono),
+    monospace;
 }
 
 .buglogin-public-capability-list h3 {
@@ -492,7 +494,7 @@
   white-space: nowrap;
 }
 
-.buglogin-public-capability-list a:hover {
+.buglogin-public-capability-list a.buglogin-public-capability-link:hover {
   text-decoration: underline;
 }
 
@@ -711,11 +713,404 @@
   }
 }
 
+/* =========================================================================
+   BUGLOGIN BESPOKE VISUAL IDENTITY (CRIMSON BEETLE & PIXEL MATRIX)
+   ========================================================================= */
+
+.buglogin-hero-stage {
+  position: relative;
+  overflow: hidden;
+  padding: 32px 0 64px;
+  border-bottom: 1px solid var(--border);
+  background:
+    radial-gradient(circle at 80% 30%, rgba(225, 29, 72, 0.08), transparent 50%),
+    radial-gradient(circle at 20% 70%, rgba(225, 29, 72, 0.04), transparent 50%);
+}
+
+.buglogin-pixel-bug-flank {
+  position: absolute;
+  top: 10px;
+  z-index: 0;
+  margin: 0;
+  padding: 0;
+  color: #e11d48;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10.5px;
+  line-height: 1.15;
+  letter-spacing: 0.05em;
+  opacity: 0.2;
+  pointer-events: none;
+  user-select: none;
+  text-shadow: 0 0 12px rgba(225, 29, 72, 0.4);
+  filter: blur(0.2px);
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 40%,
+    rgba(0, 0, 0, 0) 90%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 40%,
+    rgba(0, 0, 0, 0) 90%
+  );
+}
+
+.buglogin-pixel-bug-flank--left {
+  left: -30px;
+}
+
+.buglogin-pixel-bug-flank--right {
+  right: -30px;
+}
+
+@media (max-width: 1180px) {
+  .buglogin-pixel-bug-flank {
+    display: none;
+  }
+}
+
+.buglogin-hero-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+  align-items: center;
+  gap: 48px;
+}
+
+.buglogin-hero-headline {
+  font-size: clamp(36px, 4.4vw, 56px);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+  margin: 0 0 18px;
+}
+
+.buglogin-hero-lead {
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+  max-width: 620px;
+  margin: 0 0 28px;
+}
+
+.buglogin-btn-primary-crimson {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 20px;
+  border-radius: var(--radius-sm);
+  background: #e11d48;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 650;
+  text-decoration: none;
+  border: 1px solid #f43f5e;
+  box-shadow: 0 0 25px rgba(225, 29, 72, 0.35);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.buglogin-btn-primary-crimson:hover {
+  background: #be123c;
+  box-shadow: 0 0 35px rgba(225, 29, 72, 0.55);
+  transform: translateY(-1px);
+}
+
+.buglogin-btn-secondary-cyber {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 18px;
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  transition: all 0.2s ease;
+}
+
+.buglogin-btn-secondary-cyber:hover {
+  border-color: #e11d48;
+  background: var(--secondary);
+}
+
+/* HERO MAIN BUG SHOWCASE */
+.buglogin-hero-bug-showcase {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px 28px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(225, 29, 72, 0.25);
+  background: linear-gradient(
+    135deg,
+    rgba(24, 24, 27, 0.95),
+    rgba(9, 9, 11, 0.98)
+  );
+  box-shadow:
+    0 0 40px rgba(225, 29, 72, 0.15),
+    inset 0 0 30px rgba(225, 29, 72, 0.05);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.buglogin-hero-bug-showcase:hover {
+  border-color: rgba(225, 29, 72, 0.45);
+  box-shadow: 0 0 50px rgba(225, 29, 72, 0.28);
+}
+
+.buglogin-hero-bug-glow-orb {
+  position: relative;
+  width: 140px;
+  height: 140px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 24px;
+}
+
+.buglogin-hero-bug-glow-orb::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  border-radius: 50%;
+  border: 1px dashed rgba(225, 29, 72, 0.35);
+  animation: buglogin-rotate-ring 24s linear infinite;
+}
+
+.buglogin-hero-bug-glow-orb::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(225, 29, 72, 0.25) 0%,
+    transparent 70%
+  );
+}
+
+@keyframes buglogin-rotate-ring {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.buglogin-hero-bug-img {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 16px rgba(225, 29, 72, 0.75));
+  z-index: 1;
+  transition: transform 0.3s ease;
+}
+
+.buglogin-hero-bug-showcase:hover .buglogin-hero-bug-img {
+  transform: scale(1.06);
+}
+
+.buglogin-hero-telemetry-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+}
+
+.buglogin-telemetry-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11.5px;
+  font-family: var(--font-geist-mono), monospace;
+  color: #e4e7eb;
+}
+
+.buglogin-telemetry-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+.buglogin-telemetry-dot--crimson {
+  background: #e11d48;
+  box-shadow: 0 0 8px #e11d48;
+}
+
+/* TRUST TICKER */
+.buglogin-trust-ticker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.buglogin-trust-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.buglogin-trust-item strong {
+  color: var(--foreground);
+}
+
+/* BENTO HIGHLIGHTS */
+.buglogin-bento-section {
+  padding: 56px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.buglogin-bento-header {
+  margin-bottom: 32px;
+}
+
+.buglogin-bento-header h2 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  margin: 6px 0 0;
+}
+
+.buglogin-bento-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+}
+
+.buglogin-bento-card {
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--card);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.buglogin-bento-card:hover {
+  border-color: rgba(225, 29, 72, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.buglogin-bento-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  background: rgba(225, 29, 72, 0.1);
+  color: #e11d48;
+  font-size: 20px;
+  margin-bottom: 16px;
+}
+
+.buglogin-bento-card h3 {
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0 0 8px;
+}
+
+.buglogin-bento-card p {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted-foreground);
+  margin: 0;
+}
+
+/* SIMPLE TERMINAL & QUICK CONNECT */
+.buglogin-terminal-section {
+  padding: 48px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.buglogin-terminal-card {
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #09090b;
+  overflow: hidden;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25);
+}
+
+.buglogin-terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.buglogin-terminal-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.buglogin-terminal-tab {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: var(--font-geist-mono), monospace;
+  background: transparent;
+  color: #a1a1aa;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.buglogin-terminal-tab--active {
+  background: rgba(225, 29, 72, 0.15);
+  color: #fda4af;
+  border: 1px solid rgba(225, 29, 72, 0.3);
+}
+
+.buglogin-terminal-body {
+  padding: 20px 24px;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #e4e4e7;
+  overflow-x: auto;
+}
+
+.buglogin-terminal-body code {
+  color: #f43f5e;
+}
+
+@media (max-width: 900px) {
+  .buglogin-hero-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 32px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .buglogin-web *,
   .buglogin-web *::before,
   .buglogin-web *::after {
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
+    scroll-behavior: auto;
+    transition-duration: 0.01ms;
   }
 }

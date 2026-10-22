@@ -10,6 +10,7 @@ use buglogin_migration::encrypted_secrets::decrypt_packaged_proxy_credentials;
 use buglogin_migration::inspect::inspect_source;
 use buglogin_migration::legacy::{
     map_legacy_groups, map_legacy_proxies, map_legacy_proxies_for_encrypted_package,
+    map_legacy_proxies_for_ids,
 };
 use buglogin_migration::package::{PackageMetadata, build_encrypted_profile_package};
 use buglogin_migration::reconcile::{ReconciliationStatus, reconcile_activation_with_vault};
@@ -22,7 +23,7 @@ use buglogin_storage::local::LocalRepository;
 use buglogin_storage::secrets::{
     OsVault, RotationReceipt, SecretError, SecretKey, SecretValue, SecretVersion,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 struct FakeVault {
@@ -250,4 +251,20 @@ fn proxy_credentials_fail_closed_without_leaking_values() {
     .unwrap();
     assert_eq!(rollback.removed_credentials.len(), 1);
     assert!(vault.values.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn referenced_proxy_mapping_rejects_symlinked_proxy_directory() {
+    let source = Temp::new();
+    let outside = Temp::new();
+    outside.write(
+        "proxy-a.json",
+        br#"{"id":"proxy-a","proxy_settings":{"proxy_type":"http","host":"proxy.example.test","port":8080}}"#,
+    );
+    std::os::unix::fs::symlink(outside.path(), source.path().join("proxies")).unwrap();
+    let ids = BTreeSet::from(["proxy-a".to_owned()]);
+
+    let error = map_legacy_proxies_for_ids(source.path(), "entities", &ids).unwrap_err();
+    assert_eq!(error.code, "migration_entity_invalid");
 }

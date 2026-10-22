@@ -62,8 +62,8 @@ const client = createWebApiClient({
       request.headers.get("x-correlation-id") === "cor_self_test",
       "Correlation header missing",
     );
-    if (request.method === "GET" && request.url.endsWith("/v1/health"))
-      return Response.json({ status: "ok", service: "buglogin-api" });
+    if (request.method === "GET" && request.url.endsWith("/v1/readyz"))
+      return Response.json({ status: "ready", service: "buglogin-api" });
     if (request.method === "GET" && request.url.endsWith("/v1/account"))
       return Response.json({ accountId: "account-1" });
     if (request.method === "GET" && request.url.endsWith("/v1/organizations"))
@@ -173,7 +173,7 @@ const client = createWebApiClient({
 const summary = await client.reads.publicSummary(controller.signal);
 assert(
   summary.status.label === "Operational",
-  "Health response was not mapped",
+  "Readiness response was not mapped",
 );
 const account = await client.reads.account(controller.signal);
 assert(account.accountId === "account-1", "Account response was not parsed");
@@ -640,6 +640,12 @@ assert(
   "Session revoke idempotency missing",
 );
 assert(
+  /^auth-logout-[0-9a-f-]{36}$/.test(
+    authRequests[10].headers.get("idempotency-key") ?? "",
+  ),
+  "Logout idempotency missing",
+);
+assert(
   !(await authRequests[0].text()).includes("accessToken"),
   "Login request must not contain bearer fields",
 );
@@ -853,10 +859,10 @@ const operationalClient = createWebApiClient({
       return Response.json(workspace);
     if (url.pathname === "/v1/workspaces/workspace%3A1/teams")
       return Response.json([{ team, revision: 3 }]);
-    if (url.pathname === "/v1/workspaces/workspace%3A1/members")
-      return Response.json([]);
-    if (url.pathname === "/v1/workspaces/workspace%3A1/resources")
-      return Response.json([]);
+    if (url.pathname === "/v1/workspaces/workspace%3A1/members/page")
+      return Response.json({ items: [], nextCursor: null });
+    if (url.pathname === "/v1/workspaces/workspace%3A1/resources/page")
+      return Response.json({ items: [], nextCursor: null });
     if (url.pathname === "/v1/workspaces/workspace%3A1/grants")
       return Response.json([]);
     return Response.json({}, { status: 404 });
@@ -870,6 +876,43 @@ assert(
   operational.teams.length === 1 && operational.teams[0].id === team.id,
   "Versioned REST team records were not projected into the workspace view",
 );
+
+let repeatedMemberPageRequests = 0;
+const repeatedCursorClient = createWebApiClient({
+  accessToken: "workspace-token",
+  baseUrl: "http://127.0.0.1:47822",
+  workspaceScopes: [{ organizationId: "org:1", workspaceId: "workspace:1" }],
+  fetch: async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/v1/organizations/org%3A1/workspaces/workspace%3A1")
+      return Response.json(workspace);
+    if (url.pathname === "/v1/workspaces/workspace%3A1/teams")
+      return Response.json([{ team, revision: 3 }]);
+    if (url.pathname === "/v1/workspaces/workspace%3A1/members/page") {
+      repeatedMemberPageRequests += 1;
+      return Response.json({ items: [], nextCursor: "cursor-a" });
+    }
+    if (url.pathname === "/v1/workspaces/workspace%3A1/resources/page")
+      return Response.json({ items: [], nextCursor: null });
+    if (url.pathname === "/v1/workspaces/workspace%3A1/grants")
+      return Response.json([]);
+    return Response.json({}, { status: 404 });
+  },
+});
+try {
+  await repeatedCursorClient.reads.workspaceOperational(
+    "workspace:1",
+    profileController.signal,
+  );
+  throw new Error("Repeated list cursor was not rejected");
+} catch (error) {
+  assert(
+    error instanceof WebApiError &&
+      error.problem.code === "api_page_cursor_invalid" &&
+      repeatedMemberPageRequests === 2,
+    "Workspace list pagination did not stop on a repeated cursor",
+  );
+}
 
 const profiles = await profileClient.reads.profiles(
   null,
@@ -885,7 +928,7 @@ const createdProfile = await profileClient.writes.createProfile(
   {
     id: profile.id,
     name: profile.name,
-    runtime: profile.runtime,
+    runtime: "wayfern",
     runtimeVersion: profile.runtimeVersion ?? undefined,
     workspaceId: "ws_web_1",
     proxyId: profile.proxyId ?? undefined,

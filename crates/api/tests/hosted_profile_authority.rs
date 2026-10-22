@@ -5,6 +5,7 @@ use buglogin_domain::{
     ids::{ProfileId, WorkspaceId},
 };
 use buglogin_storage::control::MemoryControlRecordStore;
+use buglogin_sync::payload::PayloadDescriptor;
 
 fn profile() -> Profile {
     Profile {
@@ -39,6 +40,14 @@ fn provision_plan_is_deterministic_and_promotes_profile_to_ready() {
     assert_eq!(plan.binding.profile_id, plan.profile.id);
     assert_eq!(plan.binding.resource_id, plan.resource_id);
     assert_eq!(plan.manifest.generation, 1);
+    let empty_payload = PayloadDescriptor::new(
+        plan.workspace_id.clone(),
+        plan.resource_id.clone(),
+        1,
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(plan.manifest.root_checksum, empty_payload.root_checksum);
     assert_eq!(
         HostedProfileService::managed_resource_id(&plan.profile.id).unwrap(),
         plan.resource_id

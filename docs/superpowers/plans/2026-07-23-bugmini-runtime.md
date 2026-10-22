@@ -4,6 +4,8 @@
 2. [x] Add checksum/path/launch adapter core
 3. [x] Preserve fingerprint adapter configuration
 4. [x] Add desktop multi-runtime configuration
+- [x] Stream runtime executable checksum validation through a fixed 64 KiB buffer so Wayfern/Bugmini launch does not allocate the full browser binary in memory; source-only, consolidated verification deferred.
+- [x] Stream runtime installation into a bounded same-directory staging file, hash it on disk, and atomically replace/rollback only after size and checksum pass; source-only, consolidated verification deferred.
 5. [~] Prove native Windows launch/stop/proxy/cookie/extensions
 6. [ ] Prove native macOS arm64 and Intel/waiver
 7. [ ] Approve migration classification as direct

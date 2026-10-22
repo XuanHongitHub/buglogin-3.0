@@ -223,6 +223,82 @@ impl WayfernManager {
     Err(format!("CDP not ready after {max_attempts} attempts on port {port}: {detail}").into())
   }
 
+  async fn wait_for_cdp_ready_while_running(
+    &self,
+    port: u16,
+    child: &mut tokio::process::Child,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let url = format!("http://127.0.0.1:{port}/json/version");
+    let max_attempts = 120;
+    let delay = Duration::from_millis(500);
+    let pid = child.id().unwrap_or_default();
+    let mut last_error = String::from("no CDP response received");
+
+    for attempt in 0..max_attempts {
+      if let Some(status) = child.try_wait()? {
+        return Err(format!(
+          "Wayfern exited before CDP became ready (pid={pid}, status={status}, port={port})"
+        )
+        .into());
+      }
+
+      match self.http_client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => {
+          log::info!("CDP ready on port {port} after {attempt} attempts (pid={pid})");
+          return Ok(());
+        }
+        Ok(response) => last_error = format!("HTTP {} from {url}", response.status()),
+        Err(error) => last_error = format!("request failed: {error}"),
+      }
+      tokio::time::sleep(delay).await;
+    }
+
+    Err(format!(
+      "Wayfern stayed alive but CDP was not ready after {max_attempts} attempts (pid={pid}, port={port}): {last_error}"
+    )
+    .into())
+  }
+
+  async fn terminate_failed_launch(&self, pid: u32, profile_path: &str) {
+    #[cfg(target_os = "windows")]
+    {
+      use std::os::windows::process::CommandExt;
+      const CREATE_NO_WINDOW: u32 = 0x08000000;
+      match std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+      {
+        Ok(output) if output.status.success() => {
+          log::warn!("Terminated failed Wayfern launch process tree pid={pid}");
+        }
+        Ok(output) => log::error!(
+          "Failed to terminate failed Wayfern launch process tree pid={pid}: {}",
+          String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => log::error!("Could not run taskkill for failed Wayfern pid={pid}: {error}"),
+      }
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(error) = crate::platform_browser::macos::kill_browser_process_impl(
+      pid,
+      Some(profile_path),
+    )
+    .await
+    {
+      log::error!("Failed to terminate failed Wayfern launch pid={pid}: {error}");
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = crate::platform_browser::linux::kill_browser_process_impl(
+      pid,
+      Some(profile_path),
+    )
+    .await
+    {
+      log::error!("Failed to terminate failed Wayfern launch pid={pid}: {error}");
+    }
+  }
+
   async fn get_cdp_targets(
     &self,
     port: u16,
@@ -943,7 +1019,7 @@ impl WayfernManager {
       .stdout(Stdio::null())
       .stderr(Stdio::null());
 
-    let child = command
+    let mut child = command
       .spawn()
       .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
         let hint = if e.raw_os_error() == Some(14001) {
@@ -955,9 +1031,16 @@ impl WayfernManager {
         format!("Failed to spawn Wayfern: {e}{hint}").into()
       })?;
     let process_id = child.id();
+    if let Err(error) = self
+      .wait_for_cdp_ready_while_running(port, &mut child)
+      .await
+    {
+      if let Some(pid) = process_id {
+        self.terminate_failed_launch(pid, profile_path).await;
+      }
+      return Err(error);
+    }
     drop(child);
-
-    self.wait_for_cdp_ready(port).await?;
 
     let targets = self.get_cdp_targets(port).await?;
     log::info!("Found {} CDP targets", targets.len());

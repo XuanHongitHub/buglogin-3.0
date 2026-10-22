@@ -21,18 +21,33 @@ fn generated_registry_matches_canonical_source_hash() {
 }
 
 #[test]
+fn cookie_value_mutations_are_native_adapter_only() {
+    for command_id in ["cookie.stage", "cookie.import", "cookie.copy"] {
+        let command = CommandRegistry::get(command_id).expect("cookie command is registered");
+        assert_eq!(command.adapters, &[Adapter::Tauri], "{command_id}");
+    }
+}
+
+#[test]
 fn every_registered_command_has_canonical_action() {
     let expected = [
+        ("runtime.catalog.get", Action::Read),
         ("system.health.get", Action::Read),
         ("operation.get", Action::Read),
         ("events.stream", Action::Read),
         ("audit.events.list", Action::Read),
         ("profile.list", Action::Read),
         ("profile.get", Action::Read),
+        ("profile.binding.get", Action::Read),
         ("profile.create", Action::Create),
+        ("profile.update", Action::Update),
         ("profile.clone", Action::Create),
         ("profile.share", Action::Manage),
         ("profile.share.revoke", Action::Manage),
+        ("profile.share.recipientdevicekeys.list", Action::Manage),
+        ("profile.share.keyenvelope.get", Action::Read),
+        ("profile.keyrotation.recipients.list", Action::Update),
+        ("profile.keyrotation.execute", Action::Update),
         ("profile.launch", Action::Execute),
         ("profile.stop", Action::Execute),
         ("profile.sync.recovery.code.get", Action::Read),
@@ -46,6 +61,7 @@ fn every_registered_command_has_canonical_action() {
         ("cookie.copy", Action::Create),
         ("cookie.jobs.inbox", Action::Read),
         ("proxy.parse", Action::Read),
+        ("proxy.import", Action::Create),
         ("proxy.list", Action::Read),
         ("proxy.get", Action::Read),
         ("proxy.create", Action::Create),
@@ -54,6 +70,7 @@ fn every_registered_command_has_canonical_action() {
         ("proxy.check", Action::Read),
         ("migration.inspect", Action::Read),
         ("migration.import", Action::Execute),
+        ("migration.profile.data.import", Action::Update),
         ("migration.sync.import", Action::Execute),
         ("migration.control.import", Action::Execute),
         ("migration.control.rollback", Action::Execute),
@@ -72,9 +89,11 @@ fn every_registered_command_has_canonical_action() {
         ("auth.sessions.revoke", Action::Update),
         ("auth.device.approve", Action::Update),
         ("auth.device.token", Action::Create),
+        ("auth.device.refresh", Action::Update),
+        ("auth.desktop.login", Action::Create),
+        ("auth.device.encryptionkey.register", Action::Create),
         ("desktop.auth.status", Action::Read),
-        ("desktop.auth.device.start", Action::Execute),
-        ("desktop.auth.device.poll", Action::Execute),
+        ("desktop.auth.login", Action::Create),
         ("desktop.auth.logout", Action::Update),
         ("auth.refresh", Action::Update),
         ("auth.logout", Action::Update),
@@ -84,18 +103,23 @@ fn every_registered_command_has_canonical_action() {
         ("resource.lease.acquire", Action::Execute),
         ("resource.lease.renew", Action::Execute),
         ("resource.lease.release", Action::Execute),
+        ("resource.lease.get", Action::Read),
         ("profile.manifest.get", Action::Read),
         ("profile.manifest.commit", Action::Update),
         ("profile.blob.get", Action::Read),
         ("profile.blob.check", Action::Update),
         ("profile.blob.put", Action::Update),
         ("account.get", Action::Read),
+        ("account.list", Action::Read),
+        ("account.status.update", Action::Manage),
         ("organization.list", Action::Read),
         ("organization.get", Action::Read),
+        ("organization.record.get", Action::Read),
         ("organization.create", Action::Create),
         ("organization.update", Action::Update),
         ("workspace.list", Action::Read),
         ("workspace.get", Action::Read),
+        ("workspace.record.get", Action::Read),
         ("workspace.create", Action::Create),
         ("workspace.update", Action::Update),
         ("group.list", Action::Read),
@@ -103,6 +127,15 @@ fn every_registered_command_has_canonical_action() {
         ("group.create", Action::Create),
         ("group.update", Action::Update),
         ("group.delete", Action::Delete),
+        ("extension.group.list", Action::Read),
+        ("extension.group.get", Action::Read),
+        ("extension.group.create", Action::Create),
+        ("extension.group.update", Action::Update),
+        ("extension.group.delete", Action::Delete),
+        ("profile.extension.group.set", Action::Update),
+        ("group.share.list", Action::Read),
+        ("group.share.create", Action::Share),
+        ("group.share.revoke", Action::Share),
         ("profile.groups.replace", Action::Update),
         ("profile.proxy.assignment.get", Action::Read),
         ("profile.proxy.assignment.set", Action::Update),
@@ -114,6 +147,9 @@ fn every_registered_command_has_canonical_action() {
         ("member.list", Action::Read),
         ("member.get", Action::Read),
         ("member.invite", Action::Create),
+        ("member.invitation.create", Action::Create),
+        ("member.invitation.redeem", Action::Update),
+        ("member.invitation.revoke", Action::Manage),
         ("member.activate", Action::Update),
         ("member.suspend", Action::Manage),
         ("member.role.update", Action::Manage),
@@ -121,6 +157,8 @@ fn every_registered_command_has_canonical_action() {
         ("resource.get", Action::Read),
         ("resource.register", Action::Create),
         ("grant.list", Action::Read),
+        ("grant.list.legacy", Action::Read),
+        ("grant.list.page", Action::Read),
         ("grant.create", Action::Manage),
         ("grant.revoke", Action::Manage),
     ];
@@ -134,7 +172,7 @@ fn every_registered_command_has_canonical_action() {
 #[test]
 fn control_commands_are_schema_bound_and_mcp_discoverable() {
     let expected = [
-        ("account.get", "CAP-ID-001", "Empty", "Account"),
+        ("account.get", "CAP-ID-001", "Empty", "AccountView"),
         (
             "organization.list",
             "CAP-ORG-001",
@@ -146,6 +184,12 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
             "CAP-ORG-001",
             "OrganizationIdInput",
             "Organization",
+        ),
+        (
+            "organization.record.get",
+            "CAP-ORG-001",
+            "OrganizationIdInput",
+            "OrganizationRecord",
         ),
         (
             "organization.create",
@@ -170,6 +214,12 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
             "CAP-WS-001",
             "WorkspaceIdInput",
             "Workspace",
+        ),
+        (
+            "workspace.record.get",
+            "CAP-WS-001",
+            "WorkspaceIdInput",
+            "WorkspaceRecord",
         ),
         (
             "workspace.create",
@@ -231,12 +281,24 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
         ),
         ("resource.get", "CAP-RES-001", "ResourceIdInput", "Resource"),
         (
+            "resource.lease.get",
+            "profile.read",
+            "ResourceIdInput",
+            "OptionalLeaseStatus",
+        ),
+        (
             "resource.register",
             "CAP-RES-001",
             "ResourceRegisterInput",
             "Resource",
         ),
         ("grant.list", "CAP-SHARE-001", "GrantListInput", "GrantPage"),
+        (
+            "grant.list.page",
+            "CAP-SHARE-001",
+            "GrantListPageInput",
+            "GrantPage",
+        ),
         ("grant.create", "CAP-SHARE-001", "GrantCreateInput", "Grant"),
         (
             "grant.revoke",
@@ -259,6 +321,17 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
     assert_eq!(delete.input_schema.as_str(), "TeamDeleteInput");
     assert_eq!(delete.output_schema.as_str(), "TeamRecord");
     assert_eq!(delete.adapters, &[Adapter::Rest]);
+
+    let profile_data_import =
+        CommandRegistry::get("migration.profile.data.import").expect("profile data import");
+    assert_eq!(profile_data_import.capability, "profile.update");
+    assert_eq!(profile_data_import.action, Action::Update);
+    assert_eq!(profile_data_import.adapters, &[Adapter::Tauri]);
+
+    let legacy_grant_list = CommandRegistry::get("grant.list.legacy").expect("legacy grant list");
+    assert_eq!(legacy_grant_list.input_schema.as_str(), "GrantListInput");
+    assert_eq!(legacy_grant_list.output_schema.as_str(), "GrantList");
+    assert_eq!(legacy_grant_list.adapters, &[Adapter::Rest]);
 }
 
 #[test]
@@ -288,11 +361,12 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
             command.id.as_str(),
             "auth.device.start"
                 | "auth.device.token"
+                | "auth.device.refresh"
                 | "auth.login"
                 | "auth.recovery.request"
                 | "auth.recovery.complete"
-                | "desktop.auth.device.start"
-                | "desktop.auth.device.poll"
+                | "auth.desktop.login"
+                | "desktop.auth.login"
                 | "desktop.auth.logout"
         ) {
             assert!(command.auth_required, "{}", command.id.as_str());
@@ -302,11 +376,13 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
             "auth.device.start"
                 | "auth.device.approve"
                 | "auth.device.token"
+                | "auth.device.refresh"
+                | "auth.refresh"
                 | "auth.login"
                 | "auth.api.token.create"
                 | "auth.recovery.request"
-                | "desktop.auth.device.start"
-                | "desktop.auth.device.poll"
+                | "auth.desktop.login"
+                | "desktop.auth.login"
                 | "desktop.auth.logout"
         ) {
             assert!(command.idempotency_required, "{}", command.id.as_str());

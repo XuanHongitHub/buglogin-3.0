@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -54,6 +54,8 @@ struct ParsedProxyRow {
 pub struct NeutralGroupData {
     pub name: String,
     pub appearance: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -72,6 +74,8 @@ pub struct NeutralGroupRecord {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NeutralProxyData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub protocol: String,
     pub host: String,
     pub port: u16,
@@ -128,6 +132,56 @@ pub fn map_legacy_proxies_for_encrypted_package(
     source_instance_id: &str,
 ) -> Result<LegacyProxyExport, Problem> {
     map_proxy_export(source_root, source_instance_id, true)
+}
+
+pub fn map_legacy_proxies_for_ids(
+    source_root: &Path,
+    source_instance_id: &str,
+    source_ids: &BTreeSet<String>,
+) -> Result<LegacyProxyExport, Problem> {
+    let root = source_root.join("proxies");
+    let root_metadata = fs::symlink_metadata(&root).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            invalid("proxies directory")
+        } else {
+            io_problem(error)
+        }
+    })?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(invalid("proxies directory"));
+    }
+    let mut records = Vec::with_capacity(source_ids.len());
+    let mut credentials = Vec::new();
+    for source_id in source_ids {
+        if source_id.is_empty()
+            || source_id.len() > 128
+            || !source_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(invalid("proxy ID"));
+        }
+        let path = root.join(format!("{source_id}.json"));
+        reject_symlink(&path)?;
+        let metadata = fs::metadata(&path).map_err(io_problem)?;
+        if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+            return Err(invalid("proxy file size"));
+        }
+        let value: Value = serde_json::from_slice(&fs::read(&path).map_err(io_problem)?)
+            .map_err(|_| invalid("proxy"))?;
+        if value.get("id").and_then(Value::as_str) != Some(source_id) {
+            return Err(invalid("proxy identity"));
+        }
+        let (record, credential) = map_proxy(&value, source_id, source_instance_id, true)?;
+        records.push(record);
+        credentials.extend(credential);
+    }
+    records.sort_by(|left, right| left.source_ref.id.cmp(&right.source_ref.id));
+    credentials.sort_by(|left, right| left.credential_id.cmp(&right.credential_id));
+    Ok(LegacyProxyExport {
+        records,
+        credentials,
+    })
 }
 
 pub fn analyze_legacy_proxy_batch(
@@ -301,6 +355,7 @@ fn map_group(value: &Value, source_instance_id: &str) -> Result<NeutralGroupReco
         data: NeutralGroupData {
             name: name.into(),
             appearance,
+            workspace_id: None,
         },
         extensions: Map::new(),
     })
@@ -320,6 +375,12 @@ fn map_proxy(
     if source_id.trim().is_empty() {
         return Err(invalid("proxy ID"));
     }
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
     let (protocol, host, port, bypass_rules, username, password) = if let Some(settings) = object
         .get("proxy_settings")
         .or_else(|| object.get("proxySettings"))
@@ -383,6 +444,7 @@ fn map_proxy(
         created_at: timestamp(object, "created_at", "createdAt"),
         updated_at: timestamp(object, "updated_at", "updatedAt"),
         data: NeutralProxyData {
+            name,
             protocol,
             host,
             port,

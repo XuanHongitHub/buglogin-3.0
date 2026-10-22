@@ -73,7 +73,7 @@ fn canonical_control_plane_export_is_sanitized_and_deterministic() {
 }
 
 #[test]
-fn legacy_persisted_snapshot_is_blocked_until_export_adapter_exists() {
+fn raw_legacy_snapshot_is_not_accepted_as_a_canonical_control_export() {
     let snapshot = json!({
         "organizations": [],
         "workspaces": [],

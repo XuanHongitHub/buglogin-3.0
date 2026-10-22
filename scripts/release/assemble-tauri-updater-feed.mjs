@@ -1,0 +1,49 @@
+import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+
+const [inputRootArg, outputRootArg, version, repository] = process.argv.slice(2);
+if (!inputRootArg || !outputRootArg || !version || !repository) {
+  throw new Error("usage: assemble-tauri-updater-feed.mjs <incoming-root> <output-root> <version> <owner/repo>");
+}
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error("invalid updater version");
+if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("invalid GitHub repository");
+
+const inputRoot = resolve(inputRootArg);
+const outputRoot = resolve(outputRootArg);
+const platforms = [
+  { directory: `buglogin-v${version}-windows-x64-signed`, key: "windows-x86_64", suffix: ".nsis.zip" },
+  { directory: `buglogin-v${version}-macos-arm64-signed`, key: "darwin-aarch64", suffix: ".app.tar.gz" },
+  { directory: `buglogin-v${version}-macos-x64-signed`, key: "darwin-x86_64", suffix: ".app.tar.gz" },
+];
+const manifestPlatforms = {};
+const assets = [];
+
+for (const platform of platforms) {
+  const directory = join(inputRoot, platform.directory);
+  const files = await readdir(directory, { withFileTypes: true });
+  const candidates = files
+    .filter((file) => file.isFile() && file.name.endsWith(platform.suffix))
+    .map((file) => file.name);
+  if (candidates.length !== 1) throw new Error(`${platform.key}: expected exactly one ${platform.suffix} artifact`);
+  const artifactName = candidates[0];
+  const signatureName = `${artifactName}.sig`;
+  const signature = (await readFile(join(directory, signatureName), "utf8")).trim();
+  if (!signature || signature.length > 4096 || /[\r\n]/.test(signature)) {
+    throw new Error(`${platform.key}: missing or malformed detached Tauri signature`);
+  }
+  const artifactPath = join(directory, artifactName);
+  const artifactBytes = await readFile(artifactPath);
+  if (artifactBytes.length === 0) throw new Error(`${platform.key}: updater artifact is empty`);
+  const url = `https://github.com/${repository}/releases/download/v${version}/${encodeURIComponent(artifactName)}`;
+  manifestPlatforms[platform.key] = { signature, url };
+  assets.push([artifactPath, artifactName], [join(directory, signatureName), signatureName]);
+}
+
+await mkdir(outputRoot, { recursive: true });
+for (const [source, name] of assets) await copyFile(source, join(outputRoot, name));
+await writeFile(
+  join(outputRoot, "latest.json"),
+  `${JSON.stringify({ version, platforms: manifestPlatforms }, null, 2)}\n`,
+  { flag: "wx" },
+);
+console.log(`Assembled signed Tauri updater feed for ${Object.keys(manifestPlatforms).length} platform targets`);

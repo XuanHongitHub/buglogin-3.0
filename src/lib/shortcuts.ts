@@ -5,6 +5,8 @@
  * the ⌘ glyph while everyone else sees `Ctrl`.
  */
 
+import { isMacOS } from "@/lib/platform";
+
 export type ShortcutGroup =
   | "navigation"
   | "actions"
@@ -29,14 +31,18 @@ export interface ShortcutDef {
 export type ShortcutId =
   | "openPalette"
   | "openShortcuts"
-  | "importProfile"
+  | "openTips"
+  | "sendFeedback"
   | "goProfiles"
   | "goProxies"
   | "goExtensions"
   | "goGroups"
+  | "goCookieBot"
+  | "goAgent"
   | "goIntegrations"
   | "goAccount"
-  | "goSettings";
+  | "goSettings"
+  | "goTrash";
 
 export const SHORTCUTS: ShortcutDef[] = [
   // Actions
@@ -55,11 +61,22 @@ export const SHORTCUTS: ShortcutDef[] = [
     mod: true,
   },
   {
-    id: "importProfile",
-    labelKey: "shortcuts.importProfile",
+    // Mod+Shift+H, "hints". Plain Mod+H hides the window on macOS.
+    id: "openTips",
+    labelKey: "shortcuts.openTips",
     group: "actions",
-    key: "o",
+    key: "h",
     mod: true,
+    shift: true,
+  },
+  {
+    // Mod+Shift+F, "feedback". Plain Mod+F stays free for find.
+    id: "sendFeedback",
+    labelKey: "shortcuts.sendFeedback",
+    group: "actions",
+    key: "f",
+    mod: true,
+    shift: true,
   },
   // Navigation
   {
@@ -91,6 +108,24 @@ export const SHORTCUTS: ShortcutDef[] = [
     mod: true,
   },
   {
+    // Mod+B: "bot". Every other letter in the navigation group was taken.
+    id: "goCookieBot",
+    labelKey: "shortcuts.goCookieBot",
+    group: "navigation",
+    key: "b",
+    mod: true,
+  },
+  {
+    // Mod+J: the agent has no free mnemonic left — b is the cookie bot, a is
+    // the account, g is groups — so an unclaimed key it is, rather than
+    // stealing a chord the platform already means something by.
+    id: "goAgent",
+    labelKey: "shortcuts.goAgent",
+    group: "navigation",
+    key: "j",
+    mod: true,
+  },
+  {
     id: "goIntegrations",
     labelKey: "shortcuts.goIntegrations",
     group: "navigation",
@@ -113,6 +148,16 @@ export const SHORTCUTS: ShortcutDef[] = [
     group: "navigation",
     key: ",",
     mod: true,
+  },
+  {
+    // Mod+Shift+T, the "reopen what I just closed" chord: the trash is where
+    // a deleted profile comes back from. Plain Mod+T stays free.
+    id: "goTrash",
+    labelKey: "shortcuts.goTrash",
+    group: "navigation",
+    key: "t",
+    mod: true,
+    shift: true,
   },
 ];
 
@@ -137,17 +182,8 @@ export function formatGroupShortcut(digit: number): string[] {
   return [mac ? "⌘" : "Ctrl", String(digit)];
 }
 
-export function isMac(): boolean {
-  if (typeof navigator === "undefined") return false;
-  // userAgentData is preferred but not in all browsers; fall back to platform.
-  // `navigator.platform` is deprecated but still works in Tauri's webview.
-  const ua = navigator.userAgent || "";
-  const platform =
-    (navigator as unknown as { userAgentData?: { platform?: string } })
-      .userAgentData?.platform ??
-    navigator.platform ??
-    "";
-  return /Mac|iPhone|iPad|iPod/.test(platform) || /Mac OS X/.test(ua);
+function isMac(): boolean {
+  return isMacOS();
 }
 
 /**

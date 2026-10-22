@@ -18,6 +18,26 @@ pub fn plan_sync_import(
     destination_fencing_token: u64,
 ) -> Result<SyncImportPlan, Problem> {
     export.validate()?;
+    let mut plan = plan_sync_import_manifest_unchecked(export, current, destination_fencing_token)?;
+    plan.blobs = export.blobs.clone();
+    Ok(plan)
+}
+
+/// Builds a plan without copying export payloads. Call only after full export validation.
+pub fn plan_sync_import_manifest(
+    export: &SyncExport,
+    current: Option<&SyncManifest>,
+    destination_fencing_token: u64,
+) -> Result<SyncImportPlan, Problem> {
+    export.validate_metadata()?;
+    plan_sync_import_manifest_unchecked(export, current, destination_fencing_token)
+}
+
+fn plan_sync_import_manifest_unchecked(
+    export: &SyncExport,
+    current: Option<&SyncManifest>,
+    destination_fencing_token: u64,
+) -> Result<SyncImportPlan, Problem> {
     if destination_fencing_token == 0 {
         return Err(problem(
             "sync_import_fencing_token_invalid",
@@ -31,7 +51,7 @@ pub fn plan_sync_import(
                 export_id: export.export_id.clone(),
                 replayed: true,
                 manifest: current.clone(),
-                blobs: export.blobs.clone(),
+                blobs: Vec::new(),
             });
         }
         if export.base_generation != Some(current.generation)
@@ -61,19 +81,117 @@ pub fn plan_sync_import(
     Ok(SyncImportPlan {
         export_id: export.export_id.clone(),
         replayed: false,
-        manifest: export.import_manifest(destination_fencing_token)?,
-        blobs: export.blobs.clone(),
+        manifest: import_manifest_metadata(export, destination_fencing_token)?,
+        blobs: Vec::new(),
     })
 }
 
+fn import_manifest_metadata(
+    export: &SyncExport,
+    fencing_token: u64,
+) -> Result<SyncManifest, Problem> {
+    let mut manifest = export.manifest.clone();
+    manifest.fencing_token = fencing_token;
+    // Every exported object has its bytes in the package and is staged under
+    // the destination manifest generation. Source generations are source-store
+    // locations and must not be carried into the destination manifest.
+    for object in &mut manifest.objects {
+        object.source_generation = None;
+    }
+    manifest.validate()?;
+    Ok(manifest)
+}
+
 fn same_state(left: &SyncManifest, right: &SyncManifest) -> bool {
-    left.workspace_id == right.workspace_id
+    left.schema_version == right.schema_version
+        && left.workspace_id == right.workspace_id
         && left.resource_id == right.resource_id
         && left.generation == right.generation
         && left.parent_generation == right.parent_generation
         && left.root_checksum == right.root_checksum
-        && left.objects == right.objects
+        && left.objects.len() == right.objects.len()
+        && left
+            .objects
+            .iter()
+            .zip(&right.objects)
+            .all(|(left, right)| {
+                left.key == right.key && left.size == right.size && left.checksum == right.checksum
+            })
         && left.tombstones == right.tombstones
+        && left.dependencies == right.dependencies
+        && left.payload_encryption == right.payload_encryption
+        && left.file_chunks == right.file_chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{
+        ManifestDependency, ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
+        PayloadEncryptionAlgorithm,
+    };
+    use buglogin_domain::ids::{ProxyId, ResourceId, WorkspaceId};
+
+    fn manifest_with_envelope() -> SyncManifest {
+        SyncManifest::new(
+            WorkspaceId::new("ws-import-replay").unwrap(),
+            ResourceId::new("res-import-replay").unwrap(),
+            4,
+            2,
+            Some(1),
+            b"same-root",
+            vec![
+                ManifestObject::new(".buglogin/resource-key-envelope.json", b"envelope").unwrap(),
+                ManifestObject::new("profile/state", b"payload").unwrap(),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn replay_identity_includes_dependencies_and_payload_encryption() {
+        let base = manifest_with_envelope();
+
+        let mut changed_dependency = base.clone();
+        changed_dependency
+            .dependencies
+            .push(ManifestDependency::Proxy {
+                proxy_id: ProxyId::new("proxy-import-replay").unwrap(),
+                revision: 1,
+                credential_version: None,
+                metadata_object: None,
+                credential_envelope_object: None,
+            });
+        assert!(!same_state(&base, &changed_dependency));
+
+        let envelope = ManifestObjectReference::from(&base.objects[0]);
+        let mut changed_encryption = base.clone();
+        changed_encryption.payload_encryption = Some(ManifestPayloadEncryption {
+            schema_version: 1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV1,
+            key_version: None,
+            resource_key_envelope: envelope,
+        });
+        assert!(!same_state(&base, &changed_encryption));
+    }
+
+    #[test]
+    fn replay_identity_includes_manifest_schema_version() {
+        let base = manifest_with_envelope();
+        let mut changed_schema = base.clone();
+        changed_schema.schema_version += 1;
+
+        assert!(!same_state(&base, &changed_schema));
+    }
+
+    #[test]
+    fn replay_identity_ignores_source_object_generation() {
+        let base = manifest_with_envelope();
+        let mut source_rebased = base.clone();
+        source_rebased.objects[0].source_generation = Some(1);
+
+        assert!(same_state(&base, &source_rebased));
+    }
 }
 
 fn problem(code: &'static str, title: &'static str) -> Problem {

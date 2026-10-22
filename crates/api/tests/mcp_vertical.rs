@@ -78,6 +78,19 @@ fn dispatch_resolves_back_to_the_canonical_command() {
 }
 
 #[test]
+fn signed_runtime_catalog_is_an_explicit_public_global_read() {
+    let command = CommandRegistry::get("runtime.catalog.get").expect("catalog command");
+    let dispatch = mcp::dispatch_metadata("runtime_catalog_get").expect("MCP catalog tool");
+
+    assert_eq!(command.action, Action::Read);
+    assert!(!command.auth_required);
+    assert!(!command.idempotency_required);
+    assert!(!dispatch.scope_required);
+    assert_eq!(dispatch.command.id.as_str(), "runtime.catalog.get");
+    assert!(!dispatch.secrets_returned);
+}
+
+#[test]
 fn dispatch_rejects_unknown_and_non_mcp_commands() {
     assert_eq!(
         mcp::dispatch_metadata("missing_tool"),

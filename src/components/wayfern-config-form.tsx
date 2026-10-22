@@ -1,14 +1,13 @@
 "use client";
 
-import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { LoadingButton } from "@/components/loading-button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ProBadge } from "@/components/ui/pro-badge";
+import { RippleButton } from "@/components/ui/ripple";
 import {
   Select,
   SelectContent,
@@ -18,13 +17,15 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { useCloudAuth } from "@/hooks/use-cloud-auth";
+import { getEntitlements } from "@/lib/entitlements";
 import type {
   WayfernConfig,
   WayfernFingerprintConfig,
   WayfernOS,
 } from "@/types";
 
-interface WayfernConfigFormProps {
+export interface WayfernConfigFormProps {
   config: WayfernConfig;
   onConfigChange: (key: keyof WayfernConfig, value: unknown) => void;
   className?: string;
@@ -35,6 +36,67 @@ interface WayfernConfigFormProps {
   limitedMode?: boolean;
   profileVersion?: string;
   profileBrowser?: string;
+  supportedConfigOnly?: boolean;
+}
+
+export function LaunchArgumentsEditor({
+  config,
+  onConfigChange,
+  readOnly = false,
+}: {
+  config: WayfernConfig;
+  onConfigChange: (key: keyof WayfernConfig, value: unknown) => void;
+  readOnly?: boolean;
+}) {
+  const { t } = useTranslation();
+  const { user } = useCloudAuth();
+  const unlocked = getEntitlements(user).browserAutomation;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label
+          htmlFor="wayfern-launch-args"
+          className="flex items-center gap-2"
+        >
+          {t("fingerprint.launchArgs", { defaultValue: "Tham số khởi chạy" })}
+          {!unlocked && <ProBadge />}
+        </Label>
+        {config.launch_args?.some((arg) => arg.trim()) && (
+          <RippleButton
+            variant="ghost"
+            size="sm"
+            disabled={readOnly}
+            onClick={() => onConfigChange("launch_args", [])}
+          >
+            {t("common.buttons.clear", { defaultValue: "Xóa" })}
+          </RippleButton>
+        )}
+      </div>
+      <Textarea
+        id="wayfern-launch-args"
+        aria-describedby="wayfern-launch-args-description"
+        value={(config.launch_args ?? []).join("\n")}
+        onChange={(event) => {
+          onConfigChange("launch_args", event.target.value.split("\n"));
+        }}
+        disabled={readOnly || !unlocked}
+        placeholder={t("common.placeholders.example", {
+          value: "--disable-gpu",
+          defaultValue: "Ví dụ: --disable-gpu",
+        })}
+        className="min-h-24 font-mono text-sm"
+        spellCheck={false}
+      />
+      <p
+        id="wayfern-launch-args-description"
+        className="text-sm text-muted-foreground"
+      >
+        {t("fingerprint.launchArgsDescription", {
+          defaultValue: "Mỗi tham số trên một dòng được truyền cho Chromium.",
+        })}
+      </p>
+    </div>
+  );
 }
 
 const isFingerprintEditingDisabled = (config: WayfernConfig): boolean => {
@@ -64,10 +126,8 @@ export function WayfernConfigForm({
   isCreating = false,
   forceAdvanced = false,
   readOnly = false,
-  crossOsUnlocked = false,
   limitedMode = false,
-  profileVersion,
-  profileBrowser,
+  supportedConfigOnly = false,
 }: WayfernConfigFormProps) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState(
@@ -76,25 +136,6 @@ export function WayfernConfigForm({
   const [fingerprintConfig, setFingerprintConfig] =
     useState<WayfernFingerprintConfig>({});
   const [currentOS] = useState<WayfernOS>(getCurrentOS);
-  const [isGeneratingFingerprint, setIsGeneratingFingerprint] = useState(false);
-
-  const handleGenerateFingerprint = async () => {
-    if (!profileVersion) return;
-    setIsGeneratingFingerprint(true);
-    try {
-      const configJson = JSON.stringify(config);
-      const result = await invoke<string>("generate_sample_fingerprint", {
-        browser: profileBrowser ?? "wayfern",
-        version: profileVersion,
-        configJson,
-      });
-      onConfigChange("fingerprint", result);
-    } catch (error) {
-      console.error("Failed to generate fingerprint:", error);
-    } finally {
-      setIsGeneratingFingerprint(false);
-    }
-  };
 
   const selectedOS = config.os || currentOS;
 
@@ -132,6 +173,51 @@ export function WayfernConfigForm({
       setFingerprintConfig({});
     }
   }, [config.fingerprint]);
+
+  if (supportedConfigOnly) {
+    const operatingSystems =
+      selectedOS === currentOS ? [currentOS] : [currentOS, selectedOS];
+    return (
+      <div className={`@container space-y-4 ${className}`}>
+        <div className="space-y-3">
+          <Label>{t("fingerprint.osLabel")}</Label>
+          <Select
+            value={selectedOS}
+            onValueChange={(value: WayfernOS) => onConfigChange("os", value)}
+            disabled={readOnly}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder={t("fingerprint.selectOSPlaceholder")} />
+            </SelectTrigger>
+            <SelectContent>
+              {operatingSystems.map((os) => (
+                <SelectItem key={os} value={os} disabled={os !== currentOS}>
+                  <span className="flex items-center gap-2">
+                    {osLabels[os]}
+                    {os !== currentOS && (
+                      <span className="text-xs text-muted-foreground">
+                        {t("fingerprint.unavailableInBuild")}
+                      </span>
+                    )}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {selectedOS !== currentOS && (
+            <Alert>
+              <AlertDescription>
+                {t("fingerprint.localOsOnly")}
+              </AlertDescription>
+            </Alert>
+          )}
+          <p className="text-sm text-muted-foreground">
+            {t("fingerprint.generatedOnLaunch")}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const updateFingerprintConfig = (
     key: keyof WayfernFingerprintConfig,
@@ -175,22 +261,7 @@ export function WayfernConfigForm({
     <div className="space-y-6">
       {/* Operating System Selection */}
       <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <Label>{t("fingerprint.osLabel")}</Label>
-          {profileVersion && (!isCreating || crossOsUnlocked) && (
-            <LoadingButton
-              isLoading={isGeneratingFingerprint}
-              onClick={handleGenerateFingerprint}
-              disabled={readOnly}
-              variant="outline"
-              size="sm"
-            >
-              {isCreating
-                ? t("fingerprint.generateFingerprint")
-                : t("fingerprint.refreshFingerprint")}
-            </LoadingButton>
-          )}
-        </div>
+        <Label>{t("fingerprint.osLabel")}</Label>
         <Select
           value={selectedOS}
           onValueChange={(value: WayfernOS) => {
@@ -205,25 +276,30 @@ export function WayfernConfigForm({
             {(
               ["windows", "macos", "linux", "android", "ios"] as WayfernOS[]
             ).map((os) => {
-              const isDisabled = os !== currentOS && !crossOsUnlocked;
+              const isDisabled = os !== currentOS;
               return (
                 <SelectItem key={os} value={os} disabled={isDisabled}>
                   <span className="flex items-center gap-2">
                     {osLabels[os]}
-                    {isDisabled && <ProBadge />}
+                    {isDisabled && (
+                      <span className="text-xs text-muted-foreground">
+                        {t("fingerprint.unavailableInBuild")}
+                      </span>
+                    )}
                   </span>
                 </SelectItem>
               );
             })}
           </SelectContent>
         </Select>
-        {selectedOS !== currentOS && crossOsUnlocked && (
+        {selectedOS !== currentOS && (
           <Alert className="mt-2">
-            <AlertDescription>
-              {t("fingerprint.crossOsWarning")}
-            </AlertDescription>
+            <AlertDescription>{t("fingerprint.localOsOnly")}</AlertDescription>
           </Alert>
         )}
+        <p className="text-sm text-muted-foreground">
+          {t("fingerprint.generatedOnLaunch")}
+        </p>
       </div>
 
       {/* Randomize Fingerprint Option */}
@@ -1158,22 +1234,26 @@ export function WayfernConfigForm({
                       "ios",
                     ] as WayfernOS[]
                   ).map((os) => {
-                    const isDisabled = os !== currentOS && !crossOsUnlocked;
+                    const isDisabled = os !== currentOS;
                     return (
                       <SelectItem key={os} value={os} disabled={isDisabled}>
                         <span className="flex items-center gap-2">
                           {osLabels[os]}
-                          {isDisabled && <ProBadge />}
+                          {isDisabled && (
+                            <span className="text-xs text-muted-foreground">
+                              {t("fingerprint.unavailableInBuild")}
+                            </span>
+                          )}
                         </span>
                       </SelectItem>
                     );
                   })}
                 </SelectContent>
               </Select>
-              {selectedOS !== currentOS && crossOsUnlocked && (
+              {selectedOS !== currentOS && (
                 <Alert className="mt-2">
                   <AlertDescription>
-                    {t("fingerprint.crossOsLimitations")}
+                    {t("fingerprint.localOsOnly")}
                   </AlertDescription>
                 </Alert>
               )}

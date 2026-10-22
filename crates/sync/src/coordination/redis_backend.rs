@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -12,40 +12,17 @@ use buglogin_domain::{
     lease::{MAX_TTL_SECONDS, MIN_TTL_SECONDS},
 };
 use redis::{AsyncCommands, Script, aio::ConnectionManagerConfig, streams::StreamRangeReply};
+use sha2::{Digest, Sha256};
 
 use super::{
     AuthorizationRequest, CoordinationAuthorizer, CoordinationBackend, CoordinationEvent,
-    CoordinationOperation, CoordinationScope, EventResource, LeaseGrant, Presence, PublishedEvent,
-    SharedAuthorizer, StreamEvent, protocol,
+    CoordinationOperation, CoordinationScope, EventResource, LeaseGrant, LeaseStatus, Presence,
+    PublishedEvent, SharedAuthorizer, StreamEvent, protocol,
 };
 use crate::manifest::SyncManifest;
 
 const MIN_IDEMPOTENCY_TTL: Duration = Duration::from_secs(86_400);
 const DEFAULT_STREAM_MAX_LEN: usize = 10_000;
-
-const ACQUIRE_LEASE: &str = r#"
-local current = redis.call('HGETALL', KEYS[1])
-if #current > 0 then
-  local values = {}
-  for index = 1, #current, 2 do values[current[index]] = current[index + 1] end
-  if not values.owner or values.owner == ''
-    or not values.token or string.len(values.token) ~= 64 or not string.match(values.token, '^%x+$')
-    or not values.fencingToken or not string.match(values.fencingToken, '^%d+$') or tonumber(values.fencingToken) < 1
-    or not values.issuedAt or not string.match(values.issuedAt, '^%d+$')
-    or not values.expiresAt or not string.match(values.expiresAt, '^%d+$') then
-    return {-2, '', '', '', '', ''}
-  end
-  return {0, values.owner, '', values.fencingToken, values.issuedAt, values.expiresAt}
-end
-local time = redis.call('TIME')
-local now = (time[1] * 1000) + math.floor(time[2] / 1000)
-local expires = now + tonumber(ARGV[3])
-redis.call('INCR', KEYS[2])
-local fence = redis.call('GET', KEYS[2])
-redis.call('HSET', KEYS[1], 'owner', ARGV[1], 'token', ARGV[2], 'fencingToken', fence, 'issuedAt', now, 'expiresAt', expires)
-redis.call('PEXPIRE', KEYS[1], ARGV[3])
-return {1, ARGV[1], ARGV[2], fence, tostring(now), tostring(expires)}
-"#;
 
 const ACQUIRE_LEASE_IDEMPOTENT: &str = r#"
 local replay = redis.call('HGETALL', KEYS[3])
@@ -101,13 +78,27 @@ local expires = now + tonumber(ARGV[3])
 redis.call('INCR', KEYS[2])
 local fence = redis.call('GET', KEYS[2])
 redis.call('HSET', KEYS[1], 'owner', ARGV[1], 'token', ARGV[2], 'fencingToken', fence, 'issuedAt', now, 'expiresAt', expires)
-redis.call('PEXPIRE', KEYS[1], ARGV[3])
+redis.call('PEXPIREAT', KEYS[1], string.format('%.0f', expires))
 redis.call('HSET', KEYS[3], 'fingerprint', ARGV[4], 'owner', ARGV[1], 'token', ARGV[2], 'fencingToken', fence, 'issuedAt', now, 'expiresAt', expires)
 redis.call('PEXPIRE', KEYS[3], ARGV[5])
 return {1, ARGV[1], ARGV[2], fence, tostring(now), tostring(expires)}
 "#;
 
-const RENEW_LEASE: &str = r#"
+const RENEW_LEASE_IDEMPOTENT: &str = r#"
+local replay = redis.call('HGETALL', KEYS[2])
+if #replay > 0 then
+  local values = {}
+  for index = 1, #replay, 2 do values[replay[index]] = replay[index + 1] end
+  if not values.fingerprint or not values.owner or values.owner == ''
+    or not values.token or string.len(values.token) ~= 64 or not string.match(values.token, '^%x+$')
+    or not values.fencingToken or not string.match(values.fencingToken, '^%d+$') or tonumber(values.fencingToken) < 1
+    or not values.issuedAt or not string.match(values.issuedAt, '^%d+$')
+    or not values.expiresAt or not string.match(values.expiresAt, '^%d+$') then
+    return {-2, '', '', '', '', ''}
+  end
+  if values.fingerprint ~= ARGV[4] then return {-3, '', '', '', '', ''} end
+  return {2, values.owner, values.token, values.fencingToken, values.issuedAt, values.expiresAt}
+end
 if redis.call('EXISTS', KEYS[1]) == 0 then return {0, '', '', '', '', ''} end
 local owner = redis.call('HGET', KEYS[1], 'owner')
 local token = redis.call('HGET', KEYS[1], 'token')
@@ -124,9 +115,12 @@ end
 if owner ~= ARGV[1] or token ~= ARGV[2] then return {-1, owner, '', '', '', ''} end
 local time = redis.call('TIME')
 local now = (time[1] * 1000) + math.floor(time[2] / 1000)
+if tonumber(currentExpires) <= now then return {-4, owner, '', fence, issued, currentExpires} end
 local expires = now + tonumber(ARGV[3])
 redis.call('HSET', KEYS[1], 'expiresAt', expires)
-redis.call('PEXPIRE', KEYS[1], ARGV[3])
+redis.call('PEXPIREAT', KEYS[1], string.format('%.0f', expires))
+redis.call('HSET', KEYS[2], 'fingerprint', ARGV[4], 'owner', owner, 'token', token, 'fencingToken', fence, 'issuedAt', issued, 'expiresAt', expires)
+redis.call('PEXPIRE', KEYS[2], ARGV[5])
 return {1, owner, token, fence, issued, tostring(expires)}
 "#;
 
@@ -148,10 +142,22 @@ if fence ~= ARGV[2] then return {-3, 'stale_fencing_token'} end
 return {1, 'ok'}
 "#;
 
-const RELEASE_LEASE: &str = r#"
-if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
-if redis.call('HGET', KEYS[1], 'owner') ~= ARGV[1] or redis.call('HGET', KEYS[1], 'token') ~= ARGV[2] then return -1 end
-redis.call('DEL', KEYS[1])
+const RELEASE_LEASE_IDEMPOTENT: &str = r#"
+local replay = redis.call('HGETALL', KEYS[2])
+if #replay > 0 then
+  local values = {}
+  for index = 1, #replay, 2 do values[replay[index]] = replay[index + 1] end
+  if not values.fingerprint or values.released ~= '1' then return -3 end
+  if values.fingerprint ~= ARGV[3] then return -2 end
+  return 2
+end
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  if redis.call('HGET', KEYS[1], 'owner') ~= ARGV[1]
+    or redis.call('HGET', KEYS[1], 'token') ~= ARGV[2] then return -1 end
+  redis.call('DEL', KEYS[1])
+end
+redis.call('HSET', KEYS[2], 'fingerprint', ARGV[3], 'released', '1')
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
 return 1
 "#;
 
@@ -180,6 +186,25 @@ return {1, streamId}
 "#;
 
 const COMMIT_MANIFEST: &str = r#"
+local function is_positive_u64(value)
+  if not value or not string.match(value, '^[1-9]%d*$') or string.len(value) > 20 then
+    return false
+  end
+  return string.len(value) < 20 or value <= '18446744073709551615'
+end
+
+local function increment_u64(value)
+  local digits = {string.byte(value, 1, string.len(value))}
+  for index = #digits, 1, -1 do
+    if digits[index] < 57 then
+      digits[index] = digits[index] + 1
+      return string.char(unpack(digits))
+    end
+    digits[index] = 48
+  end
+  return nil
+end
+
 local manifest_key = KEYS[1]
 local lease_key = KEYS[2]
 
@@ -187,9 +212,14 @@ local owner_token = ARGV[1]
 local fencing_token = ARGV[2]
 local workspace_id = ARGV[3]
 local resource_id = ARGV[4]
-local incoming_gen = tonumber(ARGV[5])
+local incoming_gen = ARGV[5]
 local incoming_parent = ARGV[6]
 local payload = ARGV[7]
+
+if not is_positive_u64(incoming_gen)
+  or (incoming_parent ~= 'none' and not is_positive_u64(incoming_parent)) then
+  return {-8, 'manifest_generation_invalid'}
+end
 
 if redis.call('EXISTS', lease_key) == 0 then
   return {-1, 'lease_missing'}
@@ -219,14 +249,18 @@ end
 
 local current_exists = redis.call('EXISTS', manifest_key)
 if current_exists == 0 then
-  if incoming_gen ~= 1 or incoming_parent ~= 'none' then
+  if incoming_gen ~= '1' or incoming_parent ~= 'none' then
     return {-5, 'manifest_base_missing'}
   end
 else
-  local curr_gen = tonumber(redis.call('HGET', manifest_key, 'generation'))
+  local curr_gen = redis.call('HGET', manifest_key, 'generation')
   local curr_ws = redis.call('HGET', manifest_key, 'workspace_id')
   local curr_res = redis.call('HGET', manifest_key, 'resource_id')
   local curr_payload = redis.call('HGET', manifest_key, 'payload')
+
+  if not is_positive_u64(curr_gen) then
+    return {-8, 'manifest_generation_invalid'}
+  end
 
   if curr_ws ~= workspace_id or curr_res ~= resource_id then
     return {-4, 'workspace_resource_mismatch'}
@@ -240,7 +274,8 @@ else
     end
   end
 
-  if incoming_gen ~= curr_gen + 1 then
+  local next_gen = increment_u64(curr_gen)
+  if not next_gen or not is_positive_u64(next_gen) or incoming_gen ~= next_gen then
     return {-6, 'generation_gap_or_stale'}
   end
 
@@ -427,9 +462,22 @@ impl RedisCoordination {
     }
     fn lease_idempotency_key(&self, scope: CoordinationScope<'_>, key: &str) -> String {
         format!(
-            "{}:lease-idempotency:{}:{}",
+            "{}:lease-idempotency:{}",
             self.workspace_prefix(scope.clone()),
-            key_segment(scope.auth.actor_id()),
+            key_segment(key)
+        )
+    }
+    fn lease_renew_idempotency_key(&self, scope: CoordinationScope<'_>, key: &str) -> String {
+        format!(
+            "{}:lease-renew-idempotency:{}",
+            self.workspace_prefix(scope.clone()),
+            key_segment(key)
+        )
+    }
+    fn lease_release_idempotency_key(&self, scope: CoordinationScope<'_>, key: &str) -> String {
+        format!(
+            "{}:lease-release-idempotency:{}",
+            self.workspace_prefix(scope),
             key_segment(key)
         )
     }
@@ -455,64 +503,6 @@ impl CoordinationBackend for RedisCoordination {
         }
     }
 
-    async fn acquire_lease(
-        &self,
-        scope: CoordinationScope<'_>,
-        resource_id: &ResourceId,
-        ttl: Duration,
-    ) -> Result<LeaseGrant, Problem> {
-        self.authorize(
-            scope.clone(),
-            CoordinationOperation::LeaseAcquire,
-            Some(resource_id),
-        )
-        .await?;
-        let ttl_ms = validate_ttl(ttl)?;
-        let owner_token = secure_token()?;
-        let mut connection = self.connection.clone();
-        let (status, owner_id, token, fencing_token, issued_at_ms, expires_at_ms): (
-            i64,
-            String,
-            String,
-            String,
-            String,
-            String,
-        ) = Script::new(ACQUIRE_LEASE)
-            .key(self.lease_key(scope.clone(), resource_id))
-            .key(self.fence_key(scope.clone(), resource_id))
-            .arg(scope.auth.actor_id())
-            .arg(&owner_token)
-            .arg(ttl_ms)
-            .invoke_async(&mut connection)
-            .await
-            .map_err(redis_problem)?;
-        if status == 0 {
-            parse_lease_number(&fencing_token)?;
-            parse_lease_number(&issued_at_ms)?;
-            let expires_at_ms = parse_lease_number(&expires_at_ms)?;
-            return Err(Problem::new(
-                "lease_held",
-                "Resource lease is already held",
-                409,
-                "sync-coordination",
-            )
-            .with_field("ownerId", owner_id)
-            .with_field("expiresAtMs", expires_at_ms));
-        }
-        if status != 1 {
-            return Err(invalid_stored_lease());
-        }
-        Ok(LeaseGrant {
-            resource_id: resource_id.clone(),
-            workspace_id: scope.workspace_id.clone(),
-            owner_id,
-            owner_token: token,
-            fencing_token: parse_lease_number(&fencing_token)?,
-            issued_at_ms: parse_lease_number(&issued_at_ms)?,
-            expires_at_ms: parse_lease_number(&expires_at_ms)?,
-        })
-    }
-
     async fn acquire_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
@@ -533,12 +523,12 @@ impl CoordinationBackend for RedisCoordination {
             .checked_mul(1_000)
             .ok_or_else(|| protocol::invalid("invalid_idempotency_ttl"))?;
         let owner_token = secure_token()?;
-        let fingerprint = format!(
-            "{}|{}|{}",
+        let ttl_fingerprint = ttl_ms.to_string();
+        let fingerprint = lease_fingerprint(&[
             scope.auth.actor_id(),
             resource_id.as_str(),
-            ttl_ms
-        );
+            &ttl_fingerprint,
+        ]);
         let mut connection = self.connection.clone();
         let (status, owner_id, token, fencing_token, issued_at_ms, expires_at_ms): (
             i64,
@@ -588,12 +578,13 @@ impl CoordinationBackend for RedisCoordination {
         }
     }
 
-    async fn renew_lease(
+    async fn renew_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
         ttl: Duration,
+        idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem> {
         self.authorize(
             scope.clone(),
@@ -602,37 +593,64 @@ impl CoordinationBackend for RedisCoordination {
         )
         .await?;
         validate_owner_token(owner_token)?;
+        validate_idempotency_key(idempotency_key)?;
         let ttl_ms = validate_ttl(ttl)?;
+        let idempotency_ttl_ms = self
+            .idempotency_ttl_seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| protocol::invalid("invalid_idempotency_ttl"))?;
+        let ttl_fingerprint = ttl_ms.to_string();
+        let fingerprint = lease_fingerprint(&[
+            scope.auth.actor_id(),
+            resource_id.as_str(),
+            owner_token,
+            &ttl_fingerprint,
+        ]);
         let mut connection = self.connection.clone();
-        let result: (i64, String, String, String, String, String) = Script::new(RENEW_LEASE)
-            .key(self.lease_key(scope.clone(), resource_id))
-            .arg(scope.auth.actor_id())
-            .arg(owner_token)
-            .arg(ttl_ms)
-            .invoke_async(&mut connection)
-            .await
-            .map_err(redis_problem)?;
+        let result: (i64, String, String, String, String, String) =
+            Script::new(RENEW_LEASE_IDEMPOTENT)
+                .key(self.lease_key(scope.clone(), resource_id))
+                .key(self.lease_renew_idempotency_key(scope.clone(), idempotency_key))
+                .arg(scope.auth.actor_id())
+                .arg(owner_token)
+                .arg(ttl_ms)
+                .arg(fingerprint)
+                .arg(idempotency_ttl_ms)
+                .invoke_async(&mut connection)
+                .await
+                .map_err(redis_problem)?;
         match result {
-            (1, owner_id, token, fencing_token, issued_at_ms, expires_at_ms) => Ok(LeaseGrant {
-                resource_id: resource_id.clone(),
-                workspace_id: scope.workspace_id.clone(),
-                owner_id,
-                owner_token: token,
-                fencing_token: parse_lease_number(&fencing_token)?,
-                issued_at_ms: parse_lease_number(&issued_at_ms)?,
-                expires_at_ms: parse_lease_number(&expires_at_ms)?,
-            }),
+            (1 | 2, owner_id, token, fencing_token, issued_at_ms, expires_at_ms) => {
+                Ok(LeaseGrant {
+                    resource_id: resource_id.clone(),
+                    workspace_id: scope.workspace_id.clone(),
+                    owner_id,
+                    owner_token: token,
+                    fencing_token: parse_lease_number(&fencing_token)?,
+                    issued_at_ms: parse_lease_number(&issued_at_ms)?,
+                    expires_at_ms: parse_lease_number(&expires_at_ms)?,
+                })
+            }
             (0, _, _, _, _, _) => Err(lease_missing()),
-            (-1, _, _, _, _, _) => Err(lease_not_owner()),
+            (-1, owner_id, _, _, _, _) => Err(lease_not_owner().with_field("ownerId", owner_id)),
+            (-2, _, _, _, _, _) => Err(invalid_stored_lease()),
+            (-3, _, _, _, _, _) => Err(Problem::new(
+                "idempotency_conflict",
+                "Idempotency key was reused with different input",
+                409,
+                "sync-coordination",
+            )),
+            (-4, _, _, _, _, _) => Err(lease_expired()),
             _ => Err(invalid_stored_lease()),
         }
     }
 
-    async fn release_lease(
+    async fn release_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
+        idempotency_key: &str,
     ) -> Result<(), Problem> {
         self.authorize(
             scope.clone(),
@@ -641,19 +659,80 @@ impl CoordinationBackend for RedisCoordination {
         )
         .await?;
         validate_owner_token(owner_token)?;
+        validate_idempotency_key(idempotency_key)?;
+        let idempotency_ttl_ms = self
+            .idempotency_ttl_seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| protocol::invalid("invalid_idempotency_ttl"))?;
+        let fingerprint =
+            lease_fingerprint(&[scope.auth.actor_id(), resource_id.as_str(), owner_token]);
         let mut connection = self.connection.clone();
-        let status: i64 = Script::new(RELEASE_LEASE)
+        let status: i64 = Script::new(RELEASE_LEASE_IDEMPOTENT)
             .key(self.lease_key(scope.clone(), resource_id))
+            .key(self.lease_release_idempotency_key(scope.clone(), idempotency_key))
             .arg(scope.auth.actor_id())
             .arg(owner_token)
+            .arg(fingerprint)
+            .arg(idempotency_ttl_ms)
             .invoke_async(&mut connection)
             .await
             .map_err(redis_problem)?;
         match status {
-            1 => Ok(()),
-            0 => Err(lease_missing()),
-            _ => Err(lease_not_owner()),
+            1 | 2 => Ok(()),
+            -1 => Err(lease_not_owner()),
+            -2 => Err(Problem::new(
+                "idempotency_conflict",
+                "Idempotency key was reused with different input",
+                409,
+                "sync-coordination",
+            )),
+            -3 => Err(invalid_stored_lease()),
+            _ => Err(invalid_stored_lease()),
         }
+    }
+
+    async fn lease_status(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+    ) -> Result<Option<LeaseStatus>, Problem> {
+        self.authorize(
+            scope.clone(),
+            CoordinationOperation::LeaseRead,
+            Some(resource_id),
+        )
+        .await?;
+        let mut connection = self.connection.clone();
+        let fields: HashMap<String, String> = connection
+            .hgetall(self.lease_key(scope.clone(), resource_id))
+            .await
+            .map_err(redis_problem)?;
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        let owner_id = fields
+            .get("owner")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(invalid_stored_lease)?;
+        let owner_token = fields.get("token").ok_or_else(invalid_stored_lease)?;
+        validate_owner_token(owner_token).map_err(|_| invalid_stored_lease())?;
+        let fencing_token = fields
+            .get("fencingToken")
+            .ok_or_else(invalid_stored_lease)?;
+        let issued_at_ms = fields.get("issuedAt").ok_or_else(invalid_stored_lease)?;
+        let expires_at_ms = fields.get("expiresAt").ok_or_else(invalid_stored_lease)?;
+        let status = LeaseStatus {
+            resource_id: resource_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            owner_id: owner_id.clone(),
+            fencing_token: parse_lease_number(fencing_token)?,
+            issued_at_ms: parse_lease_number(issued_at_ms)?,
+            expires_at_ms: parse_lease_number(expires_at_ms)?,
+        };
+        if status.fencing_token == 0 || status.expires_at_ms <= crate::clock::unix_time_millis()? {
+            return Ok(None);
+        }
+        Ok(Some(status))
     }
 
     async fn validate_write_authority(
@@ -945,11 +1024,7 @@ impl CoordinationBackend for RedisCoordination {
             )
         })?;
         let event_id = format!("evt_sync_{}", hex(&event_id_bytes));
-        let occurred_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .min(u64::MAX as u128) as u64;
+        let occurred_at_ms = crate::clock::unix_time_millis()?;
         let event = CoordinationEvent {
             event_id: event_id.clone(),
             event_version: "1".to_owned(),
@@ -1072,6 +1147,19 @@ fn validate_idempotency_key(key: &str) -> Result<(), Problem> {
         return Err(protocol::invalid("invalid_idempotency_key"));
     }
     Ok(())
+}
+
+fn lease_fingerprint(parts: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn key_segment(value: &str) -> String {
@@ -1200,6 +1288,14 @@ fn lease_missing() -> Problem {
         "sync-coordination",
     )
 }
+fn lease_expired() -> Problem {
+    Problem::new(
+        "lease_expired",
+        "Resource lease is expired",
+        409,
+        "sync-coordination",
+    )
+}
 fn lease_not_owner() -> Problem {
     Problem::new(
         "lease_not_owner",
@@ -1254,6 +1350,22 @@ mod tests {
         assert_eq!(
             manifest_key("sync", &workspace, &resource),
             "buglogin:{sync:workspace-1}:manifest:resource-1"
+        );
+    }
+
+    #[test]
+    fn lease_receipt_fingerprint_is_stable_and_does_not_store_owner_token() {
+        let owner_token = "a1b2c3d4e5f6a7b8";
+        let fingerprint = lease_fingerprint(&["actor-1", "resource-1", owner_token, "30000"]);
+
+        assert_eq!(
+            fingerprint,
+            lease_fingerprint(&["actor-1", "resource-1", owner_token, "30000"])
+        );
+        assert!(!fingerprint.contains(owner_token));
+        assert_ne!(
+            fingerprint,
+            lease_fingerprint(&["actor-1", "resource-1", "different-token", "30000"])
         );
     }
 

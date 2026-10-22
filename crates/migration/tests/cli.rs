@@ -180,6 +180,28 @@ fn cli_rejects_invalid_command_and_non_directory_package() {
 }
 
 #[test]
+fn postgres_control_export_requires_explicit_read_only_mode() {
+    let work = TestDirectory::new("postgres-control-export-read-only");
+    let policy = work.child("storage-policy.json");
+    let output = work.child("control-plane.json");
+    let result = run(&[
+        "export-control-plane",
+        "--expected-database",
+        "buglogin3_rehearsal_fixture",
+        "--source-instance-id",
+        "legacy-fixture",
+        "--storage-policy",
+        text(&policy),
+        "--output",
+        text(&output),
+    ]);
+
+    assert!(!result.status.success());
+    assert_eq!(error_code(&result), "migration_read_only_required");
+    assert!(!output.exists());
+}
+
+#[test]
 fn cli_verify_rejects_mutated_package_bytes_before_import() {
     let source = TestDirectory::new("mutation-source");
     source.write(

@@ -23,7 +23,7 @@ jobs:
             target: aarch64-apple-darwin
             platform_test: platform_macos
           - platform: macos-x64
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             platform_test: platform_macos
     runs-on: ${{ matrix.runner }}
@@ -41,13 +41,13 @@ jobs:
         run: rustup target add "$TARGET" --toolchain 1.95.0
       - name: Test rebuilt Rust workspace
         shell: bash
-        run: cargo test --workspace --all-targets --target "$TARGET"
+        run: node scripts/tauri-cargo.mjs test --workspace --all-targets --target "$TARGET"
       - name: Test native browser platform adapter
         shell: bash
-        run: cargo test -p buglogin-browser --test "${{ matrix.platform_test }}" --target "$TARGET"
+        run: node scripts/tauri-cargo.mjs test -p buglogin-browser --test "${{ matrix.platform_test }}" --target "$TARGET"
       - name: Check desktop Rust application
         shell: bash
-        run: cargo check -p buglogin-desktop-app --all-targets --target "$TARGET"
+        run: node scripts/tauri-cargo.mjs check -p buglogin-desktop-app --all-targets --target "$TARGET"
       - name: Test and typecheck desktop presentation
         shell: bash
         run: |

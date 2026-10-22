@@ -62,7 +62,7 @@ Public-specific checks:
 | ACC-01 Sign up | ○ | — | — | ● | ● | ○ | ● | ○ | ○ | ● | ● | ○ |
 | ACC-02 Sign in | ○ | — | — | ● | ● | ○ | ● | ○ | ○ | ● | ● | ● |
 | ACC-03 MFA | ○ | — | — | ● | ● | ○ | ● | ○ | ○ | ● | ● | ● |
-| ACC-04 Recovery | ○ | — | — | ● | ● | ○ | ● | ○ | ○ | ● | ● | ● |
+| ACC-04 Recovery (outbound password reset unavailable this release) | ○ | — | — | ● | ● | ○ | ● | ○ | ○ | ● | ● | ● |
 | ACC-05 Invitation | ● | — | — | ● | ● | ● | ● | ○ | — | ● | ● | ● |
 | ACC-06 Onboarding | ● | ○ | — | ● | ● | ● | ● | ○ | — | ● | ● | ○ |
 | ACC-07 Profile | ● | — | — | ● | ○ | ● | ○ | ○ | — | ● | ● | ○ |

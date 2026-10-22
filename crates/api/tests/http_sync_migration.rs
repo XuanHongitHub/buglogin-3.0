@@ -16,6 +16,7 @@ use axum::{
 use buglogin_api::http::{ApiState, router};
 use buglogin_browser::profile::ProfileService;
 use buglogin_domain::{
+    entities::{Profile, ProfileState, Runtime, SyncMode},
     errors::Problem,
     ids::{AccountId, GrantId, ProfileId, ResourceId, WorkspaceId},
     permissions::{Action, Capability, Effect, Grant, ResourceScope},
@@ -44,6 +45,7 @@ static SYNC_IMPORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 struct FakeCoordination {
     lease: Mutex<Option<LeaseGrant>>,
     replays: Mutex<BTreeMap<String, LeaseGrant>>,
+    after_acquire: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     lease_acquires: AtomicUsize,
     manifest_commits: AtomicUsize,
     fail_validation: AtomicBool,
@@ -51,14 +53,8 @@ struct FakeCoordination {
 
 #[async_trait]
 impl CoordinationBackend for FakeCoordination {
-    async fn acquire_lease(
-        &self,
-        scope: CoordinationScope<'_>,
-        resource_id: &ResourceId,
-        ttl: Duration,
-    ) -> Result<LeaseGrant, Problem> {
-        self.acquire_lease_idempotent(scope, resource_id, ttl, "fallback-lease-key-0001")
-            .await
+    async fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
     }
 
     async fn acquire_lease_idempotent(
@@ -89,15 +85,20 @@ impl CoordinationBackend for FakeCoordination {
             .lock()
             .unwrap()
             .insert(idempotency_key.into(), lease.clone());
+        let after_acquire = { self.after_acquire.lock().unwrap().take() };
+        if let Some(after_acquire) = after_acquire {
+            after_acquire();
+        }
         Ok(lease)
     }
 
-    async fn renew_lease(
+    async fn renew_lease_idempotent(
         &self,
         _scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
         ttl: Duration,
+        _idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem> {
         let mut current = self.lease.lock().unwrap();
         let lease = current.as_mut().ok_or_else(lease_missing)?;
@@ -113,11 +114,12 @@ impl CoordinationBackend for FakeCoordination {
         Ok(lease.clone())
     }
 
-    async fn release_lease(
+    async fn release_lease_idempotent(
         &self,
         _scope: CoordinationScope<'_>,
         _resource_id: &ResourceId,
         owner_token: &str,
+        _idempotency_key: &str,
     ) -> Result<(), Problem> {
         let mut lease = self.lease.lock().unwrap();
         let current = lease.as_ref().ok_or_else(lease_missing)?;
@@ -131,6 +133,14 @@ impl CoordinationBackend for FakeCoordination {
         }
         *lease = None;
         Ok(())
+    }
+
+    async fn lease_status(
+        &self,
+        _scope: CoordinationScope<'_>,
+        _resource_id: &ResourceId,
+    ) -> Result<Option<buglogin_sync::coordination::LeaseStatus>, Problem> {
+        Ok(None)
     }
 
     async fn validate_write_authority(
@@ -236,15 +246,38 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
     let workspace = WorkspaceId::new("ws_sync_migration").unwrap();
     let resource = ResourceId::new("res_sync_migration").unwrap();
     let profile = ProfileId::new("prf_sync_migration").unwrap();
+    state
+        .profiles
+        .create(Profile {
+            id: profile.clone(),
+            name: "Migrated profile".into(),
+            runtime: Runtime::Wayfern,
+            runtime_version: None,
+            runtime_config: None,
+            state: ProfileState::Created,
+            archived: false,
+            fingerprint: None,
+            note: None,
+            proxy_id: None,
+            vpn_id: None,
+            group_ids: vec![],
+            tags: vec![],
+            extension_group_id: None,
+            sync_mode: Some(SyncMode::Managed),
+            created_at: "2026-10-16T00:00:00Z".into(),
+            updated_at: "2026-10-16T00:00:00Z".into(),
+        })
+        .unwrap();
     let mut grants = state.grants.write().unwrap();
+    let migration_grant = grant(
+        &account,
+        "grant_sync_migration",
+        "migration.write",
+        Action::Execute,
+        ResourceScope::resource(workspace.clone(), resource.clone()),
+    );
     grants.extend([
-        grant(
-            &account,
-            "grant_sync_migration",
-            "migration.write",
-            Action::Execute,
-            ResourceScope::resource(workspace.clone(), resource.clone()),
-        ),
+        migration_grant.clone(),
         grant(
             &account,
             "grant_sync_resource_create",
@@ -293,17 +326,16 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
         &staged_blob.checksum,
     )
     .unwrap();
-    let app = router(
-        state
-            .with_profile_resource(ProfileResource {
-                profile_id: profile,
-                resource_id: resource.clone(),
-                workspace_id: workspace.clone(),
-                archive_state: ProfileArchiveState::Active,
-            })
-            .with_remote_chunks(Box::new(remote.clone()))
-            .with_coordination(coordination.clone()),
-    );
+    let app_state = state
+        .with_profile_resource(ProfileResource {
+            profile_id: profile,
+            resource_id: resource.clone(),
+            workspace_id: workspace.clone(),
+            archive_state: ProfileArchiveState::Active,
+        })
+        .with_remote_chunks(Box::new(remote.clone()))
+        .with_coordination(coordination.clone());
+    let app = router(app_state.clone());
     assert_eq!(export.manifest.fencing_token, 8);
     coordination.fail_validation.store(true, Ordering::SeqCst);
     let rejected = app
@@ -320,6 +352,50 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
         RemoteChunkStore::checksum(&remote, &staged_key).unwrap(),
         Some(staged_blob.checksum.clone())
     );
+
+    let mut remote_cleanup = remote.clone();
+    assert!(
+        RemoteChunkStore::delete_if_checksum(
+            &mut remote_cleanup,
+            &staged_key,
+            &staged_blob.checksum,
+        )
+        .unwrap()
+    );
+    let grants = Arc::clone(&app_state.grants);
+    *coordination.after_acquire.lock().unwrap() = Some(Box::new(move || {
+        grants
+            .write()
+            .unwrap()
+            .retain(|grant| grant.id.as_str() != "grant_sync_migration");
+    }));
+    let revoked_during_lease_wait = app
+        .clone()
+        .oneshot(request(
+            &token,
+            "sync-migration-revoked-before-stage-01",
+            json!({"export": export.clone(), "dryRun": false}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(revoked_during_lease_wait.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        body(revoked_during_lease_wait).await["code"],
+        "migration_forbidden"
+    );
+    assert_eq!(
+        RemoteChunkStore::checksum(&remote, &staged_key).unwrap(),
+        None
+    );
+    app_state.grants.write().unwrap().push(migration_grant);
+    let mut remote_restore = remote.clone();
+    RemoteChunkStore::put(
+        &mut remote_restore,
+        &staged_key,
+        &staged_blob.data,
+        &staged_blob.checksum,
+    )
+    .unwrap();
 
     let first = app
         .clone()
@@ -353,7 +429,7 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
     let replay_body = body(replay).await;
     assert_eq!(replay_body["state"], "active");
     assert_eq!(replay_body["generation"], 1);
-    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 2);
+    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 3);
 
     let mut conflicting_export = genesis_export(workspace.clone(), resource.clone());
     conflicting_export.export_id = "hosted-sync-export-conflict".into();
@@ -383,7 +459,7 @@ async fn sync_import_resumes_verified_blob_and_activates_authoritative_manifest(
         .unwrap();
     assert_eq!(wrong_base.status(), StatusCode::CONFLICT);
     assert_eq!(body(wrong_base).await["code"], "sync_import_base_conflict");
-    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 3);
+    assert_eq!(coordination.lease_acquires.load(Ordering::SeqCst), 4);
 
     let manifest = app
         .oneshot(
@@ -509,8 +585,8 @@ fn successor_with_wrong_base(workspace: WorkspaceId, resource: ResourceId) -> Sy
         workspace,
         resource,
         8,
-        2,
-        Some(1),
+        10,
+        Some(9),
         b"migration-root-successor",
         vec![ManifestObject::new("profile/state", b"encrypted-successor").unwrap()],
     )
@@ -521,7 +597,7 @@ fn successor_with_wrong_base(workspace: WorkspaceId, resource: ResourceId) -> Sy
         manifest.clone(),
         Some(9),
         vec![SyncRevision {
-            generation: 2,
+            generation: 10,
             parent_generation: Some(9),
             manifest_sha256: canonical_manifest_checksum(&manifest).unwrap(),
         }],

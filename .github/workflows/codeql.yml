@@ -25,10 +25,13 @@ jobs:
         include:
           - language: actions
             build-mode: none
+            experimental: false
           - language: javascript-typescript
             build-mode: none
+            experimental: false
           - language: rust
             build-mode: none
+            experimental: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v7.0.0
@@ -49,6 +52,8 @@ jobs:
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@b1e4dc3db58c9601794e22a9f6d28d45461b9dbf #v3.29.0
+        env:
+          CODEQL_ENABLE_EXPERIMENTAL_FEATURES: ${{ matrix.experimental && 'true' || 'false' }}
         with:
           queries: security-extended
           languages: ${{ matrix.language }}
@@ -58,3 +63,6 @@ jobs:
         uses: github/codeql-action/analyze@b1e4dc3db58c9601794e22a9f6d28d45461b9dbf #v3.29.0
         with:
           category: "/language:${{matrix.language}}"
+          # The private repository cannot upload code-scanning results on its current plan.
+          # Keep CodeQL database creation and analysis running in CI.
+          upload: never

@@ -11,9 +11,10 @@
  * Usage: node scripts/sync-test-harness.mjs
  */
 
-import { spawn, execSync } from "child_process";
-import { createWriteStream, existsSync, mkdirSync, chmodSync } from "fs";
-import { mkdir, rm, writeFile } from "fs/promises";
+import { execSync, spawn } from "child_process";
+import { createHash } from "crypto";
+import { chmodSync, createWriteStream, existsSync, mkdirSync } from "fs";
+import { mkdir, readFile, rename, rm } from "fs/promises";
 import http from "http";
 import https from "https";
 import os from "os";
@@ -28,6 +29,29 @@ const CACHE_DIR = path.join(ROOT_DIR, ".cache", "sync-test");
 const MINIO_PORT = 9876;
 const MINIO_CONSOLE_PORT = 9877;
 const SYNC_PORT = 3456;
+const MINIO_RELEASE = "RELEASE.2025-09-07T16-13-09Z";
+const MINIO_ASSETS = {
+  "darwin-arm64": {
+    name: `minio.darwin-arm64.${MINIO_RELEASE}`,
+    sha256: "7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4",
+  },
+  "darwin-x64": {
+    name: `minio.darwin-amd64.${MINIO_RELEASE}`,
+    sha256: "4759080aeef7385aaceaac1131c30aaeb99605921553967dc6d3ef4e16ac64f9",
+  },
+  "linux-arm64": {
+    name: `minio.linux-arm64.${MINIO_RELEASE}`,
+    sha256: "5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d",
+  },
+  "linux-x64": {
+    name: `minio.linux-amd64.${MINIO_RELEASE}`,
+    sha256: "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f",
+  },
+  "win32-x64": {
+    name: `minio.windows-amd64.${MINIO_RELEASE}.exe`,
+    sha256: "af709e6ba68488404e85acdd22a3030d0f5e56a108d4b27d744f18ceb50861b4",
+  },
+};
 // Must be >= 24 chars and not a known default — the server's validateEnv()
 // rejects short/placeholder tokens and exits at startup otherwise.
 const SYNC_TOKEN = "test-sync-token-0123456789abcdef";
@@ -86,45 +110,55 @@ async function downloadFile(url, dest) {
 }
 
 function getMinioUrl() {
-  const platform = os.platform();
-  const arch = os.arch();
-
-  if (platform === "darwin") {
-    if (arch === "arm64") {
-      return "https://dl.min.io/server/minio/release/darwin-arm64/minio";
-    }
-    return "https://dl.min.io/server/minio/release/darwin-amd64/minio";
-  } else if (platform === "linux") {
-    if (arch === "arm64") {
-      return "https://dl.min.io/server/minio/release/linux-arm64/minio";
-    }
-    return "https://dl.min.io/server/minio/release/linux-amd64/minio";
-  } else if (platform === "win32") {
-    return "https://dl.min.io/server/minio/release/windows-amd64/minio.exe";
-  }
-
-  throw new Error(`Unsupported platform: ${platform}-${arch}`);
+  const key = `${os.platform()}-${os.arch()}`;
+  const asset = MINIO_ASSETS[key];
+  if (!asset) throw new Error(`Unsupported platform: ${key}`);
+  return {
+    url: `https://github.com/minio/minio/releases/download/${MINIO_RELEASE}/${asset.name}`,
+    sha256: asset.sha256,
+    name: asset.name,
+  };
 }
 
 async function ensureMinioBinary() {
   const isWindows = os.platform() === "win32";
-  const minioBin = path.join(CACHE_DIR, isWindows ? "minio.exe" : "minio");
+  const asset = getMinioUrl();
+  const minioBin = path.join(CACHE_DIR, asset.name);
 
   if (existsSync(minioBin)) {
-    log("MinIO binary already cached");
-    return minioBin;
+    const cachedHash = createHash("sha256")
+      .update(await readFile(minioBin))
+      .digest("hex");
+    if (cachedHash === asset.sha256) {
+      log(`Verified MinIO ${MINIO_RELEASE} binary already cached`);
+      return minioBin;
+    }
+    await rm(minioBin, { force: true });
+    error("Cached MinIO binary checksum mismatch; downloading a clean copy");
   }
 
-  log("Downloading MinIO binary...");
+  log(`Downloading pinned MinIO ${MINIO_RELEASE} binary...`);
   mkdirSync(CACHE_DIR, { recursive: true });
 
-  const url = getMinioUrl();
-  await downloadFile(url, minioBin);
-  if (!isWindows) {
-    chmodSync(minioBin, 0o755);
+  const partialPath = `${minioBin}.part`;
+  try {
+    await downloadFile(asset.url, partialPath);
+    const downloadedHash = createHash("sha256")
+      .update(await readFile(partialPath))
+      .digest("hex");
+    if (downloadedHash !== asset.sha256) {
+      throw new Error(
+        `MinIO SHA-256 mismatch: expected ${asset.sha256}, got ${downloadedHash}`,
+      );
+    }
+    if (!isWindows) chmodSync(partialPath, 0o755);
+    await rename(partialPath, minioBin);
+  } catch (err) {
+    await rm(partialPath, { force: true });
+    throw err;
   }
 
-  log("MinIO binary downloaded");
+  log(`MinIO ${MINIO_RELEASE} binary checksum verified`);
   return minioBin;
 }
 

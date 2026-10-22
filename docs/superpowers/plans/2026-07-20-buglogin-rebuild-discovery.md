@@ -140,19 +140,16 @@ A release is done only when no critical/high data-loss, permission, runtime, syn
 
 ## Production migration workstream
 
-- [ ] Inventory local, control-plane, object-store, and secret data separately.
-- [ ] Implement read-only `inspect` and immutable `snapshot` first.
-- [ ] Define neutral export package and version it.
-- [ ] Build old-to-new entity mapping tables with deterministic IDs.
-- [ ] Add per-profile classification: direct, adapter, partial, unsupported.
-- [ ] Build encrypted migration reports with secret redaction.
-- [ ] Rehearse on cloned production data twice.
-- [ ] Verify counts, hashes, runtime launch, cookies, extensions, proxy, ACL, sharing, sync, REST, and MCP.
-- [ ] Use a short write-freeze cutover for first production migration.
-- [ ] Keep old system/data immutable and recoverable.
-- [ ] Test rollback before enabling public writes.
+- [x] Inventory local, control-plane, object-store, and secret data separately.
+- [x] Implement read-only `inspect`, immutable snapshot, signed package, and deterministic old-to-new mappings.
+- [x] Classify profiles as direct, adapter, partial, or unsupported; keep unsupported/incomplete profiles non-launchable.
+- [x] Clone control-plane records directly to the isolated 3.0 destination once and archive the source-to-target diff and pre-import checkpoint; see `docs/superpowers/plans/2026-10-16-legacy-cloud-profile-migration.md`.
+- [x] Keep the 1.0 source unchanged. The owner waived repeated production-data rehearsals and a write-freeze for this low-volume clone; post-snapshot 1.0 writes are outside the clone.
+- [ ] Import the 22 staged browser-data payloads through authenticated encrypted desktop sync and reconcile their final manifests. Cookie data travels inside each browser profile payload.
+- [ ] Resolve or explicitly retain the 12 incomplete profiles as preserve-only; verify supported-runtime launch, proxy, ACL, sharing, sync, REST, and MCP in the single consolidated pass.
+- [x] Retain the destination pre-import checkpoint and source snapshot; no repeated rollback rehearsal is required.
 - [ ] Retain 2.0 divergence separately if rollback happens.
-- [ ] Archive signed mapping/checksum/residual-risk report.
+- [x] Archive signed mapping/checksum and residual-risk evidence under `docs/migration/production-readiness-evidence-register.md`.
 
 ## Migration stop conditions
 

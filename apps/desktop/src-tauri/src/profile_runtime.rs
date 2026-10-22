@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use buglogin_browser::{
     lifecycle::LifecycleManager, process::ProcessController, runtime::LaunchSpecification,
@@ -9,10 +14,12 @@ use buglogin_domain::{
 };
 use buglogin_sync::coordination::{
     CoordinationAuth, CoordinationBackend, CoordinationScope, LeaseGrant,
+    lease_release_idempotency_key,
 };
 use buglogin_sync::manifest::SyncManifest;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::clock::unix_time_millis;
 use crate::proxy_bridge::ProxyBridgeHandle;
 
 #[derive(Clone)]
@@ -32,18 +39,30 @@ pub trait DesktopSyncBackend: Send + Sync {
         ttl: Duration,
         idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem>;
-    async fn renew_lease(
+    async fn renew_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
         ttl: Duration,
+        idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem>;
     async fn release_lease(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
+    ) -> Result<(), Problem> {
+        let idempotency_key = lease_release_idempotency_key(&scope, resource_id, owner_token);
+        self.release_lease_idempotent(scope, resource_id, owner_token, &idempotency_key)
+            .await
+    }
+    async fn release_lease_idempotent(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        idempotency_key: &str,
     ) -> Result<(), Problem>;
     async fn current_manifest(
         &self,
@@ -79,23 +98,40 @@ impl<T: CoordinationBackend + ?Sized> DesktopSyncBackend for T {
         .await
     }
 
-    async fn renew_lease(
+    async fn renew_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
         ttl: Duration,
+        idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem> {
-        CoordinationBackend::renew_lease(self, scope, resource_id, owner_token, ttl).await
+        CoordinationBackend::renew_lease_idempotent(
+            self,
+            scope,
+            resource_id,
+            owner_token,
+            ttl,
+            idempotency_key,
+        )
+        .await
     }
 
-    async fn release_lease(
+    async fn release_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
+        idempotency_key: &str,
     ) -> Result<(), Problem> {
-        CoordinationBackend::release_lease(self, scope, resource_id, owner_token).await
+        CoordinationBackend::release_lease_idempotent(
+            self,
+            scope,
+            resource_id,
+            owner_token,
+            idempotency_key,
+        )
+        .await
     }
 
     async fn current_manifest(
@@ -151,6 +187,7 @@ pub struct LaunchReceipt {
 pub struct StopReceipt {
     pub(crate) profile_path: PathBuf,
     pub(crate) lease: Option<LeaseGrant>,
+    pub(crate) was_launched: bool,
 }
 
 #[derive(Clone)]
@@ -177,6 +214,27 @@ impl ProfileRuntimeHandle {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(RuntimeCommand::StopForSync { profile_id, reply })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    pub async fn hold_idle_profile_for_sync(
+        &self,
+        profile_id: ProfileId,
+        profile_path: PathBuf,
+        lease_scope: LeaseScope,
+        lease: LeaseGrant,
+    ) -> Result<StopReceipt, Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::HoldIdleProfileForSync {
+                profile_id,
+                profile_path,
+                lease_scope,
+                lease,
+                reply,
+            })
             .await
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
@@ -212,6 +270,24 @@ impl ProfileRuntimeHandle {
         response.await.map_err(|_| unavailable())
     }
 
+    pub async fn active_profiles(&self) -> Result<Vec<ProfileId>, Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::ActiveProfiles { reply })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())
+    }
+
+    pub async fn unexpectedly_stopped_profiles(&self) -> Result<Vec<ProfileId>, Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::UnexpectedlyStoppedProfiles { reply })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())
+    }
+
     pub async fn set_coordination(
         &self,
         coordination: Option<ManagedCoordination>,
@@ -222,6 +298,15 @@ impl ProfileRuntimeHandle {
                 coordination,
                 reply,
             })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    pub async fn approve_executable(&self, path: PathBuf) -> Result<(), Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::ApproveExecutable { path, reply })
             .await
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
@@ -246,6 +331,13 @@ enum RuntimeCommand {
         profile_id: ProfileId,
         reply: oneshot::Sender<Result<StopReceipt, Problem>>,
     },
+    HoldIdleProfileForSync {
+        profile_id: ProfileId,
+        profile_path: PathBuf,
+        lease_scope: LeaseScope,
+        lease: LeaseGrant,
+        reply: oneshot::Sender<Result<StopReceipt, Problem>>,
+    },
     CompleteStop {
         profile_id: ProfileId,
         reply: oneshot::Sender<Result<(), Problem>>,
@@ -257,8 +349,18 @@ enum RuntimeCommand {
     RunningProfiles {
         reply: oneshot::Sender<Vec<ProfileId>>,
     },
+    ActiveProfiles {
+        reply: oneshot::Sender<Vec<ProfileId>>,
+    },
+    UnexpectedlyStoppedProfiles {
+        reply: oneshot::Sender<Vec<ProfileId>>,
+    },
     SetCoordination {
         coordination: Option<ManagedCoordination>,
+        reply: oneshot::Sender<Result<(), Problem>>,
+    },
+    ApproveExecutable {
+        path: PathBuf,
         reply: oneshot::Sender<Result<(), Problem>>,
     },
     Shutdown {
@@ -269,6 +371,7 @@ enum RuntimeCommand {
 struct RunningProfile {
     profile_path: PathBuf,
     lease: Option<LeaseGrant>,
+    was_launched: bool,
     process_stopped: bool,
     sync_pending: bool,
     proxy_bridge: Option<ProxyBridgeHandle>,
@@ -282,10 +385,11 @@ where
     C: ProcessController + 'static,
 {
     let (commands, receiver) = mpsc::channel(32);
-    tokio::spawn(run(ProfileRuntime {
+    tauri::async_runtime::spawn(run(ProfileRuntime {
         lifecycle: LifecycleManager::new(controller),
         coordination,
         running: HashMap::new(),
+        unexpectedly_stopped: BTreeSet::new(),
         receiver,
     }));
     ProfileRuntimeHandle { commands }
@@ -295,6 +399,7 @@ struct ProfileRuntime<C: ProcessController> {
     lifecycle: LifecycleManager<C>,
     coordination: Option<ManagedCoordination>,
     running: HashMap<ProfileId, RunningProfile>,
+    unexpectedly_stopped: BTreeSet<ProfileId>,
     receiver: mpsc::Receiver<RuntimeCommand>,
 }
 
@@ -313,6 +418,20 @@ where
                 Some(RuntimeCommand::StopForSync { profile_id, reply }) => {
                     let _ = reply.send(runtime.stop_for_sync(&profile_id).await);
                 }
+                Some(RuntimeCommand::HoldIdleProfileForSync {
+                    profile_id,
+                    profile_path,
+                    lease_scope,
+                    lease,
+                    reply,
+                }) => {
+                    let _ = reply.send(runtime.hold_idle_profile_for_sync(
+                        profile_id,
+                        profile_path,
+                        lease_scope,
+                        lease,
+                    ));
+                }
                 Some(RuntimeCommand::CompleteStop { profile_id, reply }) => {
                     let _ = reply.send(runtime.complete_stop(&profile_id).await);
                 }
@@ -326,6 +445,52 @@ where
                     profiles.sort();
                     let _ = reply.send(profiles);
                 }
+                Some(RuntimeCommand::ActiveProfiles { reply }) => {
+                    let exited = runtime.lifecycle.reconcile();
+                    let mut bridges_to_stop = Vec::new();
+                    for (path, state) in exited {
+                        if state == buglogin_browser::lifecycle::LifecycleState::Ready {
+                            if let Some((profile_id, running)) = runtime
+                                .running
+                                .iter_mut()
+                                .find(|(_, running)| running.profile_path == path)
+                            {
+                                running.process_stopped = true;
+                                running.sync_pending = true;
+                                runtime.unexpectedly_stopped.insert(profile_id.clone());
+                                if let Some(bridge) = running.proxy_bridge.take() {
+                                    bridges_to_stop.push(bridge);
+                                }
+                            }
+                        }
+                    }
+                    for bridge in bridges_to_stop {
+                        let _ = bridge.stop().await;
+                    }
+                    let candidates = runtime
+                        .running
+                        .iter()
+                        .map(|(profile_id, running)| {
+                            (
+                                profile_id.clone(),
+                                running.profile_path.clone(),
+                                running.process_stopped,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut profiles = candidates
+                        .into_iter()
+                        .filter_map(|(profile_id, path, stopped)| {
+                            (!stopped && runtime.lifecycle.process_is_verified_running(&path))
+                                .then_some(profile_id)
+                        })
+                        .collect::<Vec<_>>();
+                    profiles.sort();
+                    let _ = reply.send(profiles);
+                }
+                Some(RuntimeCommand::UnexpectedlyStoppedProfiles { reply }) => {
+                    let _ = reply.send(runtime.unexpectedly_stopped.iter().cloned().collect());
+                }
                 Some(RuntimeCommand::SetCoordination { coordination, reply }) => {
                     let result = runtime.set_coordination(coordination);
                     if result.is_ok() {
@@ -333,6 +498,9 @@ where
                         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     }
                     let _ = reply.send(result);
+                }
+                Some(RuntimeCommand::ApproveExecutable { path, reply }) => {
+                    let _ = reply.send(runtime.lifecycle.approve_executable(&path));
                 }
                 Some(RuntimeCommand::Shutdown { reply }) => {
                     let result = runtime.shutdown().await;
@@ -358,7 +526,13 @@ impl<C: ProcessController> ProfileRuntime<C> {
         &mut self,
         coordination: Option<ManagedCoordination>,
     ) -> Result<(), Problem> {
-        if !self.running.is_empty() {
+        let same_actor_refresh = self.running.is_empty()
+            || self
+                .coordination
+                .as_ref()
+                .zip(coordination.as_ref())
+                .is_some_and(|(current, next)| current.auth.actor_id() == next.auth.actor_id());
+        if !same_actor_refresh {
             return Err(Problem::new(
                 "runtime_reconfigure_running",
                 "Runtime coordination cannot change while profiles are running",
@@ -419,6 +593,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             RunningProfile {
                 profile_path: request.profile_path,
                 lease,
+                was_launched: true,
                 process_stopped: false,
                 sync_pending: false,
                 proxy_bridge,
@@ -436,7 +611,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
     }
 
     async fn stop_for_sync(&mut self, profile_id: &ProfileId) -> Result<StopReceipt, Problem> {
-        let (profile_path, lease, process_stopped) = self
+        let (profile_path, lease, process_stopped, was_launched) = self
             .running
             .get(profile_id)
             .map(|running| {
@@ -444,6 +619,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                     running.profile_path.clone(),
                     running.lease.clone(),
                     running.process_stopped,
+                    running.was_launched,
                 )
             })
             .ok_or_else(|| {
@@ -473,7 +649,66 @@ impl<C: ProcessController> ProfileRuntime<C> {
         Ok(StopReceipt {
             profile_path,
             lease,
+            was_launched,
         })
+    }
+
+    fn hold_idle_profile_for_sync(
+        &mut self,
+        profile_id: ProfileId,
+        profile_path: PathBuf,
+        lease_scope: LeaseScope,
+        lease: LeaseGrant,
+    ) -> Result<StopReceipt, Problem> {
+        if let Some(running) = self.running.get(&profile_id) {
+            if let Some(held_lease) = running.lease.as_ref() {
+                let resumable = running.process_stopped
+                    && running.sync_pending
+                    && !running.was_launched
+                    && running.profile_path == profile_path
+                    && held_lease.workspace_id == lease.workspace_id
+                    && held_lease.resource_id == lease.resource_id
+                    && held_lease.owner_id == lease.owner_id
+                    && held_lease.owner_token == lease.owner_token
+                    && held_lease.fencing_token == lease.fencing_token;
+                if resumable {
+                    validate_preacquired(
+                        self.coordination.as_ref(),
+                        Some(&lease_scope),
+                        held_lease,
+                    )?;
+                    return Ok(StopReceipt {
+                        profile_path: running.profile_path.clone(),
+                        lease: Some(held_lease.clone()),
+                        was_launched: false,
+                    });
+                }
+            }
+            return Err(Problem::new(
+                "profile_already_running",
+                "Profile is already running or has a pending sync",
+                409,
+                "desktop",
+            ));
+        }
+        validate_preacquired(self.coordination.as_ref(), Some(&lease_scope), &lease)?;
+        let receipt = StopReceipt {
+            profile_path: profile_path.clone(),
+            lease: Some(lease.clone()),
+            was_launched: false,
+        };
+        self.running.insert(
+            profile_id,
+            RunningProfile {
+                profile_path,
+                lease: Some(lease),
+                was_launched: false,
+                process_stopped: true,
+                sync_pending: true,
+                proxy_bridge: None,
+            },
+        );
+        Ok(receipt)
     }
 
     async fn complete_stop(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
@@ -485,6 +720,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             release(self.coordination.clone(), lease).await?;
         }
         self.running.remove(profile_id);
+        self.unexpectedly_stopped.remove(profile_id);
         Ok(())
     }
 
@@ -520,18 +756,40 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 }
                 continue;
             }
-            let renewed = coordination
-                .backend
-                .renew_lease(
-                    CoordinationScope {
-                        workspace_id: &lease.workspace_id,
-                        auth: &coordination.auth,
-                    },
-                    &lease.resource_id,
-                    &lease.owner_token,
-                    coordination.lease_ttl,
-                )
-                .await;
+            let renewal_identity = format!(
+                "{}|{}|{}|{}",
+                lease.resource_id.as_str(),
+                lease.fencing_token,
+                lease.expires_at_ms,
+                lease.owner_token
+            );
+            let renewal_key = format!(
+                "lease-renew-{}",
+                crate::remote_api::sha256_hex(renewal_identity.as_bytes())
+            );
+            let mut renewal_attempt = 0;
+            let renewed = loop {
+                match coordination
+                    .backend
+                    .renew_lease_idempotent(
+                        CoordinationScope {
+                            workspace_id: &lease.workspace_id,
+                            auth: &coordination.auth,
+                        },
+                        &lease.resource_id,
+                        &lease.owner_token,
+                        coordination.lease_ttl,
+                        &renewal_key,
+                    )
+                    .await
+                {
+                    Err(error) if error.retryable && renewal_attempt == 0 => {
+                        renewal_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    result => break result,
+                }
+            };
             match renewed {
                 Ok(renewed) if renewed.fencing_token == lease.fencing_token => {
                     if let Some(running) = self.running.get_mut(&profile_id) {
@@ -586,10 +844,7 @@ fn validate_preacquired(
             "desktop",
         )
     })?;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let now_ms = unix_time_millis("preacquired_lease")?;
     if lease.workspace_id != scope.workspace_id
         || lease.resource_id != scope.resource_id
         || lease.owner_id != coordination.auth.actor_id()
@@ -640,17 +895,31 @@ async fn release(
     lease: &LeaseGrant,
 ) -> Result<(), Problem> {
     let coordination = coordination.ok_or_else(unavailable)?;
-    coordination
-        .backend
-        .release_lease(
-            CoordinationScope {
-                workspace_id: &lease.workspace_id,
-                auth: &coordination.auth,
-            },
-            &lease.resource_id,
-            &lease.owner_token,
-        )
-        .await
+    let scope = CoordinationScope {
+        workspace_id: &lease.workspace_id,
+        auth: &coordination.auth,
+    };
+    let idempotency_key =
+        lease_release_idempotency_key(&scope, &lease.resource_id, &lease.owner_token);
+    let mut attempt = 0;
+    loop {
+        match coordination
+            .backend
+            .release_lease_idempotent(
+                scope.clone(),
+                &lease.resource_id,
+                &lease.owner_token,
+                &idempotency_key,
+            )
+            .await
+        {
+            Err(error) if error.retryable && attempt == 0 => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 fn authority(lease: &LeaseGrant) -> WriteAuthority {
@@ -696,6 +965,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct TestController {
         fail_launch: Arc<AtomicBool>,
+        process_exited: Arc<AtomicBool>,
         launches: Arc<AtomicUsize>,
         stop_failures: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
@@ -719,13 +989,18 @@ mod tests {
                     token: "test-process-token".into(),
                 },
                 stop_failures: self.stop_failures.clone(),
+                process_exited: self.process_exited.clone(),
                 stops: self.stops.clone(),
                 log: self.log.clone(),
             }))
         }
 
         fn inspect(&self, _identity: &ProcessIdentity) -> ProcessStatus {
-            ProcessStatus::Running
+            if self.process_exited.load(Ordering::SeqCst) {
+                ProcessStatus::Exited
+            } else {
+                ProcessStatus::Running
+            }
         }
 
         fn terminate(&self, _identity: &ProcessIdentity) -> Result<(), Problem> {
@@ -735,6 +1010,7 @@ mod tests {
 
     struct TestProcess {
         identity: ProcessIdentity,
+        process_exited: Arc<AtomicBool>,
         stop_failures: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
         log: Arc<Mutex<Vec<&'static str>>>,
@@ -746,7 +1022,11 @@ mod tests {
         }
 
         fn status(&mut self) -> Result<ProcessStatus, Problem> {
-            Ok(ProcessStatus::Running)
+            Ok(if self.process_exited.load(Ordering::SeqCst) {
+                ProcessStatus::Exited
+            } else {
+                ProcessStatus::Running
+            })
         }
 
         fn stop(&mut self) -> Result<(), Problem> {
@@ -789,11 +1069,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CoordinationBackend for TestCoordination {
-        async fn acquire_lease(
+        async fn readiness(&self) -> Result<(), Problem> {
+            Ok(())
+        }
+
+        async fn acquire_lease_idempotent(
             &self,
             scope: CoordinationScope<'_>,
             resource_id: &ResourceId,
             _ttl: Duration,
+            _idempotency_key: &str,
         ) -> Result<LeaseGrant, Problem> {
             self.log.lock().unwrap().push("acquire");
             if self.fail_acquire.load(Ordering::SeqCst) {
@@ -810,12 +1095,13 @@ mod tests {
             })
         }
 
-        async fn renew_lease(
+        async fn renew_lease_idempotent(
             &self,
             scope: CoordinationScope<'_>,
             resource_id: &ResourceId,
             owner_token: &str,
             _ttl: Duration,
+            _idempotency_key: &str,
         ) -> Result<LeaseGrant, Problem> {
             self.renewals.fetch_add(1, Ordering::SeqCst);
             if self.fail_renew.load(Ordering::SeqCst) {
@@ -833,11 +1119,12 @@ mod tests {
             })
         }
 
-        async fn release_lease(
+        async fn release_lease_idempotent(
             &self,
             _scope: CoordinationScope<'_>,
             _resource_id: &ResourceId,
             owner_token: &str,
+            _idempotency_key: &str,
         ) -> Result<(), Problem> {
             assert_eq!(owner_token, "private-owner-token");
             self.log.lock().unwrap().push("release");
@@ -849,6 +1136,37 @@ mod tests {
                 .is_ok()
             {
                 return Err(unavailable());
+            }
+            Ok(())
+        }
+
+        async fn lease_status(
+            &self,
+            _scope: CoordinationScope<'_>,
+            _resource_id: &ResourceId,
+        ) -> Result<Option<buglogin_sync::coordination::LeaseStatus>, Problem> {
+            Ok(None)
+        }
+
+        async fn validate_write_authority(
+            &self,
+            scope: CoordinationScope<'_>,
+            resource_id: &ResourceId,
+            owner_token: &str,
+            fencing_token: u64,
+        ) -> Result<(), Problem> {
+            if scope.auth.actor_id() != "actor-runtime"
+                || scope.workspace_id.as_str() != "ws_runtime_1"
+                || resource_id.as_str() != "res_runtime_1"
+                || owner_token != "private-owner-token"
+                || fencing_token != 7
+            {
+                return Err(Problem::new(
+                    "lease_not_owner",
+                    "Lease owner mismatch",
+                    409,
+                    "test",
+                ));
             }
             Ok(())
         }
@@ -953,9 +1271,16 @@ mod tests {
     }
 
     fn managed_coordination(backend: Arc<TestCoordination>) -> ManagedCoordination {
+        managed_coordination_with_bearer(backend, "private-bearer")
+    }
+
+    fn managed_coordination_with_bearer(
+        backend: Arc<TestCoordination>,
+        bearer: &str,
+    ) -> ManagedCoordination {
         ManagedCoordination {
             backend,
-            auth: CoordinationAuth::new("actor-runtime", "private-bearer").unwrap(),
+            auth: CoordinationAuth::new("actor-runtime", bearer).unwrap(),
             lease_ttl: Duration::from_secs(60),
             heartbeat_interval: Duration::from_secs(3_600),
         }
@@ -970,6 +1295,7 @@ mod tests {
             lifecycle: LifecycleManager::new(controller),
             coordination: Some(coordination),
             running: HashMap::new(),
+            unexpectedly_stopped: BTreeSet::new(),
             receiver,
         }
     }
@@ -989,6 +1315,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn exited_browser_is_not_reported_as_active_but_keeps_pending_sync_entry() {
+        let path = profile_path("exited-before-stop");
+        let controller = TestController::default();
+        let handle = spawn_profile_runtime(
+            controller.clone(),
+            Some(managed_coordination(Arc::new(TestCoordination::new(
+                Arc::new(Mutex::new(Vec::new())),
+            )))),
+        );
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+
+        handle
+            .launch(request(&path, true))
+            .await
+            .expect("managed launch succeeds");
+        controller.process_exited.store(true, Ordering::SeqCst);
+
+        assert!(handle.active_profiles().await.unwrap().is_empty());
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
+
+        let stopped = handle.stop_for_sync(profile_id.clone()).await.unwrap();
+        assert!(stopped.was_launched);
+        handle.complete_stop(profile_id.clone()).await.unwrap();
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
     }
@@ -1057,6 +1416,36 @@ mod tests {
         let unavailable = handle.launch(request(&path, true)).await.unwrap_err();
         assert_eq!(unavailable.code, "managed_lease_unavailable");
         assert_eq!(controller.launches.load(Ordering::SeqCst), 1);
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_actor_coordination_refresh_keeps_running_profile_lease() {
+        let path = profile_path("coordination-refresh-running");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log));
+        let handle = spawn_profile_runtime(
+            controller.clone(),
+            Some(managed_coordination(backend.clone())),
+        );
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        handle.launch(request(&path, true)).await.unwrap();
+
+        handle
+            .set_coordination(Some(managed_coordination_with_bearer(
+                backend,
+                "rotated-bearer",
+            )))
+            .await
+            .expect("refreshing credentials for the same account preserves its lease");
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
+
+        handle.stop(profile_id).await.unwrap();
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
     }
@@ -1143,6 +1532,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_profile_sync_lease_is_renewed_without_starting_a_browser() {
+        let path = profile_path("idle-sync-lease-renewal");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        let renewals = Arc::clone(&backend.renewals);
+        let coordination = ManagedCoordination {
+            backend: backend.clone(),
+            auth: CoordinationAuth::new("actor-runtime", "private-bearer").unwrap(),
+            lease_ttl: Duration::from_secs(1),
+            heartbeat_interval: Duration::from_millis(10),
+        };
+        let handle = spawn_profile_runtime(controller, Some(coordination));
+        let profile_id = ProfileId::from_str("prf_idle_sync_1").unwrap();
+        let workspace_id = WorkspaceId::from_str("ws_idle_sync_1").unwrap();
+        let resource_id = ResourceId::from_str("res_idle_sync_1").unwrap();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let lease = LeaseGrant {
+            resource_id: resource_id.clone(),
+            workspace_id: workspace_id.clone(),
+            owner_id: "actor-runtime".into(),
+            owner_token: "private-owner-token".into(),
+            fencing_token: 7,
+            issued_at_ms: now_ms,
+            expires_at_ms: now_ms + 60_000,
+        };
+
+        let receipt = handle
+            .hold_idle_profile_for_sync(
+                profile_id.clone(),
+                path.clone(),
+                LeaseScope {
+                    workspace_id,
+                    resource_id,
+                },
+                lease,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.profile_path, path);
+        assert_eq!(receipt.lease.unwrap().fencing_token, 7);
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while renewals.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(renewals.load(Ordering::SeqCst) >= 2);
+        let during_sync = log.lock().unwrap().clone();
+        assert!(!during_sync.contains(&"launch"));
+        assert!(!during_sync.contains(&"stop"));
+        assert!(!during_sync.contains(&"release"));
+
+        handle.complete_stop(profile_id).await.unwrap();
+        assert!(log.lock().unwrap().contains(&"release"));
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn lease_acquire_failure_does_not_launch_process() {
         let path = profile_path("acquire-failure");
         let controller = TestController::default();
@@ -1197,7 +1655,9 @@ mod tests {
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log.clone()));
-        backend.release_failures.store(1, Ordering::SeqCst);
+        // release() retries one retryable failure with the same idempotency key;
+        // fail both bounded attempts to leave cleanup pending for stop() to retry.
+        backend.release_failures.store(2, Ordering::SeqCst);
         let mut runtime = runtime(controller, managed_coordination(backend));
         let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
         runtime.launch(request(&path, true)).await.unwrap();
@@ -1209,7 +1669,7 @@ mod tests {
         assert!(runtime.authority(&profile_id).is_none());
         assert_eq!(
             *log.lock().unwrap(),
-            vec!["acquire", "launch", "stop", "release", "release"]
+            vec!["acquire", "launch", "stop", "release", "release", "release"]
         );
         fs::remove_dir_all(path).unwrap();
     }
@@ -1233,7 +1693,7 @@ mod tests {
         );
         assert_eq!(
             *log.lock().unwrap(),
-            vec!["acquire", "launch", "renew", "stop"]
+            vec!["acquire", "launch", "renew", "renew", "stop"]
         );
         fs::remove_dir_all(path).unwrap();
     }

@@ -81,7 +81,7 @@ jobs:
             -p 8987:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1 server /data
 
           # Wait for MinIO to be ready
           for i in {1..30}; do
@@ -92,6 +92,11 @@ jobs:
             echo "Waiting for MinIO... ($i/30)"
             sleep 2
           done
+
+          if ! curl -sf http://127.0.0.1:8987/minio/health/live >/dev/null; then
+            docker logs minio
+            exit 1
+          fi
 
       - name: Install pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 #v6.0.9

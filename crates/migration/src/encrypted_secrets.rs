@@ -4,6 +4,7 @@ use buglogin_domain::errors::Problem;
 use buglogin_storage::blob::checksum;
 use buglogin_sync::crypto::{AuthenticatedChunk, ClientKey};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::package::NeutralPackage;
 
@@ -27,6 +28,17 @@ impl std::fmt::Debug for ProxyCredentialSecret {
             .field("username", &self.username.as_ref().map(|_| "<redacted>"))
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .finish()
+    }
+}
+
+impl Drop for ProxyCredentialSecret {
+    fn drop(&mut self) {
+        if let Some(username) = &mut self.username {
+            username.zeroize();
+        }
+        if let Some(password) = &mut self.password {
+            password.zeroize();
+        }
     }
 }
 

@@ -8,8 +8,26 @@ use sha2::{Digest, Sha256};
 
 use crate::blob::checksum;
 
+pub const MAX_REMOTE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn validate_remote_object_size(size: u64) -> Result<(), Problem> {
+    if size > MAX_REMOTE_OBJECT_BYTES {
+        return Err(Problem::new(
+            "remote_chunk_too_large",
+            "Remote object exceeds the configured size limit",
+            413,
+            "storage",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "production-adapters")]
 mod s3;
+
+mod local;
+
+pub use local::LocalRemoteChunkStore;
 
 #[cfg(feature = "production-adapters")]
 pub use s3::{S3Config, S3RemoteChunkStore};
@@ -25,9 +43,7 @@ pub struct RemoteChunk {
 }
 
 pub trait RemoteChunkStore: Send {
-    fn readiness(&self) -> Result<(), Problem> {
-        Ok(())
-    }
+    fn readiness(&self) -> Result<(), Problem>;
 
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem>;
 
@@ -44,24 +60,14 @@ pub trait RemoteChunkStore: Send {
         &mut self,
         object_key: &str,
         expected_checksum: &str,
-    ) -> Result<bool, Problem> {
-        let _ = (object_key, expected_checksum);
-        Err(Problem::new(
-            "remote_chunk_delete_unsupported",
-            "Remote chunk delete is unsupported",
-            501,
-            "storage",
-        ))
-    }
+    ) -> Result<bool, Problem>;
 }
 
 /// Shared adapter surface for servers that can run object operations concurrently.
 /// Legacy `RemoteChunkStore` implementations remain usable through
 /// `SerializedRemoteChunkStore` without changing their public method signatures.
 pub trait ConcurrentRemoteChunkStore: Send + Sync {
-    fn readiness(&self) -> Result<(), Problem> {
-        Ok(())
-    }
+    fn readiness(&self) -> Result<(), Problem>;
 
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem>;
 
@@ -73,15 +79,7 @@ pub trait ConcurrentRemoteChunkStore: Send + Sync {
         &self,
         object_key: &str,
         expected_checksum: &str,
-    ) -> Result<bool, Problem> {
-        let _ = (object_key, expected_checksum);
-        Err(Problem::new(
-            "remote_chunk_delete_unsupported",
-            "Remote chunk delete is unsupported",
-            501,
-            "storage",
-        ))
-    }
+    ) -> Result<bool, Problem>;
 }
 
 pub struct SerializedRemoteChunkStore {
@@ -136,6 +134,10 @@ pub struct MemoryRemoteChunkStore {
 }
 
 impl RemoteChunkStore for MemoryRemoteChunkStore {
+    fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
+    }
+
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
         validate_object_key(object_key)?;
         let chunks = self.chunks.read().map_err(|_| storage_unavailable())?;
@@ -149,6 +151,7 @@ impl RemoteChunkStore for MemoryRemoteChunkStore {
         expected_checksum: &str,
     ) -> Result<(), Problem> {
         validate_object_key(object_key)?;
+        validate_remote_object_size(bytes.len() as u64)?;
         let actual_checksum = checksum(bytes);
         if actual_checksum != expected_checksum {
             return Err(checksum_problem());
@@ -216,6 +219,10 @@ impl RemoteChunkStore for MemoryRemoteChunkStore {
 }
 
 impl ConcurrentRemoteChunkStore for MemoryRemoteChunkStore {
+    fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
+    }
+
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
         RemoteChunkStore::checksum(self, object_key)
     }
@@ -272,4 +279,17 @@ fn storage_unavailable() -> Problem {
         503,
         "storage",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_REMOTE_OBJECT_BYTES, validate_remote_object_size};
+
+    #[test]
+    fn remote_object_size_limit_is_inclusive_and_bounded() {
+        assert!(validate_remote_object_size(MAX_REMOTE_OBJECT_BYTES).is_ok());
+        let error = validate_remote_object_size(MAX_REMOTE_OBJECT_BYTES + 1).unwrap_err();
+        assert_eq!(error.code, "remote_chunk_too_large");
+        assert_eq!(error.status, 413);
+    }
 }

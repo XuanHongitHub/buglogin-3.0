@@ -8,7 +8,15 @@ export function generateStaticParams() {
   );
 }
 
-export default async function AccountRoute({ params }: { params: Promise<{ path?: string[] }> }) {
+export default async function AccountRoute({
+  params,
+}: {
+  params: Promise<{ path?: string[] }>;
+}) {
   const { path = [] } = await params;
-  return <WebRouteHost initialPath={path.length ? `/account/${path.join("/")}` : "/account"} />;
+  return (
+    <WebRouteHost
+      initialPath={path.length ? `/account/${path.join("/")}` : "/account"}
+    />
+  );
 }

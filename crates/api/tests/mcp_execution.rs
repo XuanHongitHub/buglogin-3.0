@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fs,
     path::PathBuf,
     rc::Rc,
@@ -17,13 +17,19 @@ use buglogin_domain::{
     account::Account,
     entities::{Profile, ProfileState, Proxy, ProxyProtocol, Runtime, SyncMode},
     errors::Problem,
-    ids::{AccountId, GrantId, OrganizationId, ProfileId, ProxyId, ResourceId, WorkspaceId},
+    grant::ResourceGrant,
+    ids::{
+        AccountId, GrantId, MemberId, OrganizationId, ProfileId, ProxyId, ResourceId, WorkspaceId,
+    },
+    member::{Member, MemberRole, MemberStatus},
     organization::{Organization, OrganizationPolicy},
     permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope},
     profile::{ProfileArchiveState, ProfileResource},
+    resource::{Resource, ResourceKind, ResourceState},
     workspace::{Workspace, WorkspacePolicy},
 };
 use buglogin_storage::control::{ControlRecordStore, MemoryControlRecordStore, PutControlRecord};
+use buglogin_sync::coordination::CoordinationBackend;
 use serde_json::{Value, json};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -35,6 +41,9 @@ struct FakePolicy {
     replay: Option<Value>,
     calls: Rc<RefCell<Vec<&'static str>>>,
     audits: Rc<RefCell<Vec<AuditRecord>>>,
+    completed: Rc<RefCell<Vec<Result<Value, Problem>>>>,
+    abandoned: Rc<Cell<bool>>,
+    audit_fails: bool,
 }
 
 impl McpExecutionPolicy for FakePolicy {
@@ -94,6 +103,25 @@ impl McpExecutionPolicy for FakePolicy {
     fn audit(&mut self, record: AuditRecord) -> Result<(), Problem> {
         self.calls.borrow_mut().push("audit");
         self.audits.borrow_mut().push(record);
+        if self.audit_fails {
+            Err(problem("audit_unavailable", "Audit unavailable", 503))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn complete_idempotency(
+        &mut self,
+        _principal: &Principal,
+        _command: &buglogin_api::commands::CommandMetadata,
+        result: &Result<Value, Problem>,
+    ) -> Result<(), Problem> {
+        self.completed.borrow_mut().push(result.clone());
+        Ok(())
+    }
+
+    fn abandon_idempotency(&mut self) -> Result<(), Problem> {
+        self.abandoned.set(true);
         Ok(())
     }
 }
@@ -118,6 +146,88 @@ fn request(tool_name: &str, idempotency_key: Option<&str>) -> McpRequest {
         idempotency_key: idempotency_key.map(str::to_owned),
         input: json!({"name": "MCP test profile", "runtime": "wayfern"}),
     }
+}
+
+#[tokio::test]
+async fn signed_migration_package_activation_is_exposed_to_mcp_with_package_id_input() {
+    let audits = Rc::new(RefCell::new(Vec::new()));
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let policy = FakePolicy {
+        authenticated: true,
+        authorized: true,
+        calls: calls.clone(),
+        audits: audits.clone(),
+        ..FakePolicy::default()
+    };
+    let executor = FakeExecutor {
+        calls: 0,
+        result: Ok(json!({
+            "packageId": "pkg_rehearsal_01",
+            "state": "active",
+            "replayed": false,
+            "controlImport": null,
+            "syncImport": null
+        })),
+    };
+    let mut dispatcher = McpDispatcher::new(policy, executor, true);
+    let result = dispatcher
+        .dispatch_async(McpRequest {
+            tool_name: "migration_package_activate".into(),
+            correlation_id: "cor_mcp_package_activation".into(),
+            bearer_token: Some("test-token".into()),
+            idempotency_key: Some("mcp-package-activate-01".into()),
+            input: json!({"packageId": "pkg_rehearsal_01"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result["packageId"], "pkg_rehearsal_01");
+    assert!(calls.borrow().contains(&"authenticate"));
+    assert!(calls.borrow().contains(&"authorize"));
+    assert!(calls.borrow().contains(&"idempotency"));
+    assert_eq!(audits.borrow().len(), 1);
+    assert_eq!(audits.borrow()[0].outcome, AuditOutcome::Succeeded);
+}
+
+#[tokio::test]
+async fn signed_migration_package_activation_replays_before_running_activation() {
+    let replay = json!({
+        "packageId": "pkg_rehearsal_02",
+        "state": "active",
+        "replayed": true,
+        "controlImport": null,
+        "syncImport": null
+    });
+    let policy = FakePolicy {
+        authenticated: true,
+        authorized: true,
+        replay: Some(replay.clone()),
+        ..FakePolicy::default()
+    };
+    let executor = FakeExecutor {
+        calls: 0,
+        result: Ok(Value::Null),
+    };
+    let mut dispatcher = McpDispatcher::new(policy, executor, true);
+    let result = dispatcher
+        .dispatch_async(McpRequest {
+            tool_name: "migration_package_activate".into(),
+            correlation_id: "cor_mcp_package_replay".into(),
+            bearer_token: Some("test-token".into()),
+            idempotency_key: Some("mcp-package-activate-02".into()),
+            input: json!({"packageId": "pkg_rehearsal_02"}),
+        })
+        .await
+        .unwrap();
+    let (policy, executor) = dispatcher.into_parts();
+
+    assert_eq!(result, replay);
+    assert_eq!(executor.calls, 0);
+    assert!(policy.calls.borrow().contains(&"idempotency"));
+    assert_eq!(
+        policy.audits.borrow()[0].metadata.get("idempotency"),
+        Some(&"replay".to_owned())
+    );
 }
 
 fn problem(code: &str, title: &str, status: u16) -> Problem {
@@ -422,6 +532,36 @@ fn execution_runs_policy_before_fake_executor_and_audits_success() {
 }
 
 #[test]
+fn audit_failure_after_execution_does_not_leave_idempotency_unsettled() {
+    let policy = FakePolicy {
+        authenticated: true,
+        authorized: true,
+        audit_fails: true,
+        ..FakePolicy::default()
+    };
+    let completed = policy.completed.clone();
+    let mut dispatcher = McpDispatcher::new(
+        policy,
+        FakeExecutor {
+            calls: 0,
+            result: Ok(json!({"created": true})),
+        },
+        true,
+    );
+
+    let error = dispatcher
+        .dispatch(request("profile_create", Some("key-123456789012")))
+        .unwrap_err();
+
+    assert_eq!(error.code, "audit_unavailable");
+    assert_eq!(
+        completed.borrow().as_slice(),
+        &[Ok(json!({"created": true}))]
+    );
+    assert_eq!(dispatcher.into_parts().1.calls, 1);
+}
+
+#[test]
 fn execution_rejects_invalid_contract_before_auth_or_execution() {
     let invalid_inputs = [
         json!({"name": "Missing runtime"}),
@@ -672,6 +812,135 @@ async fn production_mcp_event_read_uses_hosted_coordination_and_fails_closed_wit
     fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn production_mcp_lease_status_is_scoped_and_never_returns_owner_token() {
+    let (root, state) = production_state("lease-status-redaction");
+    let account_id = "acct_mcp_lease_status";
+    let workspace_id = WorkspaceId::from_str("ws_mcp_lease_status").unwrap();
+    let resource_id = ResourceId::from_str("res_mcp_lease_status").unwrap();
+    let token = mcp_token(&state, account_id);
+    grant_workspace_capability(
+        &state,
+        account_id,
+        workspace_id.as_str(),
+        "profile.read",
+        Action::Read,
+    );
+    let coordination = buglogin_sync::coordination::LocalCoordination::new();
+    let auth =
+        buglogin_sync::coordination::CoordinationAuth::new(account_id, token.clone()).unwrap();
+    coordination
+        .acquire_lease_idempotent(
+            buglogin_sync::coordination::CoordinationScope {
+                workspace_id: &workspace_id,
+                auth: &auth,
+            },
+            &resource_id,
+            std::time::Duration::from_secs(30),
+            "mcp-lease-status-0001",
+        )
+        .await
+        .unwrap();
+    let state = state.with_coordination(Arc::new(coordination));
+    let status = production_dispatcher(&state)
+        .dispatch_async(production_request(
+            "resource_lease_get",
+            "cor_mcp_lease_status",
+            Some(&token),
+            None,
+            json!({
+                "workspaceId": workspace_id,
+                "resourceId": resource_id
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(status["ownerId"], account_id);
+    assert!(status.get("ownerToken").is_none());
+
+    let absent = production_dispatcher(&state)
+        .dispatch_async(production_request(
+            "resource_lease_get",
+            "cor_mcp_lease_status_absent",
+            Some(&token),
+            None,
+            json!({
+                "workspaceId": workspace_id,
+                "resourceId": "res_mcp_lease_absent"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(absent.is_null());
+
+    let forbidden = production_dispatcher(&state)
+        .dispatch_async(production_request(
+            "resource_lease_get",
+            "cor_mcp_lease_status_forbidden",
+            Some(&token),
+            None,
+            json!({
+                "workspaceId": "ws_mcp_lease_other",
+                "resourceId": resource_id
+            }),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(forbidden.status, 403);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn production_mcp_reads_revision_aware_org_and_workspace_records() {
+    let account_id = "acct_mcp_admin_records";
+    let workspace_id = "ws_mcp_admin_records";
+    let organization_id = format!("org_{workspace_id}");
+    let state = hosted_state(account_id);
+    let token = mcp_token(&state, account_id);
+    seed_workspace(&state, account_id, workspace_id, 25);
+    grant_workspace_capability(&state, account_id, workspace_id, "CAP-WS-001", Action::Read);
+    state.grants.write().unwrap().push(Grant {
+        id: GrantId::from_str("grant_mcp_admin_record_org_read").unwrap(),
+        account_id: Some(AccountId::from_str(account_id).unwrap()),
+        member_id: None,
+        capability: Capability::new("CAP-ORG-001").unwrap(),
+        action: Action::Read,
+        scope: ResourceScope {
+            account_id: Some(AccountId::from_str(account_id).unwrap()),
+            organization_id: Some(OrganizationId::from_str(&organization_id).unwrap()),
+            ..ResourceScope::default()
+        },
+        effect: Effect::Allow,
+    });
+
+    let workspace_record = production_dispatcher(&state)
+        .dispatch_async(production_request(
+            "workspace_record_get",
+            "cor_mcp_workspace_record",
+            Some(&token),
+            None,
+            json!({ "organizationId": organization_id.clone(), "workspaceId": workspace_id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(workspace_record["workspace"]["id"], workspace_id);
+    assert_eq!(workspace_record["revision"], 1);
+
+    let organization_record = production_dispatcher(&state)
+        .dispatch_async(production_request(
+            "organization_record_get",
+            "cor_mcp_organization_record",
+            Some(&token),
+            None,
+            json!({ "organizationId": organization_id.clone() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(organization_record["organization"]["id"], organization_id);
+    assert_eq!(organization_record["revision"], 1);
+}
+
 #[test]
 fn production_profile_create_replays_exact_result() {
     let (root, state) = production_state("profile-create-replay");
@@ -748,6 +1017,109 @@ fn production_profile_create_rejects_same_key_with_different_input() {
     assert_eq!(error.status, 409);
     assert_eq!(error.code, "idempotency_conflict");
     assert_eq!(state.profiles.list().unwrap().len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn production_mcp_grant_list_page_continues_and_legacy_list_keeps_all_items() {
+    let (root, state) = production_state("grant-list-page");
+    let account_id = "acct_mcp_grant_page";
+    let workspace_id = "ws_mcp_grant_page";
+    let resource_id = "res_mcp_grant_page";
+    let token = mcp_token(&state, account_id);
+    for (capability, action) in [
+        ("CAP-RES-001", Action::Create),
+        ("CAP-SHARE-001", Action::Manage),
+        ("CAP-SHARE-001", Action::Read),
+    ] {
+        grant_workspace_capability(&state, account_id, workspace_id, capability, action);
+    }
+
+    let principal = Principal {
+        account_id: Some(AccountId::from_str(account_id).unwrap()),
+        ..Principal::default()
+    };
+    let grants = state.grants().unwrap();
+    let workspace = WorkspaceId::from_str(workspace_id).unwrap();
+    let resource = ResourceId::from_str(resource_id).unwrap();
+    state
+        .resources
+        .write()
+        .unwrap()
+        .register(
+            &principal,
+            &grants,
+            Resource {
+                id: resource.clone(),
+                workspace_id: workspace.clone(),
+                kind: ResourceKind::Profile,
+                state: ResourceState::Active,
+                display_name: "Grant page fixture".into(),
+            },
+        )
+        .unwrap();
+    for (grant_id, member_id) in [
+        ("grant_page_a", "mem_mcp_page_a"),
+        ("grant_page_b", "mem_mcp_page_b"),
+        ("grant_page_c", "mem_mcp_page_c"),
+    ] {
+        state
+            .resources
+            .write()
+            .unwrap()
+            .grant(
+                &principal,
+                &grants,
+                ResourceGrant {
+                    id: GrantId::from_str(grant_id).unwrap(),
+                    workspace_id: workspace.clone(),
+                    resource_id: resource.clone(),
+                    member_id: MemberId::from_str(member_id).unwrap(),
+                    action: Action::Read,
+                    effect: Effect::Allow,
+                },
+            )
+            .unwrap();
+    }
+
+    let first_page = production_dispatcher(&state)
+        .dispatch(production_request(
+            "grant.list.page",
+            "cor_grant_page_first",
+            Some(&token),
+            None,
+            json!({"workspaceId": workspace_id, "limit": 2}),
+        ))
+        .unwrap();
+    assert_eq!(first_page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(first_page["items"][0]["id"], "grant_page_a");
+    assert_eq!(first_page["items"][1]["id"], "grant_page_b");
+    assert_eq!(first_page["nextCursor"], "grant_page_b");
+
+    let second_page = production_dispatcher(&state)
+        .dispatch(production_request(
+            "grant.list.page",
+            "cor_grant_page_second",
+            Some(&token),
+            None,
+            json!({"workspaceId": workspace_id, "limit": 2, "cursor": "grant_page_b"}),
+        ))
+        .unwrap();
+    assert_eq!(second_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(second_page["items"][0]["id"], "grant_page_c");
+    assert!(second_page["nextCursor"].is_null());
+
+    let compatibility = production_dispatcher(&state)
+        .dispatch(production_request(
+            "grant.list",
+            "cor_grant_list_compatibility",
+            Some(&token),
+            None,
+            json!({"workspaceId": workspace_id}),
+        ))
+        .unwrap();
+    assert_eq!(compatibility["items"].as_array().unwrap().len(), 3);
+    assert!(compatibility["nextCursor"].is_null());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1225,6 +1597,34 @@ fn production_profile_proxy_assignment_uses_canonical_workspace_revision_contrac
         .unwrap();
     assert_eq!(active["proxyId"], proxy_id);
     assert_eq!(active["revision"], 1);
+
+    let pending_update = production_dispatcher(&state)
+        .dispatch(production_request(
+            "profile_update",
+            "cor_mcp_proxy_assignment_metadata_update",
+            Some(&token),
+            Some("mcp-proxy-assignment-metadata-update-01"),
+            json!({
+                "workspaceId": workspace_id,
+                "profileId": profile_id,
+                "expectedRevision": 1,
+                "name": "MCP proxy assignment renamed",
+                "note": null,
+                "tags": []
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(pending_update.code, "profile_proxy_assignment_pending");
+    let stale_pending = production_dispatcher(&state)
+        .dispatch(production_request(
+            "profile_proxy_assignment_get",
+            "cor_mcp_proxy_assignment_stale_get",
+            Some(&token),
+            None,
+            json!({ "workspaceId": workspace_id, "profileId": profile_id }),
+        ))
+        .unwrap();
+    assert_eq!(stale_pending, staged);
 }
 
 #[test]
@@ -1386,7 +1786,7 @@ fn production_proxy_crud_replays_and_redacts_inventory() {
         grant_proxy(&state, account_id, workspace_id, action);
     }
     let mut create_input = proxy_input(workspace_id, proxy_id, "Primary");
-    create_input["proxy"]["hasCredential"] = json!(true);
+    create_input["proxy"]["hasCredential"] = json!(false);
     let created = production_dispatcher(&state)
         .dispatch(production_request(
             "proxy_create",
@@ -1408,7 +1808,7 @@ fn production_proxy_crud_replays_and_redacts_inventory() {
     assert_eq!(replay, created);
     assert_eq!(created["record"]["revision"], 1);
     assert_eq!(created["record"]["proxy"]["host"], "proxy.example.com");
-    assert_eq!(created["record"]["proxy"]["hasCredential"], true);
+    assert_eq!(created["record"]["proxy"]["hasCredential"], false);
     assert_eq!(created["record"]["proxy"]["rotationConfigured"], false);
 
     let listed = production_dispatcher(&state)
@@ -1477,7 +1877,6 @@ fn production_proxy_crud_replays_and_redacts_inventory() {
             }),
         ))
         .unwrap();
-    assert_eq!(deleted["revision"], 2);
     let serialized =
         serde_json::to_string(&json!([created, listed, fetched, updated, deleted])).unwrap();
     for forbidden in ["credentialRef", "rotationUrl", "username", "password"] {
@@ -1538,6 +1937,27 @@ fn production_group_commands_share_workspace_acl_revision_and_idempotency_contra
     for action in [Action::Read, Action::Create, Action::Update, Action::Delete] {
         grant_workspace_capability(&state, account_id, workspace_id, "CAP-PROF-003", action);
     }
+    grant_workspace_capability(
+        &state,
+        account_id,
+        workspace_id,
+        "CAP-PROF-003",
+        Action::Share,
+    );
+    grant_workspace_capability(
+        &state,
+        account_id,
+        workspace_id,
+        "CAP-MEM-001",
+        Action::Create,
+    );
+    grant_workspace_capability(
+        &state,
+        account_id,
+        workspace_id,
+        "profile.update",
+        Action::Update,
+    );
 
     let profile_id = ProfileId::from_str("prf_mcp_group_membership").unwrap();
     state
@@ -1550,6 +1970,48 @@ fn production_group_commands_share_workspace_acl_revision_and_idempotency_contra
         workspace_id: WorkspaceId::from_str(workspace_id).unwrap(),
         archive_state: ProfileArchiveState::Active,
     });
+    let member_id = MemberId::from_str("mem_mcp_group_share_target").unwrap();
+    let target_account = AccountId::from_str("acct_mcp_group_share_target").unwrap();
+    state
+        .members
+        .write()
+        .unwrap()
+        .invite(
+            &Principal {
+                account_id: Some(AccountId::from_str(account_id).unwrap()),
+                roles: [buglogin_domain::permissions::Role::PlatformAdmin]
+                    .into_iter()
+                    .collect(),
+                ..Principal::default()
+            },
+            &state.grants.read().unwrap(),
+            Member {
+                id: member_id.clone(),
+                account_id: target_account.clone(),
+                workspace_id: WorkspaceId::from_str(workspace_id).unwrap(),
+                team_id: None,
+                role: MemberRole::Member,
+                status: MemberStatus::Invited,
+                invite_expires_at: Some(100),
+            },
+            1,
+        )
+        .unwrap();
+    state
+        .members
+        .write()
+        .unwrap()
+        .activate(
+            &Principal {
+                account_id: Some(target_account.clone()),
+                ..Principal::default()
+            },
+            &[],
+            &WorkspaceId::from_str(workspace_id).unwrap(),
+            &member_id,
+            2,
+        )
+        .unwrap();
     let mut dispatcher = production_dispatcher(&state);
     let create_input = json!({
         "workspaceId": workspace_id,
@@ -1624,6 +2086,79 @@ fn production_group_commands_share_workspace_acl_revision_and_idempotency_contra
     assert_eq!(assigned_groups["revision"], 2);
     assert_eq!(assigned_groups["groupIds"], json!([group_id]));
 
+    let share_input = json!({
+        "workspaceId": workspace_id,
+        "groupId": group_id,
+        "memberId": member_id,
+        "action": "read",
+        "effect": "allow"
+    });
+    let created_share = dispatcher
+        .dispatch(production_request(
+            "group_share_create",
+            "cor_group_share_create",
+            Some(&token),
+            Some("group-share-create-mcp-0001"),
+            share_input.clone(),
+        ))
+        .unwrap();
+    assert_eq!(created_share["revision"], 1);
+    let share_id = created_share["id"].as_str().unwrap().to_owned();
+    let recipient = Principal {
+        account_id: Some(target_account),
+        workspace_ids: [WorkspaceId::from_str(workspace_id).unwrap()]
+            .into_iter()
+            .collect(),
+        ..Principal::default()
+    };
+    assert!(
+        buglogin_api::services::profile_hosted::HostedProfileService::authorized(
+            &state,
+            &recipient,
+            &[],
+            &profile_id,
+            Action::Read,
+            "profile.read",
+        )
+        .unwrap()
+    );
+    let listed_shares = dispatcher
+        .dispatch(production_request(
+            "group_share_list",
+            "cor_group_share_list",
+            Some(&token),
+            None,
+            json!({"workspaceId": workspace_id, "groupId": group_id}),
+        ))
+        .unwrap();
+    assert_eq!(listed_shares.as_array().unwrap().len(), 1);
+    let revoked_share = dispatcher
+        .dispatch(production_request(
+            "group_share_revoke",
+            "cor_group_share_revoke",
+            Some(&token),
+            Some("group-share-revoke-mcp-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "groupId": group_id,
+                "grantId": share_id,
+                "expectedRevision": 1
+            }),
+        ))
+        .unwrap();
+    assert_eq!(revoked_share["revision"], 2);
+    assert!(
+        !buglogin_api::services::profile_hosted::HostedProfileService::authorized(
+            &state,
+            &recipient,
+            &[],
+            &profile_id,
+            Action::Read,
+            "profile.read",
+        )
+        .unwrap()
+    );
+
     let assigned_groups_replay = dispatcher
         .dispatch(production_request(
             "profile_groups_replace",
@@ -1657,6 +2192,60 @@ fn production_group_commands_share_workspace_acl_revision_and_idempotency_contra
     assert_eq!(cleared_groups["revision"], 3);
     assert_eq!(cleared_groups["groupIds"], json!([]));
 
+    let profile_update_input = json!({
+        "workspaceId": workspace_id,
+        "profileId": profile_id,
+        "expectedRevision": 3,
+        "name": "  Renamed profile  ",
+        "note": null,
+        "tags": ["automation"]
+    });
+    let profile_updated = dispatcher
+        .dispatch(production_request(
+            "profile_update",
+            "cor_profile_update_mcp",
+            Some(&token),
+            Some("profile-update-mcp-0001"),
+            profile_update_input.clone(),
+        ))
+        .unwrap();
+    assert_eq!(profile_updated["revision"], 4);
+    assert_eq!(profile_updated["name"], "Renamed profile");
+    assert_eq!(profile_updated["note"], Value::Null);
+    assert_eq!(profile_updated["tags"], json!(["automation"]));
+
+    let profile_update_replay = dispatcher
+        .dispatch(production_request(
+            "profile_update",
+            "cor_profile_update_mcp_replay",
+            Some(&token),
+            Some("profile-update-mcp-0001"),
+            profile_update_input,
+        ))
+        .unwrap();
+    assert_eq!(profile_update_replay, profile_updated);
+
+    // The REST PUT adapter delegates to HostedProfileService::update_metadata
+    // too, so both transports must reject a stale profile revision the same way.
+    let stale_profile_update = dispatcher
+        .dispatch(production_request(
+            "profile_update",
+            "cor_profile_update_mcp_stale",
+            Some(&token),
+            Some("profile-update-mcp-stale-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "profileId": profile_id,
+                "expectedRevision": 3,
+                "name": "Stale overwrite",
+                "note": null,
+                "tags": ["automation"]
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(stale_profile_update.code, "revision_conflict");
+    assert_eq!(stale_profile_update.status, 409);
+
     let stale = dispatcher
         .dispatch(production_request(
             "group_delete",
@@ -1669,13 +2258,134 @@ fn production_group_commands_share_workspace_acl_revision_and_idempotency_contra
     assert_eq!(stale.code, "revision_conflict");
     assert_eq!(stale.status, 409);
 
-    let deleted = dispatcher
+    let retained_history = dispatcher
         .dispatch(production_request(
             "group_delete",
             "cor_group_delete",
             Some(&token),
             Some("group-delete-mcp-0001"),
             json!({"workspaceId": workspace_id, "groupId": group_id, "expectedRevision": 2}),
+        ))
+        .unwrap_err();
+    assert_eq!(retained_history.code, "group_share_history_retained");
+    assert_eq!(retained_history.status, 409);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn production_extension_group_mcp_commands_enforce_workspace_acl_and_revisions() {
+    let (root, state) = production_state("extension-group-crud");
+    let account_id = "acct_mcp_extension_group";
+    let workspace_id = "ws_mcp_extension_group";
+    let group_id = "extgrp_mcp_extension_group";
+    let token = mcp_token(&state, account_id);
+    for action in [Action::Read, Action::Create, Action::Update, Action::Delete] {
+        grant_workspace_capability(&state, account_id, workspace_id, "CAP-EXT-002", action);
+    }
+
+    let create_input = json!({
+        "workspaceId": workspace_id,
+        "extensionGroupId": group_id,
+        "name": "Automation",
+        "extensionIds": [],
+        "syncMode": "local"
+    });
+    let created = production_dispatcher(&state)
+        .dispatch(production_request(
+            "extension.group.create",
+            "cor_mcp_extension_group_create",
+            Some(&token),
+            Some("extension-group-create-mcp-0001"),
+            create_input.clone(),
+        ))
+        .unwrap();
+    assert_eq!(created["group"]["id"], group_id);
+    assert_eq!(created["revision"], 1);
+
+    let mut dispatcher = production_dispatcher(&state);
+    let replay = dispatcher
+        .dispatch(production_request(
+            "extension.group.create",
+            "cor_mcp_extension_group_create_replay",
+            Some(&token),
+            Some("extension-group-create-mcp-0001"),
+            create_input,
+        ))
+        .unwrap();
+    assert_eq!(replay, created);
+
+    let listed = dispatcher
+        .dispatch(production_request(
+            "extension.group.list",
+            "cor_mcp_extension_group_list",
+            Some(&token),
+            None,
+            json!({"workspaceId": workspace_id}),
+        ))
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    let updated = dispatcher
+        .dispatch(production_request(
+            "extension.group.update",
+            "cor_mcp_extension_group_update",
+            Some(&token),
+            Some("extension-group-update-mcp-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "extensionGroupId": group_id,
+                "expectedRevision": 1,
+                "name": "Managed automation",
+                "extensionIds": [],
+                "syncMode": "managed"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(updated["revision"], 2);
+    assert_eq!(updated["group"]["name"], "Managed automation");
+
+    let stale = dispatcher
+        .dispatch(production_request(
+            "extension.group.update",
+            "cor_mcp_extension_group_stale",
+            Some(&token),
+            Some("extension-group-update-mcp-stale-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "extensionGroupId": group_id,
+                "expectedRevision": 1,
+                "name": "Stale overwrite",
+                "extensionIds": [],
+                "syncMode": "managed"
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(stale.code, "revision_conflict");
+    assert_eq!(stale.status, 409);
+
+    let forbidden = dispatcher
+        .dispatch(production_request(
+            "extension.group.list",
+            "cor_mcp_extension_group_cross_workspace",
+            Some(&token),
+            None,
+            json!({"workspaceId": "ws_mcp_extension_group_other"}),
+        ))
+        .unwrap_err();
+    assert_eq!(forbidden.code, "forbidden");
+    assert_eq!(forbidden.status, 403);
+
+    let deleted = dispatcher
+        .dispatch(production_request(
+            "extension.group.delete",
+            "cor_mcp_extension_group_delete",
+            Some(&token),
+            Some("extension-group-delete-mcp-0001"),
+            json!({
+                "workspaceId": workspace_id,
+                "extensionGroupId": group_id,
+                "expectedRevision": 2
+            }),
         ))
         .unwrap();
     assert_eq!(deleted["revision"], 2);

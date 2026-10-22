@@ -1,17 +1,30 @@
-import {
-  attachConsole,
-  debug,
-  error,
-  info,
-  trace,
-  warn,
-} from "@tauri-apps/plugin-log";
+import { attachConsole, error as logError } from "@tauri-apps/plugin-log";
 
 let consoleAttached = false;
+let errorsForwarded = false;
+
+function describe(reason: unknown): string {
+  if (reason instanceof Error) return reason.stack ?? reason.message;
+  return typeof reason === "string" ? reason : JSON.stringify(reason);
+}
 
 export async function setupLogging() {
   if (consoleAttached) {
     return;
+  }
+
+  // Only uncaught failures go to the log file. Forwarding console.error too
+  // would loop: attachConsole writes every backend line back to the console.
+  if (!errorsForwarded) {
+    errorsForwarded = true;
+    window.addEventListener("error", (event) => {
+      void logError(
+        `Uncaught error err="${describe(event.error ?? event.message)}" source=${event.filename}:${event.lineno}:${event.colno}`,
+      );
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      void logError(`Unhandled rejection err="${describe(event.reason)}"`);
+    });
   }
 
   try {
@@ -22,21 +35,3 @@ export async function setupLogging() {
     console.error("Failed to attach console to logging plugin:", err);
   }
 }
-
-export const logger = {
-  error: (message: string, ...args: unknown[]) => {
-    error(`${message} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`);
-  },
-  warn: (message: string, ...args: unknown[]) => {
-    warn(`${message} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`);
-  },
-  info: (message: string, ...args: unknown[]) => {
-    info(`${message} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`);
-  },
-  debug: (message: string, ...args: unknown[]) => {
-    debug(`${message} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`);
-  },
-  log: (message: string, ...args: unknown[]) => {
-    trace(`${message} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`);
-  },
-};

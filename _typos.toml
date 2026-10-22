@@ -9,4 +9,5 @@ extend-exclude = [
 
 [default.extend-words]
 DBE = "DBE"
+Nam = "Nam"
 nd = "nd"

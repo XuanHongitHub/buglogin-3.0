@@ -212,4 +212,19 @@ impl Account {
             updated_at: updated_at.into(),
         })
     }
+
+    /// Advances the account concurrency revision without changing its lifecycle status.
+    /// Durable credential issuance uses this as a shared write fence with status changes.
+    pub fn advance_revision(&self, expected_revision: u64) -> Result<Self, Problem> {
+        if self.revision != expected_revision {
+            return Err(revision_conflict(expected_revision, self.revision));
+        }
+        Ok(Self {
+            id: self.id.clone(),
+            status: self.status,
+            revision: next_revision(self.revision)?,
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        })
+    }
 }

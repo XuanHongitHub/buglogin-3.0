@@ -78,6 +78,8 @@ fn packages_encrypted_profile_data_without_plaintext_and_sets_manifest_security(
         serde_json::from_slice(package.file("manifest.json").unwrap()).unwrap();
     assert_eq!(manifest["security"]["encrypted"], true);
     assert_eq!(manifest["security"]["encryption"], "aes-256-gcm-chunks/1");
+    assert_eq!(manifest["security"]["contains_secrets"], true);
+    assert_eq!(manifest["security"]["contains_cookie_values"], true);
     let bytes = package
         .files()
         .values()

@@ -1,6 +1,6 @@
 # Sync Import REST Contract Plan
 
-Status: implemented and locally verified; hosted staging and large-export transport evidence remain open.
+Status: implementation present; the newly added full-stream parser regressions and consolidated gates remain unexecuted by explicit request; hosted staging and large-export transport evidence remain open.
 
 - [x] Add closed serde input DTOs for the complete sync import payload tree.
 - [x] Document exact request, receipt, and Problem wire schemas in both OpenAPI copies.
@@ -8,6 +8,7 @@ Status: implemented and locally verified; hosted staging and large-export transp
 - [x] Replace Axum's 2 MiB default body limit with a documented 320 MiB cap; authenticate before reading, allow one direct import per process, and return canonical size/media/JSON/capacity errors.
 - [x] Regenerate typed frontend API artifacts and run Rust/contract gates.
 - [x] Record staging and transport limits without implying production sync readiness.
+- [x] Require the bounded parser to consume the complete JSON stream and add regressions for exact-cap input, a second JSON document, and oversized trailing whitespace; execution deferred to the consolidated verification pass.
 
 ## Evidence
 

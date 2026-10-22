@@ -1,12 +1,13 @@
 use buglogin_domain::ids::{ProxyId, ResourceId, WorkspaceId};
+use buglogin_storage::blob::checksum;
 use buglogin_sync::{
     conflict::{
         ApplyOutcome, ConflictKind, ConflictResolution, ConflictStatus, ManifestCoordinator,
     },
     manifest::{
-        MANIFEST_SCHEMA_VERSION, MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject,
-        ManifestObjectReference, ManifestPayloadEncryption, ManifestTombstone,
-        PayloadEncryptionAlgorithm, SyncManifest,
+        MANIFEST_SCHEMA_VERSION, MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency,
+        ManifestFileChunk, ManifestFileChunks, ManifestObject, ManifestObjectReference,
+        ManifestPayloadEncryption, ManifestTombstone, PayloadEncryptionAlgorithm, SyncManifest,
     },
 };
 use serde_json::json;
@@ -62,12 +63,233 @@ fn rejects_duplicate_object_keys() {
 }
 
 #[test]
+fn object_keys_are_confined_relative_paths() {
+    for key in [
+        "../outside",
+        "profile/../outside",
+        "profile\\outside",
+        "C:/outside",
+        "profile//state",
+        "profile/./state",
+        "profile/state\u{0000}",
+    ] {
+        assert_eq!(
+            ManifestObject::new(key, b"data").unwrap_err().code,
+            "invalid_manifest_object_key",
+            "key {key:?} must be rejected"
+        );
+    }
+    assert!(ManifestObject::new("profile/state..json", b"data").is_ok());
+    assert!(ManifestObject::new(".buglogin/resource-key-envelope.json", b"data").is_ok());
+}
+
+#[test]
 fn rejects_objects_above_the_shared_sync_limit() {
     let mut value = manifest(1, None, b"one");
     value.objects[0].size = MAX_PROFILE_SYNC_OBJECT_BYTES + 1;
     assert_eq!(
         value.validate().unwrap_err().code,
         "manifest_object_too_large"
+    );
+}
+
+#[test]
+fn rejects_ephemeral_profile_paths_in_plain_and_chunked_manifests() {
+    let mut legacy_plain = manifest(1, None, b"cache profile root");
+    legacy_plain.objects[0].key = "Default/Cache/index".into();
+    assert!(legacy_plain.validate().is_ok());
+    assert_eq!(
+        legacy_plain.validate_new_profile_paths().unwrap_err().code,
+        "sync_ephemeral_profile_path"
+    );
+
+    let new_plain = SyncManifest::new(
+        workspace(),
+        resource(),
+        1,
+        1,
+        None,
+        b"cache profile root",
+        vec![ManifestObject::new("Default/Cache/index", b"cache").unwrap()],
+    );
+    assert_eq!(new_plain.unwrap_err().code, "sync_ephemeral_profile_path");
+
+    assert!(buglogin_sync::manifest::is_ephemeral_profile_path(
+        "Default/Service Worker/ScriptCache/index"
+    ));
+    assert!(!buglogin_sync::manifest::is_ephemeral_profile_path(
+        "Default/Cookies"
+    ));
+}
+
+#[test]
+fn schema_v3_requires_a_valid_chunk_mapping_bound_to_uploaded_objects() {
+    let path = "Default/Cookies";
+    let first_plaintext_checksum = "c".repeat(64);
+    let last_plaintext_checksum = "d".repeat(64);
+    let first = ManifestObject::new(
+        format!(
+            ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+            checksum(path.as_bytes()),
+            0,
+            first_plaintext_checksum,
+            checksum(b"encrypted first chunk")
+        ),
+        b"encrypted first chunk",
+    )
+    .unwrap();
+    let last = ManifestObject::new(
+        format!(
+            ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+            checksum(path.as_bytes()),
+            1,
+            last_plaintext_checksum,
+            checksum(b"encrypted last chunk")
+        ),
+        b"encrypted last chunk",
+    )
+    .unwrap();
+    let envelope =
+        ManifestObject::new(".buglogin/resource-key-envelope.json", b"opaque envelope").unwrap();
+    let mut value = SyncManifest::new_chunked_with_tombstones(
+        workspace(),
+        resource(),
+        1,
+        1,
+        None,
+        b"chunked root",
+        vec![first.clone(), last.clone(), envelope.clone()],
+        vec![ManifestTombstone::new_object(path, 1, 100, 200).unwrap()],
+        ManifestPayloadEncryption {
+            schema_version: 1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
+            key_version: Some("a".repeat(64)),
+            resource_key_envelope: ManifestObjectReference::from(&envelope),
+        },
+        vec![ManifestFileChunks {
+            path: path.into(),
+            plaintext_size: 4 * 1024 * 1024 + 2,
+            plaintext_checksum: "b".repeat(64),
+            chunks: vec![
+                ManifestFileChunk {
+                    index: 0,
+                    plaintext_size: 4 * 1024 * 1024,
+                    plaintext_checksum: first_plaintext_checksum,
+                    object: ManifestObjectReference::from(&first),
+                },
+                ManifestFileChunk {
+                    index: 1,
+                    plaintext_size: 2,
+                    plaintext_checksum: last_plaintext_checksum,
+                    object: ManifestObjectReference::from(&last),
+                },
+            ],
+        }],
+    )
+    .unwrap();
+    assert!(value.validate().is_ok());
+    let mut colliding_object_path = value.clone();
+    colliding_object_path
+        .objects
+        .push(ManifestObject::new(path, b"conflicting logical file path").unwrap());
+    assert_eq!(
+        colliding_object_path.validate().unwrap_err().code,
+        "invalid_manifest_file_chunks"
+    );
+    let serialized = serde_json::to_value(&value).unwrap();
+    assert_eq!(serialized["schemaVersion"], 3);
+    assert_eq!(
+        serde_json::from_value::<SyncManifest>(serialized).unwrap(),
+        value
+    );
+
+    let mut unsafe_path = value.clone();
+    unsafe_path.file_chunks[0].path = "../escape".into();
+    assert_eq!(
+        unsafe_path.validate().unwrap_err().code,
+        "invalid_manifest_file_chunks"
+    );
+
+    let mut cache_path = value.clone();
+    let cache_path_name = "Default/Cache/Cookies";
+    cache_path.file_chunks[0].path = cache_path_name.into();
+    for chunk in &mut cache_path.file_chunks[0].chunks {
+        let previous_key = chunk.object.key.clone();
+        let new_key = format!(
+            ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+            checksum(cache_path_name.as_bytes()),
+            chunk.index,
+            chunk.plaintext_checksum,
+            chunk.object.checksum
+        );
+        cache_path
+            .objects
+            .iter_mut()
+            .find(|object| object.key == previous_key)
+            .unwrap()
+            .key = new_key.clone();
+        chunk.object.key = new_key;
+    }
+    assert!(cache_path.validate().is_ok());
+    assert_eq!(
+        cache_path.validate_new_profile_paths().unwrap_err().code,
+        "sync_ephemeral_profile_path"
+    );
+
+    let nested_path = "Default/Cookies/child";
+    let nested_plaintext_checksum = "e".repeat(64);
+    let nested_object = ManifestObject::new(
+        format!(
+            ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+            checksum(nested_path.as_bytes()),
+            0,
+            nested_plaintext_checksum,
+            checksum(b"encrypted nested chunk")
+        ),
+        b"encrypted nested chunk",
+    )
+    .unwrap();
+    let mut colliding_file_paths = value.clone();
+    colliding_file_paths.objects.push(nested_object.clone());
+    colliding_file_paths.file_chunks.push(ManifestFileChunks {
+        path: nested_path.into(),
+        plaintext_size: 5,
+        plaintext_checksum: "f".repeat(64),
+        chunks: vec![ManifestFileChunk {
+            index: 0,
+            plaintext_size: 5,
+            plaintext_checksum: nested_plaintext_checksum,
+            object: ManifestObjectReference::from(&nested_object),
+        }],
+    });
+    assert_eq!(
+        colliding_file_paths.validate().unwrap_err().code,
+        "invalid_manifest_file_chunks"
+    );
+
+    let mut missing_object = value.clone();
+    let missing_key = missing_object.file_chunks[0].chunks[0].object.key.clone();
+    missing_object
+        .objects
+        .retain(|object| object.key != missing_key);
+    assert_eq!(
+        missing_object.validate().unwrap_err().code,
+        "manifest_dependency_object_missing"
+    );
+
+    let mut orphan_object = value.clone();
+    orphan_object
+        .objects
+        .push(ManifestObject::new(".buglogin/file-chunks/orphan/object", b"orphan").unwrap());
+    assert_eq!(
+        orphan_object.validate().unwrap_err().code,
+        "invalid_manifest_file_chunks"
+    );
+
+    value.file_chunks[0].chunks[1].index = 3;
+    assert_eq!(
+        value.validate().unwrap_err().code,
+        "invalid_manifest_file_chunks"
     );
 }
 
@@ -135,6 +357,7 @@ fn proxy_dependency_must_reference_verified_manifest_objects() {
     value.dependencies.push(ManifestDependency::Proxy {
         proxy_id: ProxyId::new("proxy_manifest_1").unwrap(),
         revision: 1,
+        credential_version: None,
         metadata_object: Some(ManifestObjectReference::from(&metadata)),
         credential_envelope_object: Some(ManifestObjectReference::from(&envelope)),
     });
@@ -147,6 +370,7 @@ fn proxy_dependency_must_reference_verified_manifest_objects() {
     value.dependencies[0] = ManifestDependency::Proxy {
         proxy_id: ProxyId::new("proxy_manifest_1").unwrap(),
         revision: 1,
+        credential_version: None,
         metadata_object: Some(ManifestObjectReference {
             key: "proxies/p1/not-uploaded".into(),
             size: 1,
@@ -175,6 +399,7 @@ fn proxy_dependency_can_reference_canonical_api_record_without_profile_blob_copy
     value.dependencies.push(ManifestDependency::Proxy {
         proxy_id: ProxyId::new("proxy_manifest_2").unwrap(),
         revision: 3,
+        credential_version: None,
         metadata_object: None,
         credential_envelope_object: None,
     });

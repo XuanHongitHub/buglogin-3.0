@@ -1,15 +1,102 @@
-use buglogin_domain::errors::Problem;
+use buglogin_domain::{errors::Problem, ids::DeviceId};
 use buglogin_storage::{
     secrets::{OsVault, RotationReceipt, SecretError, SecretKey, SecretValue, SecretVersion},
     vault::NativeVault,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 const NAMESPACE: &str = "buglogin-auth";
 
 pub struct StoredBearer {
     bearer: String,
     version: SecretVersion,
+}
+
+pub struct StoredAuthSession {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: u64,
+    refresh_pending: bool,
+    version: SecretVersion,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthSessionValue {
+    access_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    expires_at: u64,
+    #[serde(default)]
+    refresh_pending: bool,
+}
+
+impl Drop for AuthSessionValue {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+        if let Some(refresh_token) = &mut self.refresh_token {
+            refresh_token.zeroize();
+        }
+    }
+}
+
+impl Drop for StoredAuthSession {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+        if let Some(refresh_token) = &mut self.refresh_token {
+            refresh_token.zeroize();
+        }
+    }
+}
+
+impl Drop for StoredBearer {
+    fn drop(&mut self) {
+        self.bearer.zeroize();
+    }
+}
+
+impl StoredAuthSession {
+    pub fn access_token(&self) -> &str {
+        &self.access_token
+    }
+
+    pub fn access_token_for_resume(&self) -> Option<&str> {
+        (!self.refresh_pending).then_some(self.access_token.as_str())
+    }
+
+    pub fn refresh_token(&self) -> Option<&str> {
+        self.refresh_token.as_deref()
+    }
+
+    pub const fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    pub const fn refresh_pending(&self) -> bool {
+        self.refresh_pending
+    }
+
+    pub const fn version(&self) -> SecretVersion {
+        self.version
+    }
+}
+
+impl std::fmt::Debug for StoredAuthSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredAuthSession")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("refresh_pending", &self.refresh_pending)
+            .field("version", &self.version)
+            .finish()
+    }
 }
 
 impl StoredBearer {
@@ -47,6 +134,213 @@ impl AuthVault<NativeVault> {
 impl<V: OsVault> AuthVault<V> {
     pub const fn new(vault: V) -> Self {
         Self { vault }
+    }
+
+    pub fn load_session(
+        &self,
+        device_id: &str,
+        correlation_id: &str,
+    ) -> Result<Option<StoredAuthSession>, Problem> {
+        let key = session_key(device_id, correlation_id)?;
+        match self.vault.read(&key) {
+            Ok((value, version)) => {
+                let bytes = value.as_bytes();
+                let text = std::str::from_utf8(bytes).map_err(|_| {
+                    vault_problem(
+                        SecretError::OperationFailed,
+                        "Stored session is invalid",
+                        correlation_id,
+                    )
+                })?;
+                if let Ok(mut session) = serde_json::from_str::<AuthSessionValue>(text) {
+                    if session.access_token.is_empty()
+                        || session.refresh_token.as_ref().is_some_and(String::is_empty)
+                        || (session.refresh_token.is_some() && session.expires_at == 0)
+                    {
+                        return Err(vault_problem(
+                            SecretError::OperationFailed,
+                            "Stored session is invalid",
+                            correlation_id,
+                        ));
+                    }
+                    let access_token = std::mem::take(&mut session.access_token);
+                    let refresh_token = session.refresh_token.take();
+                    return Ok(Some(StoredAuthSession {
+                        access_token,
+                        refresh_token,
+                        expires_at: session.expires_at,
+                        refresh_pending: session.refresh_pending,
+                        version,
+                    }));
+                }
+                if text.starts_with('{') {
+                    return Err(vault_problem(
+                        SecretError::OperationFailed,
+                        "Stored session is invalid",
+                        correlation_id,
+                    ));
+                }
+                Ok(Some(StoredAuthSession {
+                    access_token: text.to_owned(),
+                    refresh_token: None,
+                    expires_at: 0,
+                    refresh_pending: false,
+                    version,
+                }))
+            }
+            Err(SecretError::NotFound) => Ok(None),
+            Err(error) => Err(vault_problem(
+                error,
+                "Unable to load session",
+                correlation_id,
+            )),
+        }
+    }
+
+    pub fn store_session(
+        &mut self,
+        device_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: u64,
+        correlation_id: &str,
+    ) -> Result<SecretVersion, Problem> {
+        let key = session_key(device_id, correlation_id)?;
+        let value = session_value_optional(
+            access_token,
+            Some(refresh_token),
+            expires_at,
+            false,
+            correlation_id,
+        )?;
+        self.vault
+            .create(&key, value)
+            .map_err(|error| vault_problem(error, "Unable to store session", correlation_id))
+    }
+
+    pub fn replace_session(
+        &mut self,
+        device_id: &str,
+        expected_version: SecretVersion,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: u64,
+        correlation_id: &str,
+    ) -> Result<SecretVersion, Problem> {
+        let key = session_key(device_id, correlation_id)?;
+        let value = session_value_optional(
+            access_token,
+            Some(refresh_token),
+            expires_at,
+            false,
+            correlation_id,
+        )?;
+        let RotationReceipt { current, .. } = self
+            .vault
+            .rotate(&key, expected_version, value)
+            .map_err(|error| vault_problem(error, "Unable to replace session", correlation_id))?;
+        Ok(current)
+    }
+
+    pub fn store_legacy_session(
+        &mut self,
+        device_id: &str,
+        access_token: &str,
+        expires_at: u64,
+        correlation_id: &str,
+    ) -> Result<SecretVersion, Problem> {
+        let key = session_key(device_id, correlation_id)?;
+        let value = session_value_optional(access_token, None, expires_at, false, correlation_id)?;
+        self.vault
+            .create(&key, value)
+            .map_err(|error| vault_problem(error, "Unable to store session", correlation_id))
+    }
+
+    pub fn replace_legacy_session(
+        &mut self,
+        device_id: &str,
+        expected_version: SecretVersion,
+        access_token: &str,
+        expires_at: u64,
+        correlation_id: &str,
+    ) -> Result<SecretVersion, Problem> {
+        let key = session_key(device_id, correlation_id)?;
+        let value = session_value_optional(access_token, None, expires_at, false, correlation_id)?;
+        let RotationReceipt { current, .. } = self
+            .vault
+            .rotate(&key, expected_version, value)
+            .map_err(|error| vault_problem(error, "Unable to replace session", correlation_id))?;
+        Ok(current)
+    }
+
+    pub fn mark_refresh_pending(
+        &mut self,
+        device_id: &str,
+        expected_version: SecretVersion,
+        correlation_id: &str,
+    ) -> Result<SecretVersion, Problem> {
+        self.set_refresh_pending(device_id, expected_version, true, correlation_id)
+    }
+
+    pub fn clear_refresh_pending(
+        &mut self,
+        device_id: &str,
+        expected_version: SecretVersion,
+        correlation_id: &str,
+    ) -> Result<SecretVersion, Problem> {
+        self.set_refresh_pending(device_id, expected_version, false, correlation_id)
+    }
+
+    fn set_refresh_pending(
+        &mut self,
+        device_id: &str,
+        expected_version: SecretVersion,
+        refresh_pending: bool,
+        correlation_id: &str,
+    ) -> Result<SecretVersion, Problem> {
+        let key = session_key(device_id, correlation_id)?;
+        let (current, _) = self
+            .vault
+            .read(&key)
+            .map_err(|error| vault_problem(error, "Unable to read session", correlation_id))?;
+        let text = std::str::from_utf8(current.as_bytes()).map_err(|_| {
+            vault_problem(
+                SecretError::OperationFailed,
+                "Stored session is invalid",
+                correlation_id,
+            )
+        })?;
+        let mut session = match serde_json::from_str::<AuthSessionValue>(text) {
+            Ok(session) => session,
+            Err(_) if !text.starts_with('{') => AuthSessionValue {
+                access_token: text.to_owned(),
+                refresh_token: None,
+                expires_at: 0,
+                refresh_pending: false,
+            },
+            Err(_) => {
+                return Err(vault_problem(
+                    SecretError::OperationFailed,
+                    "Stored session is invalid",
+                    correlation_id,
+                ));
+            }
+        };
+        session.refresh_pending = refresh_pending;
+        let value = session_value_optional(
+            &session.access_token,
+            session.refresh_token.as_deref(),
+            session.expires_at,
+            refresh_pending,
+            correlation_id,
+        )?;
+        let RotationReceipt { current, .. } = self
+            .vault
+            .rotate(&key, expected_version, value)
+            .map_err(|error| {
+                vault_problem(error, "Unable to stage session refresh", correlation_id)
+            })?;
+        Ok(current)
     }
 
     pub fn load_bearer(
@@ -118,14 +412,14 @@ impl<V: OsVault> AuthVault<V> {
 }
 
 fn session_key(device_id: &str, correlation_id: &str) -> Result<SecretKey, Problem> {
-    let device_id = device_id.trim();
-    if device_id.is_empty() {
-        return Err(vault_problem(
-            SecretError::InvalidKey,
-            "Device ID is required",
+    DeviceId::new(device_id).map_err(|_| {
+        Problem::new(
+            "device_id_invalid",
+            "Device ID is invalid",
+            400,
             correlation_id,
-        ));
-    }
+        )
+    })?;
     let digest = Sha256::digest(device_id.as_bytes());
     SecretKey::new(NAMESPACE, format!("device-{:x}", digest))
         .map_err(|error| vault_problem(error, "Unable to build session key", correlation_id))
@@ -134,6 +428,40 @@ fn session_key(device_id: &str, correlation_id: &str) -> Result<SecretKey, Probl
 fn secret_value(bearer: &str, correlation_id: &str) -> Result<SecretValue, Problem> {
     SecretValue::new(bearer.as_bytes().to_vec())
         .map_err(|error| vault_problem(error, "Bearer is invalid", correlation_id))
+}
+
+fn session_value_optional(
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_at: u64,
+    refresh_pending: bool,
+    correlation_id: &str,
+) -> Result<SecretValue, Problem> {
+    if access_token.is_empty()
+        || refresh_token.is_some_and(str::is_empty)
+        || (refresh_token.is_some() && expires_at == 0)
+    {
+        return Err(vault_problem(
+            SecretError::EmptyValue,
+            "Session is invalid",
+            correlation_id,
+        ));
+    }
+    let bytes = serde_json::to_vec(&AuthSessionValue {
+        access_token: access_token.to_owned(),
+        refresh_token: refresh_token.map(str::to_owned),
+        expires_at,
+        refresh_pending,
+    })
+    .map_err(|_| {
+        vault_problem(
+            SecretError::OperationFailed,
+            "Unable to encode session",
+            correlation_id,
+        )
+    })?;
+    SecretValue::new(bytes)
+        .map_err(|error| vault_problem(error, "Session is invalid", correlation_id))
 }
 
 fn vault_problem(error: SecretError, title: &str, correlation_id: &str) -> Problem {
@@ -223,53 +551,169 @@ mod tests {
     fn bearer_round_trip_replacement_and_removal_use_versions() {
         let mut vault = AuthVault::new(FakeVault::default());
         let first = vault
-            .store_bearer("device-a", "first-token", "cor-store")
+            .store_bearer("device-a1", "first-token", "cor-store")
             .unwrap();
         assert_eq!(
             vault
-                .load_bearer("device-a", "cor-load")
+                .load_bearer("device-a1", "cor-load")
                 .unwrap()
                 .unwrap()
                 .bearer(),
             "first-token"
         );
         let second = vault
-            .replace_bearer("device-a", first, "second-token", "cor-replace")
+            .replace_bearer("device-a1", first, "second-token", "cor-replace")
             .unwrap();
         assert_eq!(second.generation(), 2);
         assert_eq!(
             vault
-                .load_bearer("device-a", "cor-load")
+                .load_bearer("device-a1", "cor-load")
                 .unwrap()
                 .unwrap()
                 .bearer(),
             "second-token"
         );
         vault
-            .remove_bearer("device-a", second, "cor-remove")
+            .remove_bearer("device-a1", second, "cor-remove")
             .unwrap();
-        assert!(vault.load_bearer("device-a", "cor-load").unwrap().is_none());
+        assert!(
+            vault
+                .load_bearer("device-a1", "cor-load")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn missing_bearer_maps_to_none_and_device_key_is_stable() {
         let vault = AuthVault::new(FakeVault::default());
-        assert!(vault.load_bearer("device-a", "cor-load").unwrap().is_none());
-        let first = session_key(" device-a ", "cor-key").unwrap();
-        let second = session_key("device-a", "cor-key").unwrap();
+        assert!(
+            vault
+                .load_bearer("device-a1", "cor-load")
+                .unwrap()
+                .is_none()
+        );
+        let first = session_key("device-a1", "cor-key").unwrap();
+        let second = session_key("device-a1", "cor-key").unwrap();
         assert_eq!(first, second);
+        assert_eq!(
+            session_key(" device-a1 ", "cor-key").unwrap_err().code,
+            "device_id_invalid"
+        );
         assert_ne!(
             first.name(),
-            session_key("device-b", "cor-key").unwrap().name()
+            session_key("device-b1", "cor-key").unwrap().name()
         );
     }
 
     #[test]
     fn errors_are_typed_and_never_contain_bearer() {
         let mut vault = AuthVault::new(FakeVault::default());
-        let error = vault.store_bearer("device-a", "", "cor-empty").unwrap_err();
+        let error = vault
+            .store_bearer("device-a1", "", "cor-empty")
+            .unwrap_err();
         assert_eq!(error.code, "empty_secret");
         assert!(!format!("{error:?}").contains("first-token"));
-        assert!(vault.load_bearer("device-a", "cor-load").unwrap().is_none());
+        assert!(
+            vault
+                .load_bearer("device-a1", "cor-load")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn session_pair_round_trips_and_rotates_as_one_vault_value() {
+        let mut vault = AuthVault::new(FakeVault::default());
+        let first = vault
+            .store_session("device-a1", "access-one", "refresh-one", 100, "cor-store")
+            .unwrap();
+        let loaded = vault
+            .load_session("device-a1", "cor-load")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.access_token(), "access-one");
+        assert_eq!(loaded.access_token_for_resume(), Some("access-one"));
+        assert_eq!(loaded.refresh_token(), Some("refresh-one"));
+        assert_eq!(loaded.expires_at(), 100);
+        assert_eq!(loaded.version(), first);
+        assert!(!format!("{loaded:?}").contains("refresh-one"));
+
+        let staged_version = vault
+            .mark_refresh_pending("device-a1", loaded.version(), "cor-stage")
+            .unwrap();
+        let staged = vault
+            .load_session("device-a1", "cor-load-staged")
+            .unwrap()
+            .unwrap();
+        assert!(staged.refresh_pending());
+        assert_eq!(staged.access_token_for_resume(), None);
+        assert_eq!(staged.version(), staged_version);
+
+        let next = vault
+            .replace_session(
+                "device-a1",
+                staged.version(),
+                "access-two",
+                "refresh-two",
+                200,
+                "cor-rotate",
+            )
+            .unwrap();
+        let loaded = vault
+            .load_session("device-a1", "cor-load-next")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.version(), next);
+        assert!(!loaded.refresh_pending());
+        assert_eq!(loaded.access_token(), "access-two");
+        assert_eq!(loaded.refresh_token(), Some("refresh-two"));
+    }
+
+    #[test]
+    fn definitely_unsent_refresh_can_clear_pending_marker_without_rotating_tokens() {
+        let mut vault = AuthVault::new(FakeVault::default());
+        let stored = vault
+            .store_session("device-a1", "access-one", "refresh-one", 100, "cor-store")
+            .unwrap();
+        let staged = vault
+            .mark_refresh_pending("device-a1", stored, "cor-stage")
+            .unwrap();
+        let cleared = vault
+            .clear_refresh_pending("device-a1", staged, "cor-clear")
+            .unwrap();
+        let loaded = vault
+            .load_session("device-a1", "cor-load-cleared")
+            .unwrap()
+            .unwrap();
+
+        assert!(!loaded.refresh_pending());
+        assert_eq!(loaded.access_token_for_resume(), Some("access-one"));
+        assert_eq!(loaded.refresh_token(), Some("refresh-one"));
+        assert_eq!(loaded.version(), cleared);
+    }
+
+    #[test]
+    fn legacy_bearer_is_readable_as_a_session_without_refresh_authority() {
+        let mut vault = AuthVault::new(FakeVault::default());
+        vault
+            .store_bearer("device-legacy1", "legacy-access", "cor-legacy")
+            .unwrap();
+        let loaded = vault
+            .load_session("device-legacy1", "cor-load-legacy")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.access_token(), "legacy-access");
+        assert_eq!(loaded.refresh_token(), None);
+        assert_eq!(loaded.expires_at(), 0);
+        let pending_version = vault
+            .mark_refresh_pending("device-legacy1", loaded.version(), "cor-stage-legacy")
+            .unwrap();
+        let pending = vault
+            .load_session("device-legacy1", "cor-load-pending-legacy")
+            .unwrap()
+            .unwrap();
+        assert!(pending.refresh_pending());
+        assert_eq!(pending.version(), pending_version);
     }
 }

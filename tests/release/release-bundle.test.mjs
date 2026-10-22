@@ -21,7 +21,21 @@ test("release bundle verifies SBOM, provenance, signatures, and rollback coverag
     await writeFile(join(root, "provenance.json"), JSON.stringify({ schema: "buglogin.release-provenance.v1", source: { sha: "0".repeat(40) }, materials: [{ name: "Cargo.lock", sha256: "0".repeat(64) }, { name: "pnpm-lock.yaml", sha256: "0".repeat(64) }, { name: ".github/workflows/release.yml", sha256: "0".repeat(64) }, { name: ".github/workflows/signing.yml", sha256: "0".repeat(64) }], subjects: [{ name: "BugLogin.exe", sha256: sha256(Buffer.from("current")) }, { name: "dist.spdx.json", sha256: sha256(await readFile(join(root, "dist.spdx.json"))) }, { name: "updater-manifest.json", sha256: sha256(manifestBytes) }] }));
     const checksumLines = await Promise.all(["BugLogin.exe", "dist.spdx.json", "updater-manifest.json"].map(async (name) => `${sha256(await readFile(join(root, name)))}  ${name}`));
     await writeFile(join(root, "SHA256SUMS.txt"), `${checksumLines.join("\n")}\n`);
-    await verifyBundle(root, { requireUpdater: true });
+    await verifyBundle(root, {
+      requireUpdater: true,
+      trustedUpdaterPublicKeyBase64: publicKeyBase64,
+    });
+    await assert.rejects(
+      () => verifyBundle(root, { requireUpdater: true, trustedUpdaterPublicKeyBase64: "" }),
+      /trusted updater public key is not configured/,
+    );
+    const otherPublicKeyBase64 = generateKeyPairSync("ed25519").publicKey
+      .export({ format: "der", type: "spki" })
+      .toString("base64");
+    await assert.rejects(
+      () => verifyBundle(root, { requireUpdater: true, trustedUpdaterPublicKeyBase64: otherPublicKeyBase64 }),
+      /untrusted key/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

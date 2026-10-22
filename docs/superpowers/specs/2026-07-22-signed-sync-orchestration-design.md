@@ -10,6 +10,9 @@
 - A package containing `sync/export.json` cannot report success while sync activation is absent.
 - Control state, filesystem activation, and hosted sync use explicit rollback/recovery states; ambiguous sync commit or journal-state acknowledgement never deletes staged immutable blobs.
 - Replay is keyed by package/run idempotency and sync export hash.
+- Manifest generation advancement uses checked arithmetic at API, conflict-resolution, and desktop snapshot boundaries; exhausted generations fail as conflicts instead of panicking or wrapping.
+- Redis manifest generation comparisons use canonical decimal strings, not Lua floating-point numbers, so valid `u64` generations remain distinct above 2^53.
+- Profile/proxy/control revisions and local lease fencing sequences use checked increments; exhausted values fail without reusing a revision/token.
 
 ## Sequence
 

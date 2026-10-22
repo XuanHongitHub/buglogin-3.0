@@ -14,7 +14,10 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use buglogin_api::http::{ApiState, router};
+use buglogin_api::{
+    http::{ApiState, router},
+    mcp::{McpDispatcher, McpRequest, ProductionMcpExecutor, ProductionMcpPolicy},
+};
 use buglogin_browser::profile::ProfileService;
 use buglogin_domain::{
     account::Account,
@@ -67,14 +70,8 @@ struct FakeCoordination {
 
 #[async_trait]
 impl CoordinationBackend for FakeCoordination {
-    async fn acquire_lease(
-        &self,
-        scope: CoordinationScope<'_>,
-        resource_id: &ResourceId,
-        ttl: Duration,
-    ) -> Result<LeaseGrant, Problem> {
-        self.acquire_lease_idempotent(scope, resource_id, ttl, "fallback-lease-key-0001")
-            .await
+    async fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
     }
 
     async fn acquire_lease_idempotent(
@@ -134,12 +131,13 @@ impl CoordinationBackend for FakeCoordination {
         Ok(lease)
     }
 
-    async fn renew_lease(
+    async fn renew_lease_idempotent(
         &self,
         _scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
         ttl: Duration,
+        _idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem> {
         let mut current = self.lease.lock().unwrap();
         let lease = current.as_mut().ok_or_else(lease_missing)?;
@@ -155,11 +153,12 @@ impl CoordinationBackend for FakeCoordination {
         Ok(lease.clone())
     }
 
-    async fn release_lease(
+    async fn release_lease_idempotent(
         &self,
         _scope: CoordinationScope<'_>,
         _resource_id: &ResourceId,
         owner_token: &str,
+        _idempotency_key: &str,
     ) -> Result<(), Problem> {
         let mut lease = self.lease.lock().unwrap();
         let current = lease.as_ref().ok_or_else(lease_missing)?;
@@ -173,6 +172,14 @@ impl CoordinationBackend for FakeCoordination {
         }
         *lease = None;
         Ok(())
+    }
+
+    async fn lease_status(
+        &self,
+        _scope: CoordinationScope<'_>,
+        _resource_id: &ResourceId,
+    ) -> Result<Option<buglogin_sync::coordination::LeaseStatus>, Problem> {
+        Ok(None)
     }
 
     async fn validate_write_authority(
@@ -316,7 +323,8 @@ async fn signed_sync_package_activation_compensates_and_replays() {
     drop(grants);
     let coordination = Arc::new(FakeCoordination::default());
     let hosted_state = state.clone();
-    let app = router(state.with_coordination(coordination.clone()));
+    let activation_state = state.with_coordination(coordination.clone());
+    let app = router(activation_state.clone());
 
     for (index, (path, bytes)) in package.files().iter().enumerate() {
         let response = app
@@ -434,21 +442,23 @@ async fn signed_sync_package_activation_compensates_and_replays() {
             .await
             .unwrap()
     });
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        coordination.second_acquire_waiting.notified(),
-    )
-    .await
-    .expect("replayed activation should acquire the sync lease");
+    let concurrent = second_activation.await.unwrap();
+    let concurrent_status = concurrent.status();
+    let concurrent_body = body(concurrent).await;
+    assert_eq!(concurrent_status, StatusCode::CONFLICT, "{concurrent_body}");
+    assert_eq!(
+        concurrent_body["code"],
+        "migration_control_import_in_progress"
+    );
 
     coordination.resume_first_acquire.notify_one();
-    let first_lost = first_activation.await.unwrap();
-    let first_lost_status = first_lost.status();
-    let first_lost_body = body(first_lost).await;
-    assert_eq!(first_lost_status, StatusCode::CONFLICT, "{first_lost_body}");
-    assert_eq!(first_lost_body["code"], "lease_held");
+    let first = first_activation.await.unwrap();
+    let first_status = first.status();
+    let activated_body = body(first).await;
+    assert_eq!(first_status, StatusCode::OK, "{activated_body}");
+    assert_eq!(activated_body["state"], "active");
 
-    let profiles_after_owner_compensation = app
+    let profiles_after_activation = app
         .clone()
         .oneshot(
             Request::builder()
@@ -461,45 +471,44 @@ async fn signed_sync_package_activation_compensates_and_replays() {
         )
         .await
         .unwrap();
-    assert_eq!(profiles_after_owner_compensation.status(), StatusCode::OK);
+    assert_eq!(profiles_after_activation.status(), StatusCode::OK);
     assert_eq!(
-        body(profiles_after_owner_compensation).await["items"]
+        body(profiles_after_activation).await["items"]
             .as_array()
             .unwrap()
             .len(),
-        0,
-        "the owner compensates its control graph when it loses sync lease acquisition"
+        1,
+        "the serialized activation keeps its control graph available to sync commit"
     );
 
-    coordination.resume_second_acquire.notify_one();
-    let second_lost = second_activation.await.unwrap();
-    assert_eq!(second_lost.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        body(second_lost).await["code"],
-        "migration_sync_commit_outcome_unknown"
+    let mut dispatcher = McpDispatcher::new(
+        ProductionMcpPolicy::new(activation_state.clone()),
+        ProductionMcpExecutor::new(activation_state),
+        true,
     );
-
-    let manifest_after_rollback = app
-        .clone()
-        .oneshot(manifest_request(&token, &workspace, &resource))
+    let mcp_activation = dispatcher
+        .dispatch_async(McpRequest {
+            tool_name: "migration_package_activate".into(),
+            correlation_id: "cor_signed_sync_mcp_activate".into(),
+            bearer_token: Some(token.clone()),
+            idempotency_key: Some("signed-sync-mcp-activate-0001".into()),
+            input: json!({"packageId": package_id.clone()}),
+        })
         .await
         .unwrap();
-    assert_eq!(manifest_after_rollback.status(), StatusCode::OK);
-    assert!(body(manifest_after_rollback).await.is_null());
-
-    let activated = app
-        .clone()
-        .oneshot(activate_request(
-            &package_id,
-            &token,
-            "signed-sync-activate-concurrent-0001",
-        ))
+    let mcp_replay = dispatcher
+        .dispatch_async(McpRequest {
+            tool_name: "migration_package_activate".into(),
+            correlation_id: "cor_signed_sync_mcp_activate_replay".into(),
+            bearer_token: Some(token.clone()),
+            idempotency_key: Some("signed-sync-mcp-activate-0001".into()),
+            input: json!({"packageId": package_id.clone()}),
+        })
         .await
         .unwrap();
-    let activated_status = activated.status();
-    let activated_body = body(activated).await;
-    assert_eq!(activated_status, StatusCode::OK, "{activated_body}");
-    assert_eq!(activated_body["state"], "active");
+    assert_eq!(mcp_replay, mcp_activation);
+    assert_eq!(mcp_activation["state"], "active");
+    assert_eq!(mcp_activation["replayed"], true);
     assert_eq!(activated_body["replayed"], false);
     assert!(activated_body["controlImport"].is_object());
     assert_eq!(activated_body["controlImport"]["state"], "active");
@@ -659,6 +668,15 @@ fn control_plane_export() -> Value {
             "platformRole": null,
             "accessSource": "direct",
             "createdAt": "2025-01-01T00:00:00Z"
+        }],
+        "profiles": [{
+            "id": "prf_0123456789abcdef0123456789abcdef",
+            "workspaceId": "workspace-signed-sync", "name": "Signed sync profile",
+            "runtime": "wayfern", "runtimeVersion": "146.0.7680.177.4",
+            "releaseType": "stable", "proxyId": null, "vpnId": null,
+            "groupId": null, "extensionGroupId": null, "ephemeral": false,
+            "createdAt": "2025-01-01T00:00:00Z", "updatedAt": "2025-01-01T00:00:00Z",
+            "tags": [], "note": null
         }],
         "shareGrants": [{
             "id": "share-signed-sync",

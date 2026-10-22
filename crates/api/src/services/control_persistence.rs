@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use buglogin_domain::errors::Problem;
 use buglogin_storage::control::{
     ClaimControlCommand, CompleteControlCommand, ControlCommandResult, ControlIdempotencyClaim,
-    ControlRecordStore, ExecuteControlCommand,
+    ControlIdempotencyClaimToken, ControlRecordStore, ExecuteControlCommand,
 };
 use serde::de::DeserializeOwned;
 
@@ -95,6 +95,50 @@ impl ControlPersistence {
             .collect()
     }
 
+    pub fn list_versioned_for_tenants<T>(
+        &self,
+        tenant_ids: &[String],
+        record_type: &str,
+    ) -> Result<Vec<(String, String, T, u64)>, Problem>
+    where
+        T: DeserializeOwned,
+    {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .list_for_tenants(tenant_ids, record_type)?
+            .into_iter()
+            .map(|record| {
+                let tenant_id = record.tenant_id.clone();
+                let record_id = record.record_id.clone();
+                let revision = record.revision;
+                decode(record).map(|value| (tenant_id, record_id, value, revision))
+            })
+            .collect()
+    }
+
+    pub fn list_versioned_for_account<T>(
+        &self,
+        tenant_id: &str,
+        record_type: &str,
+        account_id: &str,
+    ) -> Result<Vec<(String, T, u64)>, Problem>
+    where
+        T: DeserializeOwned,
+    {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .list_for_account(tenant_id, record_type, account_id)?
+            .into_iter()
+            .map(|record| {
+                let record_id = record.record_id.clone();
+                let revision = record.revision;
+                decode(record).map(|value| (record_id, value, revision))
+            })
+            .collect()
+    }
+
     #[allow(dead_code)]
     pub fn list<T>(&self, tenant_id: &str, record_type: &str) -> Result<Vec<T>, Problem>
     where
@@ -137,11 +181,45 @@ impl ControlPersistence {
             .map_err(|_| unavailable())?
             .complete_idempotency(command)
     }
+    pub fn abandon_idempotency(&self, claim: &ControlIdempotencyClaimToken) -> Result<(), Problem> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .abandon_idempotency(claim)
+    }
     pub fn execute(&self, command: ExecuteControlCommand) -> Result<ControlCommandResult, Problem> {
         self.store
             .lock()
             .map_err(|_| unavailable())?
             .execute(command)
+    }
+
+    pub fn try_advisory_lock(&self, lock_id: i64) -> Result<bool, Problem> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .try_advisory_lock(lock_id)
+    }
+
+    pub fn release_advisory_lock(&self, lock_id: i64) -> Result<(), Problem> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .release_advisory_lock(lock_id)
+    }
+
+    pub fn try_shared_advisory_lock(&self, lock_id: i64) -> Result<bool, Problem> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .try_shared_advisory_lock(lock_id)
+    }
+
+    pub fn release_shared_advisory_lock(&self, lock_id: i64) -> Result<(), Problem> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .release_shared_advisory_lock(lock_id)
     }
 }
 

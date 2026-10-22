@@ -7,6 +7,7 @@ pub mod encrypted_secrets;
 pub mod encrypted_vpn_configs;
 pub mod inspect;
 pub mod legacy;
+pub mod legacy_account_credentials;
 pub mod package;
 pub(crate) mod preserved_profile_activation;
 pub(crate) mod profile_data_activation;

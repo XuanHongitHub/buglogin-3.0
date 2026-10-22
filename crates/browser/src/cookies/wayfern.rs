@@ -1,12 +1,31 @@
 use super::{CookieInput, CookieSameSite};
+use aes::Aes128;
+use buglogin_storage::secrets::SecretValue;
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use rusqlite::{Connection, OpenFlags, params};
+use sha2::{Digest, Sha256};
 use std::{
     fmt,
+    io::Read,
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
+use zeroize::Zeroizing;
 
 const WINDOWS_EPOCH_DIFF: i64 = 11_644_473_600;
 const MIN_SUPPORTED_COOKIE_SCHEMA_VERSION: i64 = 23;
+const COOKIE_KEY_BYTES: usize = 16;
+const COOKIE_KEY_SALT: &[u8] = b"saltysalt";
+const COOKIE_KEY_IV: [u8; 16] = [b' '; 16];
+const COOKIE_HOST_HASH_BYTES: usize = 32;
+const MAX_OS_CRYPT_KEY_BYTES: usize = 4096;
+const MAX_COOKIE_ROWS: usize = 100_000;
+const MAX_COOKIE_VALUE_BYTES: usize = 64 * 1024 * 1024;
+
+#[cfg(target_os = "macos")]
+const COOKIE_KEY_ITERATIONS: u32 = 1003;
+#[cfg(not(target_os = "macos"))]
+const COOKIE_KEY_ITERATIONS: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileCookieState {
@@ -67,6 +86,9 @@ pub enum WayfernCookieError {
     InvalidCiphertext,
     InvalidValue,
     InvalidExpiry,
+    ResourceLimit,
+    PartitionedCookiesUnsupported,
+    EncryptionKeyUnavailable,
     UnsupportedSchema,
     Database,
 }
@@ -79,6 +101,9 @@ impl fmt::Display for WayfernCookieError {
             Self::InvalidCiphertext => "invalid_cookie_ciphertext",
             Self::InvalidValue => "invalid_cookie_value",
             Self::InvalidExpiry => "invalid_cookie_expiry",
+            Self::ResourceLimit => "cookie_resource_limit_exceeded",
+            Self::PartitionedCookiesUnsupported => "cookie_partitioned_unsupported",
+            Self::EncryptionKeyUnavailable => "cookie_encryption_key_unavailable",
             Self::UnsupportedSchema => "unsupported_cookie_database_schema",
             Self::Database => "cookie_database_error",
         })
@@ -109,6 +134,93 @@ pub fn materialize(
     Err(WayfernCookieError::PlaintextPersistenceForbidden)
 }
 
+pub fn materialize_from_inputs(
+    profile_data_root: &Path,
+    state: ProfileCookieState,
+    cookies: &[CookieInput],
+    now_unix: i64,
+) -> Result<WayfernCookieReport, WayfernCookieError> {
+    if state == ProfileCookieState::Running {
+        return Err(WayfernCookieError::RunningProfile);
+    }
+    if now_unix < 0 {
+        return Err(WayfernCookieError::InvalidExpiry);
+    }
+    let os_crypt_key = read_os_crypt_key(profile_data_root)?;
+    if os_crypt_key.is_empty() || os_crypt_key.len() > MAX_OS_CRYPT_KEY_BYTES {
+        return Err(WayfernCookieError::EncryptionKeyUnavailable);
+    }
+    let encrypted = cookies
+        .iter()
+        .map(|cookie| {
+            let ciphertext =
+                encrypt_cookie_value(&os_crypt_key, &cookie.domain, cookie.value.as_bytes())?;
+            EncryptedCookieInput::new(
+                cookie.name.clone(),
+                cookie.domain.clone(),
+                cookie.path.clone(),
+                cookie.secure,
+                cookie.http_only,
+                cookie.expires_at,
+                cookie.same_site,
+                ciphertext,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    materialize_encrypted(profile_data_root, state, &encrypted, now_unix)
+}
+
+fn read_os_crypt_key(profile_data_root: &Path) -> Result<Zeroizing<Vec<u8>>, WayfernCookieError> {
+    let file = std::fs::File::open(profile_data_root.join("os_crypt_key"))
+        .map_err(|_| WayfernCookieError::EncryptionKeyUnavailable)?;
+    let mut key = Zeroizing::new(Vec::with_capacity(MAX_OS_CRYPT_KEY_BYTES + 1));
+    file.take((MAX_OS_CRYPT_KEY_BYTES + 1) as u64)
+        .read_to_end(&mut key)
+        .map_err(|_| WayfernCookieError::EncryptionKeyUnavailable)?;
+    if key.is_empty() || key.len() > MAX_OS_CRYPT_KEY_BYTES {
+        return Err(WayfernCookieError::EncryptionKeyUnavailable);
+    }
+    Ok(key)
+}
+
+fn encrypt_cookie_value(
+    os_crypt_key: &[u8],
+    host_key: &str,
+    value: &[u8],
+) -> Result<Vec<u8>, WayfernCookieError> {
+    if os_crypt_key.is_empty()
+        || os_crypt_key.len() > MAX_OS_CRYPT_KEY_BYTES
+        || host_key.is_empty()
+        || value.is_empty()
+    {
+        return Err(WayfernCookieError::InvalidValue);
+    }
+    let mut aes_key = Zeroizing::new([0_u8; COOKIE_KEY_BYTES]);
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA1,
+        NonZeroU32::new(COOKIE_KEY_ITERATIONS)
+            .ok_or(WayfernCookieError::EncryptionKeyUnavailable)?,
+        COOKIE_KEY_SALT,
+        os_crypt_key,
+        &mut *aes_key,
+    );
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(
+        COOKIE_HOST_HASH_BYTES + value.len() + 16,
+    ));
+    plaintext.extend_from_slice(&Sha256::digest(host_key.as_bytes()));
+    plaintext.extend_from_slice(value);
+    let original_len = plaintext.len();
+    plaintext.resize(original_len + 16, 0);
+    let encryption_result =
+        cbc::Encryptor::<Aes128>::new(&(*aes_key).into(), &COOKIE_KEY_IV.into())
+            .encrypt_padded_mut::<Pkcs7>(&mut *plaintext, original_len);
+    let ciphertext = encryption_result.map_err(|_| WayfernCookieError::InvalidValue)?;
+    let mut output = Vec::with_capacity(3 + ciphertext.len());
+    output.extend_from_slice(b"v10");
+    output.extend_from_slice(ciphertext);
+    Ok(output)
+}
+
 pub fn materialize_encrypted(
     profile_data_root: &Path,
     state: ProfileCookieState,
@@ -136,12 +248,11 @@ pub fn materialize_encrypted(
         .map_err(|_| WayfernCookieError::Database)?;
     let mut report = WayfernCookieReport::default();
     for cookie in cookies {
-        let expires = cookie
-            .expires_at
-            .unwrap_or_else(|| now_unix.saturating_add(30 * 86_400));
-        if expires < 0 {
-            return Err(WayfernCookieError::InvalidExpiry);
-        }
+        let (expires_utc, has_expires, is_persistent) = match cookie.expires_at {
+            Some(expires) if expires >= 0 => (unix_to_chrome_time(expires)?, 1, 1),
+            Some(_) => return Err(WayfernCookieError::InvalidExpiry),
+            None => (0, 0, 0),
+        };
         let source_scheme = if cookie.secure { 2 } else { 1 };
         let source_port = if cookie.secure { 443 } else { 80 };
         let existing: bool = transaction
@@ -151,21 +262,20 @@ pub fn materialize_encrypted(
                 |row| row.get(0),
             )
             .map_err(|_| WayfernCookieError::Database)?;
-        let expires_utc = unix_to_chrome_time(expires)?;
         let now_utc = unix_to_chrome_time(now_unix)?;
         let same_site = same_site_to_db(cookie.same_site);
         let secure = i32::from(cookie.secure);
         let http_only = i32::from(cookie.http_only);
         if existing {
             transaction.execute(
-                "UPDATE cookies SET value = '', encrypted_value = ?1, expires_utc = ?2, is_secure = ?3, is_httponly = ?4, last_access_utc = ?5, has_expires = 1, is_persistent = 1, samesite = ?6, last_update_utc = ?7 WHERE host_key = ?8 AND top_frame_site_key = '' AND has_cross_site_ancestor = 0 AND name = ?9 AND path = ?10 AND source_scheme = ?11 AND source_port = ?12",
-                params![cookie.ciphertext, expires_utc, secure, http_only, now_utc, same_site, now_utc, cookie.domain, cookie.name, cookie.path, source_scheme, source_port],
+                "UPDATE cookies SET value = '', encrypted_value = ?1, expires_utc = ?2, is_secure = ?3, is_httponly = ?4, last_access_utc = ?5, has_expires = ?6, is_persistent = ?7, samesite = ?8, last_update_utc = ?9 WHERE host_key = ?10 AND top_frame_site_key = '' AND has_cross_site_ancestor = 0 AND name = ?11 AND path = ?12 AND source_scheme = ?13 AND source_port = ?14",
+                params![cookie.ciphertext, expires_utc, secure, http_only, now_utc, has_expires, is_persistent, same_site, now_utc, cookie.domain, cookie.name, cookie.path, source_scheme, source_port],
             ).map_err(|_| WayfernCookieError::Database)?;
             report.replaced += 1;
         } else {
             transaction.execute(
-                "INSERT INTO cookies (creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, priority, samesite, source_scheme, source_port, source_type, has_cross_site_ancestor, last_update_utc) VALUES (?1, ?2, '', ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, 1, 1, 1, ?10, ?11, ?12, 0, 0, ?13)",
-                params![now_utc, cookie.domain, cookie.name, cookie.ciphertext, cookie.path, expires_utc, secure, http_only, now_utc, same_site, source_scheme, source_port, now_utc],
+                "INSERT INTO cookies (creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, priority, samesite, source_scheme, source_port, source_type, has_cross_site_ancestor, last_update_utc) VALUES (?1, ?2, '', ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?13, ?14, 0, 0, ?15)",
+                params![now_utc, cookie.domain, cookie.name, cookie.ciphertext, cookie.path, expires_utc, secure, http_only, now_utc, has_expires, is_persistent, same_site, source_scheme, source_port, now_utc],
             ).map_err(|_| WayfernCookieError::Database)?;
             report.inserted += 1;
         }
@@ -198,6 +308,123 @@ pub fn read_metadata(
         .map_err(|_| WayfernCookieError::Database)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|_| WayfernCookieError::Database)
+}
+
+/// Reads cookie values from a stopped local Wayfern profile into zeroizing secret containers.
+/// Values are decrypted in memory only; this function never writes plaintext to disk or logs.
+pub fn read_inputs(profile_data_root: &Path) -> Result<Vec<CookieInput>, WayfernCookieError> {
+    let os_crypt_key = read_os_crypt_key(profile_data_root)?;
+    let path = database_path(profile_data_root);
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| WayfernCookieError::Database)?;
+    validate_supported_schema(&connection)?;
+    let has_partitioned_cookies: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM cookies WHERE top_frame_site_key <> '' OR has_cross_site_ancestor <> 0)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| WayfernCookieError::Database)?;
+    if has_partitioned_cookies {
+        return Err(WayfernCookieError::PartitionedCookiesUnsupported);
+    }
+    let mut statement = connection
+        .prepare("SELECT name, host_key, path, value, encrypted_value, expires_utc, is_secure, is_httponly, samesite FROM cookies WHERE top_frame_site_key = '' AND has_cross_site_ancestor = 0")
+        .map_err(|_| WayfernCookieError::Database)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i32>(6)? != 0,
+                row.get::<_, i32>(7)? != 0,
+                row.get::<_, i32>(8)?,
+            ))
+        })
+        .map_err(|_| WayfernCookieError::Database)?;
+    let mut cookies = Vec::new();
+    let mut total_value_bytes = 0_usize;
+    for row in rows {
+        if cookies.len() >= MAX_COOKIE_ROWS {
+            return Err(WayfernCookieError::ResourceLimit);
+        }
+        let (
+            name,
+            domain,
+            path,
+            plaintext_value,
+            ciphertext,
+            expires_utc,
+            secure,
+            http_only,
+            same_site,
+        ) = row.map_err(|_| WayfernCookieError::Database)?;
+        let value = if !ciphertext.is_empty() {
+            decrypt_cookie_value(&os_crypt_key, &domain, &ciphertext)?
+        } else if !plaintext_value.is_empty() {
+            Zeroizing::new(plaintext_value.into_bytes())
+        } else {
+            return Err(WayfernCookieError::InvalidValue);
+        };
+        total_value_bytes = total_value_bytes.saturating_add(value.len());
+        if total_value_bytes > MAX_COOKIE_VALUE_BYTES {
+            return Err(WayfernCookieError::ResourceLimit);
+        }
+        let value =
+            SecretValue::new(value.to_vec()).map_err(|_| WayfernCookieError::InvalidValue)?;
+        cookies.push(CookieInput {
+            name,
+            domain,
+            path,
+            secure,
+            http_only,
+            expires_at: chrome_to_unix(expires_utc),
+            same_site: same_site_from_db(same_site),
+            value,
+        });
+    }
+    Ok(cookies)
+}
+
+fn decrypt_cookie_value(
+    os_crypt_key: &[u8],
+    host_key: &str,
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, WayfernCookieError> {
+    if os_crypt_key.is_empty()
+        || os_crypt_key.len() > MAX_OS_CRYPT_KEY_BYTES
+        || host_key.is_empty()
+        || ciphertext.len() <= 3
+        || !matches!(&ciphertext[..3], b"v10" | b"v11")
+        || (ciphertext.len() - 3) % 16 != 0
+    {
+        return Err(WayfernCookieError::InvalidCiphertext);
+    }
+    let mut aes_key = Zeroizing::new([0_u8; COOKIE_KEY_BYTES]);
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA1,
+        NonZeroU32::new(COOKIE_KEY_ITERATIONS)
+            .ok_or(WayfernCookieError::EncryptionKeyUnavailable)?,
+        COOKIE_KEY_SALT,
+        os_crypt_key,
+        &mut *aes_key,
+    );
+    let mut plaintext = Zeroizing::new(ciphertext[3..].to_vec());
+    let decrypted = cbc::Decryptor::<Aes128>::new(&(*aes_key).into(), &COOKIE_KEY_IV.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut *plaintext)
+        .map_err(|_| WayfernCookieError::InvalidCiphertext)?;
+    if decrypted.len() <= COOKIE_HOST_HASH_BYTES
+        || decrypted[..COOKIE_HOST_HASH_BYTES] != Sha256::digest(host_key.as_bytes())[..]
+    {
+        return Err(WayfernCookieError::InvalidCiphertext);
+    }
+    let value = decrypted[COOKIE_HOST_HASH_BYTES..].to_vec();
+    plaintext.clear();
+    Ok(Zeroizing::new(value))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -370,6 +597,22 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn decrypts_cookie_ciphertext_and_checks_host_binding() {
+        let key = b"profile-local-os-crypt-key";
+        let ciphertext = encrypt_cookie_value(key, ".example.com", b"session-value").unwrap();
+        assert_eq!(
+            decrypt_cookie_value(key, ".example.com", &ciphertext)
+                .unwrap()
+                .as_slice(),
+            b"session-value"
+        );
+        assert_eq!(
+            decrypt_cookie_value(key, ".other.example", &ciphertext),
+            Err(WayfernCookieError::InvalidCiphertext)
+        );
+    }
+
     fn create_supported_database(root: &Path) {
         let path = database_path(root);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -410,6 +653,33 @@ mod tests {
     }
 
     #[test]
+    fn reads_decrypted_cookie_inputs_from_supported_profile_database() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-wayfern-cookie-read-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        create_supported_database(&root);
+        let key = b"profile-local-os-crypt-key";
+        fs::write(root.join("os_crypt_key"), key).unwrap();
+        materialize_from_inputs(
+            &root,
+            ProfileCookieState::Stopped,
+            &[input(b"session-value")],
+            1_700_000_000,
+        )
+        .unwrap();
+
+        let cookies = read_inputs(&root).unwrap();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].value.as_bytes(), b"session-value");
+        assert_eq!(cookies[0].domain, ".example.com");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn writes_to_existing_supported_profile_database_and_redacts_reads() {
         let root = std::env::temp_dir().join(format!(
             "buglogin-wayfern-cookie-{}",
@@ -435,15 +705,30 @@ mod tests {
         );
         {
             let connection = Connection::open(database_path(&root)).unwrap();
-            let (value, encrypted): (String, Vec<u8>) = connection
+            let (value, encrypted, expires_utc, has_expires, is_persistent): (
+                String,
+                Vec<u8>,
+                i64,
+                i64,
+                i64,
+            ) = connection
                 .query_row(
-                    "SELECT value, encrypted_value FROM cookies WHERE name = 'sid'",
+                    "SELECT value, encrypted_value, expires_utc, has_expires, is_persistent FROM cookies WHERE name = 'sid'",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
                 )
                 .unwrap();
             assert!(value.is_empty());
             assert_eq!(encrypted, b"v10\x01opaque-ciphertext");
+            assert_eq!((expires_utc, has_expires, is_persistent), (0, 0, 0));
         }
         let rows = read_metadata(&root).unwrap();
         assert_eq!(rows.len(), 1);

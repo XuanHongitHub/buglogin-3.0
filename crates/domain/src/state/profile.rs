@@ -5,6 +5,10 @@ use std::fmt;
 pub use crate::entities::ProfileState as ProfileLifecycle;
 
 impl ProfileState {
+    pub fn allows_proxy_change(&self) -> bool {
+        matches!(self, Self::Created | Self::Ready | Self::Failed)
+    }
+
     pub fn transition(self, next: Self) -> Result<Self, Problem> {
         if self.can_transition_to(&next) {
             Ok(next)

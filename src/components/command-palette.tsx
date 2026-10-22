@@ -1,19 +1,23 @@
 "use client";
 
 import { useTranslation } from "react-i18next";
-import { FaDownload } from "react-icons/fa";
 import { FiWifi } from "react-icons/fi";
 import { GoGear } from "react-icons/go";
 import {
   LuBadgeInfo,
+  LuBot,
   LuCircleStop,
   LuCloud,
+  LuCookie,
   LuInfo,
   LuKeyboard,
+  LuLightbulb,
+  LuMessageSquareHeart,
   LuPlay,
   LuPlug,
   LuPlus,
   LuPuzzle,
+  LuTrash2,
   LuUser,
   LuUsers,
 } from "react-icons/lu";
@@ -62,14 +66,18 @@ interface CommandPaletteProps {
 const ICONS: Record<ShortcutId, React.ComponentType<{ className?: string }>> = {
   openPalette: LuKeyboard,
   openShortcuts: LuKeyboard,
-  importProfile: FaDownload,
+  openTips: LuLightbulb,
+  sendFeedback: LuMessageSquareHeart,
   goProfiles: LuUser,
   goProxies: FiWifi,
   goExtensions: LuPuzzle,
   goGroups: LuUsers,
+  goCookieBot: LuCookie,
+  goAgent: LuBot,
   goIntegrations: LuPlug,
   goAccount: LuCloud,
   goSettings: GoGear,
+  goTrash: LuTrash2,
 };
 
 function Tokens({ tokens }: { tokens: string[] }) {

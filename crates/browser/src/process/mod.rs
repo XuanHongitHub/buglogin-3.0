@@ -1,13 +1,12 @@
 use buglogin_domain::errors::Problem;
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 use std::process::Child;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use std::process::Command;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+};
 
 #[cfg(target_os = "macos")]
 use crate::platform::macos::{MacOsProcessGroup, MacOsProcessGroupController};
@@ -17,9 +16,6 @@ use crate::platform::windows::{WindowsJobController, WindowsJobProcess};
 use crate::platform::{OwnedProcessTree, ProcessTreeIdentity, ProcessTreeStatus};
 use crate::runtime::LaunchSpecification;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessIdentity {
     pub pid: u32,
@@ -28,17 +24,18 @@ pub struct ProcessIdentity {
 }
 impl ProcessIdentity {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    fn new(pid: u32, executable: PathBuf) -> Self {
-        let time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self {
+    fn new(pid: u32, executable: PathBuf) -> Result<Self, Problem> {
+        let mut token_bytes = [0_u8; 16];
+        getrandom::fill(&mut token_bytes).map_err(|_| identity_unavailable())?;
+        let token = token_bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Ok(Self {
             pid,
             executable,
-            token: format!("{time:x}-{counter:x}"),
-        }
+            token,
+        })
     }
     pub(crate) fn encode(&self) -> String {
         format!(
@@ -104,6 +101,9 @@ pub trait ProcessController: Send {
     ) -> Result<Box<dyn ManagedProcess>, Problem>;
     fn inspect(&self, identity: &ProcessIdentity) -> ProcessStatus;
     fn terminate(&self, identity: &ProcessIdentity) -> Result<(), Problem>;
+    fn approve_executable(&self, _path: &Path) -> Result<(), Problem> {
+        Err(invalid_executable())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,12 +122,14 @@ impl ApprovedExecutable {
 }
 
 pub struct SystemProcessController {
-    approved: BTreeSet<PathBuf>,
+    approved: Arc<RwLock<BTreeSet<PathBuf>>>,
 }
 impl SystemProcessController {
     pub fn new(approved: impl IntoIterator<Item = ApprovedExecutable>) -> Self {
         Self {
-            approved: approved.into_iter().map(|item| item.0).collect(),
+            approved: Arc::new(RwLock::new(
+                approved.into_iter().map(|item| item.0).collect(),
+            )),
         }
     }
 
@@ -136,7 +138,12 @@ impl SystemProcessController {
             .executable
             .canonicalize()
             .map_err(|_| invalid_executable())?;
-        if !self.approved.contains(&executable) {
+        if !self
+            .approved
+            .read()
+            .map_err(|_| invalid_executable())?
+            .contains(&executable)
+        {
             return Err(invalid_executable());
         }
         if !specification.profile_path.is_absolute() {
@@ -153,7 +160,12 @@ impl ProcessController for SystemProcessController {
         let executable = self.approved_executable(specification)?;
         #[cfg(target_os = "windows")]
         return Ok(Box::new(PlatformManagedProcess::new(
-            WindowsJobController::system()?.launch(&executable, &specification.args)?,
+            WindowsJobController::system()?.launch(
+                &executable,
+                &specification.args,
+                specification.runtime == buglogin_domain::entities::Runtime::Wayfern,
+                &specification.profile_path,
+            )?,
         )));
         #[cfg(target_os = "macos")]
         return Ok(Box::new(PlatformManagedProcess::new(
@@ -165,7 +177,7 @@ impl ProcessController for SystemProcessController {
             .spawn()
             .map_err(|_| spawn_failed())?;
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        Ok(Box::new(ProcessHandle::from_child(child, executable)))
+        Ok(Box::new(ProcessHandle::from_child(child, executable)?))
     }
     fn inspect(&self, identity: &ProcessIdentity) -> ProcessStatus {
         #[cfg(target_os = "windows")]
@@ -195,6 +207,15 @@ impl ProcessController for SystemProcessController {
             .terminate(&decode_tree_identity(identity).ok_or_else(identity_unverified)?);
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         Err(identity_unverified())
+    }
+
+    fn approve_executable(&self, path: &Path) -> Result<(), Problem> {
+        let approved = ApprovedExecutable::new(path)?;
+        self.approved
+            .write()
+            .map_err(|_| invalid_executable())?
+            .insert(approved.0);
+        Ok(())
     }
 }
 
@@ -275,9 +296,16 @@ impl ProcessHandle {
         Err(invalid_executable())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    fn from_child(child: Child, executable: PathBuf) -> Self {
-        let identity = ProcessIdentity::new(child.id(), executable);
-        Self { child, identity }
+    fn from_child(mut child: Child, executable: PathBuf) -> Result<Self, Problem> {
+        let identity = match ProcessIdentity::new(child.id(), executable) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        Ok(Self { child, identity })
     }
     pub fn id(&self) -> u32 {
         self.identity.pid
@@ -317,6 +345,17 @@ fn invalid_identity() -> Problem {
         500,
         "browser",
     )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn identity_unavailable() -> Problem {
+    Problem::new(
+        "process_identity_unavailable",
+        "Process identity could not be generated",
+        503,
+        "process",
+    )
+    .retryable(true)
 }
 fn identity_unverified() -> Problem {
     Problem::new(

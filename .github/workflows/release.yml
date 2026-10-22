@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          fetch-depth: 0
+          ref: ${{ github.event_name == 'push' && github.ref_name || inputs.release_ref }}
           persist-credentials: false
       - id: release
         name: Validate immutable protected release tag
@@ -37,16 +37,27 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_REF: ${{ inputs.release_ref }}
           PUSH_REF: ${{ github.ref_name }}
+          CURRENT_REF: ${{ github.ref_name }}
+          CURRENT_REF_TYPE: ${{ github.ref_type }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_PROTECTED: ${{ github.ref_protected }}
         run: |
           set -euo pipefail
-          RELEASE_REF="${PUSH_REF:-$INPUT_REF}"
-          [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Invalid release tag"; exit 1; }
-          if [[ "$EVENT_NAME" == "push" && "$REF_PROTECTED" != "true" ]]; then
-            echo "Release tags must be protected"
-            exit 1
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            RELEASE_REF="$PUSH_REF"
+            if [[ "$CURRENT_REF_TYPE" != "tag" || "$CURRENT_REF" != "$RELEASE_REF" || "$REF_PROTECTED" != "true" ]]; then
+              echo "Release tags must be protected"
+              exit 1
+            fi
+          else
+            RELEASE_REF="$INPUT_REF"
+            if [[ "$CURRENT_REF_TYPE" != "branch" || "$CURRENT_REF" != "$DEFAULT_BRANCH" ]]; then
+              echo "Manual RC verification must run from the repository default branch"
+              exit 1
+            fi
+            [[ -n "$RELEASE_REF" ]] || { echo "release_ref is required for manual verification"; exit 1; }
           fi
-          git fetch --force --tags origin "refs/tags/$RELEASE_REF:refs/tags/$RELEASE_REF"
+          [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Invalid release tag"; exit 1; }
           RELEASE_SHA="$(git rev-parse "refs/tags/$RELEASE_REF^{commit}")"
           [[ -n "$RELEASE_SHA" ]] || { echo "Release tag does not resolve to a commit"; exit 1; }
           if [[ "$EVENT_NAME" == "push" && "$RELEASE_SHA" != "$GITHUB_SHA" ]]; then
@@ -71,3 +82,54 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+
+  publish-rc:
+    needs: [validate, sign-and-verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release-publish
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_REF: ${{ needs.validate.outputs.release_ref }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.validate.outputs.release_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: buglogin-${{ needs.validate.outputs.release_ref }}-*-signed
+          path: incoming
+          merge-multiple: false
+      - name: Verify platform bundles and prepare immutable RC assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "dist-release/$RELEASE_REF" ]] || { echo "Release staging path already exists"; exit 1; }
+          mkdir -p "dist-release/$RELEASE_REF"
+          expected=(windows-x64 macos-arm64 macos-x64)
+          for platform in "${expected[@]}"; do
+            matches=(incoming/buglogin-"$RELEASE_REF"-"$platform"-signed)
+            [[ -d "${matches[0]}" ]] || { echo "Missing signed artifact for $platform"; exit 1; }
+            node scripts/release/verify-bundle.mjs "${matches[0]}"
+            (cd "${matches[0]}" && zip -qr "$GITHUB_WORKSPACE/dist-release/$RELEASE_REF/BugLogin-$RELEASE_REF-$platform.zip" .)
+          done
+          node scripts/release/assemble-tauri-updater-feed.mjs incoming "dist-release/$RELEASE_REF" "${RELEASE_REF#v}" "$GH_REPO"
+          [[ "$(find "dist-release/$RELEASE_REF" -maxdepth 1 -name '*.zip' | wc -l | tr -d ' ')" == 3 ]] || { echo "Expected exactly three platform archives"; exit 1; }
+          (cd "dist-release/$RELEASE_REF" && find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+      - name: Create GitHub draft prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_REF" >/dev/null 2>&1; then
+            echo "A release already exists for $RELEASE_REF; refusing to replace immutable assets"
+            exit 1
+          fi
+          gh release create "$RELEASE_REF" dist-release/"$RELEASE_REF"/* \
+            --prerelease --verify-tag \
+            --title "BugLogin $RELEASE_REF (release candidate)" \
+            --notes "Signed Windows and macOS release candidate. Verify SHA256SUMS.txt and provenance before promotion. This release is not the stable channel."

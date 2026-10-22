@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBuildTargetDir } from "../../scripts/build-target.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const result = spawnSync(
@@ -13,11 +14,7 @@ const result = spawnSync(
     env: {
       ...process.env,
       BUGLOGIN_EVIDENCE_GENERATED_AT: new Date().toISOString(),
-      CARGO_TARGET_DIR:
-        process.env.CARGO_TARGET_DIR ??
-        (process.platform === "win32"
-          ? "D:\\buglogin-build\\rehearsal"
-          : join(root, "../../.build/rehearsal")),
+      CARGO_TARGET_DIR: resolveBuildTargetDir(process.env.CARGO_TARGET_DIR),
     },
   },
 );

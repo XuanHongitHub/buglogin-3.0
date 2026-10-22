@@ -24,7 +24,7 @@ One release version must match `package.json`, `src-tauri/Cargo.toml`, `src-taur
 Current snapshots provide evidence, not final pins:
 
 - Legacy `1.1.84`: Tauri 2; macOS 14 workflow; Node 22; pnpm 10.32.1; Rust stable.
-- DonutBrowser `0.28.2`: pnpm 11.10.0; Tauri CLI 2.11.4; repository Node value 23; upstream multi-platform release patterns.
+- DonutBrowser `0.34.0`: pnpm 12.8.1 and upstream multi-platform release patterns. These are reference evidence, not BugLogin pins.
 
 Rebuild must pin one Node, pnpm, Rust, and runner-image version before implementation. Release CI must not float on `stable`.
 
@@ -32,9 +32,9 @@ Rebuild must pin one Node, pnpm, Rust, and runner-image version before implement
 
 | Platform | Architecture | Primary | Secondary | Signing |
 |---|---|---|---|---|
-| Windows | x86_64 | NSIS `.exe` | Optional portable `.zip` | Authenticode SHA-256 + trusted timestamp |
-| macOS | arm64 | `.dmg` containing `.app` | Optional updater bundle | Developer ID, hardened runtime, notarization, stapling |
-| macOS | x86_64 | `.dmg` containing `.app` | Optional updater bundle | Same, if Intel supported |
+| Windows | x86_64 | NSIS `.exe` | Signed NSIS updater `.nsis.zip` | Authenticode SHA-256 + trusted timestamp |
+| macOS | arm64 | `.dmg` containing `.app` | Signed updater `.app.tar.gz` | Developer ID, hardened runtime, notarization, stapling |
+| macOS | x86_64 | `.dmg` containing `.app` | Signed updater `.app.tar.gz` | Same, if Intel supported |
 
 Linux artifacts need a separate support decision before publication.
 
@@ -44,11 +44,15 @@ Every release includes SHA-256, SBOM, provenance/attestation, license notices, v
 
 - Protected tags/manual approvals only.
 - Signing secrets use protected environments and least privilege.
+- macOS signing accepts the explicit `APPLE_CERTIFICATE_P12_BASE64` / `APPLE_APP_PASSWORD` names or the already provisioned repository aliases `APPLE_CERTIFICATE` / `APPLE_PASSWORD`; it derives the Developer ID Application identity from the imported keychain when no identity secret is set, and checks the configured Team ID.
 - Logs never print certificates, keys, passwords, tokens, or decoded secrets.
 - Temporary keychains/certificates removed in `always` cleanup.
 - Windows timestamp URL and certificate identity configured; empty values block stable.
 - macOS identity/team/entitlements/hardened runtime/notarization/stapling verify.
-- Update metadata signed separately from installers.
+- Update artifacts are signed separately from installers when the updater capability is enabled. The native Tauri updater client/feed is now implemented in source, but signing credentials and installed-app platform evidence remain outstanding. The signed installer verifier still validates the custom Ed25519 release-evidence manifest when one is present. Stable promotion remains gated on key custody and rollback evidence below.
+- The native desktop binary updater uses Tauri updater artifact signatures (minisign format) and a static `latest.json` feed with platform keys `windows-x86_64`, `darwin-aarch64`, and `darwin-x86_64`. The protected `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are consumed only by signing jobs; `BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY` is embedded into the build and is safe to publish. The existing Ed25519 `updater-manifest.json` verifier is release evidence only and is not accepted as the Tauri install trust root.
+- Release assembly requires one updater archive and detached `.sig` per supported target, then publishes those exact immutable assets plus `latest.json` as a downloadable GitHub prerelease. This allows QA to install the exact RC bytes by tag while `/releases/latest/download/latest.json` continues to resolve only to stable. `.github/workflows/promote-stable.yml` requires an HTTPS QA-evidence link and the protected `stable-promotion` environment, rechecks the published RC checksum list and feed/version/platform URLs, then changes only that release's prerelease/latest metadata. It does not rebuild, upload, clobber, or replace any asset. QA reviewers must verify the linked Windows/macOS install, update, and sync evidence before approving the environment gate.
+- When an Ed25519 release-evidence manifest is included, its verifier must pin the public key from protected release configuration; a public key embedded only in the detached signature envelope is not a trust root. The signing workflow reads the non-secret `BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64` repository variable and fails closed if the manifest's key is absent or mismatched. This evidence key is separate from the compiled Tauri artifact-signing key described below.
 - Key rotation/revocation tested before GA.
 
 ## Supply chain
@@ -119,6 +123,9 @@ Procedure:
 - Windows code-signing provider, certificate, timestamp authority.
 - Apple team, certificate custody, notarization authentication.
 - Update signing algorithm/key custody/rotation.
+- Protected Tauri updater signing key pair: `TAURI_SIGNING_PRIVATE_KEY`, optional matching passphrase `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and repository variable `BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY`.
+- Protected `BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64` value for CI manifest verification, plus a separately designed and pinned desktop updater trust configuration.
 - Artifact registry, SBOM/provenance format, retention.
 - Stable rollback window and database downgrade policy.
 - Hosted runners versus dedicated physical E2E machines.
+- Protected GitHub environment reviewers for `release-signing`, `release-publish`, and `stable-promotion`; the workflow files cannot enforce these approval lists by themselves.

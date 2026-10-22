@@ -3,15 +3,28 @@
  * Centralized helpers for browser name mapping, icons, etc.
  */
 
-import { FaChrome, FaExclamationTriangle, FaFire } from "react-icons/fa";
-import { LuLock } from "react-icons/lu";
+import {
+  FaAndroid,
+  FaApple,
+  FaChrome,
+  FaEdge,
+  FaExclamationTriangle,
+  FaFire,
+  FaFirefox,
+  FaLinux,
+  FaSafari,
+  FaWindows,
+} from "react-icons/fa";
+import { LuGlobe, LuLock } from "react-icons/lu";
+import { SiBrave, SiOpera, SiVivaldi } from "react-icons/si";
+import { BugLoginProfileIcon } from "@/components/icons/buglogin-profile-icon";
 
 /**
  * Map internal browser names to display names
  */
 export function getBrowserDisplayName(browserType: string): string {
   const browserNames: Record<string, string> = {
-    wayfern: "Wayfern",
+    wayfern: "Browser",
   };
 
   return browserNames[browserType] || browserType;
@@ -31,6 +44,35 @@ export function getBrowserIcon(browserType: string) {
   }
 }
 
+/** Source browsers are identities, not warnings about the destination runtime. */
+export function getSourceBrowserIcon(browserType: string) {
+  switch (browserType.toLowerCase()) {
+    case "chrome":
+    case "chrome-beta":
+    case "chrome-dev":
+    case "chrome-canary":
+    case "chromium":
+    case "wayfern":
+      return FaChrome;
+    case "edge":
+    case "msedge":
+      return FaEdge;
+    case "brave":
+      return SiBrave;
+    case "vivaldi":
+      return SiVivaldi;
+    case "opera":
+    case "opera-gx":
+      return SiOpera;
+    case "firefox":
+      return FaFirefox;
+    case "safari":
+      return FaSafari;
+    default:
+      return LuGlobe;
+  }
+}
+
 export function getProfileIcon(profile: {
   browser: string;
   ephemeral?: boolean;
@@ -42,7 +84,9 @@ export function getProfileIcon(profile: {
   // ever violated, in which case showing the lock is the safer default.
   if (profile.password_protected) return LuLock;
   if (profile.ephemeral) return FaFire;
-  return getBrowserIcon(profile.browser);
+  return profile.browser.toLowerCase() === "wayfern"
+    ? BugLoginProfileIcon
+    : getBrowserIcon(profile.browser);
 }
 
 export const getCurrentOS = () => {
@@ -55,10 +99,24 @@ export const getCurrentOS = () => {
   return "unknown";
 };
 
+/**
+ * The OS a fingerprint without an explicit `os` was generated for: the machine
+ * that created the profile. Mirrors `BrowserProfile::native_os`, without its
+ * fallback to this computer, so callers can tell "unknown" apart.
+ */
+export function getProfileNativeOs(profile: {
+  host_os?: string;
+}): "macos" | "windows" | "linux" | undefined {
+  const os = profile.host_os;
+  return os === "macos" || os === "windows" || os === "linux" ? os : undefined;
+}
+
 export function isCrossOsProfile(profile: {
+  browser?: string;
   host_os?: string;
   wayfern_config?: { os?: string };
 }): boolean {
+  if (profile.browser === "wayfern") return false;
   const profileOs = profile.host_os || profile.wayfern_config?.os;
   if (!profileOs) return false;
   return profileOs !== getCurrentOS();
@@ -72,7 +130,25 @@ export function getOSDisplayName(os: string): string {
       return "Windows";
     case "linux":
       return "Linux";
+    case "android":
+      return "Android";
+    case "ios":
+      return "iOS";
     default:
       return os;
+  }
+}
+
+export function getOSIcon(os: string) {
+  switch (os) {
+    case "macos":
+    case "ios":
+      return FaApple;
+    case "windows":
+      return FaWindows;
+    case "android":
+      return FaAndroid;
+    default:
+      return FaLinux;
   }
 }

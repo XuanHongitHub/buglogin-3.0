@@ -1,16 +1,17 @@
 "use client";
 
 import {
-  type ColumnDef,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
   type RowSelectionState,
   type SortingState,
-  useReactTable,
 } from "@tanstack/react-table";
+import {
+  type LegacyColumnDef as ColumnDef,
+  getCoreRowModel,
+  getSortedRowModel,
+  useLegacyTable as useReactTable,
+} from "@tanstack/react-table/legacy";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GoPlus } from "react-icons/go";
@@ -19,8 +20,11 @@ import {
   LuChevronUp,
   LuFolder,
   LuPencil,
-  LuRefreshCw,
+  LuPlay,
+  LuSearch,
+  LuSquare,
   LuTrash2,
+  LuUsers,
 } from "react-icons/lu";
 import { CreateGroupDialog } from "@/components/create-group-dialog";
 import {
@@ -31,7 +35,7 @@ import {
 import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialog";
 import { DeleteGroupDialog } from "@/components/delete-group-dialog";
 import { EditGroupDialog } from "@/components/edit-group-dialog";
-import { AnimatedSwitch } from "@/components/ui/animated-switch";
+import { GroupSharingModal } from "@/components/group-sharing-modal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -44,6 +48,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { FadingScrollArea } from "@/components/ui/fading-scroll-area";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -60,58 +65,8 @@ import {
 import { parseBackendError, translateBackendError } from "@/lib/backend-errors";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
-import type { GroupWithCount, ProfileGroup } from "@/types";
+import type { BrowserProfile, GroupWithCount, ProfileGroup } from "@/types";
 import { RippleButton } from "./ui/ripple";
-
-type SyncStatus = "disabled" | "syncing" | "synced" | "error" | "waiting";
-
-function getSyncStatusDot(
-  group: GroupWithCount,
-  liveStatus: SyncStatus | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string,
-  errorMessage?: string,
-): { color: string; tooltip: string; animate: boolean } {
-  const status = liveStatus ?? (group.sync_enabled ? "synced" : "disabled");
-
-  switch (status) {
-    case "syncing":
-      return {
-        color: "bg-warning",
-        tooltip: t("syncTooltips.syncing"),
-        animate: true,
-      };
-    case "synced":
-      return {
-        color: "bg-success",
-        tooltip: group.last_sync
-          ? t("syncTooltips.syncedAt", {
-              time: new Date(group.last_sync * 1000).toLocaleString(),
-            })
-          : t("syncTooltips.synced"),
-        animate: false,
-      };
-    case "waiting":
-      return {
-        color: "bg-warning",
-        tooltip: t("syncTooltips.waiting"),
-        animate: false,
-      };
-    case "error":
-      return {
-        color: "bg-destructive",
-        tooltip: errorMessage
-          ? t("syncTooltips.errorWith", { error: errorMessage })
-          : t("syncTooltips.error"),
-        animate: false,
-      };
-    default:
-      return {
-        color: "bg-muted-foreground",
-        tooltip: t("syncTooltips.notSynced"),
-        animate: false,
-      };
-  }
-}
 
 interface GroupManagementDialogProps {
   isOpen: boolean;
@@ -140,48 +95,16 @@ export function GroupManagementDialog({
   const [selectedGroup, setSelectedGroup] = useState<GroupWithCount | null>(
     null,
   );
-  const [groupSyncStatus, setGroupSyncStatus] = useState<
-    Record<string, SyncStatus>
-  >({});
-  const [groupSyncErrors, setGroupSyncErrors] = useState<
-    Record<string, string>
-  >({});
-  const [groupInUse, setGroupInUse] = useState<Record<string, boolean>>({});
-  const [isTogglingSync, setIsTogglingSync] = useState<Record<string, boolean>>(
-    {},
-  );
+  const [sharingDialogOpen, setSharingDialogOpen] = useState(false);
+  const [sharingGroup, setSharingGroup] = useState<GroupWithCount | null>(null);
+  const [runningGroupId, setRunningGroupId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   // Table state
   const [sorting, setSorting] = useState<SortingState>([
     { id: "name", desc: false },
   ]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
-
-  // Listen for group sync status events
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-
-    const setupListener = async () => {
-      unlisten = await listen<{ id: string; status: string; error?: string }>(
-        "group-sync-status",
-        (event) => {
-          const { id, status, error } = event.payload;
-          setGroupSyncStatus((prev) => ({
-            ...prev,
-            [id]: status as SyncStatus,
-          }));
-          if (error) {
-            setGroupSyncErrors((prev) => ({ ...prev, [id]: error }));
-          }
-        },
-      );
-    };
-
-    void setupListener();
-    return () => {
-      unlisten?.();
-    };
-  }, []);
 
   const loadGroups = useCallback(async () => {
     setIsLoading(true);
@@ -191,21 +114,6 @@ export function GroupManagementDialog({
         "get_groups_with_profile_counts",
       );
       setGroups(groupList);
-
-      // Check which groups are in use by synced profiles
-      const inUse: Record<string, boolean> = {};
-      for (const group of groupList) {
-        try {
-          const inUseBySynced = await invoke<boolean>(
-            "is_group_in_use_by_synced_profile",
-            { groupId: group.id },
-          );
-          inUse[group.id] = inUseBySynced;
-        } catch (_error) {
-          // Ignore errors
-        }
-      }
-      setGroupInUse(inUse);
     } catch (err) {
       console.error("Failed to load groups:", err);
       setError(
@@ -215,6 +123,69 @@ export function GroupManagementDialog({
       setIsLoading(false);
     }
   }, [t]);
+
+  const handleRunAll = useCallback(
+    async (group: GroupWithCount) => {
+      setRunningGroupId(group.id);
+      try {
+        const allProfiles = await invoke<BrowserProfile[]>(
+          "get_browser_profiles",
+        );
+        const targets = allProfiles.filter((p) => p.group_id === group.id);
+        if (targets.length === 0) {
+          showErrorToast(
+            t("groups.noProfilesInGroup", {
+              defaultValue: "Nhóm không có profile nào để chạy",
+            }),
+          );
+          return;
+        }
+        showSuccessToast(
+          t("groups.runningAll", {
+            defaultValue: `Đang khởi chạy ${targets.length} profile (giãn cách 800ms)...`,
+          }),
+        );
+        for (const p of targets) {
+          try {
+            await invoke("launch_browser_profile", { profileId: p.id });
+          } catch (err) {
+            console.warn(`Could not launch ${p.name}:`, err);
+          }
+          await new Promise((r) => setTimeout(r, 800));
+        }
+      } catch (err) {
+        showErrorToast(String(err));
+      } finally {
+        setRunningGroupId(null);
+      }
+    },
+    [t],
+  );
+
+  const handleStopAll = useCallback(
+    async (group: GroupWithCount) => {
+      try {
+        const allProfiles = await invoke<BrowserProfile[]>(
+          "get_browser_profiles",
+        );
+        const targets = allProfiles.filter((p) => p.group_id === group.id);
+        if (targets.length === 0) return;
+        await Promise.allSettled(
+          targets.map((p) =>
+            invoke("kill_browser_profile", { profileId: p.id }),
+          ),
+        );
+        showSuccessToast(
+          t("groups.stoppedAll", {
+            defaultValue: `Đã dừng ${targets.length} profile trong nhóm ${group.name}`,
+          }),
+        );
+      } catch (err) {
+        showErrorToast(String(err));
+      }
+    },
+    [t],
+  );
 
   const handleGroupCreated = useCallback(
     (_newGroup: ProfileGroup) => {
@@ -247,33 +218,10 @@ export function GroupManagementDialog({
     setDeleteDialogOpen(true);
   }, []);
 
-  const handleToggleSync = useCallback(
-    async (group: GroupWithCount) => {
-      setIsTogglingSync((prev) => ({ ...prev, [group.id]: true }));
-      try {
-        await invoke("set_group_sync_enabled", {
-          groupId: group.id,
-          enabled: !group.sync_enabled,
-        });
-        showSuccessToast(
-          group.sync_enabled
-            ? t("proxies.management.syncDisabled")
-            : t("proxies.management.syncEnabled"),
-        );
-        await loadGroups();
-      } catch (error) {
-        console.error("Failed to toggle sync:", error);
-        showErrorToast(
-          parseBackendError(error)
-            ? translateBackendError(t, error)
-            : t("proxies.management.updateSyncFailed"),
-        );
-      } finally {
-        setIsTogglingSync((prev) => ({ ...prev, [group.id]: false }));
-      }
-    },
-    [loadGroups, t],
-  );
+  const handleShareGroup = useCallback((group: GroupWithCount) => {
+    setSharingGroup(group);
+    setSharingDialogOpen(true);
+  }, []);
 
   useEffect(() => {
     if (isOpen) {
@@ -339,26 +287,8 @@ export function GroupManagementDialog({
         ),
         cell: ({ row }) => {
           const group = row.original;
-          const syncDot = getSyncStatusDot(
-            group,
-            groupSyncStatus[group.id],
-            t,
-            groupSyncErrors[group.id],
-          );
           return (
             <div className="flex min-w-0 items-center gap-2 font-medium">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div
-                    className={`size-2 rounded-full shrink-0 ${syncDot.color} ${
-                      syncDot.animate ? "animate-pulse" : ""
-                    }`}
-                  />
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p>{syncDot.tooltip}</p>
-                </TooltipContent>
-              </Tooltip>
               <LuFolder className="size-4 shrink-0 text-muted-foreground" />
               <span className="truncate">{group.name}</span>
             </div>
@@ -375,74 +305,104 @@ export function GroupManagementDialog({
         ),
       },
       {
-        id: "sync",
-        size: 96,
-        enableSorting: false,
-        header: () => t("proxies.management.syncCol"),
-        cell: ({ row }) => {
-          const group = row.original;
-          const locked = groupInUse[group.id];
-          return (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="inline-flex items-center">
-                  <AnimatedSwitch
-                    checked={group.sync_enabled}
-                    onCheckedChange={() => handleToggleSync(group)}
-                    disabled={isTogglingSync[group.id] || locked}
-                  />
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                {locked ? (
-                  <p>{t("syncTooltips.lockedInUse")}</p>
-                ) : (
-                  <p>
-                    {group.sync_enabled
-                      ? t("syncTooltips.disable")
-                      : t("syncTooltips.enable")}
-                  </p>
-                )}
-              </TooltipContent>
-            </Tooltip>
-          );
-        },
-      },
-      {
         id: "actions",
-        size: 96,
+        size: 160,
         enableSorting: false,
         header: () => t("common.labels.actions"),
         cell: ({ row }) => {
           const group = row.original;
+          const isRunning = runningGroupId === group.id;
           return (
-            <div className="flex gap-1">
+            <div className="flex items-center gap-1">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => {
-                      handleEditGroup(group);
-                    }}
+                    disabled={group.count === 0 || isRunning}
+                    onClick={() => void handleRunAll(group)}
+                    className="h-7 w-7 p-0 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10 cursor-pointer"
                   >
-                    <LuPencil className="size-4" />
+                    <LuPlay
+                      className={cn("size-3.5", isRunning && "animate-spin")}
+                    />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>
+                    {t("groups.runAllTooltip", {
+                      defaultValue: `Chạy tất cả ${group.count} profiles`,
+                    })}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={group.count === 0}
+                    onClick={() => void handleStopAll(group)}
+                    className="h-7 w-7 p-0 text-amber-600 hover:text-amber-700 hover:bg-amber-500/10 cursor-pointer"
+                  >
+                    <LuSquare className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>
+                    {t("groups.stopAllTooltip", {
+                      defaultValue: "Dừng tất cả profiles trong nhóm",
+                    })}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleShareGroup(group)}
+                    className="h-7 w-7 p-0 text-primary hover:text-primary hover:bg-primary/10 cursor-pointer"
+                  >
+                    <LuUsers className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>
+                    {t("groups.shareTooltip", {
+                      defaultValue: "Phân quyền thành viên truy cập nhóm này",
+                    })}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleEditGroup(group)}
+                    className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground cursor-pointer"
+                  >
+                    <LuPencil className="size-3.5" />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
                   <p>{t("groupManagement.editGroupTooltip")}</p>
                 </TooltipContent>
               </Tooltip>
+
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => {
-                      handleDeleteGroup(group);
-                    }}
+                    onClick={() => handleDeleteGroup(group)}
+                    className="h-7 w-7 p-0 text-destructive/80 hover:text-destructive hover:bg-destructive/10 cursor-pointer"
                   >
-                    <LuTrash2 className="size-4" />
+                    <LuTrash2 className="size-3.5" />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
@@ -456,18 +416,23 @@ export function GroupManagementDialog({
     ],
     [
       t,
-      groupSyncStatus,
-      groupSyncErrors,
-      groupInUse,
-      isTogglingSync,
-      handleToggleSync,
       handleEditGroup,
       handleDeleteGroup,
+      handleShareGroup,
+      handleRunAll,
+      handleStopAll,
+      runningGroupId,
     ],
   );
 
+  const filteredGroups = useMemo(() => {
+    if (!searchQuery.trim()) return groups;
+    const q = searchQuery.toLowerCase();
+    return groups.filter((g) => g.name.toLowerCase().includes(q));
+  }, [groups, searchQuery]);
+
   const table = useReactTable({
-    data: groups,
+    data: filteredGroups,
     columns,
     state: { sorting, rowSelection },
     onSortingChange: setSorting,
@@ -519,41 +484,6 @@ export function GroupManagementDialog({
     }
   }, [selectedGroupsForBulk, table, loadGroups, onGroupManagementComplete, t]);
 
-  const handleBulkToggleSync = useCallback(async () => {
-    if (selectedGroupsForBulk.length === 0) return;
-    const allOn = selectedGroupsForBulk.every((g) => g.sync_enabled);
-    const targetEnabled = !allOn;
-    const targets = selectedGroupsForBulk.filter((g) =>
-      targetEnabled ? !g.sync_enabled : g.sync_enabled && !groupInUse[g.id],
-    );
-    if (targets.length === 0) return;
-    const results = await Promise.allSettled(
-      targets.map((group) =>
-        invoke("set_group_sync_enabled", {
-          groupId: group.id,
-          enabled: targetEnabled,
-        }),
-      ),
-    );
-    const firstRejection = results.find((r) => r.status === "rejected") as
-      | PromiseRejectedResult
-      | undefined;
-    if (firstRejection) {
-      showErrorToast(
-        parseBackendError(firstRejection.reason)
-          ? translateBackendError(t, firstRejection.reason)
-          : t("proxies.management.updateSyncFailed"),
-      );
-    } else {
-      showSuccessToast(
-        targetEnabled
-          ? t("proxies.management.syncEnabled")
-          : t("proxies.management.syncDisabled"),
-      );
-    }
-    await loadGroups();
-  }, [selectedGroupsForBulk, groupInUse, loadGroups, t]);
-
   return (
     <>
       <Dialog open={isOpen} onOpenChange={onClose} subPage={subPage}>
@@ -569,11 +499,24 @@ export function GroupManagementDialog({
 
           <div className="@container flex min-h-0 w-full flex-1 flex-col">
             <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-              <div className="inline-flex h-7 items-center justify-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium whitespace-nowrap text-foreground">
-                <span>{t("groups.pageTitle")}</span>
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {groups.length}
-                </span>
+              <div className="flex items-center gap-2.5">
+                <div className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-accent px-3 text-xs font-medium whitespace-nowrap text-foreground">
+                  <span>{t("groups.pageTitle")}</span>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {filteredGroups.length}
+                  </span>
+                </div>
+                <div className="relative w-44 sm:w-60">
+                  <LuSearch className="absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
+                  <Input
+                    placeholder={t("groups.searchGroupPlaceholder", {
+                      defaultValue: "Tìm kiếm nhóm...",
+                    })}
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="h-8 pl-8 text-xs"
+                  />
+                </div>
               </div>
               <RippleButton
                 size="sm"
@@ -695,15 +638,6 @@ export function GroupManagementDialog({
         <DataTableActionBar table={table}>
           <DataTableActionBarSelection table={table} />
           <DataTableActionBarAction
-            tooltip={t("syncTooltips.bulkToggle")}
-            onClick={() => {
-              void handleBulkToggleSync();
-            }}
-            size="icon"
-          >
-            <LuRefreshCw />
-          </DataTableActionBarAction>
-          <DataTableActionBarAction
             tooltip={t("common.buttons.delete")}
             onClick={() => setBulkDeleteOpen(true)}
             size="icon"
@@ -754,6 +688,17 @@ export function GroupManagementDialog({
         }}
         group={selectedGroup}
         onGroupDeleted={handleGroupDeleted}
+      />
+
+      <GroupSharingModal
+        isOpen={sharingDialogOpen}
+        onClose={() => {
+          setSharingDialogOpen(false);
+          setSharingGroup(null);
+        }}
+        groupId={sharingGroup?.id || ""}
+        groupName={sharingGroup?.name || ""}
+        profileCount={sharingGroup?.count || 0}
       />
     </>
   );

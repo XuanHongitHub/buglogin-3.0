@@ -2,6 +2,6 @@
 set -euo pipefail
 
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+node scripts/tauri-cargo.mjs check --workspace --all-targets
+node scripts/tauri-cargo.mjs test --workspace
+node scripts/tauri-cargo.mjs clippy --workspace --all-targets -- -D warnings

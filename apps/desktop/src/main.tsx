@@ -1,15 +1,53 @@
-import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
-import { createTauriDesktopApi } from './bridge.js';
-import { AuthBootstrap } from './AuthBootstrap.js';
-import { ProfileWorkspace } from './ProfileWorkspace.js';
+import { StrictMode, useState } from "react";
+import { createRoot } from "react-dom/client";
+import DesktopHome from "../../../src/app/desktop-home.js";
+import { useAppUpdateNotifications } from "../../../src/hooks/use-app-update-notifications.js";
+import type { BrowserProfile } from "../../../src/types.js";
+import { AuthBootstrap } from "./AuthBootstrap.js";
+import { createTauriDesktopApi } from "./bridge.js";
+import { DonutDesktopProviders } from "./DonutDesktopProviders.js";
+import { ProfileSharingDialog } from "./ProfileSharingDialog.js";
+import "../../../src/styles/globals.css";
 
-const root = document.getElementById('root');
-if (!root) throw new Error('Desktop root element not found');
+const root = document.getElementById("root");
+if (!root) throw new Error("Desktop root element not found");
 
 const api = createTauriDesktopApi();
+
+function DesktopRoot() {
+  useAppUpdateNotifications();
+  const [share, setShare] = useState<{
+    profiles: BrowserProfile[];
+    workspaceId: string;
+  }>();
+  return (
+    <>
+      <DesktopHome
+        onShareProfiles={(profiles, workspaceId) =>
+          setShare({ profiles, workspaceId })
+        }
+      />
+      {share ? (
+        <ProfileSharingDialog
+          api={api}
+          profiles={share.profiles}
+          workspaceId={share.workspaceId}
+          open
+          onOpenChange={(open) => {
+            if (!open) setShare(undefined);
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
 createRoot(root).render(
   <StrictMode>
-    <AuthBootstrap api={api}><ProfileWorkspace api={api} /></AuthBootstrap>
+    <DonutDesktopProviders>
+      <AuthBootstrap api={api}>
+        <DesktopRoot />
+      </AuthBootstrap>
+    </DonutDesktopProviders>
   </StrictMode>,
 );

@@ -14,6 +14,7 @@ use buglogin_domain::{
     entities::{
         BrowserCompatibility, Extension, ExtensionGroup, ExtensionPackageType, Group, Profile,
         ProfileState, Proxy, ProxyProtocol, Runtime, SyncMode, Vpn, VpnKind,
+        validate_wayfern_runtime_config,
     },
     errors::Problem,
     ids::{
@@ -1187,6 +1188,27 @@ fn convert_profile(record: &NeutralProfileRecord) -> Result<Profile, Problem> {
     {
         return Err(invalid("profileId", &record.id));
     }
+    let runtime = match record.data.runtime.as_str() {
+        "wayfern" => Runtime::Wayfern,
+        "bugox" => Runtime::Bugox,
+        "bugium" => Runtime::Bugium,
+        "bugmini" => Runtime::Bugmini,
+        "bugthor" => Runtime::Bugthor,
+        "bughelium" => Runtime::Bughelium,
+        _ => return Err(invalid("profileId", &record.id)),
+    };
+    if record
+        .data
+        .legacy_runtime_config
+        .as_ref()
+        .is_some_and(buglogin_domain::security::contains_secret)
+    {
+        return Err(invalid("legacyRuntimeConfig", &record.id));
+    }
+    if let Some(runtime_config) = record.data.legacy_runtime_config.as_ref() {
+        validate_wayfern_runtime_config(&runtime, runtime_config)
+            .map_err(|_| invalid("legacyRuntimeConfig", &record.id))?;
+    }
     let (created_at, updated_at) = timestamps(
         &record.created_at,
         &record.updated_at,
@@ -1196,15 +1218,7 @@ fn convert_profile(record: &NeutralProfileRecord) -> Result<Profile, Problem> {
     Ok(Profile {
         id: ProfileId::new(record.id.clone()).map_err(|_| invalid("profileId", &record.id))?,
         name: record.data.name.clone(),
-        runtime: match record.data.runtime.as_str() {
-            "wayfern" => Runtime::Wayfern,
-            "bugox" => Runtime::Bugox,
-            "bugium" => Runtime::Bugium,
-            "bugmini" => Runtime::Bugmini,
-            "bugthor" => Runtime::Bugthor,
-            "bughelium" => Runtime::Bughelium,
-            _ => return Err(invalid("profileId", &record.id)),
-        },
+        runtime,
         runtime_version: record.data.runtime_version.clone(),
         runtime_config: record.data.legacy_runtime_config.clone(),
         state: ProfileState::Ready,

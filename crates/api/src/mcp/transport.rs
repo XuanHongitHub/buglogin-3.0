@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, RwLock},
-};
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -11,7 +8,6 @@ use axum::{
     routing::post,
 };
 use buglogin_domain::errors::Problem;
-use buglogin_domain::permissions::Action;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -37,104 +33,14 @@ impl Default for McpTransportConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IssuedTransportBearer(String);
-
-impl IssuedTransportBearer {
-    pub fn expose_once(self) -> String {
-        self.0
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct McpTransportControl {
-    hashes: Arc<RwLock<BTreeSet<[u8; 32]>>>,
-}
-
-impl McpTransportControl {
-    pub fn activate(&self, bearer: &str) -> Result<(), Problem> {
-        if bearer.len() < 32
-            || !bearer.is_ascii()
-            || bearer.bytes().any(|byte| byte.is_ascii_whitespace())
-        {
-            return Err(problem(
-                "mcp_invalid_token",
-                "MCP transport bearer is invalid",
-                400,
-            ));
-        }
-        self.hashes
-            .write()
-            .map_err(|_| problem("mcp_token_unavailable", "MCP token store unavailable", 503))?
-            .insert(hash(bearer.as_bytes()));
-        Ok(())
-    }
-
-    pub fn issue(&self) -> Result<IssuedTransportBearer, Problem> {
-        let mut bytes = [0_u8; 32];
-        getrandom::fill(&mut bytes)
-            .map_err(|_| problem("mcp_token_unavailable", "MCP token generation failed", 503))?;
-        let raw = hex(&bytes);
-        self.hashes
-            .write()
-            .map_err(|_| problem("mcp_token_unavailable", "MCP token store unavailable", 503))?
-            .insert(hash(raw.as_bytes()));
-        Ok(IssuedTransportBearer(raw))
-    }
-
-    pub fn rotate(&self, current: &str) -> Result<IssuedTransportBearer, Problem> {
-        self.revoke(current)?;
-        self.issue()
-    }
-
-    pub fn revoke(&self, bearer: &str) -> Result<(), Problem> {
-        let removed = self
-            .hashes
-            .write()
-            .map_err(|_| problem("mcp_token_unavailable", "MCP token store unavailable", 503))?
-            .remove(&hash(bearer.as_bytes()));
-        if removed {
-            Ok(())
-        } else {
-            Err(problem(
-                "mcp_transport_unauthorized",
-                "MCP transport bearer is invalid",
-                401,
-            ))
-        }
-    }
-
-    pub fn authenticate(&self, bearer: &str) -> Result<(), Problem> {
-        if self
-            .hashes
-            .read()
-            .map_err(|_| problem("mcp_token_unavailable", "MCP token store unavailable", 503))?
-            .contains(&hash(bearer.as_bytes()))
-        {
-            Ok(())
-        } else {
-            Err(problem(
-                "mcp_transport_unauthorized",
-                "MCP transport bearer is invalid",
-                401,
-            ))
-        }
-    }
-}
-
 #[derive(Clone)]
 struct ProductionTransportState {
     config: McpTransportConfig,
-    control: McpTransportControl,
+    api_state: crate::http::ApiState,
     dispatcher: Arc<tokio::sync::Mutex<ProductionMcpDispatcher>>,
-    control_state: crate::http::ApiState,
 }
 
-pub fn production_router(
-    state: crate::http::ApiState,
-    config: McpTransportConfig,
-    control: McpTransportControl,
-) -> Router {
+pub fn production_router(state: crate::http::ApiState, config: McpTransportConfig) -> Router {
     let dispatcher = McpDispatcher::new(
         ProductionMcpPolicy::new(state.clone()),
         ProductionMcpExecutor::new(state.clone()),
@@ -144,9 +50,8 @@ pub fn production_router(
         .route("/mcp", post(handle))
         .with_state(ProductionTransportState {
             config,
-            control,
+            api_state: state,
             dispatcher: Arc::new(tokio::sync::Mutex::new(dispatcher)),
-            control_state: state,
         })
 }
 
@@ -185,7 +90,7 @@ struct ToolCallParams {
     arguments: Value,
     bearer_token: Option<String>,
     idempotency_key: Option<String>,
-    correlation_id: String,
+    correlation_id: Option<String>,
 }
 
 async fn handle(
@@ -213,7 +118,21 @@ async fn handle(
         Ok(value) => value,
         Err(error) => return response_error(fallback_id, error),
     };
-    if let Err(error) = state.control.authenticate(bearer) {
+    if !bearer.starts_with("blapi_") {
+        return response_error(
+            fallback_id,
+            problem(
+                "mcp_transport_unauthorized",
+                "MCP requires a scoped BugLogin API token",
+                401,
+            ),
+        );
+    }
+    let now = match crate::clock::unix_time_seconds("mcp-transport-auth") {
+        Ok(now) => now,
+        Err(error) => return response_error(fallback_id, error),
+    };
+    if let Err(error) = state.api_state.authenticate_token(bearer, now) {
         return response_error(fallback_id, error);
     }
     let request: JsonRpcRequest = match serde_json::from_slice(&body) {
@@ -239,7 +158,14 @@ async fn handle(
             "capabilities": { "tools": { "listChanged": false } },
         })),
         "tools/list" => Ok(json!({ "tools": tool_list(tools()) })),
-        "tools/call" => call_tool_with_snapshot(&state, request.params).await,
+        "tools/call" if !id.is_null() => {
+            call_tool_with_snapshot(&state, request.params, bearer, &id).await
+        }
+        "tools/call" => Err(problem(
+            "mcp_invalid_request",
+            "MCP tool calls require a JSON-RPC request ID",
+            400,
+        )),
         _ => Err(problem(
             "mcp_method_not_found",
             "JSON-RPC method not found",
@@ -263,26 +189,40 @@ async fn handle(
 async fn call_tool_with_snapshot(
     state: &ProductionTransportState,
     params: Value,
+    transport_bearer: &str,
+    request_id: &Value,
 ) -> Result<Value, Problem> {
-    let params: ToolCallParams = serde_json::from_value(params)
+    let mut params: ToolCallParams = serde_json::from_value(params)
         .map_err(|_| problem("mcp_invalid_params", "MCP tool parameters are invalid", 400))?;
-    let action = tools()
-        .into_iter()
-        .find(|tool| tool.name == params.name)
-        .map_or(Action::Manage, |tool| tool.action);
-    if action == Action::Read {
-        let _snapshot = Arc::clone(&state.control_state.control_snapshot_gate)
-            .read_owned()
-            .await;
-        state.control_state.refresh_control_aggregate()?;
-        dispatch_tool(&state.dispatcher, params).await
-    } else {
-        let _snapshot = Arc::clone(&state.control_state.control_snapshot_gate)
-            .write_owned()
-            .await;
-        state.control_state.refresh_control_aggregate()?;
-        dispatch_tool(&state.dispatcher, params).await
+    if params
+        .bearer_token
+        .as_deref()
+        .is_some_and(|provided| provided != transport_bearer)
+    {
+        return Err(problem(
+            "mcp_transport_unauthorized",
+            "MCP tool bearer must match the authenticated transport bearer",
+            401,
+        ));
     }
+    params.bearer_token = Some(transport_bearer.to_owned());
+    let call_hash = standard_call_hash(request_id, &params.name);
+    if params.correlation_id.is_none() {
+        params.correlation_id = Some(format!("cor_mcp_{call_hash}"));
+    }
+    if params.idempotency_key.is_none()
+        && super::dispatch_metadata(&params.name)
+            .is_ok_and(|metadata| metadata.command.idempotency_required)
+    {
+        // JSON-RPC request IDs are stable across a transport retry. Use one as
+        // the fallback idempotency identity so standard MCP clients can call
+        // mutation tools without BugLogin-specific parameters.
+        params.idempotency_key = Some(format!("mcp_{call_hash}"));
+    }
+    // ProductionMcpPolicy holds the read snapshot gate through execution and
+    // releases it before persisting the resulting audit event. Mutation
+    // commands hold the write gate through execution and idempotency commit.
+    dispatch_tool(&state.dispatcher, params).await
 }
 
 async fn dispatch_tool(
@@ -293,12 +233,27 @@ async fn dispatch_tool(
     dispatcher
         .dispatch_async(McpRequest {
             tool_name: params.name,
-            correlation_id: params.correlation_id,
+            correlation_id: params.correlation_id.expect("generated when absent"),
             bearer_token: params.bearer_token,
             idempotency_key: params.idempotency_key,
             input: params.arguments,
         })
         .await
+}
+
+fn standard_call_hash(request_id: &Value, tool_name: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"buglogin-mcp-call-v1\0");
+    digest.update(tool_name.as_bytes());
+    digest.update([0]);
+    digest.update(request_id.to_string().as_bytes());
+    let bytes = digest.finalize();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 fn tool_list(items: Vec<ToolMetadata>) -> Vec<Value> {
@@ -378,20 +333,6 @@ fn json_rpc_code(status: u16) -> i64 {
     }
 }
 
-fn hash(value: &[u8]) -> [u8; 32] {
-    Sha256::digest(value).into()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
 fn problem(code: &str, title: &str, status: u16) -> Problem {
     Problem::new(code, title, status, "mcp-transport")
 }
@@ -399,16 +340,6 @@ fn problem(code: &str, title: &str, status: u16) -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bearer_rotation_revokes_previous_value() {
-        let control = McpTransportControl::default();
-        let first = control.issue().unwrap().expose_once();
-        assert!(control.authenticate(&first).is_ok());
-        let second = control.rotate(&first).unwrap().expose_once();
-        assert_eq!(control.authenticate(&first).unwrap_err().status, 401);
-        assert!(control.authenticate(&second).is_ok());
-    }
 
     #[test]
     fn transport_is_disabled_by_default() {

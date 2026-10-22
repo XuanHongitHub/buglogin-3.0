@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import i18n from "@/i18n";
 import type { Extension, ExtensionGroup } from "@/types";
 
-export function useExtensionEvents() {
+export function useExtensionEvents(workspaceId: string | null) {
   const [extensions, setExtensions] = useState<Extension[]>([]);
   const [extensionGroups, setExtensionGroups] = useState<ExtensionGroup[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -22,15 +22,21 @@ export function useExtensionEvents() {
   }, []);
 
   const loadExtensionGroups = useCallback(async () => {
+    if (!workspaceId) {
+      setExtensionGroups([]);
+      return;
+    }
     try {
-      const groups = await invoke<ExtensionGroup[]>("list_extension_groups");
+      const groups = await invoke<ExtensionGroup[]>("list_extension_groups", {
+        workspaceId,
+      });
       setExtensionGroups(groups);
       setError(null);
     } catch (err: unknown) {
       console.error("Failed to load extension groups:", err);
       setExtensionGroups([]);
     }
-  }, []);
+  }, [workspaceId]);
 
   const loadAll = useCallback(async () => {
     await Promise.all([loadExtensions(), loadExtensionGroups()]);

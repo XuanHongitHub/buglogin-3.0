@@ -29,6 +29,11 @@ No screen enters implementation from prose alone. Each major screen needs an app
 
 Reference artifacts may be high-fidelity design files, implementation-native HTML prototypes, or annotated screenshots. Static image-only references are insufficient for complex keyboard, table, dialog, migration, or responsive behavior.
 
+Current draft packages:
+
+- [DES-01 key-rotation recipient review](references/DES-01-key-rotation-review.md) — Donut component mapping and state contract drafted; screenshot/interaction evidence and product-owner approval remain pending. This draft does not authorize production UI implementation.
+- [DES-01 workspace switch and unified head table](references/DES-01-workspace-switch-head-table.md) — Unified search, faceted filter, multi-level sort, and workspace switcher layout conforming to Donut upstream and Lucide icon tokens.
+
 ## 2. Approved reference checklist
 
 ### Product and authority

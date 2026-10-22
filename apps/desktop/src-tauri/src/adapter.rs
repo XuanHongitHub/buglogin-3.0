@@ -2,17 +2,19 @@ use std::{
     collections::BTreeMap,
     fs,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use buglogin_api::{
     commands::{Adapter, CommandKind, CommandRegistry, CommandResult},
-    services::operations::{Operation, OperationService, OperationStatus},
+    services::{
+        operations::{Operation, OperationService, OperationStatus},
+        profile_creation::ProfileCreationService,
+    },
 };
 use buglogin_browser::{
     cookies::{
@@ -21,6 +23,7 @@ use buglogin_browser::{
             CookieAuthority, CookieStageReceipt, IdempotencyKey, ProfileRuntimeState,
             StagedImportId,
         },
+        wayfern::ProfileCookieState,
     },
     process::{ApprovedExecutable, ProcessController, SystemProcessController},
     profile::{ProfileBindingService, ProfileService},
@@ -28,8 +31,8 @@ use buglogin_browser::{
 };
 use buglogin_domain::{
     entities::{
-        Profile, ProfileCreateInput, ProfileRecord, ProfileState, Proxy, ProxyProtocol, Runtime,
-        SyncMode,
+        ExtensionGroup, Profile, ProfileCreateInput, ProfileRecord, ProfileState, Proxy,
+        ProxyProtocol, Runtime, SyncMode,
     },
     errors::Problem,
     ids::{GrantId, ProfileId, ProxyId, ResourceId, WorkspaceId},
@@ -47,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::clock::{unix_time_millis, unix_time_nanos, unix_time_seconds};
 use crate::migration_commands::{
     MigrationCommandRunner, MigrationImportInput, MigrationInspectInput, migration_import,
     migration_inspect,
@@ -56,16 +60,54 @@ use crate::profile_runtime::{
 };
 use crate::proxy_bridge::{ProxyBridgeHandle, check_proxy_connectivity};
 use crate::proxy_store::{DesktopProxyStore, ImportedProxy, ProxyImportReport};
+use crate::wayfern_fingerprint::{
+    apply_or_generate as apply_wayfern_fingerprint, clear_stale_cdp_marker,
+    configure_local_cdp_args, target_from_runtime_config,
+};
 
 pub const INVOKE_NAMESPACE: &str = "buglogin";
 const SUPPORTED_COMMANDS: &[&str] = &[
     "system.health.get",
     "organization.list",
+    "organization.get",
+    "organization.create",
+    "organization.update",
     "workspace.list",
+    "workspace.get",
+    "workspace.create",
+    "workspace.update",
     "operation.get",
     "migration.inspect",
     "migration.import",
     "profile.list",
+    "extension.group.list",
+    "extension.group.get",
+    "extension.group.create",
+    "extension.group.update",
+    "extension.group.delete",
+    "profile.extension.group.set",
+    "profile.binding.get",
+    "profile.proxy.assignment.get",
+    "group.share.list",
+    "group.share.create",
+    "group.share.revoke",
+    "member.list",
+    "member.get",
+    "member.invite",
+    "member.invitation.create",
+    "member.invitation.redeem",
+    "member.invitation.revoke",
+    "member.activate",
+    "member.suspend",
+    "member.role.update",
+    "team.list",
+    "team.get",
+    "team.create",
+    "team.update",
+    "resource.list",
+    "resource.get",
+    "resource.register",
+    "grant.list.page",
     "profile.create",
     "profile.archive",
     "profile.restore",
@@ -76,6 +118,7 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "cookie.import",
     "cookie.copy",
     "proxy.parse",
+    "proxy.import",
     "proxy.check",
     "proxy.list",
     "proxy.get",
@@ -180,6 +223,25 @@ impl RuntimeTargets {
             )?,
             _ => return Err(runtime_not_configured()),
         };
+        if profile.runtime == Runtime::Wayfern {
+            append_wayfern_profile_chrome_args(
+                &mut specification.args,
+                profile.name.as_str(),
+                profile.id.as_str(),
+            );
+        }
+        let fingerprint_target =
+            target_from_runtime_config(profile.runtime_config.as_ref(), "runtime")?;
+        if fingerprint_target.is_some() {
+            if profile.runtime != Runtime::Wayfern {
+                return Err(Problem::new(
+                    "fingerprint_runtime_unsupported",
+                    "Fingerprint targets are supported only by the Wayfern runtime",
+                    409,
+                    "runtime",
+                ));
+            }
+        }
         if profile.runtime == Runtime::Bugmini {
             append_bugmini_profile_args(&mut specification.args, profile);
         }
@@ -276,6 +338,45 @@ fn append_bugmini_profile_args(args: &mut Vec<String>, profile: &Profile) {
     }
 }
 
+fn append_wayfern_profile_chrome_args(
+    args: &mut Vec<String>,
+    profile_name: &str,
+    profile_id: &str,
+) {
+    if !profile_name.trim().is_empty() {
+        push_or_replace_arg(
+            args,
+            format!("--wayfern-profile-label={}", profile_name.trim()),
+        );
+    }
+    let mut hash = 2_166_136_261_u32;
+    for byte in profile_id.as_bytes() {
+        hash = (hash ^ u32::from(*byte)).wrapping_mul(16_777_619);
+    }
+    let (red, green, blue) = hsl_to_rgb(f64::from(hash % 360), 0.6, 0.8);
+    push_or_replace_arg(
+        args,
+        format!("--wayfern-profile-color={red:02x}{green:02x}{blue:02x}"),
+    );
+}
+
+fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (u8, u8, u8) {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let hue_sector = hue / 60.0;
+    let secondary = chroma * (1.0 - (hue_sector % 2.0 - 1.0).abs());
+    let (red, green, blue) = match hue_sector as u32 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let offset = lightness - chroma / 2.0;
+    let channel = |value: f64| ((value + offset) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (channel(red), channel(green), channel(blue))
+}
+
 pub(crate) fn push_or_replace_arg(args: &mut Vec<String>, replacement: String) {
     let key = replacement
         .split_once('=')
@@ -330,6 +431,9 @@ pub struct AdapterState {
 }
 
 impl AdapterState {
+    pub fn profiles_root(&self) -> &Path {
+        &self.runtime.profiles_root
+    }
     pub fn open(
         repository_root: impl Into<PathBuf>,
         profiles_root: impl Into<PathBuf>,
@@ -464,6 +568,59 @@ impl AdapterState {
             return Err(Problem::new(
                 "hosted_profile_authority_required",
                 "Profile clone and sharing require hosted production authority",
+                409,
+                correlation_id,
+            )
+            .with_field("invoke", invoke_name));
+        }
+        if matches!(
+            invoke_name,
+            "account_list"
+                | "account_status_update"
+                | "organization_get"
+                | "organization_record_get"
+                | "organization_create"
+                | "organization_update"
+                | "workspace_list"
+                | "workspace_get"
+                | "workspace_record_get"
+                | "workspace_create"
+                | "workspace_update"
+                | "team_list"
+                | "team_get"
+                | "team_create"
+                | "team_update"
+                | "resource_list"
+                | "resource_get"
+                | "resource_register"
+                | "grant_list_page"
+                | "group_list"
+                | "group_get"
+                | "group_create"
+                | "group_update"
+                | "group_delete"
+                | "group_share_list"
+                | "group_share_create"
+                | "group_share_revoke"
+                | "member_list"
+                | "member_get"
+                | "member_invite"
+                | "member_invitation_create"
+                | "member_invitation_redeem"
+                | "member_invitation_revoke"
+                | "member_activate"
+                | "member_suspend"
+                | "member_role_update"
+                | "profile_binding_get"
+                | "profile_proxy_assignment_get"
+                | "proxy_import"
+                | "profile_groups_replace"
+                | "profile_proxy_assignment_set"
+                | "profile_update"
+        ) {
+            return Err(Problem::new(
+                "hosted_workspace_authority_required",
+                "Workspace-scoped membership, profile, group, and proxy operations require hosted API authority",
                 409,
                 correlation_id,
             )
@@ -626,6 +783,14 @@ impl AdapterState {
                 .await
             }
             "profile.list" => self.profile_list(payload, correlation_id),
+            "extension.group.list" => self.extension_group_list(payload, correlation_id),
+            "extension.group.get" => self.extension_group_get(payload, correlation_id),
+            "extension.group.create" => self.extension_group_create(payload, correlation_id),
+            "extension.group.update" => self.extension_group_update(payload, correlation_id),
+            "extension.group.delete" => self.extension_group_delete(payload, correlation_id),
+            "profile.extension.group.set" => {
+                self.profile_extension_group_set(payload, correlation_id)
+            }
             "profile.create" => self.profile_create(payload, correlation_id),
             "profile.archive" => self.profile_archive_restore(payload, correlation_id, true),
             "profile.restore" => self.profile_archive_restore(payload, correlation_id, false),
@@ -702,6 +867,15 @@ impl AdapterState {
     pub fn list_proxies(&self) -> Result<Vec<ImportedProxy>, Problem> {
         self.proxy_store.list()
     }
+    pub async fn active_profiles(&self) -> Result<Vec<String>, Problem> {
+        Ok(self
+            .profile_runtime
+            .active_profiles()
+            .await?
+            .into_iter()
+            .map(|profile_id| profile_id.as_str().to_owned())
+            .collect())
+    }
     pub async fn shutdown(&self) -> Result<(), Problem> {
         self.profile_runtime.shutdown().await
     }
@@ -738,15 +912,69 @@ impl AdapterState {
 
     fn profile_list(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
         let input = parse_payload::<ProfileListInput>(payload, "profile.list", correlation_id)?;
-        let items = self
-            .profiles
-            .list()
-            .map_err(|error| correlate(error, correlation_id))?
+        let limit = input.limit.unwrap_or(100);
+        if !(1..=100).contains(&limit) {
+            return Err(problem(
+                "invalid_page_limit",
+                "Profile page limit must be between 1 and 100",
+                400,
+                correlation_id,
+            ));
+        }
+        let cursor = input
+            .cursor
+            .as_deref()
+            .map(ProfileId::from_str)
+            .transpose()
+            .map_err(|_| {
+                problem(
+                    "invalid_page_cursor",
+                    "Invalid page cursor",
+                    400,
+                    correlation_id,
+                )
+            })?;
+        let mut scan_cursor = cursor.map(|cursor| cursor.as_str().to_owned());
+        let mut profiles = Vec::with_capacity(limit + 1);
+        loop {
+            let batch = self
+                .profiles
+                .list_after(scan_cursor.as_deref(), 100)
+                .map_err(|error| correlate(error, correlation_id))?;
+            let batch_len = batch.len();
+            if batch_len == 0 {
+                break;
+            }
+            let last_scanned = batch
+                .last()
+                .map(|profile| profile.value.id.as_str().to_owned());
+            for profile in batch {
+                if input.include_archived || !profile.value.archived {
+                    profiles.push(profile);
+                    if profiles.len() > limit {
+                        break;
+                    }
+                }
+            }
+            if profiles.len() > limit || batch_len < 100 {
+                break;
+            }
+            scan_cursor = last_scanned;
+        }
+        let has_more = profiles.len() > limit;
+        profiles.truncate(limit);
+        let next_cursor = has_more
+            .then(|| {
+                profiles
+                    .last()
+                    .map(|profile| profile.value.id.as_str().to_owned())
+            })
+            .flatten();
+        let items = profiles
             .into_iter()
-            .filter(|profile| input.include_archived || !profile.value.archived)
             .map(|profile| profile_list_item(profile, correlation_id))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(json!({ "items": items, "nextCursor": Value::Null }))
+        Ok(json!({ "items": items, "nextCursor": next_cursor }))
     }
 
     fn profile_create(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
@@ -775,30 +1003,13 @@ impl AdapterState {
         }
         let profile_id = match input.id.as_deref() {
             Some(id) => parse_profile_id(id, correlation_id)?,
-            None => generated_profile_id()?,
+            None => generated_profile_id(correlation_id)?,
         };
-        let timestamp = now();
+        let profile = ProfileCreationService::build(input, profile_id, false)
+            .map_err(|error| correlate(error, correlation_id))?;
         let created = self
             .profiles
-            .create(Profile {
-                id: profile_id,
-                name: input.name.trim().to_owned(),
-                runtime: input.runtime,
-                runtime_version: input.runtime_version,
-                runtime_config: None,
-                state: ProfileState::Ready,
-                archived: false,
-                fingerprint: None,
-                note: input.note,
-                proxy_id,
-                vpn_id: None,
-                group_ids: Vec::new(),
-                tags: Vec::new(),
-                extension_group_id: None,
-                sync_mode: Some(SyncMode::Local),
-                created_at: timestamp.clone(),
-                updated_at: timestamp,
-            })
+            .create(profile)
             .map_err(|error| correlate(error, correlation_id))?;
         serde_json::to_value(ProfileRecord::new(created.value, created.revision))
             .map_err(|_| serialization_problem(correlation_id))
@@ -885,16 +1096,16 @@ impl AdapterState {
             )
         })?;
         authority.set_profile_state(scope.clone(), runtime_state);
+        self.reconcile_cookie_scope(&mut authority, &scope, correlation_id)?;
         let principal = Principal {
             roles: std::collections::BTreeSet::from([
                 buglogin_domain::permissions::Role::LocalOwner,
             ]),
             ..Principal::default()
         };
-        let result = authority.list(&scope, &principal, &[]).map_err(|error| {
-            let title = error.to_string();
-            problem("cookie_list_failed", &title, 409, correlation_id)
-        })?;
+        let result = authority
+            .list(&scope, &principal, &[])
+            .map_err(|error| error.as_problem(correlation_id))?;
         serde_json::to_value(result).map_err(|_| serialization_problem(correlation_id))
     }
 
@@ -909,13 +1120,13 @@ impl AdapterState {
         let cookies = input
             .cookies
             .into_iter()
-            .map(CookieWireInput::into_cookie)
+            .map(|cookie| cookie.into_cookie(correlation_id))
             .collect::<Result<Vec<_>, _>>()?;
         let mut authority = self.cookie_authority(correlation_id)?;
         self.set_cookie_profile_state(&mut authority, &scope, correlation_id)?;
         let stage_id = authority
             .stage_import(scope, cookies)
-            .map_err(|error| cookie_problem(error.to_string(), correlation_id))?;
+            .map_err(|error| error.as_problem(correlation_id))?;
         serde_json::to_value(CookieStageReceipt {
             stage_id: stage_id.as_str().to_owned(),
         })
@@ -930,26 +1141,31 @@ impl AdapterState {
     ) -> Result<Value, Problem> {
         let input = parse_payload::<CookieImportInput>(payload, "cookie.import", correlation_id)?;
         let stage_id = StagedImportId::from_opaque(input.stage_id)
-            .map_err(|error| cookie_problem(error.to_string(), correlation_id))?;
+            .map_err(|error| error.as_problem(correlation_id))?;
         let scope = cookie_scope(&input.workspace_id, &input.profile_id, correlation_id)?;
+        let request_key = IdempotencyKey::new(idempotency_key)
+            .map_err(|error| error.as_problem(correlation_id))?;
         let mut authority = self.cookie_authority(correlation_id)?;
         self.set_cookie_profile_state(&mut authority, &scope, correlation_id)?;
-        let lease = local_cookie_lease(&scope);
+        if !authority.has_idempotency_receipt(&request_key) {
+            self.preflight_cookie_scope(&scope, correlation_id)?;
+        }
+        let lease = local_cookie_lease(&scope, correlation_id)?;
         authority
             .set_current_lease(scope.clone(), lease.clone())
-            .map_err(|error| cookie_problem(error.to_string(), correlation_id))?;
+            .map_err(|error| error.as_problem(correlation_id))?;
         let result = authority
             .import(
                 &stage_id,
                 input.expected_generation,
                 &lease,
-                now_unix_ms(),
+                unix_time_millis(correlation_id)?,
                 &local_principal(),
                 &[],
-                IdempotencyKey::new(idempotency_key)
-                    .map_err(|error| cookie_problem(error.to_string(), correlation_id))?,
+                request_key,
             )
-            .map_err(|error| cookie_problem(error.to_string(), correlation_id))?;
+            .map_err(|error| error.as_problem(correlation_id))?;
+        self.reconcile_cookie_scope(&mut authority, &scope, correlation_id)?;
         serde_json::to_value(result).map_err(|_| serialization_problem(correlation_id))
     }
 
@@ -970,26 +1186,31 @@ impl AdapterState {
             &input.destination_profile_id,
             correlation_id,
         )?;
+        let request_key = IdempotencyKey::new(idempotency_key)
+            .map_err(|error| error.as_problem(correlation_id))?;
         let mut authority = self.cookie_authority(correlation_id)?;
         self.set_cookie_profile_state(&mut authority, &source, correlation_id)?;
         self.set_cookie_profile_state(&mut authority, &destination, correlation_id)?;
-        let lease = local_cookie_lease(&destination);
+        if !authority.has_idempotency_receipt(&request_key) {
+            self.preflight_cookie_scope(&destination, correlation_id)?;
+        }
+        let lease = local_cookie_lease(&destination, correlation_id)?;
         authority
             .set_current_lease(destination.clone(), lease.clone())
-            .map_err(|error| cookie_problem(error.to_string(), correlation_id))?;
+            .map_err(|error| error.as_problem(correlation_id))?;
         let result = authority
             .copy(
                 &source,
-                destination,
+                destination.clone(),
                 input.expected_generation,
                 &lease,
-                now_unix_ms(),
+                unix_time_millis(correlation_id)?,
                 &local_principal(),
                 &[],
-                IdempotencyKey::new(idempotency_key)
-                    .map_err(|error| cookie_problem(error.to_string(), correlation_id))?,
+                request_key,
             )
-            .map_err(|error| cookie_problem(error.to_string(), correlation_id))?;
+            .map_err(|error| error.as_problem(correlation_id))?;
+        self.reconcile_cookie_scope(&mut authority, &destination, correlation_id)?;
         serde_json::to_value(result).map_err(|_| serialization_problem(correlation_id))
     }
 
@@ -1005,6 +1226,347 @@ impl AdapterState {
                 correlation_id,
             )
         })
+    }
+
+    fn extension_group_repository(&self) -> Result<LocalRepository, Problem> {
+        LocalRepository::open(&self.runtime.repository_root)
+    }
+
+    fn extension_group_list(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
+        use buglogin_api::services::extension_groups::ExtensionGroupListInput;
+        let input = parse_payload::<ExtensionGroupListInput>(
+            payload,
+            "extension.group.list",
+            correlation_id,
+        )?;
+        let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
+        let repo = self.extension_group_repository()?;
+        let rows = repo
+            .list::<ExtensionGroup>()?
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "group": row.value,
+                    "workspaceId": workspace_id,
+                    "revision": row.revision
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!(rows))
+    }
+
+    fn extension_group_get(&self, payload: Value, correlation_id: &str) -> Result<Value, Problem> {
+        use buglogin_api::services::extension_groups::ExtensionGroupIdInput;
+        let input =
+            parse_payload::<ExtensionGroupIdInput>(payload, "extension.group.get", correlation_id)?;
+        let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
+        let row = self
+            .extension_group_repository()?
+            .get::<ExtensionGroup>(input.extension_group_id.as_str())?
+            .ok_or_else(|| {
+                problem(
+                    "extension_group_not_found",
+                    "Extension group not found",
+                    404,
+                    correlation_id,
+                )
+            })?;
+        Ok(json!({ "group": row.value, "workspaceId": workspace_id, "revision": row.revision }))
+    }
+
+    fn extension_group_create(
+        &self,
+        payload: Value,
+        correlation_id: &str,
+    ) -> Result<Value, Problem> {
+        use buglogin_api::services::extension_groups::ExtensionGroupCreateInput;
+        let input = parse_payload::<ExtensionGroupCreateInput>(
+            payload,
+            "extension.group.create",
+            correlation_id,
+        )?;
+        let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
+        validate_extension_group_fields(&input.name, &input.extension_ids, correlation_id)?;
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|_| {
+                problem(
+                    "clock_unavailable",
+                    "System clock unavailable",
+                    503,
+                    correlation_id,
+                )
+            })?;
+        let group = ExtensionGroup {
+            id: input.extension_group_id,
+            name: input.name.trim().to_owned(),
+            extension_ids: input.extension_ids,
+            sync_mode: input.sync_mode,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let row = self.extension_group_repository()?.create(group)?;
+        Ok(json!({ "group": row.value, "workspaceId": workspace_id, "revision": row.revision }))
+    }
+
+    fn extension_group_update(
+        &self,
+        payload: Value,
+        correlation_id: &str,
+    ) -> Result<Value, Problem> {
+        use buglogin_api::services::extension_groups::ExtensionGroupUpdateInput;
+        let input = parse_payload::<ExtensionGroupUpdateInput>(
+            payload,
+            "extension.group.update",
+            correlation_id,
+        )?;
+        let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
+        validate_extension_group_fields(&input.name, &input.extension_ids, correlation_id)?;
+        let repo = self.extension_group_repository()?;
+        let mut current = repo
+            .get::<ExtensionGroup>(input.extension_group_id.as_str())?
+            .ok_or_else(|| {
+                problem(
+                    "extension_group_not_found",
+                    "Extension group not found",
+                    404,
+                    correlation_id,
+                )
+            })?;
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|_| {
+                problem(
+                    "clock_unavailable",
+                    "System clock unavailable",
+                    503,
+                    correlation_id,
+                )
+            })?;
+        current.value.name = input.name.trim().to_owned();
+        current.value.extension_ids = input.extension_ids;
+        current.value.sync_mode = input.sync_mode;
+        current.value.updated_at = now;
+        let updated = repo.update(input.expected_revision, current.value)?;
+        Ok(
+            json!({ "group": updated.value, "workspaceId": workspace_id, "revision": updated.revision }),
+        )
+    }
+
+    fn extension_group_delete(
+        &self,
+        payload: Value,
+        correlation_id: &str,
+    ) -> Result<Value, Problem> {
+        use buglogin_api::services::extension_groups::ExtensionGroupDeleteInput;
+        let input = parse_payload::<ExtensionGroupDeleteInput>(
+            payload,
+            "extension.group.delete",
+            correlation_id,
+        )?;
+        let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
+        let repo = self.extension_group_repository()?;
+        let row = repo
+            .get::<ExtensionGroup>(input.extension_group_id.as_str())?
+            .ok_or_else(|| {
+                problem(
+                    "extension_group_not_found",
+                    "Extension group not found",
+                    404,
+                    correlation_id,
+                )
+            })?;
+        if repo.list::<Profile>()?.iter().any(|profile| {
+            profile.value.extension_group_id.as_ref() == Some(&input.extension_group_id)
+        }) {
+            return Err(problem(
+                "extension_group_in_use",
+                "Extension group is assigned to profiles",
+                409,
+                correlation_id,
+            ));
+        }
+        repo.quarantine::<ExtensionGroup>(
+            input.expected_revision,
+            input.extension_group_id.as_str(),
+        )?;
+        Ok(json!({ "group": row.value, "workspaceId": workspace_id, "revision": row.revision }))
+    }
+
+    fn profile_extension_group_set(
+        &self,
+        payload: Value,
+        correlation_id: &str,
+    ) -> Result<Value, Problem> {
+        use buglogin_api::services::extension_groups::ProfileExtensionGroupSetInput;
+        let input = parse_payload::<ProfileExtensionGroupSetInput>(
+            payload,
+            "profile.extension.group.set",
+            correlation_id,
+        )?;
+        let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
+        let repo = self.extension_group_repository()?;
+        if let Some(group_id) = &input.extension_group_id {
+            repo.get::<ExtensionGroup>(group_id.as_str())?
+                .ok_or_else(|| {
+                    problem(
+                        "extension_group_not_found",
+                        "Extension group not found",
+                        404,
+                        correlation_id,
+                    )
+                })?;
+        }
+        let mut profile = self.profiles.get(&input.profile_id)?.ok_or_else(|| {
+            problem(
+                "profile_not_found",
+                "Profile not found",
+                404,
+                correlation_id,
+            )
+        })?;
+        profile.value.extension_group_id = input.extension_group_id;
+        let updated = self
+            .profiles
+            .update(input.expected_revision, profile.value)?;
+        let _ = workspace_id;
+        serde_json::to_value(ProfileRecord::new(updated.value, updated.revision))
+            .map_err(|_| serialization_problem(correlation_id))
+    }
+
+    fn reconcile_profile_cookie_materializations(
+        &self,
+        profile_id: &ProfileId,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let mut authority = self.cookie_authority(correlation_id)?;
+        let pending = authority
+            .pending_materializations()
+            .map_err(|error| error.as_problem(correlation_id))?
+            .into_iter()
+            .filter(|(scope, _)| scope.profile_id == *profile_id)
+            .collect::<Vec<_>>();
+        if pending.len() > 1 {
+            return Err(cookie_recovery_pending(correlation_id));
+        }
+        for (scope, _) in pending {
+            self.reconcile_cookie_scope(&mut authority, &scope, correlation_id)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_cookie_scope(
+        &self,
+        authority: &mut CookieAuthority<NativeVault>,
+        scope: &CookieScope,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let pending = authority
+            .pending_materializations()
+            .map_err(|error| error.as_problem(correlation_id))?
+            .into_iter()
+            .filter(|(pending_scope, _)| pending_scope == scope)
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let profile = self
+            .profiles
+            .get(&scope.profile_id)
+            .map_err(|error| correlate(error, correlation_id))?
+            .ok_or_else(|| profile_not_found(correlation_id))?;
+        if profile.value.runtime != Runtime::Wayfern
+            || matches!(
+                profile.value.state,
+                ProfileState::Running | ProfileState::Launching | ProfileState::Stopping
+            )
+        {
+            return Err(cookie_recovery_pending(correlation_id));
+        }
+        let profile_root = self
+            .runtime
+            .targets
+            .profile_path(
+                &profile.value.runtime,
+                &self.runtime.profiles_root,
+                &scope.profile_id,
+            )
+            .map_err(|_| cookie_recovery_pending(correlation_id))?;
+        authority.set_profile_state(scope.clone(), ProfileRuntimeState::Stopped);
+        let cookies = authority
+            .materialization_inputs(scope, &local_principal(), &[])
+            .map_err(|_| cookie_recovery_pending(correlation_id))?;
+        let now_unix = unix_time_seconds(correlation_id)?.min(i64::MAX as u64) as i64;
+        buglogin_browser::cookies::wayfern::materialize_from_inputs(
+            &profile_root,
+            ProfileCookieState::Stopped,
+            &cookies,
+            now_unix,
+        )
+        .map_err(|_| cookie_recovery_pending(correlation_id))?;
+        for (_, idempotency_key) in pending {
+            authority
+                .complete_materialization(scope, &idempotency_key)
+                .map_err(|_| cookie_recovery_pending(correlation_id))?;
+        }
+        Ok(())
+    }
+
+    fn preflight_cookie_scope(
+        &self,
+        scope: &CookieScope,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let profile = self
+            .profiles
+            .get(&scope.profile_id)
+            .map_err(|error| correlate(error, correlation_id))?
+            .ok_or_else(|| profile_not_found(correlation_id))?;
+        if profile.value.runtime != Runtime::Wayfern
+            || matches!(
+                profile.value.state,
+                ProfileState::Running | ProfileState::Launching | ProfileState::Stopping
+            )
+        {
+            return Err(problem(
+                "cookie_runtime_unsupported",
+                "Cookie import requires a stopped Wayfern profile",
+                409,
+                correlation_id,
+            ));
+        }
+        let profile_root = self
+            .runtime
+            .targets
+            .profile_path(
+                &profile.value.runtime,
+                &self.runtime.profiles_root,
+                &scope.profile_id,
+            )
+            .map_err(|_| {
+                problem(
+                    "cookie_store_unavailable",
+                    "The native cookie database is not initialized",
+                    409,
+                    correlation_id,
+                )
+            })?;
+        let now_unix = unix_time_seconds(correlation_id)?.min(i64::MAX as u64) as i64;
+        buglogin_browser::cookies::wayfern::materialize_from_inputs(
+            &profile_root,
+            ProfileCookieState::Stopped,
+            &[],
+            now_unix,
+        )
+        .map_err(|_| {
+            problem(
+                "cookie_store_unavailable",
+                "The native cookie database or encryption key is unavailable",
+                409,
+                correlation_id,
+            )
+        })?;
+        Ok(())
     }
 
     fn set_cookie_profile_state(
@@ -1303,6 +1865,16 @@ impl AdapterState {
             .get(profile_id)
             .map_err(|error| correlate(error, correlation_id))?
             .ok_or_else(|| profile_not_found(correlation_id))?;
+        let fingerprint_target =
+            target_from_runtime_config(current.value.runtime_config.as_ref(), correlation_id)?;
+        if fingerprint_target.is_some() && current.value.runtime != Runtime::Wayfern {
+            return Err(problem(
+                "fingerprint_runtime_unsupported",
+                "Fingerprint targets are supported only by the Wayfern runtime",
+                409,
+                correlation_id,
+            ));
+        }
         if current.value.archived || current.value.state != ProfileState::Ready {
             return Err(problem(
                 "profile_not_launchable",
@@ -1314,6 +1886,7 @@ impl AdapterState {
         if !self.runtime.targets.supports(&current.value.runtime) {
             return Err(correlate(runtime_not_configured(), correlation_id));
         }
+        self.reconcile_profile_cookie_materializations(profile_id, correlation_id)?;
         let binding = self
             .bindings
             .get(profile_id)
@@ -1391,6 +1964,26 @@ impl AdapterState {
                 );
             }
         }
+        let fingerprint_cdp_port = if fingerprint_target.is_some() {
+            let port = match configure_local_cdp_args(&mut specification.args, correlation_id) {
+                Ok(port) => port,
+                Err(error) => {
+                    if let Some(bridge) = proxy_bridge.take() {
+                        let _ = bridge.stop().await;
+                    }
+                    return Err(correlate(error, correlation_id));
+                }
+            };
+            if let Err(error) = clear_stale_cdp_marker(&profile_path, correlation_id) {
+                if let Some(bridge) = proxy_bridge.take() {
+                    let _ = bridge.stop().await;
+                }
+                return Err(correlate(error, correlation_id));
+            }
+            Some(port)
+        } else {
+            None
+        };
         let runtime_version = specification.version.clone();
         let mut launching_profile = current.value;
         launching_profile.state = launching_profile
@@ -1398,17 +1991,22 @@ impl AdapterState {
             .clone()
             .transition(ProfileState::Launching)
             .map_err(|error| correlate(error, correlation_id))?;
-        launching_profile.updated_at = now();
-        let launching = self
-            .profiles
-            .update(current.revision, launching_profile)
-            .map_err(|error| correlate(error, correlation_id))?;
+        launching_profile.updated_at = now(correlation_id)?;
+        let launching = {
+            let authority = self.cookie_authority(correlation_id)?;
+            if authority.has_pending_materialization_for_profile(profile_id.as_str()) {
+                return Err(cookie_recovery_pending(correlation_id));
+            }
+            self.profiles
+                .update(current.revision, launching_profile)
+                .map_err(|error| correlate(error, correlation_id))?
+        };
         let receipt = match self
             .profile_runtime
             .launch(LaunchRequest {
                 profile_id: profile_id.clone(),
                 idempotency_key: idempotency_key.to_owned(),
-                profile_path,
+                profile_path: profile_path.clone(),
                 specification,
                 lease_scope,
                 preacquired_lease: None,
@@ -1422,6 +2020,37 @@ impl AdapterState {
                 return Err(correlate(error, correlation_id));
             }
         };
+        if let Some(target) = fingerprint_target.as_ref() {
+            let Some(cdp_port) = fingerprint_cdp_port else {
+                if let Err(stop_error) = self.profile_runtime.stop(profile_id.clone()).await {
+                    let _ = self.persist_failed(launching, correlation_id);
+                    return Err(correlate(stop_error, correlation_id));
+                }
+                self.persist_failed(launching, correlation_id)?;
+                return Err(problem(
+                    "wayfern_cdp_unavailable",
+                    "Wayfern local control port was not configured",
+                    503,
+                    correlation_id,
+                ));
+            };
+            if let Err(error) = apply_wayfern_fingerprint(
+                &profile_path,
+                target,
+                &runtime_version,
+                cdp_port,
+                correlation_id,
+            )
+            .await
+            {
+                if let Err(stop_error) = self.profile_runtime.stop(profile_id.clone()).await {
+                    let _ = self.persist_failed(launching, correlation_id);
+                    return Err(correlate(stop_error, correlation_id));
+                }
+                self.persist_failed(launching, correlation_id)?;
+                return Err(correlate(error, correlation_id));
+            }
+        }
         let mut running_profile = launching.value.clone();
         running_profile.state = running_profile
             .state
@@ -1429,7 +2058,7 @@ impl AdapterState {
             .transition(ProfileState::Running)
             .map_err(|error| correlate(error, correlation_id))?;
         running_profile.runtime_version = Some(runtime_version);
-        running_profile.updated_at = now();
+        running_profile.updated_at = now(correlation_id)?;
         let updated = match self.profiles.update(launching.revision, running_profile) {
             Ok(updated) => updated,
             Err(error) => {
@@ -1469,7 +2098,7 @@ impl AdapterState {
             .clone()
             .transition(ProfileState::Stopping)
             .map_err(|error| correlate(error, correlation_id))?;
-        stopping_profile.updated_at = now();
+        stopping_profile.updated_at = now(correlation_id)?;
         let stopping = self
             .profiles
             .update(current.revision, stopping_profile)
@@ -1484,7 +2113,7 @@ impl AdapterState {
             .clone()
             .transition(ProfileState::Ready)
             .map_err(|error| correlate(error, correlation_id))?;
-        ready_profile.updated_at = now();
+        ready_profile.updated_at = now(correlation_id)?;
         let updated = self
             .profiles
             .update(stopping.revision, ready_profile)
@@ -1503,7 +2132,7 @@ impl AdapterState {
             .clone()
             .transition(ProfileState::Failed)
             .map_err(|error| correlate(error, correlation_id))?;
-        failed_profile.updated_at = now();
+        failed_profile.updated_at = now(correlation_id)?;
         self.profiles
             .update(current.revision, failed_profile)
             .map(|_| ())
@@ -1714,6 +2343,25 @@ fn same_endpoint(left: &Proxy, right: &Proxy) -> bool {
         && left.port == right.port
 }
 
+fn validate_extension_group_fields(
+    name: &str,
+    extension_ids: &[buglogin_domain::ids::ExtensionId],
+    correlation_id: &str,
+) -> Result<(), Problem> {
+    let unique = extension_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if name.trim().is_empty() || name.chars().count() > 120 || unique.len() != extension_ids.len() {
+        return Err(problem(
+            "extension_group_invalid",
+            "Extension group fields are invalid",
+            400,
+            correlation_id,
+        ));
+    }
+    Ok(())
+}
+
 fn protocol_name(protocol: &ProxyProtocol) -> &'static str {
     match protocol {
         ProxyProtocol::Http => "http",
@@ -1767,6 +2415,10 @@ fn result(command_id: &str, correlation_id: &str, data: Value) -> CommandResult<
 struct ProfileListInput {
     #[serde(default)]
     include_archived: bool,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1872,9 +2524,15 @@ struct CookieWireInput {
 }
 
 impl CookieWireInput {
-    fn into_cookie(self) -> Result<CookieInput, Problem> {
-        let value = SecretValue::new(self.value.into_bytes())
-            .map_err(|error| problem("invalid_cookie_value", &error.to_string(), 400, "cookie"))?;
+    fn into_cookie(self, correlation_id: &str) -> Result<CookieInput, Problem> {
+        let value = SecretValue::new(self.value.into_bytes()).map_err(|_| {
+            problem(
+                "invalid_cookie_value",
+                "Cookie value is invalid",
+                400,
+                correlation_id,
+            )
+        })?;
         Ok(CookieInput {
             name: self.name,
             domain: self.domain,
@@ -1983,6 +2641,8 @@ struct ProxyView<'a> {
     host: &'a str,
     port: u16,
     has_credential: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_version: Option<&'a buglogin_domain::ids::CredentialId>,
     rotation_configured: bool,
     bypass_rules: &'a [String],
     created_at: &'a str,
@@ -1998,6 +2658,7 @@ impl<'a> ProxyView<'a> {
             host: &proxy.host,
             port: proxy.port,
             has_credential: proxy.credential_ref.is_some(),
+            credential_version: proxy.credential_ref.as_ref(),
             rotation_configured: proxy.rotation_url.is_some(),
             bypass_rules: &proxy.bypass_rules,
             created_at: &proxy.created_at,
@@ -2065,13 +2726,10 @@ fn operation_id(command_id: &str, idempotency_key: &str) -> String {
     format!("op_{}", &digest[..24])
 }
 
-fn generated_profile_id() -> Result<ProfileId, Problem> {
+fn generated_profile_id(correlation_id: &str) -> Result<ProfileId, Problem> {
     let seed = format!(
         "{}:{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
+        unix_time_nanos(correlation_id)?,
         PROFILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let digest = format!("{:x}", Sha256::digest(seed.as_bytes()));
@@ -2115,16 +2773,9 @@ fn local_principal() -> Principal {
     }
 }
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn local_cookie_lease(scope: &CookieScope) -> Lease {
-    let now = now_unix_ms();
-    Lease {
+fn local_cookie_lease(scope: &CookieScope, correlation_id: &str) -> Result<Lease, Problem> {
+    let now = unix_time_millis(correlation_id)?;
+    Ok(Lease {
         lease_id: format!("local-cookie-{}", scope.profile_id.as_str()),
         fencing_token: 1,
         resource_id: ResourceId::from_str(&format!("res-cookie-{}", scope.profile_id.as_str()))
@@ -2133,20 +2784,12 @@ fn local_cookie_lease(scope: &CookieScope) -> Lease {
         owner_id: "desktop-local".into(),
         token: format!("local-cookie-token-{}", scope.profile_id.as_str()),
         issued_at: now,
-        expires_at: now.saturating_add(300_000),
-    }
+        expires_at: crate::clock::checked_add_millis(now, 300_000, correlation_id)?,
+    })
 }
 
-fn cookie_problem(title: String, correlation_id: &str) -> Problem {
-    Problem::new("cookie_command_failed", title, 409, correlation_id)
-}
-
-fn now() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
+fn now(correlation_id: &str) -> Result<String, Problem> {
+    Ok(unix_time_seconds(correlation_id)?.to_string())
 }
 
 fn correlate(mut error: Problem, correlation_id: &str) -> Problem {
@@ -2189,6 +2832,16 @@ fn problem(code: &str, title: &str, status: u16, correlation_id: &str) -> Proble
     Problem::new(code, title, status, correlation_id)
 }
 
+fn cookie_recovery_pending(correlation_id: &str) -> Problem {
+    Problem::new(
+        "cookie_recovery_pending",
+        "Cookie data recovery is still pending",
+        503,
+        correlation_id,
+    )
+    .retryable(true)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
@@ -2196,6 +2849,7 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use buglogin_browser::{
         process::{ManagedProcess, ProcessIdentity, ProcessStatus},
@@ -2384,6 +3038,58 @@ mod tests {
             .unwrap()
             .to_owned();
         profile_id
+    }
+
+    fn initialize_supported_cookie_store(state: &AdapterState, profile_id: &str) {
+        let profile_id = ProfileId::from_str(profile_id).unwrap();
+        let profile_root = state
+            .runtime
+            .targets
+            .profile_path(&Runtime::Wayfern, &state.runtime.profiles_root, &profile_id)
+            .unwrap();
+        fs::create_dir_all(&profile_root).unwrap();
+        fs::write(
+            profile_root.join("os_crypt_key"),
+            b"adapter-test-os-crypt-key",
+        )
+        .unwrap();
+
+        let database_path = buglogin_browser::cookies::wayfern::database_path(&profile_root);
+        fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+        rusqlite::Connection::open(database_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+                 INSERT INTO meta(key, value) VALUES('version', '24');
+                 INSERT INTO meta(key, value) VALUES('last_compatible_version', '24');
+                 CREATE TABLE cookies(
+                     creation_utc INTEGER NOT NULL,
+                     host_key TEXT NOT NULL,
+                     top_frame_site_key TEXT NOT NULL,
+                     name TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     encrypted_value BLOB NOT NULL,
+                     path TEXT NOT NULL,
+                     expires_utc INTEGER NOT NULL,
+                     is_secure INTEGER NOT NULL,
+                     is_httponly INTEGER NOT NULL,
+                     last_access_utc INTEGER NOT NULL,
+                     has_expires INTEGER NOT NULL,
+                     is_persistent INTEGER NOT NULL,
+                     priority INTEGER NOT NULL,
+                     samesite INTEGER NOT NULL,
+                     source_scheme INTEGER NOT NULL,
+                     source_port INTEGER NOT NULL,
+                     last_update_utc INTEGER NOT NULL,
+                     source_type INTEGER NOT NULL,
+                     has_cross_site_ancestor INTEGER NOT NULL
+                 );
+                 CREATE UNIQUE INDEX cookies_unique_index ON cookies(
+                     host_key, top_frame_site_key, has_cross_site_ancestor,
+                     name, path, source_scheme, source_port
+                 );",
+            )
+            .unwrap();
     }
 
     async fn wait_operation(state: &AdapterState, operation_id: &Value) -> CommandResult<Value> {
@@ -2599,6 +3305,7 @@ mod tests {
     async fn cookie_import_persists_generation_and_rejects_stale_cas() {
         let (state, _, root) = state("cookie-import");
         let profile_id = create_profile(&state, "idem_cookie_import_profile_0001").await;
+        initialize_supported_cookie_store(&state, &profile_id);
         let stage = state
             .invoke(
                 "cookie_stage",
@@ -2707,8 +3414,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(stale.code, "cookie_command_failed");
-        assert_eq!(stale.title, "cookie_generation_mismatch");
+        assert_eq!(stale.code, "cookie_generation_mismatch");
+        assert_eq!(stale.title, "Cookie operation conflicts with current state");
         assert_eq!(stale.correlation_id, "cor_cookie_import_stale");
         assert!(!stale.to_string().contains("secret-value"));
         drop(state);
@@ -2720,6 +3427,8 @@ mod tests {
         let (state, _, root) = state("cookie-copy");
         let source_profile = create_profile(&state, "idem_cookie_copy_source_0001").await;
         let destination_profile = create_profile(&state, "idem_cookie_copy_destination_0001").await;
+        initialize_supported_cookie_store(&state, &source_profile);
+        initialize_supported_cookie_store(&state, &destination_profile);
         let stage = state
             .invoke(
                 "cookie_stage",
@@ -3350,7 +4059,7 @@ mod tests {
         let current = state.profiles.get(&id).unwrap().unwrap();
         let mut profile = current.value;
         profile.sync_mode = Some(SyncMode::Managed);
-        profile.updated_at = now();
+        profile.updated_at = now("test").unwrap();
         state.profiles.update(current.revision, profile).unwrap();
 
         let launch = state
@@ -3403,6 +4112,34 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(error.code, "hosted_profile_authority_required");
+            assert_eq!(error.status, 409);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hosted_workspace_mutations_fail_closed_in_local_mode() {
+        let (state, _, root) = state("hosted-workspace-authority");
+        for invoke in [
+            "group_list",
+            "group_get",
+            "group_create",
+            "group_update",
+            "group_delete",
+            "profile_groups_replace",
+            "profile_proxy_assignment_set",
+            "profile_update",
+        ] {
+            let error = state
+                .invoke(
+                    invoke,
+                    "cor_hosted_workspace",
+                    Some("idem_hosted_workspace"),
+                    json!({}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "hosted_workspace_authority_required");
             assert_eq!(error.status, 409);
         }
         fs::remove_dir_all(root).unwrap();

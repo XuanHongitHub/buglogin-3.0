@@ -4,7 +4,33 @@ export type ProfileRuntime =
   | "bugium"
   | "bugmini"
   | "bugthor"
-  | "bughelium";
+  | "bughelium"
+  | "preserved";
+export type RuntimeCatalog = {
+  schemaVersion: number;
+  releases: Array<{
+    runtime: ProfileRuntime;
+    version: string;
+    platform: "windows" | "macos" | "linux";
+    architecture: "x64" | "arm64";
+    relativePath: string;
+    packageFormat: "raw" | "zip" | "dmg";
+    archivePrefix?: string | null;
+    source: string;
+    sha256: string;
+    sizeBytes: number;
+    keyId: string;
+    signature: string;
+  }>;
+};
+export type DesktopIntegrationStatus = {
+  deploymentMode: "local" | "production";
+  apiEndpoint: string | null;
+  apiReachable: boolean;
+  apiService: string | null;
+  mcpEndpoint: string | null;
+  mcpEnabled: boolean | null;
+};
 export type ProfileState =
   | "created"
   | "ready"
@@ -17,13 +43,17 @@ export type Profile = {
   id: string;
   name: string;
   runtime: ProfileRuntime;
-  runtimeVersion?: string;
+  runtimeVersion?: string | null;
   state: ProfileState;
   archived?: boolean;
   revision?: number;
   updatedAt?: string;
+  note?: string | null;
+  tags?: string[];
+  proxyId?: string | null;
+  vpnId?: string | null;
+  groupIds?: string[];
 };
-export type ProfilePage = { items: Profile[]; nextCursor?: string | null };
 export type ProfileCreateInput = {
   name: string;
   runtime: "wayfern";
@@ -51,6 +81,10 @@ export type ProfileShareInput = {
   memberId: string;
   permission: ProfileSharePermission;
   expectedRevision: number;
+  confirmedDeviceFingerprints?: Array<{
+    deviceId: string;
+    fingerprint: string;
+  }>;
 };
 export type ProfileShareReceipt = {
   profileId: string;
@@ -71,8 +105,10 @@ export type ProfileShareRevocationReceipt = {
   revision: number;
   revoked: boolean;
 };
-export type Organization = { id: string; name: string };
-export type Workspace = { id: string; organizationId: string; name: string };
+export type {
+  Organization,
+  Workspace,
+} from "../../../frontend/src/generated/command-registry.ts";
 export type Page<Item> = { items: Item[]; nextCursor?: string | null };
 export type OperationAccepted = {
   operationId: string;
@@ -89,7 +125,25 @@ export type Operation = {
   operationId: string;
   status: OperationStatus;
   progress?: number;
+  result?: unknown;
   error?: Problem;
+};
+export type MigrationProfileDataImportItem = {
+  status?: string;
+  profileId?: string;
+  sourceProfileId?: string;
+  reason?: string;
+  code?: string;
+  [key: string]: unknown;
+};
+export type MigrationProfileDataImportResult = {
+  status?: string;
+  sourceProfileCount?: number;
+  proxiesImportedOrReconciled?: number;
+  imported?: MigrationProfileDataImportItem[];
+  alreadyImported?: MigrationProfileDataImportItem[];
+  preserveOnly?: MigrationProfileDataImportItem[];
+  failed?: MigrationProfileDataImportItem[];
 };
 export type ProxyParseRow = {
   line: number;
@@ -114,6 +168,7 @@ export type ProxyView = {
   host: string;
   port: number;
   hasCredential: boolean;
+  credentialVersion?: string;
   rotationConfigured: boolean;
   bypassRules: string[];
   createdAt: string;
@@ -242,11 +297,4 @@ export type CommandResult<Data> = {
 export type DesktopAuthStatus =
   | { state: "auth_not_applicable" }
   | { state: "unauthenticated" }
-  | {
-      state: "authorizing";
-      userCode: string;
-      verificationUri: string;
-      expiresAt: number;
-      interval: number;
-    }
   | { state: "authenticated" };

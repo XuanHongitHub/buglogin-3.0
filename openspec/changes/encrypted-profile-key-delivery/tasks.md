@@ -1,0 +1,25 @@
+# Tasks
+
+- [x] Specify one canonical envelope wire type and fingerprint confirmation field; synchronize OpenSpec and superpowers design/plan.
+- [x] Add versioned durable envelope records to the control aggregate with backward-compatible defaults.
+- [x] Validate encrypted share envelope set against active member sessions, registered device keys, current manifest key version, workspace/resource scope, and confirmed fingerprints.
+- [x] Publish envelope records and grants in one share mutation; revoke envelope records and set rotation pending in one revoke mutation.
+- [x] Add recipient-device envelope GET route using bearer-bound device identity and the shared hosted profile authorization evaluator.
+- [x] Expose the authorized recipient device-key query through the canonical Tauri/REST command and typed desktop client.
+- [x] Version the HPKE share envelope to v2 and include both resource keys required to hydrate and continue syncing encrypted profile data.
+- [x] Add recipient envelope retrieval on desktop launch, validate device/workspace/resource/key-version scope, and persist recovered keys to the OS vault.
+- [x] Add owner fingerprint review in the share drawer and prepare recipient-key envelopes in Rust from OS-vault keys before encrypted direct-share publication.
+- [x] Expose the current account's own active workspace membership in the existing profile-access dialog for member-wide cross-device sharing, with full fingerprint review for encrypted profiles and operate as the default access level. Source updated; interaction and cross-device recovery verification remain open.
+- [ ] Complete screenshot/interaction QA and adversarial replay/no-leak HTTP coverage for encrypted share publication and retrieval.
+- [ ] Verify shared-profile hydration/sync end to end, including auth replay and no-leak HTTP cases.
+- [ ] Add authorization, validation, idempotency, reopen/replay, and no-leak tests.
+- [x] Synchronize OpenAPI, command registry, generated TypeScript, and contract copies; run focused API/contract gates.
+- [x] Keep desktop encrypted sharing fail-closed until the confirmation UI and host persistence/rekey tests are complete.
+- [x] Add one Rust resolver for active direct and group recipients with membership, deny, workspace, and token precedence; use it in encrypted profile authorization, key-rotation enumeration, exact envelope activation, and manifest compatibility checks. Consolidated device/session resolution into one helper; execution of regression tests remains deferred.
+- [ ] Atomically set rotation-pending fences on encrypted profiles affected by group read/execute grant creation/revocation and profile-group assignment changes; verify rollback, idempotent replay, and restart persistence.
+- [ ] Fence affected encrypted profiles when a member becomes active or is suspended, and when an active device key is enrolled/revoked; ensure new recipient devices can trigger owner envelope delivery.
+- [ ] Replace the direct-only rotation envelope activation set with exact direct-plus-group device envelopes; atomically remove all stale member/device envelopes when the new manifest is committed.
+- [ ] Add tests for direct/group union, deny precedence, dynamic reassignment, inactive/cross-workspace members and devices, exact device coverage, stale-envelope pruning, pending-sync denial, and concurrent ACL/key-rotation races.
+- [ ] Keep migration imports from activating encrypted managed-profile group access without complete envelopes; cover dry-run, import, replay, rollback, and row-level error behavior.
+- [x] Add desktop owner rekey and exact recipient-device fingerprint confirmation through the existing profile-access dialog and Rust key-rotation command; preserve the current Donut UI authority. Source updated; screenshot/interaction, interruption, and cross-device recovery verification remain open.
+- [ ] Run focused API, sync, migration, command/OpenAPI, desktop, and authenticated staging E2E gates; record residual risks and release evidence.

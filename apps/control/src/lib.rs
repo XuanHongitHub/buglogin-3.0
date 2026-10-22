@@ -21,8 +21,9 @@ pub fn router() -> Router {
 
 pub fn router_with_data_dir(data_dir: impl AsRef<Path>) -> Result<Router, Problem> {
     let repository = LocalRepository::open(data_dir.as_ref().join("local"))?;
-    let state =
-        ApiState::new(ProfileService::new(repository)).with_recovery_delivery_from_env(false)?;
+    // The control process has no configured recovery provider. ApiState keeps
+    // its fail-closed UnavailableRecoveryDelivery by default.
+    let state = ApiState::new(ProfileService::new(repository));
     let router = Router::new()
         .route("/health", get(health))
         .merge(buglogin_api::http::router(state.clone()));
@@ -36,16 +37,6 @@ fn with_optional_mcp(router: Router, state: ApiState) -> Result<Router, Problem>
     if !enabled {
         return Ok(router);
     }
-    let bearer = std::env::var("BUGLOGIN_MCP_TOKEN").map_err(|_| {
-        Problem::new(
-            "missing_mcp_token",
-            "MCP transport token is missing",
-            500,
-            "control-startup",
-        )
-    })?;
-    let control = buglogin_api::mcp::transport::McpTransportControl::default();
-    control.activate(&bearer)?;
     Ok(
         router.merge(buglogin_api::mcp::transport::production_router(
             state,
@@ -53,7 +44,6 @@ fn with_optional_mcp(router: Router, state: ApiState) -> Result<Router, Problem>
                 enabled: true,
                 ..Default::default()
             },
-            control,
         )),
     )
 }

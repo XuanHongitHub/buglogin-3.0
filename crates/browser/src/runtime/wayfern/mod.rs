@@ -4,7 +4,7 @@ use std::{
 };
 
 use buglogin_domain::{entities::Runtime, errors::Problem, ids::ProfileId};
-use buglogin_storage::{blob::checksum, paths::confined_path};
+use buglogin_storage::paths::confined_path;
 
 use super::{
     LaunchSpecification, RuntimeAdapter, RuntimeBinary, RuntimeCapability, ValidatedRuntimeBinary,
@@ -53,10 +53,19 @@ impl RuntimeAdapter for WayfernAdapter {
                 "Runtime binary is not a file",
             ));
         }
-        let bytes = fs::read(&binary.path).map_err(|_| {
+        let file = fs::File::open(&binary.path).map_err(|_| {
             invalid_runtime("runtime_binary_unreadable", "Runtime binary is unreadable")
         })?;
-        let actual_checksum = checksum(&bytes);
+        let (actual_checksum, actual_size) = buglogin_storage::blob::checksum_reader(file)
+            .map_err(|_| {
+                invalid_runtime("runtime_binary_unreadable", "Runtime binary is unreadable")
+            })?;
+        if actual_size != metadata.len() {
+            return Err(invalid_runtime(
+                "runtime_size_mismatch",
+                "Runtime size changed during validation",
+            ));
+        }
         if actual_checksum != binary.expected_checksum.to_ascii_lowercase() {
             return Err(invalid_runtime(
                 "runtime_checksum_mismatch",
@@ -85,16 +94,25 @@ impl RuntimeAdapter for WayfernAdapter {
         profile_path: &Path,
         extra_args: &[String],
     ) -> Result<LaunchSpecification, Problem> {
+        if extra_args
+            .iter()
+            .any(|argument| is_user_data_dir_override(argument))
+        {
+            return Err(invalid_runtime(
+                "runtime_profile_path_override_forbidden",
+                "Runtime arguments cannot override the isolated profile data directory",
+            ));
+        }
         if !profile_path.is_absolute() {
             return Err(invalid_runtime(
                 "runtime_profile_path_invalid",
                 "Runtime profile path must be absolute",
             ));
         }
-        let mut args = vec![
-            "--user-data-dir".to_string(),
-            profile_path.to_string_lossy().into_owned(),
-        ];
+        let mut args = vec![format!(
+            "--user-data-dir={}",
+            profile_path.to_string_lossy()
+        )];
         args.extend(extra_args.iter().cloned());
         Ok(LaunchSpecification {
             runtime: Runtime::Wayfern,
@@ -106,6 +124,56 @@ impl RuntimeAdapter for WayfernAdapter {
     }
 }
 
+fn is_user_data_dir_override(argument: &str) -> bool {
+    argument
+        .split_once('=')
+        .map_or(argument, |(name, _)| name)
+        .eq_ignore_ascii_case("--user-data-dir")
+}
+
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binary() -> ValidatedRuntimeBinary {
+        ValidatedRuntimeBinary {
+            path: PathBuf::from(r"C:\BugLogin\runtimes\wayfern\chrome.exe"),
+            version: "154.0.8037.57".into(),
+            checksum: "a".repeat(64),
+            size_bytes: 1,
+        }
+    }
+
+    #[test]
+    fn launch_specification_uses_the_profile_specific_data_directory() {
+        let profile_path = Path::new(r"C:\BugLogin\profiles\profile-one");
+        let specification = WayfernAdapter
+            .launch_specification(&binary(), profile_path, &["--disable-sync".into()])
+            .unwrap();
+
+        assert_eq!(
+            specification.args,
+            vec![
+                format!("--user-data-dir={}", profile_path.to_string_lossy()),
+                "--disable-sync".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_specification_rejects_runtime_data_directory_overrides() {
+        let error = WayfernAdapter
+            .launch_specification(
+                &binary(),
+                Path::new(r"C:\BugLogin\profiles\profile-one"),
+                &["--user-data-dir=C:\\Users\\Acer\\AppData\\Local\\Wayfern".into()],
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "runtime_profile_path_override_forbidden");
+    }
 }

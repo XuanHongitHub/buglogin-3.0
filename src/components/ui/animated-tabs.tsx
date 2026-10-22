@@ -1,10 +1,11 @@
 "use client";
 
 import * as TabsPrimitive from "@radix-ui/react-tabs";
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
 import { useControlledState } from "@/hooks/use-controlled-state";
+import { useInputModality } from "@/hooks/use-input-modality";
 import { cn } from "@/lib/utils";
 
 interface AnimatedTabsContextValue {
@@ -103,11 +104,15 @@ function AnimatedTabsTrigger({
 }: AnimatedTabsTriggerProps) {
   const { activeValue, hoveredValue, setHoveredValue, indicatorId } =
     useAnimatedTabs();
+  const reduceMotion = useReducedMotion();
+  const inputModality = useInputModality();
+  const animateIndicator = !reduceMotion && inputModality === "pointer";
   // The visible pill follows hover when present, otherwise sits on the
   // active tab. Framer's `layoutId` handles the slide animation between
   // mounted instances; only the trigger whose `value` matches `shownValue`
   // renders the indicator, so the transition is a single-element move.
-  const shownValue = hoveredValue ?? activeValue;
+  const shownValue =
+    inputModality === "keyboard" ? activeValue : (hoveredValue ?? activeValue);
   const showIndicator = shownValue === value;
   const isActive = activeValue === value;
 
@@ -116,13 +121,16 @@ function AnimatedTabsTrigger({
       data-slot="animated-tabs-trigger"
       value={value}
       onMouseEnter={(event) => {
-        setHoveredValue(value);
+        if (window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+          setHoveredValue(value);
+        }
         onMouseEnter?.(event);
       }}
       className={cn(
         "relative inline-flex h-7 cursor-pointer items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium whitespace-nowrap transition-colors duration-150",
         "text-muted-foreground hover:text-foreground",
-        isActive && "text-foreground",
+        isActive && !showIndicator && "text-foreground",
+        showIndicator && "text-accent-foreground hover:text-accent-foreground",
         "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none",
         "disabled:pointer-events-none disabled:opacity-50",
         className,
@@ -131,9 +139,19 @@ function AnimatedTabsTrigger({
     >
       {showIndicator && (
         <motion.span
-          layoutId={`animated-tabs-indicator-${indicatorId}`}
+          layoutId={
+            animateIndicator
+              ? `animated-tabs-indicator-${indicatorId}`
+              : undefined
+          }
+          initial={false}
+          data-slot="animated-tabs-indicator"
           className="pointer-events-none absolute inset-0 -z-10 rounded-md bg-accent"
-          transition={{ type: "spring", stiffness: 360, damping: 32 }}
+          transition={
+            animateIndicator
+              ? { type: "spring", stiffness: 360, damping: 32 }
+              : { duration: 0 }
+          }
         />
       )}
       {children}

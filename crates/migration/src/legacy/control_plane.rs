@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use buglogin_domain::{errors::Problem, ids::migration_uuid};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::ProfileSourceRef;
+use super::{NeutralGroupData, NeutralGroupRecord, ProfileSourceRef};
 
 const LEGACY_ACTIONS: &[&str] = &[
     "create_profile",
@@ -34,6 +35,100 @@ pub struct LegacyControlPlaneExport {
     pub workspaces: Vec<LegacyControlWorkspace>,
     pub memberships: Vec<LegacyControlMembership>,
     pub share_grants: Vec<LegacyControlShareGrant>,
+    #[serde(default)]
+    pub profiles: Vec<LegacyControlProfile>,
+    #[serde(default)]
+    pub groups: Vec<LegacyControlGroup>,
+    #[serde(default)]
+    pub profile_group_assignments: Vec<LegacyControlProfileGroupAssignment>,
+    #[serde(default)]
+    pub pending_share_grants: Vec<LegacyPendingShareGrant>,
+    #[serde(default)]
+    pub pending_invites: Vec<LegacyPendingInvite>,
+    #[serde(default)]
+    pub legacy_credentials: Option<crate::legacy_account_credentials::EncryptedLegacyCredentials>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyControlProfile {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub runtime: String,
+    pub runtime_version: Option<String>,
+    pub release_type: String,
+    pub proxy_id: Option<String>,
+    pub vpn_id: Option<String>,
+    pub group_id: Option<String>,
+    pub extension_group_id: Option<String>,
+    pub ephemeral: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub tags: Vec<String>,
+    pub note: Option<String>,
+}
+
+/// Source grants aimed at an unconsumed invite are preserved as migration
+/// provenance only. They must never become an active BugLogin grant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyPendingShareGrant {
+    pub id: String,
+    pub workspace_id: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub resource_name: Option<String>,
+    pub recipient_identity_sha256: String,
+    pub access_mode: String,
+    pub created_at: String,
+    pub created_by: String,
+    pub revoked_at: Option<String>,
+    pub disposition: String,
+    pub invite_id: Option<String>,
+    pub invite_workspace_id: Option<String>,
+    pub invite_identity_sha256: Option<String>,
+    pub invite_consumed_at: Option<String>,
+    pub invite_role: Option<String>,
+    pub invite_created_at: Option<String>,
+    pub invite_expires_at: Option<String>,
+    pub invite_created_by: Option<String>,
+}
+
+/// Pending 1.0 invitations are evidence only. Their bearer tokens are never
+/// exported and a new invitation must be issued in BugLogin 3.0.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyPendingInvite {
+    pub id: String,
+    pub workspace_id: String,
+    pub identity_sha256: String,
+    pub role: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub created_by: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyControlGroup {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub sync_enabled: bool,
+    pub last_sync: Option<String>,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyControlProfileGroupAssignment {
+    pub profile_id: String,
+    pub workspace_id: String,
+    pub group_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -70,6 +165,8 @@ pub struct LegacyControlMembership {
     pub workspace_id: String,
     pub user_id: String,
     pub email: String,
+    #[serde(default)]
+    pub legacy_auth_provider: Option<String>,
     pub role: String,
     pub resource_access_mode: String,
     #[serde(default, deserialize_with = "deserialize_capabilities")]
@@ -104,6 +201,38 @@ pub struct LegacyControlShareGrant {
     pub revoked_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct NeutralGroupShareGrantData {
+    pub workspace_id: String,
+    pub group_id: String,
+    pub member_id: String,
+    pub action: String,
+    pub effect: String,
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct NeutralGroupShareGrantRecord {
+    pub schema: String,
+    pub source_ref: ProfileSourceRef,
+    pub id: String,
+    pub revision: u32,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub data: NeutralGroupShareGrantData,
+    pub extensions: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct NeutralProfileGroupAssignment {
+    pub profile_id: String,
+    pub workspace_id: String,
+    pub group_id: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LegacyControlPlaneMapping {
     pub accounts: Vec<NeutralAccountRecord>,
@@ -114,6 +243,12 @@ pub struct LegacyControlPlaneMapping {
     pub resources: Vec<NeutralResourceRecord>,
     pub profile_resources: Vec<NeutralProfileResourceRecord>,
     pub grants: Vec<NeutralGrantRecord>,
+    pub groups: Vec<NeutralGroupRecord>,
+    pub profiles: Vec<super::NeutralProfileRecord>,
+    pub group_grants: Vec<NeutralGroupShareGrantRecord>,
+    pub profile_group_assignments: Vec<NeutralProfileGroupAssignment>,
+    pub pending_share_grants: Vec<LegacyPendingShareGrant>,
+    pub pending_invites: Vec<LegacyPendingInvite>,
 }
 
 macro_rules! neutral_record {
@@ -223,6 +358,7 @@ struct AccountAccumulator {
     email: String,
     status: String,
     platform_role: Option<String>,
+    legacy_auth_provider: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -252,6 +388,29 @@ pub fn canonicalize_legacy_control_plane_json(
     sort_records(object, "workspaces", &["organizationId", "id"])?;
     sort_records(object, "memberships", &["workspaceId", "email", "userId"])?;
     sort_records(object, "shareGrants", &["workspaceId", "resourceId", "id"])?;
+    if object.contains_key("profiles") {
+        sort_records(object, "profiles", &["workspaceId", "id"])?;
+    }
+    if object.contains_key("pendingShareGrants") {
+        sort_records(
+            object,
+            "pendingShareGrants",
+            &["workspaceId", "resourceId", "id"],
+        )?;
+    }
+    if object.contains_key("pendingInvites") {
+        sort_records(object, "pendingInvites", &["workspaceId", "id"])?;
+    }
+    if object.contains_key("groups") {
+        sort_records(object, "groups", &["workspaceId", "id"])?;
+    }
+    if object.contains_key("profileGroupAssignments") {
+        sort_records(
+            object,
+            "profileGroupAssignments",
+            &["workspaceId", "profileId"],
+        )?;
+    }
     let mut canonical =
         serde_json::to_vec_pretty(&value).map_err(|_| invalid("control export serialization"))?;
     canonical.push(b'\n');
@@ -304,6 +463,35 @@ pub fn map_legacy_control_plane(
         }
     }
 
+    let mut groups_by_source = BTreeMap::new();
+    for group in &export.groups {
+        validate_control_group(group, &workspaces_by_source)?;
+        if groups_by_source.insert(group.id.clone(), group).is_some() {
+            return Err(invalid("duplicate workspace group ID"));
+        }
+    }
+    let mut profiles_by_source = BTreeMap::new();
+    for profile in &export.profiles {
+        validate_control_profile(profile, &workspaces_by_source)?;
+        if profiles_by_source
+            .insert(profile.id.clone(), profile)
+            .is_some()
+        {
+            return Err(invalid("duplicate hosted profile ID"));
+        }
+    }
+    if !profiles_by_source.is_empty() {
+        for assignment in &export.profile_group_assignments {
+            if profiles_by_source
+                .get(&assignment.profile_id)
+                .is_none_or(|profile| profile.workspace_id != assignment.workspace_id)
+            {
+                return Err(invalid(
+                    "profile group assignment has no matching hosted profile",
+                ));
+            }
+        }
+    }
     let mut accounts_by_source = BTreeMap::<String, AccountAccumulator>::new();
     let mut account_by_email = BTreeMap::<String, String>::new();
     let mut memberships_by_key = BTreeMap::new();
@@ -324,11 +512,13 @@ pub fn map_legacy_control_plane(
 
         let status = map_account_state(&membership.account_state)?;
         validate_platform_role(membership.platform_role.as_deref())?;
+        validate_legacy_auth_provider(membership.legacy_auth_provider.as_deref())?;
         match accounts_by_source.get_mut(&membership.user_id) {
             Some(account) => {
                 if account.email != email
                     || account.status != status
                     || account.platform_role != membership.platform_role
+                    || account.legacy_auth_provider != membership.legacy_auth_provider
                 {
                     return Err(invalid("conflicting account identity"));
                 }
@@ -350,6 +540,7 @@ pub fn map_legacy_control_plane(
                         email,
                         status,
                         platform_role: membership.platform_role.clone(),
+                        legacy_auth_provider: membership.legacy_auth_provider.clone(),
                         created_at: membership.created_at.clone(),
                         updated_at: membership.created_at.clone(),
                     },
@@ -374,6 +565,8 @@ pub fn map_legacy_control_plane(
         source_instance_id,
         organizations_by_source,
         workspaces_by_source,
+        groups_by_source,
+        profiles_by_source,
         accounts_by_source,
         account_by_email,
         memberships_by_key,
@@ -385,13 +578,23 @@ fn build_mapping(
     instance_id: &str,
     organizations_by_source: BTreeMap<String, &LegacyControlOrganization>,
     workspaces_by_source: BTreeMap<String, &LegacyControlWorkspace>,
+    groups_by_source: BTreeMap<String, &LegacyControlGroup>,
+    profiles_by_source: BTreeMap<String, &LegacyControlProfile>,
     accounts_by_source: BTreeMap<String, AccountAccumulator>,
     account_by_email: BTreeMap<String, String>,
     memberships_by_key: BTreeMap<(String, String), &LegacyControlMembership>,
 ) -> Result<LegacyControlPlaneMapping, Problem> {
+    let legacy_credentials_encrypted = export.legacy_credentials.is_some();
     let accounts = accounts_by_source
         .iter()
-        .map(|(source_id, account)| account_record(instance_id, source_id, account))
+        .map(|(source_id, account)| {
+            account_record(
+                instance_id,
+                source_id,
+                account,
+                legacy_credentials_encrypted,
+            )
+        })
         .collect();
     let organizations = organizations_by_source
         .values()
@@ -444,15 +647,25 @@ fn build_mapping(
             .collect();
     }
 
-    let (resources, profile_resources, grants) = map_share_grants(
+    let groups = groups_by_source
+        .values()
+        .map(|group| control_group_record(instance_id, group))
+        .collect::<Vec<_>>();
+    let profiles = profiles_by_source
+        .values()
+        .map(|profile| hosted_profile_record(instance_id, profile))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (resources, profile_resources, grants, group_grants) = map_share_grants(
         export,
         instance_id,
         &workspaces_by_source,
+        &groups_by_source,
         &memberships_by_key,
         &account_by_email,
         &member_id_by_workspace_email,
     )?;
 
+    let pending_invites = validate_pending_invites(export, &workspaces_by_source)?;
     Ok(LegacyControlPlaneMapping {
         accounts,
         organizations,
@@ -462,13 +675,318 @@ fn build_mapping(
         resources,
         profile_resources,
         grants,
+        groups,
+        profiles,
+        group_grants,
+        profile_group_assignments: map_profile_group_assignments(
+            export,
+            instance_id,
+            &workspaces_by_source,
+            &groups_by_source,
+        )?,
+        pending_share_grants: validate_pending_share_grants(
+            export,
+            &workspaces_by_source,
+            &groups_by_source,
+            &pending_invites,
+        )?,
+        pending_invites,
     })
+}
+
+fn validate_pending_invites(
+    export: &LegacyControlPlaneExport,
+    workspaces: &BTreeMap<String, &LegacyControlWorkspace>,
+) -> Result<Vec<LegacyPendingInvite>, Problem> {
+    let mut seen = BTreeSet::new();
+    let mut invites = export.pending_invites.clone();
+    for invite in &invites {
+        if !seen.insert(invite.id.as_str()) {
+            return Err(invalid("duplicate pending invite ID"));
+        }
+        required(&invite.id, "pending invite ID")?;
+        if !workspaces.contains_key(&invite.workspace_id) {
+            return Err(invalid("pending invite workspace reference"));
+        }
+        validate_identity_hash(&invite.identity_sha256)?;
+        map_member_role(&invite.role)?;
+        required(&invite.created_by, "pending invite createdBy")?;
+        parse_timestamp(&invite.created_at, "pending invite createdAt")?;
+        parse_timestamp(&invite.expires_at, "pending invite expiresAt")?;
+    }
+    invites.sort_by(|left, right| {
+        (&left.workspace_id, &left.id).cmp(&(&right.workspace_id, &right.id))
+    });
+    Ok(invites)
+}
+
+fn validate_pending_share_grants(
+    export: &LegacyControlPlaneExport,
+    workspaces: &BTreeMap<String, &LegacyControlWorkspace>,
+    groups: &BTreeMap<String, &LegacyControlGroup>,
+    pending_invites: &[LegacyPendingInvite],
+) -> Result<Vec<LegacyPendingShareGrant>, Problem> {
+    let hosted_profiles = export
+        .profiles
+        .iter()
+        .map(|profile| (profile.workspace_id.as_str(), profile.id.as_str()))
+        .collect::<BTreeSet<_>>();
+    let direct_members = export
+        .memberships
+        .iter()
+        .filter(|membership| membership.access_source == "direct")
+        .map(|membership| {
+            (
+                membership.workspace_id.as_str(),
+                identity_hash(&membership.email),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let platform_members = export
+        .memberships
+        .iter()
+        .filter(|membership| membership.access_source == "platform")
+        .map(|membership| {
+            (
+                membership.workspace_id.as_str(),
+                identity_hash(&membership.email),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let active_ids = export
+        .share_grants
+        .iter()
+        .filter(|grant| {
+            !(grant.resource_type == "profile"
+                && grant.revoked_at.is_some()
+                && direct_members.contains(&(
+                    grant.workspace_id.as_str(),
+                    identity_hash(&grant.recipient_email),
+                )))
+        })
+        .map(|grant| grant.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut pending = export.pending_share_grants.clone();
+    for share in export
+        .share_grants
+        .iter()
+        .filter(|share| share.resource_type == "profile" && share.revoked_at.is_some())
+    {
+        let recipient_hash = identity_hash(&share.recipient_email);
+        if direct_members.contains(&(share.workspace_id.as_str(), recipient_hash.clone())) {
+            pending.push(LegacyPendingShareGrant {
+                id: share.id.clone(),
+                workspace_id: share.workspace_id.clone(),
+                resource_type: share.resource_type.clone(),
+                resource_id: share.resource_id.clone(),
+                resource_name: share.resource_name.clone(),
+                recipient_identity_sha256: recipient_hash,
+                access_mode: share.access_mode.clone(),
+                created_at: share.created_at.clone(),
+                created_by: share.created_by.clone(),
+                revoked_at: share.revoked_at.clone(),
+                disposition: "revoked_member".into(),
+                invite_id: None,
+                invite_workspace_id: None,
+                invite_identity_sha256: None,
+                invite_consumed_at: None,
+                invite_role: None,
+                invite_created_at: None,
+                invite_expires_at: None,
+                invite_created_by: None,
+            });
+        }
+    }
+    for grant in &pending {
+        if !seen.insert(grant.id.as_str()) || active_ids.contains(grant.id.as_str()) {
+            return Err(invalid("duplicate share grant provenance ID"));
+        }
+        required(&grant.id, "pending share grant ID")?;
+        if !workspaces.contains_key(&grant.workspace_id) {
+            return Err(invalid("pending share grant workspace reference"));
+        }
+        match grant.resource_type.as_str() {
+            "profile" => {
+                legacy_local_profile_id(&grant.resource_id)?;
+            }
+            "group" => {
+                let group = groups
+                    .get(&grant.resource_id)
+                    .ok_or_else(|| invalid("pending share group reference"))?;
+                if group.workspace_id != grant.workspace_id {
+                    return Err(invalid("pending share group workspace"));
+                }
+            }
+            _ => return Err(invalid("pending share resource type")),
+        }
+        validate_identity_hash(&grant.recipient_identity_sha256)?;
+        let is_direct_member = direct_members.contains(&(
+            grant.workspace_id.as_str(),
+            grant.recipient_identity_sha256.clone(),
+        ));
+        required(&grant.created_by, "pending share createdBy")?;
+        parse_timestamp(&grant.created_at, "pending share createdAt")?;
+        share_actions(&grant.access_mode)?;
+        if grant.disposition == "orphaned_profile" {
+            if grant.resource_type != "profile"
+                || grant.revoked_at.is_some()
+                || hosted_profiles
+                    .contains(&(grant.workspace_id.as_str(), grant.resource_id.as_str()))
+                || grant.invite_id.is_some()
+                || grant.invite_workspace_id.is_some()
+                || grant.invite_identity_sha256.is_some()
+                || grant.invite_consumed_at.is_some()
+                || grant.invite_role.is_some()
+                || grant.invite_created_at.is_some()
+                || grant.invite_expires_at.is_some()
+                || grant.invite_created_by.is_some()
+            {
+                return Err(invalid("orphaned profile share provenance state"));
+            }
+        } else if grant.disposition == "platform_recipient" {
+            if grant.revoked_at.is_some()
+                || !platform_members.contains(&(
+                    grant.workspace_id.as_str(),
+                    grant.recipient_identity_sha256.clone(),
+                ))
+                || grant.resource_type == "profile"
+                    && !hosted_profiles
+                        .contains(&(grant.workspace_id.as_str(), grant.resource_id.as_str()))
+                || grant.invite_id.is_some()
+                || grant.invite_workspace_id.is_some()
+                || grant.invite_identity_sha256.is_some()
+                || grant.invite_consumed_at.is_some()
+                || grant.invite_role.is_some()
+                || grant.invite_created_at.is_some()
+                || grant.invite_expires_at.is_some()
+                || grant.invite_created_by.is_some()
+            {
+                return Err(invalid("platform recipient share provenance state"));
+            }
+        } else if grant.disposition == "pending_invite" {
+            if is_direct_member {
+                return Err(invalid(
+                    "pending invite recipient is already a workspace member",
+                ));
+            }
+            required(
+                grant.invite_id.as_deref().unwrap_or_default(),
+                "pending share invite ID",
+            )?;
+            required(
+                grant.invite_role.as_deref().unwrap_or_default(),
+                "pending share invite role",
+            )?;
+            map_member_role(grant.invite_role.as_deref().unwrap_or_default())?;
+            if grant.invite_workspace_id.as_deref() != Some(grant.workspace_id.as_str())
+                || grant.invite_identity_sha256.as_deref()
+                    != Some(grant.recipient_identity_sha256.as_str())
+                || grant.invite_consumed_at.is_some()
+            {
+                return Err(invalid("pending share invite identity"));
+            }
+            let invite = pending_invites
+                .iter()
+                .find(|invite| invite.id == grant.invite_id.as_deref().unwrap_or_default())
+                .ok_or_else(|| invalid("pending share invite reference"))?;
+            if invite.workspace_id != grant.workspace_id
+                || invite.identity_sha256 != grant.recipient_identity_sha256
+                || Some(invite.role.as_str()) != grant.invite_role.as_deref()
+                || Some(invite.created_at.as_str()) != grant.invite_created_at.as_deref()
+                || Some(invite.expires_at.as_str()) != grant.invite_expires_at.as_deref()
+                || Some(invite.created_by.as_str()) != grant.invite_created_by.as_deref()
+            {
+                return Err(invalid("pending share invite evidence mismatch"));
+            }
+            validate_identity_hash(grant.invite_identity_sha256.as_deref().unwrap_or_default())?;
+            required(
+                grant.invite_created_by.as_deref().unwrap_or_default(),
+                "pending share invite createdBy",
+            )?;
+            parse_timestamp(
+                grant
+                    .invite_created_at
+                    .as_deref()
+                    .ok_or_else(|| invalid("pending share invite createdAt"))?,
+                "pending share invite createdAt",
+            )?;
+            parse_timestamp(
+                grant
+                    .invite_expires_at
+                    .as_deref()
+                    .ok_or_else(|| invalid("pending share invite expiresAt"))?,
+                "pending share invite expiresAt",
+            )?;
+            if grant.revoked_at.is_some() {
+                return Err(invalid(
+                    "revoked share cannot have pending invite disposition",
+                ));
+            }
+        } else if grant.disposition == "revoked_without_member" {
+            if grant.revoked_at.is_none()
+                || is_direct_member
+                || grant.invite_id.is_some()
+                || grant.invite_workspace_id.is_some()
+                || grant.invite_identity_sha256.is_some()
+                || grant.invite_consumed_at.is_some()
+                || grant.invite_role.is_some()
+                || grant.invite_created_at.is_some()
+                || grant.invite_expires_at.is_some()
+                || grant.invite_created_by.is_some()
+            {
+                return Err(invalid("revoked share provenance state"));
+            }
+        } else if grant.disposition == "revoked_member" {
+            if grant.revoked_at.is_none()
+                || !is_direct_member
+                || grant.invite_id.is_some()
+                || grant.invite_workspace_id.is_some()
+                || grant.invite_identity_sha256.is_some()
+                || grant.invite_consumed_at.is_some()
+                || grant.invite_role.is_some()
+                || grant.invite_created_at.is_some()
+                || grant.invite_expires_at.is_some()
+                || grant.invite_created_by.is_some()
+            {
+                return Err(invalid("revoked member share provenance state"));
+            }
+        } else {
+            return Err(invalid("pending share disposition"));
+        }
+        if let Some(revoked_at) = grant.revoked_at.as_deref() {
+            parse_timestamp(revoked_at, "pending share revokedAt")?;
+        }
+    }
+    pending.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(pending)
+}
+
+fn validate_identity_hash(value: &str) -> Result<(), Problem> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(invalid("pending share identity hash"))
+    }
+}
+
+fn identity_hash(email: &str) -> String {
+    let normalized = email.trim().to_ascii_lowercase();
+    Sha256::digest(normalized.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn map_share_grants(
     export: &LegacyControlPlaneExport,
     instance_id: &str,
     workspaces: &BTreeMap<String, &LegacyControlWorkspace>,
+    groups: &BTreeMap<String, &LegacyControlGroup>,
     memberships: &BTreeMap<(String, String), &LegacyControlMembership>,
     account_by_email: &BTreeMap<String, String>,
     member_by_workspace_email: &BTreeMap<(String, String), String>,
@@ -477,20 +995,66 @@ fn map_share_grants(
         Vec<NeutralResourceRecord>,
         Vec<NeutralProfileResourceRecord>,
         Vec<NeutralGrantRecord>,
+        Vec<NeutralGroupShareGrantRecord>,
     ),
     Problem,
 > {
     let mut seen_share_ids = BTreeSet::new();
+    let hosted_profiles = export
+        .profiles
+        .iter()
+        .map(|profile| {
+            (
+                (profile.workspace_id.as_str(), profile.id.as_str()),
+                profile,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut resources = BTreeMap::<(String, String), NeutralResourceRecord>::new();
     let mut profile_resources = BTreeMap::<String, NeutralProfileResourceRecord>::new();
     let mut grants = Vec::new();
+    let mut group_grants = Vec::new();
+    for profile in &export.profiles {
+        let source_id = format!("profile:{}", profile.id);
+        let resource_id = mapped_id(instance_id, "resource", &source_id);
+        let profile_id = legacy_local_profile_id(&profile.id)?;
+        let resource = NeutralResourceRecord {
+            schema: "buglogin.resource/1".into(),
+            source_ref: source_ref(instance_id, &source_id),
+            id: resource_id.clone(),
+            revision: 1,
+            created_at: Some(profile.created_at.clone()),
+            updated_at: Some(profile.updated_at.clone()),
+            data: NeutralResourceData {
+                workspace_id: mapped_id(instance_id, "workspace", &profile.workspace_id),
+                kind: "profile".into(),
+                state: "active".into(),
+                display_name: profile.name.clone(),
+            },
+            extensions: Map::new(),
+        };
+        let binding = NeutralProfileResourceRecord {
+            schema: "buglogin.profile-resource/1".into(),
+            source_ref: source_ref(instance_id, &source_id),
+            id: mapped_id(instance_id, "profile-resource", &source_id),
+            revision: 1,
+            created_at: Some(profile.created_at.clone()),
+            updated_at: Some(profile.updated_at.clone()),
+            data: NeutralProfileResourceData {
+                profile_id: mapped_id(instance_id, "profile", &profile_id),
+                resource_id: resource_id.clone(),
+                workspace_id: mapped_id(instance_id, "workspace", &profile.workspace_id),
+                archive_state: "active".into(),
+            },
+            extensions: Map::new(),
+        };
+        resources.insert((profile.workspace_id.clone(), profile.id.clone()), resource);
+        profile_resources.insert(resource_id, binding);
+    }
     for share in &export.share_grants {
-        validate_share_grant(share, workspaces)?;
+        validate_share_grant(share, workspaces, groups)?;
         if !seen_share_ids.insert(share.id.clone()) {
             return Err(invalid("duplicate share grant ID"));
-        }
-        if share.revoked_at.is_some() {
-            continue;
         }
         let email = normalize_email(&share.recipient_email)?;
         let account_id = account_by_email
@@ -508,10 +1072,35 @@ fn map_share_grants(
             ));
         }
 
+        if share.resource_type == "group" {
+            for action in share_actions(&share.access_mode)? {
+                group_grants.push(group_share_grant_record(
+                    instance_id,
+                    share,
+                    &mapped_id(instance_id, "group", &share.resource_id),
+                    member_id,
+                    action,
+                ));
+            }
+            continue;
+        }
+        if share.revoked_at.is_some() {
+            continue;
+        }
+
+        if share.resource_type == "profile"
+            && !hosted_profiles
+                .contains_key(&(share.workspace_id.as_str(), share.resource_id.as_str()))
+        {
+            return Err(invalid("profile share grant has no hosted profile"));
+        }
+
         let key = (share.workspace_id.clone(), share.resource_id.clone());
         let resource = resource_record(instance_id, share);
         if let Some(existing) = resources.get(&key) {
-            if existing.data != resource.data {
+            if existing.data.workspace_id != resource.data.workspace_id
+                || existing.data.kind != resource.data.kind
+            {
                 return Err(invalid("conflicting shared resource"));
             }
         } else {
@@ -533,6 +1122,7 @@ fn map_share_grants(
         resources.into_values().collect(),
         profile_resources.into_values().collect(),
         grants,
+        group_grants,
     ))
 }
 
@@ -572,6 +1162,136 @@ fn validate_workspace(
         }
     }
     Ok(())
+}
+
+fn validate_control_group(
+    group: &LegacyControlGroup,
+    workspaces: &BTreeMap<String, &LegacyControlWorkspace>,
+) -> Result<(), Problem> {
+    required(&group.id, "group ID")?;
+    if !workspaces.contains_key(&group.workspace_id) {
+        return Err(invalid("group workspace reference"));
+    }
+    required(&group.name, "group name")?;
+    required(&group.created_by, "group createdBy")?;
+    parse_timestamp(&group.created_at, "group createdAt")?;
+    parse_timestamp(&group.updated_at, "group updatedAt")?;
+    if let Some(last_sync) = group.last_sync.as_deref() {
+        parse_timestamp(last_sync, "group lastSync")?;
+    }
+    Ok(())
+}
+
+fn validate_control_profile(
+    profile: &LegacyControlProfile,
+    workspaces: &BTreeMap<String, &LegacyControlWorkspace>,
+) -> Result<(), Problem> {
+    if !profile.id.starts_with("prf_")
+        || !workspaces.contains_key(&profile.workspace_id)
+        || profile.name.trim().is_empty()
+        || profile.runtime.trim().is_empty()
+    {
+        return Err(invalid("hosted profile identity or workspace"));
+    }
+    let _ = legacy_local_profile_id(&profile.id)?;
+    parse_timestamp(&profile.created_at, "profile createdAt")?;
+    parse_timestamp(&profile.updated_at, "profile updatedAt")?;
+    Ok(())
+}
+
+fn hosted_profile_record(
+    instance_id: &str,
+    profile: &LegacyControlProfile,
+) -> Result<super::NeutralProfileRecord, Problem> {
+    let local_id = legacy_local_profile_id(&profile.id)?;
+    let metadata = serde_json::json!({
+        "id": local_id,
+        "name": profile.name.clone(),
+        "runtime": profile.runtime.clone(),
+        "version": profile.runtime_version.clone(),
+        "release_type": profile.release_type.clone(),
+        "proxy_id": profile.proxy_id.clone(),
+        "vpn_id": profile.vpn_id.clone(),
+        "group_id": profile.group_id.clone(),
+        "extension_group_id": profile.extension_group_id.clone(),
+        "ephemeral": profile.ephemeral,
+        "created_at": profile.created_at.clone(),
+        "updated_at": profile.updated_at.clone(),
+        "tags": profile.tags.clone(),
+        "note": profile.note.clone()
+    });
+    let disposition = super::ProfileDataDisposition {
+        classification: super::ProfileDataClassification::Excluded,
+        reason_code: "profile_payload_not_verified_in_source_snapshot".into(),
+    };
+    let mut record = super::map_profile(&metadata, &local_id, instance_id, Some(disposition))?;
+    record.data.migration_class = "preserve-only".into();
+    record.extensions.insert(
+        "legacy_workspace_id".into(),
+        Value::String(profile.workspace_id.clone()),
+    );
+    Ok(record)
+}
+
+fn control_group_record(instance_id: &str, group: &LegacyControlGroup) -> NeutralGroupRecord {
+    let mut extensions = Map::new();
+    extensions.insert(
+        "legacyCreatedBy".into(),
+        Value::String(group.created_by.clone()),
+    );
+    extensions.insert("legacySyncEnabled".into(), Value::Bool(group.sync_enabled));
+    if let Some(last_sync) = group.last_sync.as_ref() {
+        extensions.insert("legacyLastSync".into(), Value::String(last_sync.clone()));
+    }
+    NeutralGroupRecord {
+        schema: "buglogin.group/1".into(),
+        source_ref: source_ref(instance_id, &group.id),
+        id: mapped_id(instance_id, "group", &group.id),
+        revision: 1,
+        created_at: Some(group.created_at.clone()),
+        updated_at: Some(group.updated_at.clone()),
+        data: NeutralGroupData {
+            name: group.name.trim().to_owned(),
+            appearance: group
+                .color
+                .as_ref()
+                .map(|color| serde_json::json!({"color": color})),
+            workspace_id: Some(mapped_id(instance_id, "workspace", &group.workspace_id)),
+        },
+        extensions,
+    }
+}
+
+fn map_profile_group_assignments(
+    export: &LegacyControlPlaneExport,
+    instance_id: &str,
+    workspaces: &BTreeMap<String, &LegacyControlWorkspace>,
+    groups: &BTreeMap<String, &LegacyControlGroup>,
+) -> Result<Vec<NeutralProfileGroupAssignment>, Problem> {
+    let mut seen_profiles = BTreeSet::new();
+    let mut assignments = Vec::new();
+    for assignment in &export.profile_group_assignments {
+        if !seen_profiles.insert(assignment.profile_id.clone()) {
+            return Err(invalid("duplicate profile group assignment"));
+        }
+        if !workspaces.contains_key(&assignment.workspace_id) {
+            return Err(invalid("profile group assignment workspace reference"));
+        }
+        let group = groups
+            .get(&assignment.group_id)
+            .ok_or_else(|| invalid("profile group assignment group reference"))?;
+        if group.workspace_id != assignment.workspace_id {
+            return Err(invalid("profile group assignment tenant mismatch"));
+        }
+        let profile_id = legacy_local_profile_id(&assignment.profile_id)?;
+        assignments.push(NeutralProfileGroupAssignment {
+            profile_id: mapped_id(instance_id, "profile", &profile_id),
+            workspace_id: mapped_id(instance_id, "workspace", &assignment.workspace_id),
+            group_id: mapped_id(instance_id, "group", &assignment.group_id),
+        });
+    }
+    assignments.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
+    Ok(assignments)
 }
 
 fn validate_membership(
@@ -617,37 +1337,94 @@ fn validate_membership(
 fn validate_share_grant(
     share: &LegacyControlShareGrant,
     workspaces: &BTreeMap<String, &LegacyControlWorkspace>,
+    groups: &BTreeMap<String, &LegacyControlGroup>,
 ) -> Result<(), Problem> {
     required(&share.id, "share grant ID")?;
     if !workspaces.contains_key(&share.workspace_id) {
         return Err(invalid("share grant workspace reference"));
     }
     required(&share.resource_id, "share grant resource ID")?;
-    legacy_local_profile_id(&share.resource_id)?;
+    match share.resource_type.as_str() {
+        "profile" => {
+            legacy_local_profile_id(&share.resource_id)?;
+        }
+        "group" => {
+            let group = groups
+                .get(&share.resource_id)
+                .ok_or_else(|| invalid("share grant group reference"))?;
+            if group.workspace_id != share.workspace_id {
+                return Err(invalid("share grant group tenant mismatch"));
+            }
+        }
+        _ => {
+            return Err(Problem::new(
+                "migration_control_plane_contract_gap",
+                "Legacy control-plane data cannot be represented by the current domain contract",
+                422,
+                "migration",
+            )
+            .with_field("resourceType", share.resource_type.clone()));
+        }
+    }
     normalize_email(&share.recipient_email)?;
     required(&share.created_by, "share grant createdBy")?;
     parse_timestamp(&share.created_at, "share grant createdAt")?;
     if let Some(revoked_at) = share.revoked_at.as_deref() {
         parse_timestamp(revoked_at, "share grant revokedAt")?;
     }
-    if share.resource_type != "profile" {
-        return Err(Problem::new(
-            "migration_control_plane_contract_gap",
-            "Legacy control-plane data cannot be represented by the current domain contract",
-            422,
-            "migration",
-        )
-        .with_field("resourceType", share.resource_type.clone())
-        .with_detail("domain-schema-v2 resource.kind does not include legacy group shares"));
-    }
     share_actions(&share.access_mode)?;
     Ok(())
+}
+
+fn group_share_grant_record(
+    instance_id: &str,
+    share: &LegacyControlShareGrant,
+    group_id: &str,
+    member_id: &str,
+    action: &str,
+) -> NeutralGroupShareGrantRecord {
+    let source_id = format!("{}:{action}", share.id);
+    let mut extensions = Map::new();
+    extensions.insert("legacyShareGrantId".into(), Value::String(share.id.clone()));
+    extensions.insert(
+        "legacyRecipientEmail".into(),
+        Value::String(share.recipient_email.clone()),
+    );
+    extensions.insert(
+        "legacyAccessMode".into(),
+        Value::String(share.access_mode.clone()),
+    );
+    extensions.insert(
+        "legacyCreatedBy".into(),
+        Value::String(share.created_by.clone()),
+    );
+    NeutralGroupShareGrantRecord {
+        schema: "buglogin.group-grant/1".into(),
+        source_ref: source_ref(instance_id, &source_id),
+        id: mapped_id(instance_id, "group-grant", &source_id),
+        revision: if share.revoked_at.is_some() { 2 } else { 1 },
+        created_at: Some(share.created_at.clone()),
+        updated_at: share
+            .revoked_at
+            .clone()
+            .or_else(|| Some(share.created_at.clone())),
+        data: NeutralGroupShareGrantData {
+            workspace_id: mapped_id(instance_id, "workspace", &share.workspace_id),
+            group_id: group_id.to_owned(),
+            member_id: member_id.to_owned(),
+            action: action.to_owned(),
+            effect: "allow".into(),
+            revoked_at: share.revoked_at.clone(),
+        },
+        extensions,
+    }
 }
 
 fn account_record(
     instance_id: &str,
     source_id: &str,
     account: &AccountAccumulator,
+    legacy_credentials_encrypted: bool,
 ) -> NeutralAccountRecord {
     let mut extensions = Map::new();
     extensions.insert("legacyEmail".into(), Value::String(account.email.clone()));
@@ -657,6 +1434,28 @@ fn account_record(
             .platform_role
             .clone()
             .map_or(Value::Null, Value::String),
+    );
+    extensions.insert(
+        "legacyAuthProvider".into(),
+        account
+            .legacy_auth_provider
+            .clone()
+            .map_or(Value::Null, Value::String),
+    );
+    extensions.insert(
+        "legacyCredentialDisposition".into(),
+        Value::String(
+            if legacy_credentials_encrypted
+                && matches!(
+                    account.legacy_auth_provider.as_deref(),
+                    Some("password" | "password_google")
+                )
+            {
+                "encrypted_legacy_scrypt_imported".into()
+            } else {
+                "not_transferred_reprovision_required".into()
+            },
+        ),
     );
     NeutralAccountRecord {
         schema: "buglogin.account/1".into(),
@@ -669,6 +1468,14 @@ fn account_record(
             status: account.status.clone(),
         },
         extensions,
+    }
+}
+
+fn validate_legacy_auth_provider(provider: Option<&str>) -> Result<(), Problem> {
+    match provider.map(str::trim) {
+        None | Some("password") | Some("password_google") | Some("google") => Ok(()),
+        Some("") => Err(invalid("account auth provider")),
+        Some(_) => Err(invalid("unsupported account auth provider")),
     }
 }
 
@@ -865,7 +1672,7 @@ fn profile_resource_record(
     })
 }
 
-fn legacy_local_profile_id(resource_id: &str) -> Result<String, Problem> {
+pub fn legacy_local_profile_id(resource_id: &str) -> Result<String, Problem> {
     let compact = resource_id
         .strip_prefix("prf_")
         .filter(|value| {

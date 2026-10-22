@@ -151,6 +151,19 @@ impl OperationService {
             .ok_or_else(|| problem("operation_not_found", "Operation not found", 404))?;
         validate_transition(operation.status, status)?;
         validate_progress(status, progress)?;
+        if operation.status == OperationStatus::Running
+            && status == OperationStatus::Running
+            && operation
+                .progress
+                .zip(progress)
+                .is_some_and(|(previous, next)| next < previous)
+        {
+            return Err(problem(
+                "invalid_operation_progress",
+                "Running operation progress cannot move backwards",
+                409,
+            ));
+        }
         if let Some(value) = result.as_ref() {
             reject_secrets(value)?;
         }
@@ -219,7 +232,10 @@ fn validate_transition(from: OperationStatus, to: OperationStatus) -> Result<(),
             OperationStatus::Running | OperationStatus::Failed | OperationStatus::Cancelled
         ) | (
             OperationStatus::Running,
-            OperationStatus::Completed | OperationStatus::Failed | OperationStatus::Cancelled
+            OperationStatus::Running
+                | OperationStatus::Completed
+                | OperationStatus::Failed
+                | OperationStatus::Cancelled
         )
     ) {
         Ok(())

@@ -27,6 +27,7 @@ import { RippleButton } from "./ui/ripple";
 interface ExtensionGroupAssignmentDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  workspaceId: string | null;
   selectedProfiles: string[];
   onAssignmentComplete: () => void;
   profiles?: BrowserProfile[];
@@ -35,6 +36,7 @@ interface ExtensionGroupAssignmentDialogProps {
 export function ExtensionGroupAssignmentDialog({
   isOpen,
   onClose,
+  workspaceId,
   selectedProfiles,
   onAssignmentComplete,
   profiles = [],
@@ -50,7 +52,11 @@ export function ExtensionGroupAssignmentDialog({
     setIsLoading(true);
     setError(null);
     try {
-      const groupList = await invoke<ExtensionGroup[]>("list_extension_groups");
+      if (!workspaceId) throw new Error("Select a workspace first.");
+      const groupList = await invoke<ExtensionGroup[]>(
+        "list_extension_groups",
+        { workspaceId },
+      );
       setGroups(groupList);
     } catch (err) {
       console.error("Failed to load extension groups:", err);
@@ -60,7 +66,7 @@ export function ExtensionGroupAssignmentDialog({
     } finally {
       setIsLoading(false);
     }
-  }, [t]);
+  }, [workspaceId, t]);
 
   const handleAssign = useCallback(async () => {
     setIsAssigning(true);
@@ -68,6 +74,7 @@ export function ExtensionGroupAssignmentDialog({
     try {
       for (const profileId of selectedProfiles) {
         await invoke("assign_extension_group_to_profile", {
+          workspaceId,
           profileId,
           extensionGroupId: selectedGroupId,
         });
@@ -85,7 +92,14 @@ export function ExtensionGroupAssignmentDialog({
     } finally {
       setIsAssigning(false);
     }
-  }, [selectedProfiles, selectedGroupId, onAssignmentComplete, onClose, t]);
+  }, [
+    selectedProfiles,
+    selectedGroupId,
+    workspaceId,
+    onAssignmentComplete,
+    onClose,
+    t,
+  ]);
 
   useEffect(() => {
     if (isOpen) {
@@ -160,7 +174,7 @@ export function ExtensionGroupAssignmentDialog({
           </div>
 
           {error && (
-            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive-text">
               {error}
             </div>
           )}

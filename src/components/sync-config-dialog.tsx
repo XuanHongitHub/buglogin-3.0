@@ -1,7 +1,6 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuEye, LuEyeOff } from "react-icons/lu";
@@ -17,7 +16,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ProBadge } from "@/components/ui/pro-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Tooltip,
@@ -26,21 +24,11 @@ import {
 } from "@/components/ui/tooltip";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
-import type { SyncSettings } from "@/types";
-
-const DEVICE_LINK_URL = "https://donutbrowser.com/auth/link";
+import type { SyncServerCheck, SyncSettings } from "@/types";
 
 interface SyncConfigDialogProps {
   isOpen: boolean;
   onClose: (loginOccurred?: boolean) => void;
-  /**
-   * Called after the user clicks "Login" so the parent can open the
-   * device-code verify dialog as a separate step. Implementations should
-   * close this dialog and open the verify one — that keeps the verify
-   * step visually independent and avoids stacking on top of other
-   * dialogs (e.g. the profile selector triggered by deep links).
-   */
-  onLoginStarted?: () => void;
 }
 
 interface ProxyUsage {
@@ -51,11 +39,7 @@ interface ProxyUsage {
   extra_limit_mb: number;
 }
 
-export function SyncConfigDialog({
-  isOpen,
-  onClose,
-  onLoginStarted,
-}: SyncConfigDialogProps) {
+export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
   const { t } = useTranslation();
 
   // Self-hosted state
@@ -70,6 +54,7 @@ export function SyncConfigDialog({
   const {
     user,
     isLoggedIn,
+    isCloudAvailable,
     isLoading: isCloudLoading,
     logout,
   } = useCloudAuth();
@@ -78,20 +63,52 @@ export function SyncConfigDialog({
   const [, setLiveProxyUsage] = useState<ProxyUsage | null>(null);
 
   const [connectionStatus, setConnectionStatus] = useState<
-    "unknown" | "testing" | "connected" | "error"
+    "unknown" | "testing" | "connected" | "error" | "storage-unreachable"
   >("unknown");
+  const [storageEndpoint, setStorageEndpoint] = useState<string | null>(null);
   const hasConfig = Boolean(serverUrl && token);
 
-  const testConnection = useCallback(async (url: string) => {
-    setConnectionStatus("testing");
-    try {
-      const healthUrl = `${url.replace(/\/$/, "")}/health`;
-      const response = await fetch(healthUrl);
-      setConnectionStatus(response.ok ? "connected" : "error");
-    } catch {
+  // Probing the sync server alone is what let a broken setup look correct.
+  // Files never travel through that server: the client is handed a presigned
+  // URL and uploads straight to storage, so a server whose storage address is
+  // reachable only from its own network answers every probe while every single
+  // transfer fails at connect. The check runs in the backend because that is
+  // the client that performs the transfers — same DNS, proxy and TLS trust, so
+  // a setup that passes here can actually move bytes.
+  const probeServer = useCallback(
+    (url: string) =>
+      invoke<SyncServerCheck>("check_sync_server_connection", {
+        serverUrl: url,
+      }),
+    [],
+  );
+
+  const applyProbeResult = useCallback((result: SyncServerCheck) => {
+    setStorageEndpoint(result.storage_endpoint ?? null);
+    if (!result.server_reachable || result.storage_ready === false) {
       setConnectionStatus("error");
+      return "error" as const;
     }
+    if (result.storage_reachable === false) {
+      setConnectionStatus("storage-unreachable");
+      return "storage-unreachable" as const;
+    }
+    setConnectionStatus("connected");
+    return "connected" as const;
   }, []);
+
+  const testConnection = useCallback(
+    async (url: string) => {
+      setConnectionStatus("testing");
+      try {
+        applyProbeResult(await probeServer(url));
+      } catch {
+        setStorageEndpoint(null);
+        setConnectionStatus("error");
+      }
+    },
+    [probeServer, applyProbeResult],
+  );
 
   const loadSettings = useCallback(async () => {
     setIsLoading(true);
@@ -142,22 +159,29 @@ export function SyncConfigDialog({
     setIsTesting(true);
     setConnectionStatus("testing");
     try {
-      const healthUrl = `${serverUrl.replace(/\/$/, "")}/health`;
-      const response = await fetch(healthUrl);
-      if (response.ok) {
-        setConnectionStatus("connected");
+      const result = await probeServer(serverUrl);
+      const outcome = applyProbeResult(result);
+      if (outcome === "connected") {
         showSuccessToast(t("sync.config.connectionSuccess"));
+      } else if (outcome === "storage-unreachable") {
+        // Deliberately an error, not a warning. Nothing will sync in this
+        // state, and reporting it as success is the bug being fixed.
+        showErrorToast(
+          t("sync.config.storageUnreachable", {
+            endpoint: result.storage_endpoint ?? "",
+          }),
+        );
       } else {
-        setConnectionStatus("error");
         showErrorToast(t("sync.config.serverError"));
       }
     } catch {
+      setStorageEndpoint(null);
       setConnectionStatus("error");
       showErrorToast(t("sync.config.connectFailed"));
     } finally {
       setIsTesting(false);
     }
-  }, [serverUrl, t]);
+  }, [serverUrl, t, probeServer, applyProbeResult]);
 
   const handleSave = useCallback(async () => {
     setIsSaving(true);
@@ -205,19 +229,6 @@ export function SyncConfigDialog({
     }
   }, [t]);
 
-  const handleOpenLogin = useCallback(async () => {
-    try {
-      await openUrl(DEVICE_LINK_URL);
-      // Hand off the verify step to its own dialog so the user has a
-      // focused place to paste the code, and so it doesn't visually
-      // stack with this dialog or any other modal currently on screen.
-      onLoginStarted?.();
-    } catch (error) {
-      console.error("Failed to open login link:", error);
-      showErrorToast(String(error));
-    }
-  }, [onLoginStarted]);
-
   const handleCloudLogout = useCallback(async () => {
     try {
       await logout();
@@ -260,26 +271,6 @@ export function SyncConfigDialog({
                 </span>
                 <span>{user.email}</span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">
-                  {t("sync.cloud.plan")}
-                </span>
-                <span className="capitalize">
-                  {user.plan}
-                  {user.planPeriod ? ` (${user.planPeriod})` : ""}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">
-                  {t("sync.cloud.profiles")}
-                </span>
-                <span>
-                  {t("sync.cloud.profileUsage", {
-                    used: user.cloudProfilesUsed,
-                    limit: user.profileLimit,
-                  })}
-                </span>
-              </div>
               {user.teamName && (
                 <>
                   <div className="flex justify-between">
@@ -308,15 +299,6 @@ export function SyncConfigDialog({
             </div>
 
             <div className="flex gap-2 pt-2">
-              <Button variant="outline" className="flex-1" asChild>
-                <a
-                  href="https://donutbrowser.com/account"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {t("sync.cloud.manageAccount")}
-                </a>
-              </Button>
               <Button
                 variant="outline"
                 className="flex-1"
@@ -336,7 +318,6 @@ export function SyncConfigDialog({
               >
                 <span className="flex items-center gap-2">
                   {t("sync.cloud.tabLabel")}
-                  {cloudBlocked && <ProBadge />}
                 </span>
               </TabsTrigger>
               <TabsTrigger
@@ -346,7 +327,6 @@ export function SyncConfigDialog({
               >
                 <span className="flex items-center gap-2">
                   {t("sync.cloud.selfHostedTabLabel")}
-                  {selfHostedBlocked && <ProBadge />}
                 </span>
               </TabsTrigger>
             </TabsList>
@@ -356,17 +336,15 @@ export function SyncConfigDialog({
                 <div className="flex justify-center py-8">
                   <div className="size-6 animate-spin rounded-full border-2 border-current border-t-transparent" />
                 </div>
+              ) : !isCloudAvailable ? (
+                <p role="status" className="py-4 text-sm text-muted-foreground">
+                  {t("sync.cloud.serviceUnavailable")}
+                </p>
               ) : (
                 <div className="grid gap-4 py-4">
                   <p className="text-sm text-muted-foreground">
                     {t("sync.cloud.deviceLinkInstructions")}
                   </p>
-                  <Button
-                    onClick={() => void handleOpenLogin()}
-                    className="w-full"
-                  >
-                    {t("sync.cloud.openLogin")}
-                  </Button>
                 </div>
               )}
             </TabsContent>
@@ -412,7 +390,7 @@ export function SyncConfigDialog({
                             onClick={() => {
                               setShowToken(!showToken);
                             }}
-                            className="absolute top-1/2 right-3 -translate-y-1/2 transform rounded-sm p-1 transition-colors hover:bg-accent"
+                            className="absolute top-1/2 right-3 -translate-y-1/2 transform rounded-sm p-1 transition-colors hover:bg-accent hover:text-accent-foreground"
                             aria-label={
                               showToken
                                 ? t("common.aria.hideToken")
@@ -440,9 +418,31 @@ export function SyncConfigDialog({
                     </div>
                   )}
                   {connectionStatus === "connected" && (
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <div className="size-2 rounded-full bg-success" />
-                      {t("sync.status.connected")}
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <div className="size-2 rounded-full bg-success" />
+                        {t("sync.status.connected")}
+                      </div>
+                      {storageEndpoint && (
+                        <span className="text-xs text-muted-foreground break-all">
+                          {t("sync.config.storageEndpoint", {
+                            endpoint: storageEndpoint,
+                          })}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {connectionStatus === "storage-unreachable" && (
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <div className="size-2 rounded-full bg-destructive" />
+                        {t("sync.config.storageUnreachableStatus")}
+                      </div>
+                      <span className="text-xs text-muted-foreground break-all">
+                        {t("sync.config.storageUnreachable", {
+                          endpoint: storageEndpoint ?? "",
+                        })}
+                      </span>
                     </div>
                   )}
                   {connectionStatus === "error" && (

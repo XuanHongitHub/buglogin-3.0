@@ -1,22 +1,40 @@
 "use client";
 
+import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { motion, useReducedMotion } from "motion/react";
+import type * as React from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { GoPlus } from "react-icons/go";
-import { LuCheck, LuChevronsUpDown, LuLoaderCircle } from "react-icons/lu";
+import {
+  LuCheck,
+  LuChevronDown,
+  LuChevronRight,
+  LuCpu,
+  LuDownload,
+  LuFlame,
+  LuFolder,
+  LuGlobe,
+  LuInfo,
+  LuLayers,
+  LuLoader,
+  LuLock,
+  LuLockOpen,
+  LuMonitor,
+  LuShieldCheck,
+  LuShuffle,
+  LuTriangleAlert,
+} from "react-icons/lu";
+import { CreateProfileProxyDialog } from "@/components/create-profile-proxy-dialog";
 import { LoadingButton } from "@/components/loading-button";
-import { ProxyFormDialog } from "@/components/proxy-form-dialog";
+import { ProfileGlyph } from "@/components/profile-glyph";
+import type { ProxySettingsDraft } from "@/components/proxy-form-dialog";
+import {
+  AnimatedDisclosureChevron,
+  AnimatedDisclosureContent,
+} from "@/components/ui/animated-disclosure";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Command,
   CommandEmpty,
@@ -32,6 +50,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { SoftFields } from "@/components/ui/field-variant";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -39,7 +58,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
@@ -47,15 +65,39 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsContent } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { WayfernConfigForm } from "@/components/wayfern-config-form";
 import { useBrowserDownload } from "@/hooks/use-browser-download";
+import { useInputModality } from "@/hooks/use-input-modality";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
-import { useVpnEvents } from "@/hooks/use-vpn-events";
-import { getBrowserIcon } from "@/lib/browser-utils";
+import { parseBackendError } from "@/lib/backend-errors";
+import { getOSDisplayName, getOSIcon } from "@/lib/browser-utils";
 import { DNS_BLOCKLIST_LEVELS } from "@/lib/dns-blocklist-levels";
+import { MOTION_EASE_OUT } from "@/lib/motion";
+import { showErrorToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
-import type { BrowserReleaseTypes, WayfernConfig, WayfernOS } from "@/types";
+import type { WayfernConfig, WayfernOS } from "@/types";
+
+const PASSWORD_MIN_LEN = 8;
+type BrowserKernel = "wayfern";
+
+const OS_OPTIONS: WayfernOS[] = ["windows", "macos", "linux", "android", "ios"];
+
+const COMMON_RESOLUTIONS = [
+  { width: 1920, height: 1080 },
+  { width: 2560, height: 1440 },
+  { width: 1440, height: 900 },
+  { width: 1536, height: 864 },
+  { width: 1680, height: 1050 },
+  { width: 1366, height: 768 },
+];
+
+const COMMON_CORES = [8, 12, 16, 24];
+const COMMON_MEMORY = [8, 16, 32];
 
 const getCurrentOS = (): WayfernOS => {
   if (typeof navigator === "undefined") return "linux";
@@ -65,19 +107,30 @@ const getCurrentOS = (): WayfernOS => {
   return "linux";
 };
 
-import { RippleButton } from "./ui/ripple";
-
-type BrowserTypeString = "wayfern";
+const defaultWayfernConfig = (): WayfernConfig => ({
+  os: getCurrentOS(),
+  screen_max_width:
+    typeof window === "undefined" ? 1920 : window.screen.width || 1920,
+  screen_max_height:
+    typeof window === "undefined" ? 1080 : window.screen.height || 1080,
+  screen_min_width:
+    typeof window === "undefined" ? 1920 : window.screen.width || 1920,
+  screen_min_height:
+    typeof window === "undefined" ? 1080 : window.screen.height || 1080,
+});
 
 interface CreateProfileDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  workspaceId: string | null;
   onCreateProfile: (profileData: {
     name: string;
-    browserStr: BrowserTypeString;
-    version: string;
+    idempotencyKey: string;
+    browserStr: BrowserKernel;
+    version?: string;
     releaseType: string;
     proxyId?: string;
+    proxySettingsDraft?: ProxySettingsDraft;
     vpnId?: string;
     wayfernConfig?: WayfernConfig;
     groupId?: string;
@@ -88,285 +141,250 @@ interface CreateProfileDialogProps {
     password?: string;
   }) => Promise<void>;
   selectedGroupId?: string;
-  crossOsUnlocked?: boolean;
 }
-
-interface BrowserOption {
-  value: BrowserTypeString;
-  label: string;
-}
-
-const browserOptions: BrowserOption[] = [
-  {
-    value: "wayfern",
-    label: "Wayfern",
-  },
-];
 
 export function CreateProfileDialog({
   isOpen,
   onClose,
+  workspaceId,
   onCreateProfile,
   selectedGroupId,
-  crossOsUnlocked = false,
 }: CreateProfileDialogProps) {
   const { t } = useTranslation();
-  const proxyListboxIdAntiDetect = useId();
-  const proxyListboxIdRegular = useId();
+  const osListboxId = useId();
+  const osLabelId = useId();
+  const osValueId = useId();
+  const advancedOptionsId = useId();
+  const reduceMotion = useReducedMotion() ?? false;
+  const inputModality = useInputModality();
+
   const [profileName, setProfileName] = useState("");
-  // Only Wayfern profiles can be created, so the dialog opens straight into
-  // the Wayfern config step (no browser-selection screen).
-  const [currentStep, setCurrentStep] = useState<
-    "browser-selection" | "browser-config"
-  >("browser-config");
-  const [activeTab, setActiveTab] = useState("anti-detect");
+  const [groupId, setGroupId] = useState<string>(
+    selectedGroupId && selectedGroupId !== "__all__" ? selectedGroupId : "none",
+  );
+  const [groupPopoverOpen, setGroupPopoverOpen] = useState(false);
+  const [profileGroups, setProfileGroups] = useState<
+    { id: string; name: string }[]
+  >([]);
 
-  // Browser selection states. Defaults to Wayfern — the only creatable browser.
-  const [selectedBrowser, setSelectedBrowser] =
-    useState<BrowserTypeString>("wayfern");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [selectedProxyId, setSelectedProxyId] = useState<string>();
-  const [proxyPopoverOpen, setProxyPopoverOpen] = useState(false);
-  const [dnsBlocklist, setDnsBlocklist] = useState<string>("");
+  const [proxySettingsDraft, setProxySettingsDraft] =
+    useState<ProxySettingsDraft>();
+
+  const handleProxySelect = useCallback((proxyId?: string) => {
+    setSelectedProxyId(proxyId);
+    setProxySettingsDraft(undefined);
+  }, []);
+
+  const handleProxyDraftChange = useCallback(
+    (settings?: ProxySettingsDraft) => {
+      setProxySettingsDraft(settings);
+      if (settings) setSelectedProxyId(undefined);
+    },
+    [],
+  );
+
+  const [osPopoverOpen, setOsPopoverOpen] = useState(false);
+  const [dnsBlocklist, setDnsBlocklist] = useState("");
   const [launchHook, setLaunchHook] = useState("");
-
-  // Wayfern anti-detect states
-  const [wayfernConfig, setWayfernConfig] = useState<WayfernConfig>(() => ({
-    os: getCurrentOS(), // Default to current OS
-  }));
-
-  // Handle browser selection from the initial screen
-  const handleBrowserSelect = (browser: BrowserTypeString) => {
-    setSelectedBrowser(browser);
-    setCurrentStep("browser-config");
-  };
-
-  // Reset the form fields without leaving the Wayfern config step.
-  const resetForm = () => {
-    setSelectedBrowser("wayfern");
-    setProfileName("");
-    setSelectedProxyId(undefined);
-    setLaunchHook("");
-  };
-
-  const handleTabChange = (value: string) => {
-    setActiveTab(value);
-    resetForm();
-  };
-
-  const [supportedBrowsers, setSupportedBrowsers] = useState<string[]>([]);
-  const { storedProxies } = useProxyEvents();
-  const { vpnConfigs } = useVpnEvents();
-  const [showProxyForm, setShowProxyForm] = useState(false);
+  const [hardwareCores, setHardwareCores] = useState<number>(16);
+  const [hardwareMemory, setHardwareMemory] = useState<number>(16);
+  const [wayfernConfig, setWayfernConfig] =
+    useState<WayfernConfig>(defaultWayfernConfig);
   const [isCreating, setIsCreating] = useState(false);
   const [ephemeral, setEphemeral] = useState(false);
+  const pendingCreateIdempotencyRef = useRef<{
+    fingerprint: string;
+    key: string;
+  } | null>(null);
+
   const [enablePassword, setEnablePassword] = useState(false);
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [passwordError, setPasswordError] = useState<string | null>(null);
-  const PASSWORD_MIN_LEN = 8;
   const [selectedExtensionGroupId, setSelectedExtensionGroupId] =
     useState<string>();
   const [extensionGroups, setExtensionGroups] = useState<
     { id: string; name: string; extension_ids: string[] }[]
   >([]);
-
-  useEffect(() => {
-    if (isOpen) {
-      void invoke<{ id: string; name: string; extension_ids: string[] }[]>(
-        "list_extension_groups",
-      )
-        .then(setExtensionGroups)
-        .catch(() => {
-          setExtensionGroups([]);
-        });
-    }
-  }, [isOpen]);
-  const [releaseTypes, setReleaseTypes] = useState<BrowserReleaseTypes>();
-  const [isLoadingReleaseTypes, setIsLoadingReleaseTypes] = useState(false);
-  const [releaseTypesError, setReleaseTypesError] = useState<string | null>(
-    null,
-  );
-  const loadingBrowserRef = useRef<string | null>(null);
-
-  // Use the browser download hook
+  const [availableVersions, setAvailableVersions] = useState<string[]>([]);
+  const [catalogVersions, setCatalogVersions] = useState<string[]>([]);
+  const [selectedVersion, setSelectedVersion] = useState<string>();
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogDetailsOpen, setCatalogDetailsOpen] = useState(false);
+  const versionRequestRef = useRef(0);
+  const { storedProxies } = useProxyEvents();
   const {
     isBrowserDownloading,
     downloadBrowser,
+    loadVersions,
     loadDownloadedVersions,
-    isVersionDownloaded,
     downloadedVersionsMap,
+    downloadProgress,
   } = useBrowserDownload();
 
-  const loadSupportedBrowsers = useCallback(async () => {
-    try {
-      const browsers = await invoke<string[]>("get_supported_browsers");
-      setSupportedBrowsers(browsers);
-    } catch (error) {
-      console.error("Failed to load supported browsers:", error);
-    }
-  }, []);
-
-  const checkAndDownloadGeoIPDatabase = useCallback(async () => {
-    try {
-      const isAvailable = await invoke<boolean>("is_geoip_database_available");
-      if (!isAvailable) {
-        console.log("GeoIP database not available, downloading...");
-        await invoke("download_geoip_database");
-        console.log("GeoIP database downloaded successfully");
-      }
-    } catch (error) {
-      console.error("Failed to check/download GeoIP database:", error);
-      // Don't show error to user as this is not critical for profile creation
-    }
-  }, []);
-
   const loadReleaseTypes = useCallback(
-    async (browser: string) => {
-      // Set loading state
-      loadingBrowserRef.current = browser;
-      setIsLoadingReleaseTypes(true);
-      setReleaseTypesError(null);
-
+    async (isUserRetry = false) => {
+      const request = ++versionRequestRef.current;
+      let catalogVersions: string[] = [];
       try {
-        const rawReleaseTypes = await invoke<BrowserReleaseTypes>(
-          "get_browser_release_types",
-          { browserStr: browser },
-        );
-
-        await loadDownloadedVersions(browser);
-
-        // Only update state if this browser is still the one we're loading
-        if (loadingBrowserRef.current === browser) {
-          const filtered: BrowserReleaseTypes = {};
-          if (rawReleaseTypes.stable) filtered.stable = rawReleaseTypes.stable;
-          setReleaseTypes(filtered);
-          setReleaseTypesError(null);
+        const releases = await loadVersions("wayfern");
+        catalogVersions = releases.map((release) => release.tag_name);
+        if (versionRequestRef.current === request) {
+          setCatalogVersions(catalogVersions);
+          setCatalogError(null);
         }
       } catch (error) {
-        console.error(`Failed to load release types for ${browser}:`, error);
+        console.warn("Failed to load verified releases:", error);
+        const backendError = parseBackendError(error);
+        const errorKey =
+          backendError?.code.toLowerCase() ?? "api_request_failed";
+        const errorDescription = t(`createProfile.version.errors.${errorKey}`, {
+          defaultValue:
+            "The BugLogin API does not currently provide a verified browser catalog. Profile settings can still be saved; browser install and launch need a published catalog.",
+        });
 
-        // Fallback: still load downloaded versions and derive release type from them if possible
-        try {
-          const downloaded = await loadDownloadedVersions(browser);
-          if (loadingBrowserRef.current === browser && downloaded.length > 0) {
-            const latest = downloaded[0];
-            const fallback: BrowserReleaseTypes = {};
-            fallback.stable = latest;
-            setReleaseTypes(fallback);
-            setReleaseTypesError(null);
-          } else if (loadingBrowserRef.current === browser) {
-            // No downloaded versions and API failed - show error
-            setReleaseTypesError(
-              "Failed to fetch browser versions. Please check your internet connection and try again.",
-            );
-          }
-        } catch (e) {
-          console.error(
-            `Failed to load downloaded versions for ${browser}:`,
-            e,
-          );
-          if (loadingBrowserRef.current === browser) {
-            setReleaseTypesError(
-              "Failed to fetch browser versions. Please check your internet connection and try again.",
-            );
-          }
+        if (versionRequestRef.current === request) {
+          setCatalogVersions([]);
+          setCatalogError(errorDescription);
         }
-      } finally {
-        // Clear loading state only if we're still loading this browser
-        if (loadingBrowserRef.current === browser) {
-          loadingBrowserRef.current = null;
-          setIsLoadingReleaseTypes(false);
+        if (isUserRetry) {
+          showErrorToast(t("createProfile.version.browserLabel"), {
+            description: errorDescription,
+          });
         }
       }
+
+      let installedVersions: string[] = [];
+      try {
+        installedVersions = await loadDownloadedVersions("wayfern");
+      } catch (error) {
+        console.warn("Failed to load installed Wayfern versions:", error);
+      }
+
+      if (versionRequestRef.current === request) {
+        const versions = [
+          ...new Set([...catalogVersions, ...installedVersions]),
+        ].sort((left, right) =>
+          right.localeCompare(left, undefined, { numeric: true }),
+        );
+        setAvailableVersions(versions);
+        const preferred = versions[0];
+        setSelectedVersion((current) =>
+          current && versions.includes(current) ? current : preferred,
+        );
+      }
     },
-    [loadDownloadedVersions],
+    [loadDownloadedVersions, loadVersions, t],
   );
 
-  // Load data when dialog opens
   useEffect(() => {
-    if (isOpen) {
-      void loadSupportedBrowsers();
-      // Load downloaded Wayfern versions up front so the availability gate is accurate.
-      void loadDownloadedVersions("wayfern");
-      // Load release types when a browser is selected
-      if (selectedBrowser) {
-        void loadReleaseTypes(selectedBrowser);
-      }
-      // Wayfern needs the GeoIP database for fingerprint generation.
-      if (selectedBrowser === "wayfern") {
-        void checkAndDownloadGeoIPDatabase();
-      }
-    }
-  }, [
-    isOpen,
-    loadSupportedBrowsers,
-    loadReleaseTypes,
-    loadDownloadedVersions,
-    checkAndDownloadGeoIPDatabase,
-    selectedBrowser,
-  ]);
+    if (!isOpen) return;
+    void loadReleaseTypes();
 
-  // Load release types when browser selection changes
+    void invoke<{ id: string; name: string }[]>("get_profile_groups")
+      .then(setProfileGroups)
+      .catch(() => setProfileGroups([]));
+
+    if (!workspaceId) {
+      setExtensionGroups([]);
+    } else {
+      void invoke<{ id: string; name: string; extension_ids: string[] }[]>(
+        "list_extension_groups",
+        { workspaceId },
+      )
+        .then(setExtensionGroups)
+        .catch((error) => {
+          console.error("Failed to load extension groups:", error);
+          setExtensionGroups([]);
+        });
+    }
+
+    return () => {
+      versionRequestRef.current += 1;
+    };
+  }, [isOpen, workspaceId, loadReleaseTypes]);
+
   useEffect(() => {
-    if (selectedBrowser) {
-      // Cancel any previous loading
-      loadingBrowserRef.current = null;
-      // Clear previous release types immediately to prevent showing stale data
-      setReleaseTypes({});
-      void loadReleaseTypes(selectedBrowser);
+    if (selectedGroupId && selectedGroupId !== "__all__") {
+      setGroupId(selectedGroupId);
+    } else {
+      setGroupId("none");
     }
-  }, [selectedBrowser, loadReleaseTypes]);
+  }, [selectedGroupId]);
 
-  // Helper function to get the best available version respecting rules
-  const getBestAvailableVersion = useCallback(
-    (_browserType?: string) => {
-      if (!releaseTypes) return null;
+  const downloadedVersions = downloadedVersionsMap.wayfern ?? [];
+  const creatableVersion =
+    selectedVersion || downloadedVersions[0] || availableVersions[0];
+  const browserVersionStatus =
+    creatableVersion && downloadedVersions.includes(creatableVersion)
+      ? t("createProfile.version.installed")
+      : catalogError
+        ? t("createProfile.version.fetchError")
+        : availableVersions.length > 0
+          ? t("createProfile.version.available", {
+              browser: t("createProfile.antiDetect.chromium"),
+              version: creatableVersion,
+            })
+          : t("createProfile.version.fetching");
 
-      if (releaseTypes.stable) {
-        return { version: releaseTypes.stable, releaseType: "stable" as const };
-      }
-      return null;
-    },
-    [releaseTypes],
-  );
+  const downloading = isBrowserDownloading("wayfern");
+  const canDownloadSelectedVersion =
+    !!creatableVersion &&
+    catalogVersions.includes(creatableVersion) &&
+    !downloadedVersions.includes(creatableVersion);
+  const isCreateDisabled = !profileName.trim() || downloading || isCreating;
+  const hostOs = getCurrentOS();
+  const selectedOs = wayfernConfig.os ?? hostOs;
+  const crossOs = selectedOs !== hostOs;
+  const SelectedOsIcon = getOSIcon(selectedOs);
+  const selectedGroupName =
+    groupId && groupId !== "none"
+      ? (profileGroups.find((g) => g.id === groupId)?.name ??
+        t("createProfile.noGroup"))
+      : t("createProfile.noGroup");
 
-  const getCreatableVersion = useCallback(
-    (browserType?: string) => {
-      const bestVersion = getBestAvailableVersion(browserType);
-      if (bestVersion && isVersionDownloaded(bestVersion.version)) {
-        return bestVersion;
-      }
-      const browserDownloaded = downloadedVersionsMap[browserType ?? ""] ?? [];
-      if (browserDownloaded.length > 0) {
-        const fallbackVersion = browserDownloaded[0];
-        return {
-          version: fallbackVersion,
-          releaseType: "stable" as const,
-        };
-      }
-      return null;
-    },
-    [getBestAvailableVersion, isVersionDownloaded, downloadedVersionsMap],
-  );
+  const clearPassword = () => {
+    setEnablePassword(false);
+    setPassword("");
+    setPasswordConfirm("");
+    setPasswordError(null);
+  };
 
-  const handleDownload = async (browserStr: string) => {
-    const bestVersion = getBestAvailableVersion(browserStr);
-
-    if (!bestVersion) {
-      console.error("No version available for download");
-      return;
-    }
-
+  const handleDownloadSelectedVersion = async () => {
+    if (!canDownloadSelectedVersion || !creatableVersion) return;
     try {
-      await downloadBrowser(browserStr, bestVersion.version);
+      await downloadBrowser("wayfern", creatableVersion);
     } catch (error) {
-      console.error("Failed to download browser:", error);
+      // The download hook reports the verified installer failure to the user.
+      console.error("Failed to install selected Wayfern version:", error);
     }
   };
 
-  const handleCreate = async () => {
-    if (!profileName.trim()) return;
+  const handleClose = () => {
+    versionRequestRef.current += 1;
+    pendingCreateIdempotencyRef.current = null;
+    setProfileName("");
+    setAdvancedOpen(false);
+    setSelectedProxyId(undefined);
+    setProxySettingsDraft(undefined);
+    setOsPopoverOpen(false);
+    setDnsBlocklist("");
+    setLaunchHook("");
+    setSelectedExtensionGroupId(undefined);
+    setAvailableVersions([]);
+    setCatalogVersions([]);
+    setSelectedVersion(undefined);
+    setCatalogError(null);
+    setWayfernConfig(defaultWayfernConfig());
+    setEphemeral(false);
+    clearPassword();
+    onClose();
+  };
 
+  const handleCreate = async () => {
+    if (isCreateDisabled) return;
     if (enablePassword && !ephemeral) {
       if (password.length < PASSWORD_MIN_LEN) {
         setPasswordError(
@@ -380,78 +398,50 @@ export function CreateProfileDialog({
       }
     }
     setPasswordError(null);
-
     setIsCreating(true);
 
-    const isVpnSelection = selectedProxyId?.startsWith("vpn-") ?? false;
-    const resolvedProxyId = isVpnSelection ? undefined : selectedProxyId;
-    const resolvedVpnId =
-      isVpnSelection && selectedProxyId ? selectedProxyId.slice(4) : undefined;
+    const actualGroupId = groupId && groupId !== "none" ? groupId : undefined;
 
-    const passwordToSet =
-      enablePassword && !ephemeral && password.length >= PASSWORD_MIN_LEN
-        ? password
-        : undefined;
+    const payloadFingerprint = JSON.stringify({
+      name: profileName.trim(),
+      version: creatableVersion,
+      proxyId: selectedProxyId,
+      proxySettingsDraft,
+      wayfernConfig,
+      groupId: actualGroupId,
+      extensionGroupId: selectedExtensionGroupId,
+      ephemeral,
+      dnsBlocklist,
+      launchHook: launchHook.trim(),
+      password: enablePassword && !ephemeral ? password : undefined,
+    });
+    const pendingCreate = pendingCreateIdempotencyRef.current;
+    const idempotencyKey =
+      pendingCreate?.fingerprint === payloadFingerprint
+        ? pendingCreate.key
+        : window.crypto.randomUUID();
+    pendingCreateIdempotencyRef.current = {
+      fingerprint: payloadFingerprint,
+      key: idempotencyKey,
+    };
     try {
-      if (activeTab === "anti-detect") {
-        // Only Wayfern anti-detect profiles are created.
-        const bestWayfernVersion = getCreatableVersion("wayfern");
-        if (!bestWayfernVersion) {
-          console.error("No Wayfern version available");
-          return;
-        }
-
-        // The fingerprint will be generated at launch time by the Rust backend
-        const finalWayfernConfig = { ...wayfernConfig };
-
-        await onCreateProfile({
-          name: profileName.trim(),
-          browserStr: "wayfern" as BrowserTypeString,
-          version: bestWayfernVersion.version,
-          releaseType: bestWayfernVersion.releaseType,
-          proxyId: resolvedProxyId,
-          vpnId: resolvedVpnId,
-          wayfernConfig: finalWayfernConfig,
-          groupId:
-            selectedGroupId && selectedGroupId !== "__all__"
-              ? selectedGroupId
-              : undefined,
-          extensionGroupId: selectedExtensionGroupId,
-          ephemeral,
-          dnsBlocklist: dnsBlocklist || undefined,
-          launchHook: launchHook.trim() || undefined,
-          password: passwordToSet,
-        });
-      } else {
-        // Regular browser
-        if (!selectedBrowser) {
-          console.error("Missing required browser selection");
-          return;
-        }
-
-        // Use the latest available Wayfern version
-        const bestVersion = getCreatableVersion(selectedBrowser);
-        if (!bestVersion) {
-          console.error("No version available");
-          return;
-        }
-
-        await onCreateProfile({
-          name: profileName.trim(),
-          browserStr: selectedBrowser,
-          version: bestVersion.version,
-          releaseType: bestVersion.releaseType,
-          proxyId: selectedProxyId,
-          groupId:
-            selectedGroupId && selectedGroupId !== "__all__"
-              ? selectedGroupId
-              : undefined,
-          dnsBlocklist: dnsBlocklist || undefined,
-          launchHook: launchHook.trim() || undefined,
-          password: passwordToSet,
-        });
-      }
-
+      await onCreateProfile({
+        name: profileName.trim(),
+        idempotencyKey,
+        browserStr: "wayfern",
+        version: creatableVersion,
+        releaseType: "stable",
+        proxyId: selectedProxyId,
+        proxySettingsDraft,
+        wayfernConfig,
+        groupId: actualGroupId,
+        extensionGroupId: selectedExtensionGroupId,
+        ephemeral,
+        dnsBlocklist: dnsBlocklist || undefined,
+        launchHook: launchHook.trim() || undefined,
+        password: enablePassword && !ephemeral ? password : undefined,
+      });
+      pendingCreateIdempotencyRef.current = null;
       handleClose();
     } catch (error) {
       console.error("Failed to create profile:", error);
@@ -460,1107 +450,1060 @@ export function CreateProfileDialog({
     }
   };
 
-  const handleClose = () => {
-    // Cancel any ongoing loading
-    loadingBrowserRef.current = null;
-
-    // Reset all states. Stay on the Wayfern config step.
-    setProfileName("");
-    setCurrentStep("browser-config");
-    setActiveTab("anti-detect");
-    setSelectedBrowser("wayfern");
-    setSelectedProxyId(undefined);
-    setLaunchHook("");
-    setReleaseTypes({});
-    setIsLoadingReleaseTypes(false);
-    setReleaseTypesError(null);
-    setWayfernConfig({
-      os: getCurrentOS(), // Reset to current OS
-    });
-    setEphemeral(false);
-    setEnablePassword(false);
-    setPassword("");
-    setPasswordConfirm("");
-    setPasswordError(null);
-    onClose();
-  };
-
-  const updateWayfernConfig = (key: keyof WayfernConfig, value: unknown) => {
-    setWayfernConfig((prev) => ({ ...prev, [key]: value }));
-  };
-
-  // Check if browser version is downloaded and available
-  const isBrowserVersionAvailable = useCallback(
-    (browserStr: string) => {
-      const bestVersion = getBestAvailableVersion(browserStr);
-      return bestVersion && isVersionDownloaded(bestVersion.version);
+  const updateWayfernConfig = useCallback(
+    (key: keyof WayfernConfig, value: unknown) => {
+      setWayfernConfig((previous) => ({ ...previous, [key]: value }));
     },
-    [isVersionDownloaded, getBestAvailableVersion],
+    [],
   );
 
-  // Check if browser is currently downloading
-  const isBrowserCurrentlyDownloading = useCallback(
-    (browserStr: string) => {
-      return isBrowserDownloading(browserStr);
-    },
-    [isBrowserDownloading],
-  );
+  const handleRandomizeFingerprint = useCallback(() => {
+    const res =
+      COMMON_RESOLUTIONS[Math.floor(Math.random() * COMMON_RESOLUTIONS.length)];
+    const cores = COMMON_CORES[Math.floor(Math.random() * COMMON_CORES.length)];
+    const memory =
+      COMMON_MEMORY[Math.floor(Math.random() * COMMON_MEMORY.length)];
 
-  const isCreateDisabled = useMemo(() => {
-    if (!profileName.trim()) return true;
-    if (!selectedBrowser) return true;
-    if (isBrowserCurrentlyDownloading(selectedBrowser)) return true;
-    if (!getCreatableVersion(selectedBrowser)) return true;
+    setHardwareCores(cores);
+    setHardwareMemory(memory);
 
-    return false;
-  }, [
-    profileName,
-    selectedBrowser,
-    isBrowserCurrentlyDownloading,
-    getCreatableVersion,
-  ]);
+    setWayfernConfig((prev) => ({
+      ...prev,
+      screen_max_width: res.width,
+      screen_max_height: res.height,
+      screen_min_width: res.width,
+      screen_min_height: res.height,
+      randomize_fingerprint_on_launch: true,
+    }));
+  }, []);
 
-  // Filter supported browsers for regular browsers
-  const regularBrowsers = browserOptions.filter((browser) =>
-    supportedBrowsers.includes(browser.value),
-  );
+  const animateEntry = !reduceMotion && inputModality === "pointer";
+  const rise = (delay: number) =>
+    animateEntry
+      ? {
+          initial: { y: 4 },
+          animate: { y: 0 },
+          transition: { ...ENTRY_SPRING, delay },
+        }
+      : {};
+
+  const reveal = animateEntry
+    ? {
+        initial: { y: -4, scale: 0.99 },
+        animate: { y: 0, scale: 1 },
+        transition: ENTRY_SPRING,
+      }
+    : {};
+
+  // Formatted Proxy Information for Live Summary Card
+  const activeProxyName = selectedProxyId
+    ? (storedProxies.find((p) => p.id === selectedProxyId)?.name ??
+      t("createProfile.fingerprintSummary.autoFromProxy"))
+    : proxySettingsDraft
+      ? `${proxySettingsDraft.host}:${proxySettingsDraft.port} (${proxySettingsDraft.proxy_type})`
+      : t("createProfile.fingerprintSummary.direct");
 
   return (
-    <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="flex max-h-[90vh] max-w-[min(48rem,calc(100%-4rem))] flex-col">
-        <DialogHeader className="shrink-0">
-          <DialogTitle>
-            {currentStep === "browser-selection"
-              ? t("createProfile.title")
-              : t("createProfile.configureTitle", {
-                  browser: t("createProfile.chromiumLabel"),
-                })}
-          </DialogTitle>
+    <Dialog
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!open && !isCreating) handleClose();
+      }}
+    >
+      <DialogContent
+        className="flex max-h-[calc(100dvh-max(1rem,5vh)-1rem)] w-[calc(100vw-2rem)] max-w-5xl flex-col gap-3 rounded-2xl border-0 p-5 shadow-2xl ring-1 ring-foreground/10"
+        style={
+          {
+            top: "max(1rem, 5vh)",
+            "--tw-translate-y": "0px",
+          } as React.CSSProperties
+        }
+        aria-describedby={undefined}
+        dismissible={!isCreating}
+      >
+        {/* Header */}
+        <DialogHeader className="shrink-0 flex flex-row items-center justify-between pb-2 border-b border-border/50">
+          <div className="flex items-center gap-2">
+            <div className="flex size-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <LuGlobe className="size-4" />
+            </div>
+            <div>
+              <DialogTitle className="text-base font-semibold">
+                {t("createProfile.title")}
+              </DialogTitle>
+            </div>
+            <Badge
+              variant="soft"
+              className="text-[10px] font-mono uppercase tracking-wider py-0 px-1.5 ml-1"
+            >
+              Antidetect
+            </Badge>
+          </div>
         </DialogHeader>
 
-        <Tabs
-          value={activeTab}
-          onValueChange={handleTabChange}
-          className="flex min-h-0 w-full flex-1 flex-col"
-        >
-          {/* Tab list hidden - only anti-detect browsers are supported */}
+        {/* Top Control Bar: Compact 1-2 rows */}
+        <div className="flex flex-col gap-2 shrink-0">
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_210px] gap-2 items-center">
+            {/* Profile Name Field */}
+            <motion.div
+              data-slot="profile-name-field"
+              className="flex items-center gap-2 rounded-lg bg-foreground/4 px-2.5 py-1.5 transition-colors focus-within:bg-foreground/6 focus-within:ring-2 focus-within:ring-foreground/10 hover:bg-foreground/5"
+              {...rise(0)}
+            >
+              <label
+                htmlFor="profile-name"
+                className="flex min-w-0 flex-1 cursor-text items-center gap-2"
+              >
+                <ProfileGlyph
+                  seed={profileName}
+                  routed={!!selectedProxyId || !!proxySettingsDraft}
+                  locked={enablePassword}
+                  ephemeral={ephemeral}
+                  busy={isCreating}
+                />
+                <span className="sr-only">
+                  {t("createProfile.profileName")}
+                </span>
+                <Input
+                  id="profile-name"
+                  variant="bare"
+                  autoFocus
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={profileName}
+                  onChange={(event) => setProfileName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      !event.nativeEvent.isComposing
+                    ) {
+                      event.preventDefault();
+                      void handleCreate();
+                    }
+                  }}
+                  placeholder={t("createProfile.profileNamePlaceholder")}
+                  disabled={isCreating}
+                  className="h-8 text-sm font-medium md:text-sm"
+                />
+              </label>
+            </motion.div>
 
-          <ScrollArea className="flex-1 overflow-y-auto">
-            <div className="flex w-full flex-col items-center justify-center">
-              <div className="w-full space-y-6 py-4">
-                {currentStep === "browser-selection" ? (
-                  <>
-                    <TabsContent value="anti-detect" className="mt-0 space-y-6">
-                      {/* Anti-Detect Browser Selection */}
-                      <div className="space-y-3 pt-8">
-                        {/* Wayfern (Chromium) - First */}
-                        <Button
-                          onClick={() => {
-                            handleBrowserSelect("wayfern");
+            {/* Folder / Group Selector (Filterable Combobox) */}
+            <div className="min-w-0">
+              <Popover
+                open={groupPopoverOpen}
+                onOpenChange={setGroupPopoverOpen}
+              >
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="soft"
+                    role="combobox"
+                    aria-expanded={groupPopoverOpen}
+                    disabled={isCreating}
+                    className="h-[38px] w-full justify-between rounded-lg px-2.5 text-xs font-normal"
+                  >
+                    <div className="flex min-w-0 items-center gap-1.5 truncate">
+                      <LuFolder className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate text-foreground font-medium">
+                        {selectedGroupName}
+                      </span>
+                    </div>
+                    <LuChevronDown className="size-3.5 shrink-0 text-muted-foreground opacity-60" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-60 p-0" align="end" sideOffset={4}>
+                  <Command>
+                    <CommandInput
+                      placeholder={t("createProfile.searchGroup", {
+                        defaultValue: "Search group...",
+                      })}
+                      className="h-8 text-xs"
+                    />
+                    <CommandList className="max-h-48">
+                      <CommandEmpty className="py-2.5 text-center text-xs text-muted-foreground">
+                        {t("createProfile.groupNotFound", {
+                          defaultValue: "No group found",
+                        })}
+                      </CommandEmpty>
+                      <CommandGroup>
+                        <CommandItem
+                          value="none no-group default Không có nhóm"
+                          onSelect={() => {
+                            setGroupId("none");
+                            setGroupPopoverOpen(false);
                           }}
-                          disabled={!getCreatableVersion("wayfern")}
-                          className="flex h-16 w-full items-center justify-start gap-3 border-2 p-4 transition-colors hover:border-primary/50"
-                          variant="outline"
+                          className="flex cursor-pointer items-center justify-between gap-2 py-1.5 text-xs"
                         >
-                          <div className="flex size-8 items-center justify-center">
-                            {isBrowserCurrentlyDownloading("wayfern") ? (
-                              <LuLoaderCircle className="size-6 animate-spin" />
-                            ) : (
-                              (() => {
-                                const IconComponent = getBrowserIcon("wayfern");
-                                return IconComponent ? (
-                                  <IconComponent className="size-6" />
-                                ) : null;
-                              })()
-                            )}
+                          <div className="flex min-w-0 items-center gap-2">
+                            <LuFolder className="size-3.5 text-muted-foreground" />
+                            <span className="truncate">
+                              {t("createProfile.noGroup")}
+                            </span>
                           </div>
-                          <div className="text-left">
-                            <div className="font-medium">
-                              {t("createProfile.chromiumLabel")}
-                            </div>
-                            <div className="text-sm text-muted-foreground">
-                              {isBrowserCurrentlyDownloading("wayfern")
-                                ? t("createProfile.downloadingSubtitle")
-                                : t("createProfile.chromiumSubtitle")}
-                            </div>
-                          </div>
-                        </Button>
-
-                        {!getCreatableVersion("wayfern") && (
-                          <p className="pt-2 text-center text-sm text-muted-foreground">
-                            {t("createProfile.browsersDownloading")}
-                          </p>
-                        )}
-                      </div>
-                    </TabsContent>
-
-                    <TabsContent value="regular" className="mt-0 space-y-6">
-                      {/* Regular Browser Selection */}
-                      <div className="space-y-6">
-                        <div className="text-center">
-                          <h3 className="text-lg font-medium">
-                            {t("createProfile.regular.title")}
-                          </h3>
-                          <p className="mt-2 text-sm text-muted-foreground">
-                            {t("createProfile.regular.description")}
-                          </p>
-                        </div>
-
-                        <div className="space-y-3">
-                          {regularBrowsers.map((browser) => {
-                            const IconComponent = getBrowserIcon(browser.value);
-                            return (
-                              <Button
-                                key={browser.value}
-                                onClick={() => {
-                                  handleBrowserSelect(browser.value);
-                                }}
-                                className="flex h-16 w-full items-center justify-start gap-3 border-2 p-4 transition-colors hover:border-primary/50"
-                                variant="outline"
-                              >
-                                <div className="flex size-8 items-center justify-center">
-                                  {IconComponent && (
-                                    <IconComponent className="size-6" />
-                                  )}
-                                </div>
-                                <div className="text-left">
-                                  <div className="font-medium">
-                                    {browser.label}
-                                  </div>
-                                  <div className="text-sm text-muted-foreground">
-                                    {t("createProfile.regular.badge")}
-                                  </div>
-                                </div>
-                              </Button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </TabsContent>
-                  </>
-                ) : (
-                  <>
-                    <TabsContent value="anti-detect" className="mt-0">
-                      {/* Anti-Detect Configuration */}
-                      <div className="space-y-6">
-                        {/* Profile Name */}
-                        <div className="space-y-2">
-                          <Label htmlFor="profile-name">
-                            {t("createProfile.profileName")}
-                          </Label>
-                          <Input
-                            id="profile-name"
-                            value={profileName}
-                            onChange={(e) => {
-                              setProfileName(e.target.value);
-                            }}
-                            onKeyDown={(e) => {
-                              if (
-                                e.key === "Enter" &&
-                                !isCreateDisabled &&
-                                !isCreating
-                              ) {
-                                void handleCreate();
-                              }
-                            }}
-                            placeholder={t(
-                              "createProfile.profileNamePlaceholder",
-                            )}
-                          />
-                        </div>
-
-                        {/* Ephemeral Option */}
-                        <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
-                          <div className="flex items-center gap-x-2">
-                            <Checkbox
-                              id="ephemeral"
-                              checked={ephemeral}
-                              onCheckedChange={(checked) => {
-                                setEphemeral(checked === true);
-                              }}
-                            />
-                            <Label htmlFor="ephemeral" className="font-medium">
-                              {t("profiles.ephemeral")}
-                            </Label>
-                          </div>
-                          <p className="ml-6 text-sm text-muted-foreground">
-                            {t("profiles.ephemeralDescription")}
-                          </p>
-                        </div>
-
-                        {/* Password Option */}
-                        {!ephemeral && (
-                          <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
-                            <div className="flex items-center gap-x-2">
-                              <Checkbox
-                                id="enable-password"
-                                checked={enablePassword}
-                                onCheckedChange={(checked) => {
-                                  setEnablePassword(checked === true);
-                                  if (checked !== true) {
-                                    setPassword("");
-                                    setPasswordConfirm("");
-                                    setPasswordError(null);
-                                  }
-                                }}
-                              />
-                              <Label
-                                htmlFor="enable-password"
-                                className="font-medium"
-                              >
-                                {t("createProfile.passwordProtect.label")}
-                              </Label>
-                            </div>
-                            <p className="ml-6 text-sm text-muted-foreground">
-                              {t("createProfile.passwordProtect.description")}
-                            </p>
-                            {enablePassword && (
-                              <div className="ml-6 space-y-2">
-                                <Input
-                                  type="password"
-                                  value={password}
-                                  onChange={(e) => {
-                                    setPassword(e.target.value);
-                                    setPasswordError(null);
-                                  }}
-                                  placeholder={t(
-                                    "profilePassword.fields.newPassword",
-                                  )}
-                                  autoComplete="new-password"
-                                />
-                                <Input
-                                  type="password"
-                                  value={passwordConfirm}
-                                  onChange={(e) => {
-                                    setPasswordConfirm(e.target.value);
-                                    setPasswordError(null);
-                                  }}
-                                  placeholder={t(
-                                    "profilePassword.fields.confirm",
-                                  )}
-                                  autoComplete="new-password"
-                                />
-                                {passwordError && (
-                                  <p className="text-sm text-destructive">
-                                    {passwordError}
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {selectedBrowser === "wayfern" ? (
-                          // Wayfern Configuration
-                          <div className="space-y-6">
-                            {/* Wayfern Download Status */}
-                            {isLoadingReleaseTypes && (
-                              <div className="flex items-center gap-3 rounded-md border p-3">
-                                <div className="size-4 animate-spin rounded-full border-2 border-muted/40 border-t-primary" />
-                                <p className="text-sm text-muted-foreground">
-                                  {t("createProfile.version.fetching")}
-                                </p>
-                              </div>
-                            )}
-                            {!isLoadingReleaseTypes && releaseTypesError && (
-                              <div className="flex items-center gap-3 rounded-md border border-destructive/50 bg-destructive/10 p-3">
-                                <p className="flex-1 text-sm text-destructive">
-                                  {releaseTypesError}
-                                </p>
-                                <RippleButton
-                                  onClick={() =>
-                                    selectedBrowser &&
-                                    loadReleaseTypes(selectedBrowser)
-                                  }
-                                  size="sm"
-                                  variant="outline"
-                                >
-                                  {t("common.buttons.retry")}
-                                </RippleButton>
-                              </div>
-                            )}
-                            {!isLoadingReleaseTypes &&
-                              !releaseTypesError &&
-                              !getBestAvailableVersion("wayfern") && (
-                                <div className="flex items-center gap-3 rounded-md border border-warning/50 bg-warning/10 p-3">
-                                  <p className="text-sm text-warning">
-                                    {t("createProfile.platformUnavailable", {
-                                      browser: "Wayfern",
-                                    })}
-                                  </p>
-                                </div>
-                              )}
-                            {!isLoadingReleaseTypes &&
-                              !releaseTypesError &&
-                              !isBrowserCurrentlyDownloading("wayfern") &&
-                              !getCreatableVersion("wayfern") &&
-                              getBestAvailableVersion("wayfern") && (
-                                <div className="flex items-center gap-3 rounded-md border p-3">
-                                  <p className="text-sm text-muted-foreground">
-                                    {t("createProfile.version.needsDownload", {
-                                      browser: "Wayfern",
-                                      version:
-                                        getBestAvailableVersion("wayfern")
-                                          ?.version,
-                                    })}
-                                  </p>
-                                  <LoadingButton
-                                    onClick={() => {
-                                      void handleDownload("wayfern");
-                                    }}
-                                    isLoading={isBrowserCurrentlyDownloading(
-                                      "wayfern",
-                                    )}
-                                    size="sm"
-                                    disabled={isBrowserCurrentlyDownloading(
-                                      "wayfern",
-                                    )}
-                                  >
-                                    {isBrowserCurrentlyDownloading("wayfern")
-                                      ? t("common.buttons.downloading")
-                                      : t("common.buttons.download")}
-                                  </LoadingButton>
-                                </div>
-                              )}
-                            {!isLoadingReleaseTypes &&
-                              !releaseTypesError &&
-                              !isBrowserCurrentlyDownloading("wayfern") &&
-                              getCreatableVersion("wayfern") && (
-                                <div className="rounded-md border p-3 text-sm text-muted-foreground">
-                                  ✓{" "}
-                                  {t("createProfile.version.available", {
-                                    browser: "Wayfern",
-                                    version:
-                                      getCreatableVersion("wayfern")?.version,
-                                  })}
-                                </div>
-                              )}
-                            {!isLoadingReleaseTypes &&
-                              !releaseTypesError &&
-                              !isBrowserCurrentlyDownloading("wayfern") &&
-                              getCreatableVersion("wayfern") &&
-                              !isBrowserVersionAvailable("wayfern") &&
-                              getBestAvailableVersion("wayfern") && (
-                                <div className="flex items-center gap-3 rounded-md border p-3">
-                                  <p className="flex-1 text-sm text-muted-foreground">
-                                    {t(
-                                      "createProfile.version.upgradeAvailable",
-                                      {
-                                        browser: "Wayfern",
-                                        version:
-                                          getBestAvailableVersion("wayfern")
-                                            ?.version,
-                                      },
-                                    )}
-                                  </p>
-                                  <LoadingButton
-                                    onClick={() => {
-                                      void handleDownload("wayfern");
-                                    }}
-                                    isLoading={isBrowserCurrentlyDownloading(
-                                      "wayfern",
-                                    )}
-                                    size="sm"
-                                    variant="outline"
-                                    disabled={isBrowserCurrentlyDownloading(
-                                      "wayfern",
-                                    )}
-                                  >
-                                    {isBrowserCurrentlyDownloading("wayfern")
-                                      ? t("common.buttons.downloading")
-                                      : t("common.buttons.download")}
-                                  </LoadingButton>
-                                </div>
-                              )}
-                            {isBrowserCurrentlyDownloading("wayfern") && (
-                              <div className="rounded-md border p-3 text-sm text-muted-foreground">
-                                {t("createProfile.version.downloading", {
-                                  browser: "Wayfern",
-                                  version:
-                                    getBestAvailableVersion("wayfern")?.version,
-                                })}
-                              </div>
-                            )}
-
-                            <WayfernConfigForm
-                              config={wayfernConfig}
-                              onConfigChange={updateWayfernConfig}
-                              isCreating
-                              crossOsUnlocked={crossOsUnlocked}
-                              limitedMode={!crossOsUnlocked}
-                              profileVersion={
-                                getCreatableVersion("wayfern")?.version
-                              }
-                              profileBrowser="wayfern"
-                            />
-                          </div>
-                        ) : (
-                          // Regular Browser Configuration (should not happen in the anti-detect tab).
-                          <div className="space-y-4">
-                            {selectedBrowser && (
-                              <div className="space-y-3">
-                                {isLoadingReleaseTypes && (
-                                  <div className="flex items-center gap-3">
-                                    <div className="size-4 animate-spin rounded-full border-2 border-muted/40 border-t-primary" />
-                                    <p className="text-sm text-muted-foreground">
-                                      {t("createProfile.version.fetching")}
-                                    </p>
-                                  </div>
-                                )}
-                                {!isLoadingReleaseTypes &&
-                                  releaseTypesError && (
-                                    <div className="flex items-center gap-3 rounded-md border border-destructive/50 bg-destructive/10 p-3">
-                                      <p className="flex-1 text-sm text-destructive">
-                                        {releaseTypesError}
-                                      </p>
-                                      <RippleButton
-                                        onClick={() =>
-                                          selectedBrowser &&
-                                          loadReleaseTypes(selectedBrowser)
-                                        }
-                                        size="sm"
-                                        variant="outline"
-                                      >
-                                        {t("common.buttons.retry")}
-                                      </RippleButton>
-                                    </div>
-                                  )}
-                                {!isLoadingReleaseTypes &&
-                                  !releaseTypesError &&
-                                  !isBrowserCurrentlyDownloading(
-                                    selectedBrowser,
-                                  ) &&
-                                  !getCreatableVersion(selectedBrowser) &&
-                                  getBestAvailableVersion(selectedBrowser) && (
-                                    <div className="flex items-center gap-3">
-                                      <p className="text-sm text-muted-foreground">
-                                        {t(
-                                          "createProfile.version.latestNeedsDownload",
-                                          {
-                                            version:
-                                              getBestAvailableVersion(
-                                                selectedBrowser,
-                                              )?.version,
-                                          },
-                                        )}
-                                      </p>
-                                      <LoadingButton
-                                        onClick={() => {
-                                          void handleDownload(selectedBrowser);
-                                        }}
-                                        isLoading={isBrowserCurrentlyDownloading(
-                                          selectedBrowser,
-                                        )}
-                                        className="ml-auto"
-                                        size="sm"
-                                        disabled={isBrowserCurrentlyDownloading(
-                                          selectedBrowser,
-                                        )}
-                                      >
-                                        {t("common.buttons.download")}
-                                      </LoadingButton>
-                                    </div>
-                                  )}
-                                {!isLoadingReleaseTypes &&
-                                  !releaseTypesError &&
-                                  !isBrowserCurrentlyDownloading(
-                                    selectedBrowser,
-                                  ) &&
-                                  getCreatableVersion(selectedBrowser) && (
-                                    <div className="text-sm text-muted-foreground">
-                                      ✓{" "}
-                                      {t(
-                                        "createProfile.version.latestAvailable",
-                                        {
-                                          version:
-                                            getCreatableVersion(selectedBrowser)
-                                              ?.version,
-                                        },
-                                      )}
-                                    </div>
-                                  )}
-                                {isBrowserCurrentlyDownloading(
-                                  selectedBrowser,
-                                ) && (
-                                  <div className="text-sm text-muted-foreground">
-                                    {t(
-                                      "createProfile.version.latestDownloading",
-                                      {
-                                        version:
-                                          getBestAvailableVersion(
-                                            selectedBrowser,
-                                          )?.version,
-                                      },
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Proxy / VPN Selection - Always visible */}
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <Label>{t("createProfile.proxy.title")}</Label>
-                            <RippleButton
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                setShowProxyForm(true);
-                              }}
-                              className="h-7 px-2 text-xs"
-                            >
-                              <GoPlus className="mr-1 size-3" />{" "}
-                              {t("createProfile.proxy.addProxy")}
-                            </RippleButton>
-                          </div>
-                          {storedProxies.length > 0 || vpnConfigs.length > 0 ? (
-                            <Popover
-                              open={proxyPopoverOpen}
-                              onOpenChange={setProxyPopoverOpen}
-                            >
-                              <PopoverTrigger asChild>
-                                <Button
-                                  variant="outline"
-                                  role="combobox"
-                                  aria-expanded={proxyPopoverOpen}
-                                  aria-controls={proxyListboxIdAntiDetect}
-                                  className="w-full justify-between font-normal"
-                                >
-                                  {(() => {
-                                    if (!selectedProxyId)
-                                      return t("createProfile.proxy.noProxy");
-                                    if (selectedProxyId.startsWith("vpn-")) {
-                                      const vpn = vpnConfigs.find(
-                                        (v) =>
-                                          v.id === selectedProxyId.slice(4),
-                                      );
-                                      return vpn
-                                        ? `WG — ${vpn.name}`
-                                        : t("createProfile.proxy.noProxy");
-                                    }
-                                    const proxy = storedProxies.find(
-                                      (p) => p.id === selectedProxyId,
-                                    );
-                                    return (
-                                      proxy?.name ??
-                                      t("createProfile.proxy.noProxy")
-                                    );
-                                  })()}
-                                  <LuChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
-                                </Button>
-                              </PopoverTrigger>
-                              <PopoverContent
-                                id={proxyListboxIdAntiDetect}
-                                className="w-[240px] p-0"
-                                sideOffset={8}
-                              >
-                                <Command>
-                                  <CommandInput
-                                    placeholder={t(
-                                      "createProfile.proxy.search",
-                                    )}
-                                  />
-                                  <CommandList>
-                                    <CommandEmpty>
-                                      {t("createProfile.proxy.notFound")}
-                                    </CommandEmpty>
-                                    <CommandGroup>
-                                      <CommandItem
-                                        value="__none__"
-                                        onSelect={() => {
-                                          setSelectedProxyId(undefined);
-                                          setProxyPopoverOpen(false);
-                                        }}
-                                      >
-                                        <LuCheck
-                                          className={cn(
-                                            "mr-2 size-4",
-                                            !selectedProxyId
-                                              ? "opacity-100"
-                                              : "opacity-0",
-                                          )}
-                                        />
-                                        {t("common.labels.none")}
-                                      </CommandItem>
-                                      {storedProxies.map((proxy) => (
-                                        <CommandItem
-                                          key={proxy.id}
-                                          value={proxy.name}
-                                          onSelect={() => {
-                                            setSelectedProxyId(proxy.id);
-                                            setProxyPopoverOpen(false);
-                                          }}
-                                        >
-                                          <LuCheck
-                                            className={cn(
-                                              "mr-2 size-4",
-                                              selectedProxyId === proxy.id
-                                                ? "opacity-100"
-                                                : "opacity-0",
-                                            )}
-                                          />
-                                          {proxy.name}
-                                        </CommandItem>
-                                      ))}
-                                    </CommandGroup>
-                                    {vpnConfigs.length > 0 && (
-                                      <CommandGroup heading="VPNs">
-                                        {vpnConfigs.map((vpn) => (
-                                          <CommandItem
-                                            key={vpn.id}
-                                            value={`vpn-${vpn.name}`}
-                                            onSelect={() => {
-                                              setSelectedProxyId(
-                                                `vpn-${vpn.id}`,
-                                              );
-                                              setProxyPopoverOpen(false);
-                                            }}
-                                          >
-                                            <LuCheck
-                                              className={cn(
-                                                "mr-2 size-4",
-                                                selectedProxyId ===
-                                                  `vpn-${vpn.id}`
-                                                  ? "opacity-100"
-                                                  : "opacity-0",
-                                              )}
-                                            />
-                                            <Badge
-                                              variant="outline"
-                                              className="mr-1 px-1 py-0 text-[10px] leading-tight"
-                                            >
-                                              WG
-                                            </Badge>
-                                            {vpn.name}
-                                          </CommandItem>
-                                        ))}
-                                      </CommandGroup>
-                                    )}
-                                  </CommandList>
-                                </Command>
-                              </PopoverContent>
-                            </Popover>
-                          ) : (
-                            <div className="flex items-center gap-3 rounded-md border p-3 text-sm text-muted-foreground">
-                              {t("createProfile.proxy.noProxiesAvailable")}
-                            </div>
+                          {(!groupId || groupId === "none") && (
+                            <LuCheck className="size-3.5 text-primary shrink-0" />
                           )}
-                        </div>
-
-                        <div className="space-y-2">
-                          <Label htmlFor="launch-hook-url">
-                            {t("createProfile.launchHook.label")}
-                          </Label>
-                          <Input
-                            id="launch-hook-url"
-                            value={launchHook}
-                            onChange={(e) => {
-                              setLaunchHook(e.target.value);
+                        </CommandItem>
+                        {profileGroups.map((group) => (
+                          <CommandItem
+                            key={group.id}
+                            value={group.name}
+                            onSelect={() => {
+                              setGroupId(group.id);
+                              setGroupPopoverOpen(false);
                             }}
-                            placeholder={t(
-                              "createProfile.launchHook.placeholder",
+                            className="flex cursor-pointer items-center justify-between gap-2 py-1.5 text-xs"
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <LuFolder className="size-3.5 text-muted-foreground" />
+                              <span className="truncate font-medium">
+                                {group.name}
+                              </span>
+                            </div>
+                            {groupId === group.id && (
+                              <LuCheck className="size-3.5 text-primary shrink-0" />
                             )}
-                            disabled={isCreating}
-                          />
-                        </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+            </div>
+          </div>
 
-                        {/* DNS Blocklist */}
-                        <div className="space-y-2">
-                          <Label>{t("dnsBlocklist.title")}</Label>
-                          <Select
-                            value={dnsBlocklist || "none"}
-                            onValueChange={(val) => {
-                              setDnsBlocklist(val === "none" ? "" : val);
+          {/* Quick Pill Controls */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span id={osLabelId} className="sr-only">
+              {t("fingerprint.osLabel")}
+            </span>
+            <Popover open={osPopoverOpen} onOpenChange={setOsPopoverOpen}>
+              <PopoverTrigger asChild>
+                <button
+                  id="profile-os"
+                  type="button"
+                  role="combobox"
+                  aria-expanded={osPopoverOpen}
+                  aria-controls={osListboxId}
+                  aria-labelledby={`${osLabelId} ${osValueId}`}
+                  className={cn(
+                    optionPill(crossOs),
+                    "shrink-0 h-7 text-xs px-2.5",
+                  )}
+                  disabled={isCreating}
+                >
+                  <PillIcon on={crossOs} animate={animateEntry}>
+                    <SelectedOsIcon />
+                  </PillIcon>
+                  <PillLabel
+                    id={osValueId}
+                    label={getOSDisplayName(selectedOs)}
+                    animate={animateEntry}
+                  />
+                  <LuChevronDown
+                    className={cn(
+                      "-mr-0.5 opacity-60 transition-transform duration-200 motion-reduce:transition-none",
+                      osPopoverOpen && "rotate-180",
+                    )}
+                    aria-hidden="true"
+                  />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent className="w-48 p-0" align="start" sideOffset={6}>
+                <Command>
+                  <CommandList id={osListboxId}>
+                    <CommandGroup>
+                      {OS_OPTIONS.map((os) => {
+                        const mobileComingSoon =
+                          os === "android" || os === "ios";
+                        const Icon = getOSIcon(os);
+                        return (
+                          <CommandItem
+                            key={os}
+                            value={os}
+                            disabled={mobileComingSoon}
+                            onSelect={() => {
+                              if (mobileComingSoon) return;
+                              updateWayfernConfig("os", os);
+                              setOsPopoverOpen(false);
                             }}
                           >
-                            <SelectTrigger>
-                              <SelectValue
-                                placeholder={t("dnsBlocklist.none")}
-                              />
+                            <LuCheck
+                              className={cn(
+                                "size-4 shrink-0",
+                                selectedOs === os ? "opacity-100" : "opacity-0",
+                              )}
+                              aria-hidden="true"
+                            />
+                            <Icon
+                              className="size-3.5 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span className="truncate">
+                              {getOSDisplayName(os)}
+                            </span>
+                          </CommandItem>
+                        );
+                      })}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
+
+            <OptionToggle
+              id="enable-password"
+              checked={enablePassword}
+              onCheckedChange={(checked) => {
+                if (checked) {
+                  setEnablePassword(true);
+                  setEphemeral(false);
+                } else clearPassword();
+              }}
+              disabled={isCreating}
+              animate={animateEntry}
+              icon={enablePassword ? <LuLock /> : <LuLockOpen />}
+              label={t("profiles.passwordProtectedBadge")}
+              hint={t("createProfile.passwordProtect.description")}
+            />
+
+            <OptionToggle
+              id="ephemeral"
+              checked={ephemeral}
+              onCheckedChange={(checked) => {
+                setEphemeral(checked);
+                if (checked) clearPassword();
+              }}
+              disabled={isCreating}
+              animate={animateEntry}
+              icon={<LuFlame className={cn(ephemeral && "fill-current")} />}
+              label={t("profiles.ephemeral")}
+              hint={t("profiles.ephemeralDescription")}
+            />
+          </div>
+        </div>
+
+        {/* Master-Detail 2-Column Body: Fully scrollable if content overflows (no clip/cut off) */}
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_310px] gap-4 min-h-0 flex-1 overflow-y-auto pr-1">
+          {/* Left Column: Configuration Forms */}
+          <div
+            data-slot="profile-create-fields"
+            className="flex flex-col gap-3 min-h-0 pb-2"
+          >
+            {/* Password input row if enabled */}
+            {enablePassword && (
+              <motion.div
+                className="space-y-1.5 rounded-lg border border-border/50 bg-card/40 p-2.5"
+                {...reveal}
+              >
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div>
+                    <Label
+                      htmlFor="profile-password"
+                      className="text-xs text-muted-foreground mb-1 block"
+                    >
+                      {t("profilePassword.fields.newPassword")}
+                    </Label>
+                    <Input
+                      id="profile-password"
+                      variant="soft"
+                      type="password"
+                      value={password}
+                      onChange={(event) => {
+                        setPassword(event.target.value);
+                        setPasswordError(null);
+                      }}
+                      placeholder={t("profilePassword.fields.newPassword")}
+                      autoComplete="new-password"
+                      aria-invalid={!!passwordError}
+                      aria-describedby={
+                        passwordError ? "profile-password-error" : undefined
+                      }
+                      disabled={isCreating}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <Label
+                      htmlFor="profile-password-confirm"
+                      className="text-xs text-muted-foreground mb-1 block"
+                    >
+                      {t("profilePassword.fields.confirm")}
+                    </Label>
+                    <Input
+                      id="profile-password-confirm"
+                      variant="soft"
+                      type="password"
+                      value={passwordConfirm}
+                      onChange={(event) => {
+                        setPasswordConfirm(event.target.value);
+                        setPasswordError(null);
+                      }}
+                      placeholder={t("profilePassword.fields.confirm")}
+                      autoComplete="new-password"
+                      aria-invalid={!!passwordError}
+                      aria-describedby={
+                        passwordError ? "profile-password-error" : undefined
+                      }
+                      disabled={isCreating}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                </div>
+                {passwordError && (
+                  <motion.p
+                    key={passwordError}
+                    id="profile-password-error"
+                    role="alert"
+                    className="px-1 text-xs text-destructive-text"
+                    initial={animateEntry ? { x: 0 } : false}
+                    animate={animateEntry ? { x: [0, -4, 4, -2, 0] } : { x: 0 }}
+                    transition={{ duration: 0.32, ease: MOTION_EASE_OUT }}
+                  >
+                    {passwordError}
+                  </motion.p>
+                )}
+              </motion.div>
+            )}
+
+            {crossOs && (
+              <motion.p
+                role="status"
+                className={cn(STATUS_CLASS, "items-start py-1.5 text-xs")}
+                {...reveal}
+              >
+                <LuTriangleAlert
+                  className="mt-0.5 size-3.5 shrink-0 text-warning"
+                  aria-hidden="true"
+                />
+                {t("fingerprint.crossOsWarning")}
+              </motion.p>
+            )}
+
+            {/* Section 1: Browser Core (Generic, user-friendly with clean layout & live progress) */}
+            <div className="rounded-lg border border-border/50 bg-card/40 p-3 space-y-2.5">
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary border border-primary/20">
+                    <LuGlobe className="size-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 font-medium text-foreground">
+                      <span>Browser</span>
+                      <span className="text-[11px] text-muted-foreground font-normal">
+                        ({t("createProfile.version.browserLabel")})
+                      </span>
+                    </div>
+                  </div>
+
+                  {catalogError && (
+                    <Popover
+                      open={catalogDetailsOpen}
+                      onOpenChange={setCatalogDetailsOpen}
+                    >
+                      <Tooltip delayDuration={200}>
+                        <TooltipTrigger asChild>
+                          <PopoverTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
+                              aria-label="Browser catalog status details"
+                              onClick={() => {
+                                showErrorToast(
+                                  t("createProfile.version.browserLabel"),
+                                  {
+                                    description: catalogError,
+                                  },
+                                );
+                              }}
+                            >
+                              <LuInfo className="size-3.5 text-warning/80 hover:text-warning transition-colors" />
+                            </button>
+                          </PopoverTrigger>
+                        </TooltipTrigger>
+                        <TooltipContent
+                          side="top"
+                          sideOffset={4}
+                          className="text-[11px] max-w-64"
+                        >
+                          Click or hover for catalog notice
+                        </TooltipContent>
+                      </Tooltip>
+                      <PopoverContent
+                        side="top"
+                        align="start"
+                        className="w-80 p-3 text-xs space-y-2"
+                      >
+                        <div className="flex items-center gap-1.5 font-semibold text-foreground">
+                          <LuInfo className="size-4 text-warning shrink-0" />
+                          <span>Catalog Notice</span>
+                        </div>
+                        <p className="text-muted-foreground leading-relaxed text-[11px]">
+                          {catalogError}
+                        </p>
+                        <div className="flex justify-end pt-1">
+                          <Button
+                            size="sm"
+                            variant="soft"
+                            className="h-7 text-xs px-2.5"
+                            onClick={() => void loadReleaseTypes(true)}
+                          >
+                            {t("common.buttons.retry")}
+                          </Button>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <Select
+                    value={creatableVersion ?? ""}
+                    onValueChange={setSelectedVersion}
+                    disabled={
+                      availableVersions.length === 0 ||
+                      downloading ||
+                      isCreating
+                    }
+                  >
+                    <SelectTrigger
+                      aria-label={t("createProfile.version.browserLabel")}
+                      className="h-8 w-44 text-xs font-mono"
+                    >
+                      <SelectValue
+                        placeholder={
+                          catalogError
+                            ? t("createProfile.version.fetchError")
+                            : t("createProfile.version.fetching")
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableVersions.map((version) => (
+                        <SelectItem
+                          key={version}
+                          value={version}
+                          className="text-xs font-mono"
+                        >
+                          {version}
+                          {downloadedVersions.includes(version)
+                            ? ` · ${t("createProfile.version.installed")}`
+                            : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {/* Status Indicator / Actions */}
+                  {creatableVersion &&
+                  downloadedVersions.includes(creatableVersion) ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0">
+                      <LuCheck className="size-3.5" />
+                      <span>{t("createProfile.version.installed")}</span>
+                    </span>
+                  ) : downloading ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-primary/10 text-primary border border-primary/20 shrink-0">
+                      <LuLoader className="size-3.5 animate-spin" />
+                      <span>
+                        {downloadProgress?.percentage
+                          ? `${downloadProgress.percentage}%`
+                          : t("common.buttons.downloading")}
+                      </span>
+                    </span>
+                  ) : canDownloadSelectedVersion ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="soft"
+                      className="h-8 shrink-0 text-xs gap-1.5 px-3"
+                      onClick={() => void handleDownloadSelectedVersion()}
+                      disabled={downloading || isCreating}
+                    >
+                      <LuDownload className="size-3.5" />
+                      <span>{t("common.buttons.download")}</span>
+                    </Button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] text-muted-foreground bg-muted/50 shrink-0">
+                      {browserVersionStatus}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Progress bar when downloading */}
+              {downloading && (
+                <div className="pt-1 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span className="flex items-center gap-1.5">
+                      <LuLoader className="size-3 animate-spin text-primary" />
+                      <span>
+                        {downloadProgress?.stage === "extracting"
+                          ? t("createProfile.downloadStatus.extracting", {
+                              defaultValue:
+                                "Đang hoàn tất cài đặt trình duyệt...",
+                            })
+                          : downloadProgress?.stage === "verifying"
+                            ? t("createProfile.downloadStatus.verifying", {
+                                defaultValue:
+                                  "Đang kiểm tra gói trình duyệt...",
+                              })
+                            : t("createProfile.downloadStatus.downloading", {
+                                defaultValue:
+                                  "Đang tải gói trình duyệt tự động...",
+                              })}
+                      </span>
+                    </span>
+                    <span className="font-mono text-xs font-semibold text-primary">
+                      {typeof downloadProgress?.percentage === "number"
+                        ? `${downloadProgress.percentage}%`
+                        : "0%"}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-primary transition-all duration-300 rounded-full"
+                      style={{
+                        width: `${Math.max(5, downloadProgress?.percentage ?? 0)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Section 2: Proxy & Network Routing */}
+            <div className="rounded-lg border border-border/50 bg-card/40 p-3 space-y-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground block">
+                {t("proxies.title")} &amp; Network
+              </span>
+              <CreateProfileProxyDialog
+                proxies={storedProxies}
+                selectedProxyId={selectedProxyId}
+                onSelect={handleProxySelect}
+                onDraftChange={handleProxyDraftChange}
+              />
+            </div>
+
+            {/* Section 3: Extensions & Advanced Automation (Disclosure) */}
+            <div id={advancedOptionsId} hidden={!advancedOpen}>
+              <AnimatedDisclosureContent
+                open={advancedOpen}
+                className="space-y-3 pt-1"
+              >
+                <SoftFields>
+                  <div className="space-y-3 rounded-lg border border-border/50 bg-card/40 p-3">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground block">
+                      {t("createProfile.advancedOptions")}
+                    </span>
+
+                    <div className="space-y-1">
+                      <Label
+                        htmlFor="launch-hook-url"
+                        className={FIELD_LABEL_CLASS}
+                      >
+                        {t("createProfile.launchHook.label")}
+                      </Label>
+                      <Input
+                        id="launch-hook-url"
+                        variant="soft"
+                        value={launchHook}
+                        onChange={(event) => setLaunchHook(event.target.value)}
+                        placeholder={t("createProfile.launchHook.placeholder")}
+                        disabled={isCreating}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+
+                    <div
+                      className={cn(
+                        "grid gap-3",
+                        extensionGroups.length > 0 && "sm:grid-cols-2",
+                      )}
+                    >
+                      <div className="min-w-0 space-y-1">
+                        <Label
+                          htmlFor="profile-dns-blocklist"
+                          className={FIELD_LABEL_CLASS}
+                        >
+                          {t("dnsBlocklist.title")}
+                        </Label>
+                        <Select
+                          value={dnsBlocklist || "none"}
+                          onValueChange={(value) =>
+                            setDnsBlocklist(value === "none" ? "" : value)
+                          }
+                          disabled={isCreating}
+                        >
+                          <SelectTrigger
+                            id="profile-dns-blocklist"
+                            variant="soft"
+                            className="w-full text-xs h-8"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">
+                              {t("dnsBlocklist.none")}
+                            </SelectItem>
+                            {DNS_BLOCKLIST_LEVELS.map((level) => (
+                              <SelectItem key={level.value} value={level.value}>
+                                {t(level.labelKey)}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {extensionGroups.length > 0 && (
+                        <div className="min-w-0 space-y-1">
+                          <Label
+                            htmlFor="profile-extension-group"
+                            className={FIELD_LABEL_CLASS}
+                          >
+                            {t("extensions.extensionGroup")}
+                          </Label>
+                          <Select
+                            value={selectedExtensionGroupId ?? "none"}
+                            onValueChange={(value) =>
+                              setSelectedExtensionGroupId(
+                                value === "none" ? undefined : value,
+                              )
+                            }
+                            disabled={isCreating}
+                          >
+                            <SelectTrigger
+                              id="profile-extension-group"
+                              variant="soft"
+                              className="w-full text-xs h-8"
+                            >
+                              <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="none">
-                                {t("dnsBlocklist.none")}
+                                {t("profileInfo.values.none")}
                               </SelectItem>
-                              {DNS_BLOCKLIST_LEVELS.map((level) => (
-                                <SelectItem
-                                  key={level.value}
-                                  value={level.value}
-                                >
-                                  {t(level.labelKey)}
+                              {extensionGroups.map((group) => (
+                                <SelectItem key={group.id} value={group.id}>
+                                  {group.name} ({group.extension_ids.length})
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
                         </div>
+                      )}
+                    </div>
 
-                        {/* Extension Group */}
-                        {extensionGroups.length > 0 && (
-                          <div className="space-y-2">
-                            <Label>{t("extensions.extensionGroup")}</Label>
-                            <Select
-                              value={selectedExtensionGroupId ?? "none"}
-                              onValueChange={(val) => {
-                                setSelectedExtensionGroupId(
-                                  val === "none" ? undefined : val,
-                                );
-                              }}
-                            >
-                              <SelectTrigger>
-                                <SelectValue
-                                  placeholder={t("profileInfo.values.none")}
-                                />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="none">
-                                  {t("profileInfo.values.none")}
-                                </SelectItem>
-                                {extensionGroups.map((g) => (
-                                  <SelectItem key={g.id} value={g.id}>
-                                    {g.name} ({g.extension_ids.length})
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        )}
-                      </div>
-                    </TabsContent>
+                    <div className="space-y-3 pt-1">
+                      <WayfernConfigForm
+                        className="[&_[data-slot=select-trigger]]:w-full"
+                        config={wayfernConfig}
+                        onConfigChange={updateWayfernConfig}
+                        isCreating
+                        forceAdvanced
+                        readOnly={isCreating}
+                        profileVersion={creatableVersion}
+                        profileBrowser="wayfern"
+                      />
+                    </div>
+                  </div>
+                </SoftFields>
+              </AnimatedDisclosureContent>
+            </div>
+          </div>
 
-                    <TabsContent value="regular" className="mt-0">
-                      {/* Regular Browser Configuration */}
-                      <div className="space-y-6">
-                        {/* Profile Name */}
-                        <div className="space-y-2">
-                          <Label htmlFor="profile-name">
-                            {t("createProfile.profileName")}
-                          </Label>
-                          <Input
-                            id="profile-name"
-                            value={profileName}
-                            onChange={(e) => {
-                              setProfileName(e.target.value);
-                            }}
-                            onKeyDown={(e) => {
-                              if (
-                                e.key === "Enter" &&
-                                !isCreateDisabled &&
-                                !isCreating
-                              ) {
-                                void handleCreate();
-                              }
-                            }}
-                            placeholder={t(
-                              "createProfile.profileNamePlaceholder",
-                            )}
-                          />
-                        </div>
+          {/* Right Column: Live Fingerprint Preview Card (Compact Grid 2 Columns) */}
+          <div className="hidden md:flex flex-col gap-3 rounded-xl border border-border/60 bg-gradient-to-b from-card/90 to-card/50 p-3.5 shadow-sm backdrop-blur-sm h-fit sticky top-0">
+            <div className="space-y-3">
+              {/* Card Header */}
+              <div className="flex items-center justify-between border-b border-border/50 pb-2">
+                <div className="flex items-center gap-1.5">
+                  <LuShieldCheck className="size-4 text-primary" />
+                  <span className="text-[11px] font-semibold tracking-wider uppercase text-foreground">
+                    {t("createProfile.fingerprintSummary.title")}
+                  </span>
+                </div>
+                <Button
+                  variant="subtle"
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[11px] rounded-md hover:bg-primary/10 hover:text-primary transition-colors"
+                  onClick={handleRandomizeFingerprint}
+                  disabled={isCreating}
+                  title="Randomize hardware attributes"
+                >
+                  <LuShuffle className="size-3" />
+                  <span>{t("createProfile.fingerprintSummary.randomize")}</span>
+                </Button>
+              </div>
 
-                        {/* Regular Browser Configuration */}
-                        <div className="space-y-4">
-                          {selectedBrowser && (
-                            <div className="space-y-3">
-                              {isLoadingReleaseTypes && (
-                                <div className="flex items-center gap-3">
-                                  <div className="size-4 animate-spin rounded-full border-2 border-muted/40 border-t-primary" />
-                                  <p className="text-sm text-muted-foreground">
-                                    {t("createProfile.version.fetching")}
-                                  </p>
-                                </div>
-                              )}
-                              {!isLoadingReleaseTypes && releaseTypesError && (
-                                <div className="flex items-center gap-3 rounded-md border border-destructive/50 bg-destructive/10 p-3">
-                                  <p className="flex-1 text-sm text-destructive">
-                                    {releaseTypesError}
-                                  </p>
-                                  <RippleButton
-                                    onClick={() =>
-                                      selectedBrowser &&
-                                      loadReleaseTypes(selectedBrowser)
-                                    }
-                                    size="sm"
-                                    variant="outline"
-                                  >
-                                    {t("common.buttons.retry")}
-                                  </RippleButton>
-                                </div>
-                              )}
-                              {!isLoadingReleaseTypes &&
-                                !releaseTypesError &&
-                                !isBrowserCurrentlyDownloading(
-                                  selectedBrowser,
-                                ) &&
-                                !getCreatableVersion(selectedBrowser) &&
-                                getBestAvailableVersion(selectedBrowser) && (
-                                  <div className="flex items-center gap-3">
-                                    <p className="text-sm text-muted-foreground">
-                                      {t(
-                                        "createProfile.version.latestNeedsDownload",
-                                        {
-                                          version:
-                                            getBestAvailableVersion(
-                                              selectedBrowser,
-                                            )?.version,
-                                        },
-                                      )}
-                                    </p>
-                                    <LoadingButton
-                                      onClick={() => {
-                                        void handleDownload(selectedBrowser);
-                                      }}
-                                      isLoading={isBrowserCurrentlyDownloading(
-                                        selectedBrowser,
-                                      )}
-                                      className="ml-auto"
-                                      size="sm"
-                                      disabled={isBrowserCurrentlyDownloading(
-                                        selectedBrowser,
-                                      )}
-                                    >
-                                      {t("common.buttons.download")}
-                                    </LoadingButton>
-                                  </div>
-                                )}
-                              {!isLoadingReleaseTypes &&
-                                !releaseTypesError &&
-                                !isBrowserCurrentlyDownloading(
-                                  selectedBrowser,
-                                ) &&
-                                getCreatableVersion(selectedBrowser) && (
-                                  <div className="text-sm text-muted-foreground">
-                                    ✓{" "}
-                                    {t(
-                                      "createProfile.version.latestAvailable",
-                                      {
-                                        version:
-                                          getCreatableVersion(selectedBrowser)
-                                            ?.version,
-                                      },
-                                    )}
-                                  </div>
-                                )}
-                              {isBrowserCurrentlyDownloading(
-                                selectedBrowser,
-                              ) && (
-                                <div className="text-sm text-muted-foreground">
-                                  {t(
-                                    "createProfile.version.latestDownloading",
-                                    {
-                                      version:
-                                        getBestAvailableVersion(selectedBrowser)
-                                          ?.version,
-                                    },
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
+              {/* Key-Value Summary List (Compact 2-Column Mini Grid) */}
+              <div className="grid grid-cols-2 gap-x-2.5 gap-y-2 text-xs">
+                {/* OS & Kernel */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <SelectedOsIcon className="size-3" />
+                    {t("createProfile.fingerprintSummary.osKernel")}
+                  </span>
+                  <span className="font-medium text-foreground text-xs truncate block">
+                    {getOSDisplayName(selectedOs)} x64
+                  </span>
+                </div>
 
-                        {/* Proxy / VPN Selection - Always visible */}
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <Label>{t("createProfile.proxy.title")}</Label>
-                            <RippleButton
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                setShowProxyForm(true);
-                              }}
-                              className="h-7 px-2 text-xs"
-                            >
-                              <GoPlus className="mr-1 size-3" />{" "}
-                              {t("createProfile.proxy.addProxy")}
-                            </RippleButton>
-                          </div>
-                          {storedProxies.length > 0 || vpnConfigs.length > 0 ? (
-                            <Popover
-                              open={proxyPopoverOpen}
-                              onOpenChange={setProxyPopoverOpen}
-                            >
-                              <PopoverTrigger asChild>
-                                <Button
-                                  variant="outline"
-                                  role="combobox"
-                                  aria-expanded={proxyPopoverOpen}
-                                  aria-controls={proxyListboxIdRegular}
-                                  className="w-full justify-between font-normal"
-                                >
-                                  {(() => {
-                                    if (!selectedProxyId)
-                                      return t("createProfile.proxy.noProxy");
-                                    if (selectedProxyId.startsWith("vpn-")) {
-                                      const vpn = vpnConfigs.find(
-                                        (v) =>
-                                          v.id === selectedProxyId.slice(4),
-                                      );
-                                      return vpn
-                                        ? `WG — ${vpn.name}`
-                                        : t("createProfile.proxy.noProxy");
-                                    }
-                                    const proxy = storedProxies.find(
-                                      (p) => p.id === selectedProxyId,
-                                    );
-                                    return (
-                                      proxy?.name ??
-                                      t("createProfile.proxy.noProxy")
-                                    );
-                                  })()}
-                                  <LuChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
-                                </Button>
-                              </PopoverTrigger>
-                              <PopoverContent
-                                id={proxyListboxIdRegular}
-                                className="w-[240px] p-0"
-                                sideOffset={8}
-                              >
-                                <Command>
-                                  <CommandInput
-                                    placeholder={t(
-                                      "createProfile.proxy.search",
-                                    )}
-                                  />
-                                  <CommandList>
-                                    <CommandEmpty>
-                                      {t("createProfile.proxy.notFound")}
-                                    </CommandEmpty>
-                                    <CommandGroup>
-                                      <CommandItem
-                                        value="__none__"
-                                        onSelect={() => {
-                                          setSelectedProxyId(undefined);
-                                          setProxyPopoverOpen(false);
-                                        }}
-                                      >
-                                        <LuCheck
-                                          className={cn(
-                                            "mr-2 size-4",
-                                            !selectedProxyId
-                                              ? "opacity-100"
-                                              : "opacity-0",
-                                          )}
-                                        />
-                                        {t("common.labels.none")}
-                                      </CommandItem>
-                                      {storedProxies.map((proxy) => (
-                                        <CommandItem
-                                          key={proxy.id}
-                                          value={proxy.name}
-                                          onSelect={() => {
-                                            setSelectedProxyId(proxy.id);
-                                            setProxyPopoverOpen(false);
-                                          }}
-                                        >
-                                          <LuCheck
-                                            className={cn(
-                                              "mr-2 size-4",
-                                              selectedProxyId === proxy.id
-                                                ? "opacity-100"
-                                                : "opacity-0",
-                                            )}
-                                          />
-                                          {proxy.name}
-                                        </CommandItem>
-                                      ))}
-                                    </CommandGroup>
-                                    {vpnConfigs.length > 0 && (
-                                      <CommandGroup heading="VPNs">
-                                        {vpnConfigs.map((vpn) => (
-                                          <CommandItem
-                                            key={vpn.id}
-                                            value={`vpn-${vpn.name}`}
-                                            onSelect={() => {
-                                              setSelectedProxyId(
-                                                `vpn-${vpn.id}`,
-                                              );
-                                              setProxyPopoverOpen(false);
-                                            }}
-                                          >
-                                            <LuCheck
-                                              className={cn(
-                                                "mr-2 size-4",
-                                                selectedProxyId ===
-                                                  `vpn-${vpn.id}`
-                                                  ? "opacity-100"
-                                                  : "opacity-0",
-                                              )}
-                                            />
-                                            <Badge
-                                              variant="outline"
-                                              className="mr-1 px-1 py-0 text-[10px] leading-tight"
-                                            >
-                                              WG
-                                            </Badge>
-                                            {vpn.name}
-                                          </CommandItem>
-                                        ))}
-                                      </CommandGroup>
-                                    )}
-                                  </CommandList>
-                                </Command>
-                              </PopoverContent>
-                            </Popover>
-                          ) : (
-                            <div className="flex items-center gap-3 rounded-md border p-3 text-sm text-muted-foreground">
-                              {t("createProfile.proxy.noProxiesAvailable")}
-                            </div>
-                          )}
-                        </div>
+                {/* Browser Engine */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <LuGlobe className="size-3" />
+                    {t("createProfile.fingerprintSummary.browser")}
+                  </span>
+                  <span className="font-medium text-foreground text-xs truncate block">
+                    Browser{creatableVersion ? ` ${creatableVersion}` : ""}
+                  </span>
+                </div>
 
-                        <div className="space-y-2">
-                          <Label htmlFor="launch-hook-url-regular">
-                            {t("createProfile.launchHook.label")}
-                          </Label>
-                          <Input
-                            id="launch-hook-url-regular"
-                            value={launchHook}
-                            onChange={(e) => {
-                              setLaunchHook(e.target.value);
-                            }}
-                            placeholder={t(
-                              "createProfile.launchHook.placeholder",
-                            )}
-                            disabled={isCreating}
-                          />
-                        </div>
-                      </div>
-                    </TabsContent>
-                  </>
-                )}
+                {/* Display Resolution */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <LuMonitor className="size-3" />
+                    {t("createProfile.fingerprintSummary.screen")}
+                  </span>
+                  <span className="font-mono text-[11px] text-foreground truncate block">
+                    {wayfernConfig.screen_max_width ?? 1920} ×{" "}
+                    {wayfernConfig.screen_max_height ?? 1080}
+                  </span>
+                </div>
+
+                {/* CPU & Memory */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <LuCpu className="size-3" />
+                    {t("createProfile.fingerprintSummary.hardware")}
+                  </span>
+                  <span className="font-medium text-foreground text-xs truncate block">
+                    {hardwareCores}C · {hardwareMemory}GB
+                  </span>
+                </div>
+
+                {/* Canvas */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground block">
+                    {t("createProfile.fingerprintSummary.canvas")}
+                  </span>
+                  <span className="flex items-center gap-1 text-primary text-[11px] font-medium">
+                    <LuCheck className="size-3" />
+                    Noise Injected
+                  </span>
+                </div>
+
+                {/* WebGL */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground block">
+                    {t("createProfile.fingerprintSummary.webgl")}
+                  </span>
+                  <span className="flex items-center gap-1 text-primary text-[11px] font-medium">
+                    <LuCheck className="size-3" />
+                    Noise Injected
+                  </span>
+                </div>
+
+                {/* AudioContext */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground block">
+                    {t("createProfile.fingerprintSummary.audio")}
+                  </span>
+                  <span className="flex items-center gap-1 text-primary text-[11px] font-medium">
+                    <LuCheck className="size-3" />
+                    Noise Injected
+                  </span>
+                </div>
+
+                {/* WebRTC */}
+                <div className="space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground block">
+                    {t("createProfile.fingerprintSummary.webrtc")}
+                  </span>
+                  <span className="text-foreground text-[11px] truncate block">
+                    Altered (Exit IP)
+                  </span>
+                </div>
+
+                {/* Network / Exit IP - Full width */}
+                <div className="col-span-2 pt-1 border-t border-border/30 space-y-0.5">
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <LuLayers className="size-3" />
+                    {t("createProfile.fingerprintSummary.network")}
+                  </span>
+                  <span
+                    className="font-medium text-foreground text-xs truncate block"
+                    title={activeProxyName}
+                  >
+                    {activeProxyName}
+                  </span>
+                </div>
               </div>
             </div>
-          </ScrollArea>
-        </Tabs>
+          </div>
+        </div>
 
-        <DialogFooter className="shrink-0 border-t pt-4">
-          {currentStep === "browser-config" ? (
-            <>
-              <RippleButton variant="outline" onClick={handleClose}>
-                {t("common.buttons.close")}
-              </RippleButton>
-              <LoadingButton
-                onClick={handleCreate}
-                isLoading={isCreating}
-                disabled={isCreateDisabled}
-              >
-                {t("common.buttons.create")}
-              </LoadingButton>
-            </>
-          ) : (
-            <RippleButton variant="outline" onClick={handleClose}>
+        {/* Footer */}
+        <DialogFooter className="items-center justify-between pt-2 border-t border-border/50 shrink-0">
+          <Button
+            variant="subtle"
+            size="sm"
+            className="-ml-2 gap-1 rounded-lg px-2 text-xs h-8"
+            aria-expanded={advancedOpen}
+            aria-controls={advancedOptionsId}
+            onClick={() => setAdvancedOpen((open) => !open)}
+            disabled={isCreating}
+          >
+            <AnimatedDisclosureChevron open={advancedOpen}>
+              <LuChevronRight className="size-4" />
+            </AnimatedDisclosureChevron>
+            {t("createProfile.advancedOptions")}
+          </Button>
+
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="subtle"
+              size="sm"
+              onClick={handleClose}
+              disabled={isCreating}
+              className="text-xs rounded-lg h-8"
+            >
               {t("common.buttons.cancel")}
-            </RippleButton>
-          )}
+            </Button>
+            <LoadingButton
+              onClick={handleCreate}
+              isLoading={isCreating}
+              disabled={isCreateDisabled}
+              size="sm"
+              className="h-8 rounded-lg px-4 text-xs font-medium transition-[opacity,box-shadow,transform] duration-200"
+            >
+              {t("common.buttons.create")}
+            </LoadingButton>
+          </div>
         </DialogFooter>
       </DialogContent>
-      <ProxyFormDialog
-        isOpen={showProxyForm}
-        onClose={() => {
-          setShowProxyForm(false);
-        }}
-      />
     </Dialog>
+  );
+}
+
+const ENTRY_SPRING = {
+  type: "spring" as const,
+  stiffness: 420,
+  damping: 34,
+  mass: 0.7,
+};
+
+const STATUS_CLASS =
+  "flex items-center gap-2 rounded-lg bg-foreground/4 px-3 py-2 text-xs text-muted-foreground";
+
+const FIELD_LABEL_CLASS = "text-xs font-medium text-muted-foreground";
+
+function optionPill(on: boolean) {
+  return cn(
+    "inline-flex h-8 max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-full px-3 text-sm font-medium outline-none select-none transition-[background-color,color,box-shadow,transform] duration-150 ease-[var(--ease-out)] focus-visible:ring-2 focus-visible:ring-ring/50 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50 motion-reduce:active:scale-100 [&_svg]:size-3.5 [&_svg]:shrink-0",
+    on
+      ? "bg-primary/10 text-foreground [&_svg]:text-primary-text"
+      : "bg-foreground/5 text-muted-foreground hover:bg-foreground/8 hover:text-foreground",
+  );
+}
+
+function useMounted() {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
+  return mounted.current;
+}
+
+function PillIcon({
+  on,
+  animate,
+  children,
+}: {
+  on: boolean;
+  animate: boolean;
+  children: React.ReactNode;
+}) {
+  const mounted = useMounted();
+  return (
+    <motion.span
+      key={String(on)}
+      aria-hidden="true"
+      className="inline-flex"
+      initial={
+        animate && mounted ? { scale: 0.4, rotate: on ? -24 : 24 } : false
+      }
+      animate={{ scale: 1, rotate: 0 }}
+      transition={{ type: "spring", stiffness: 560, damping: 22 }}
+    >
+      {children}
+    </motion.span>
+  );
+}
+
+function PillLabel({
+  id,
+  label,
+  animate,
+}: {
+  id: string;
+  label: string;
+  animate: boolean;
+}) {
+  const mounted = useMounted();
+  return (
+    <motion.span
+      key={label}
+      id={id}
+      className="min-w-0 truncate"
+      initial={animate && mounted ? { y: 4 } : false}
+      animate={{ y: 0 }}
+      transition={ENTRY_SPRING}
+    >
+      {label}
+    </motion.span>
+  );
+}
+
+function OptionToggle({
+  id,
+  checked,
+  onCheckedChange,
+  disabled,
+  animate,
+  icon,
+  label,
+  hint,
+}: {
+  id: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  disabled: boolean;
+  animate: boolean;
+  icon: React.ReactNode;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <Tooltip delayDuration={600}>
+      <TooltipTrigger asChild>
+        <CheckboxPrimitive.Root
+          id={id}
+          checked={checked}
+          onCheckedChange={(state) => onCheckedChange(state === true)}
+          disabled={disabled}
+          className={optionPill(checked)}
+        >
+          <PillIcon on={checked} animate={animate}>
+            {icon}
+          </PillIcon>
+          <span className="truncate">{label}</span>
+        </CheckboxPrimitive.Root>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6} className="max-w-72">
+        {hint}
+      </TooltipContent>
+    </Tooltip>
   );
 }

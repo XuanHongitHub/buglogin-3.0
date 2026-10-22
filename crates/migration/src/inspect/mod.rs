@@ -432,7 +432,7 @@ fn scan_value(
         Value::Object(object) => {
             for (key, child) in object {
                 let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
-                if is_secret_key(&normalized) && !child.is_null() {
+                if buglogin_domain::security::is_secret_field(&normalized) && !child.is_null() {
                     secrets.secret_fields_present += 1;
                 }
                 if count_runtimes && matches!(normalized.as_str(), "runtime" | "browser") {
@@ -450,22 +450,6 @@ fn scan_value(
         }
         _ => {}
     }
-}
-
-fn is_secret_key(key: &str) -> bool {
-    const SECRET_KEYS: [&str; 10] = [
-        "password",
-        "proxypassword",
-        "token",
-        "accesstoken",
-        "refreshtoken",
-        "apikey",
-        "secret",
-        "privatekey",
-        "cookie",
-        "cookies",
-    ];
-    SECRET_KEYS.into_iter().any(|candidate| key == candidate)
 }
 
 fn runtime_report_key(runtime: &str) -> String {

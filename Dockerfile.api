@@ -6,7 +6,7 @@ RUN apt-get update \
 
 WORKDIR /build
 COPY . .
-RUN cargo build --locked --release --package buglogin-api --bin buglogin-api
+RUN cargo build --locked --release --package buglogin-api --bin buglogin-api --bin buglogin-bootstrap --bin buglogin-admin-password-reset
 
 FROM debian:bookworm-slim AS runtime
 
@@ -17,6 +17,8 @@ RUN apt-get update \
     && useradd --system --uid 10001 --gid buglogin --no-create-home buglogin
 
 COPY --from=build --chown=10001:10001 /build/target/release/buglogin-api /usr/local/bin/buglogin-api
+COPY --from=build --chown=10001:10001 /build/target/release/buglogin-bootstrap /usr/local/bin/buglogin-bootstrap
+COPY --from=build --chown=10001:10001 /build/target/release/buglogin-admin-password-reset /usr/local/bin/buglogin-admin-password-reset
 
 ENV BUGLOGIN_ENV=production \
     BUGLOGIN_API_BIND=0.0.0.0:12343

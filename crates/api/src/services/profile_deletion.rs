@@ -1,9 +1,7 @@
-use std::path::PathBuf;
-
 use buglogin_domain::{entities::ProfileState, errors::Problem, ids::ProfileId};
 use serde::Serialize;
 
-use crate::{http::ApiState, services::profile_hosted::HostedProfileService};
+use crate::http::ApiState;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,7 +9,6 @@ pub struct ProfileDeleteReceipt {
     pub id: ProfileId,
     pub deleted: bool,
     pub recoverable: bool,
-    pub quarantine_path: PathBuf,
 }
 
 pub struct ProfileDeletionService;
@@ -23,7 +20,6 @@ impl ProfileDeletionService {
         expected_revision: u64,
         confirmation: &str,
     ) -> Result<ProfileDeleteReceipt, Problem> {
-        HostedProfileService::ensure_delete_supported(state)?;
         if confirmation != "QUARANTINE_PROFILE_DATA" {
             return Err(Problem::new(
                 "delete_not_confirmed",
@@ -33,7 +29,7 @@ impl ProfileDeletionService {
             ));
         }
 
-        let quarantine_path = match state.profiles.get(profile_id)? {
+        let _quarantine_path = match state.profiles.get(profile_id)? {
             Some(current) => {
                 if matches!(
                     current.value.state,
@@ -66,7 +62,6 @@ impl ProfileDeletionService {
             id: profile_id.clone(),
             deleted: true,
             recoverable: true,
-            quarantine_path,
         })
     }
 }

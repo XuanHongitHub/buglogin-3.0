@@ -1,21 +1,24 @@
 "use client";
 
-import { AnimatePresence, type HTMLMotionProps, motion } from "motion/react";
+import { type HTMLMotionProps, motion, useReducedMotion } from "motion/react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 import type * as React from "react";
 import { useTranslation } from "react-i18next";
 import { RxCross2 } from "react-icons/rx";
 
 import { useControlledState } from "@/hooks/use-controlled-state";
+import { useInputModality } from "@/hooks/use-input-modality";
 import { getStrictContext } from "@/lib/get-strict-context";
+import { MOTION_EASE_OUT } from "@/lib/motion";
 import { cn } from "@/lib/utils";
-import { WindowDragArea } from "../window-drag-area";
+import { DialogWindowChrome } from "../window-drag-area";
 
 type DialogContextType = {
   isOpen: boolean;
   setIsOpen: DialogProps["onOpenChange"];
   subPage: boolean;
   container: HTMLElement | null | undefined;
+  motionEnabled: boolean;
 };
 
 const [DialogProvider, useDialog] =
@@ -26,9 +29,16 @@ type DialogProps = React.ComponentProps<typeof DialogPrimitive.Root> & {
   subPage?: boolean;
   /** Portal container target. Required when subPage=true; ignored otherwise. */
   container?: HTMLElement | null;
+  motionEnabled?: boolean;
 };
 
-function Dialog({ subPage, container, children, ...props }: DialogProps) {
+function Dialog({
+  subPage,
+  container,
+  motionEnabled = true,
+  children,
+  ...props
+}: DialogProps) {
   const [isOpen, setIsOpen] = useControlledState({
     value: props?.open,
     defaultValue: props?.defaultOpen,
@@ -42,6 +52,7 @@ function Dialog({ subPage, container, children, ...props }: DialogProps) {
         setIsOpen,
         subPage: !!subPage,
         container: container ?? undefined,
+        motionEnabled,
       }}
     >
       {/* In sub-page mode the Dialog isn't a modal — it's an in-flow page.
@@ -72,20 +83,24 @@ type DialogPortalProps = Omit<
   "forceMount"
 >;
 
-function DialogPortal(props: DialogPortalProps) {
+function DialogPortal({
+  children,
+  container: portalContainer,
+  ...props
+}: DialogPortalProps) {
   const { isOpen, container } = useDialog();
 
+  if (!isOpen) return null;
+
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <DialogPrimitive.Portal
-          data-slot="dialog-portal"
-          forceMount
-          container={container ?? props.container}
-          {...props}
-        />
-      )}
-    </AnimatePresence>
+    <DialogPrimitive.Portal
+      data-slot="dialog-portal"
+      forceMount
+      container={container ?? portalContainer}
+      {...props}
+    >
+      {children}
+    </DialogPrimitive.Portal>
   );
 }
 
@@ -95,32 +110,16 @@ type DialogOverlayProps = Omit<
 > &
   HTMLMotionProps<"div">;
 
-function DialogOverlay({
-  className,
-  transition = { duration: 0.2, ease: "easeInOut" },
-  ...props
-}: DialogOverlayProps) {
+function DialogOverlay({ className, ...props }: DialogOverlayProps) {
   return (
     <DialogPrimitive.Overlay data-slot="dialog-overlay" asChild forceMount>
       <motion.div
         key="dialog-overlay"
-        initial={{ opacity: 0, filter: "blur(4px)" }}
-        animate={{ opacity: 1, filter: "blur(0px)" }}
-        exit={{ opacity: 0, filter: "blur(4px)" }}
-        transition={transition}
+        initial={false}
         className={cn("fixed inset-0 z-9999 bg-background/50", className)}
         {...props}
       >
-        {/* Keep the OS title-bar zone draggable while a modal is open — the
-            overlay otherwise covers the native drag region. `data-window-drag-area`
-            stops Radix from treating a drag here as an outside-click dismiss. */}
-        <div
-          data-tauri-drag-region
-          data-window-drag-area="true"
-          aria-hidden="true"
-          className="absolute inset-x-0 top-0 h-11"
-        />
-        <WindowDragArea />
+        <DialogWindowChrome />
       </motion.div>
     </DialogPrimitive.Overlay>
   );
@@ -159,15 +158,9 @@ function SubPageContent({
   // shared dialog wrappers turned out to be unreliable when both classnames
   // and !important variants competed — inline styles guarantee the layout.
   return (
-    <motion.div
+    <div
       data-slot="sub-page"
       data-sub-page="true"
-      // Sub-pages enter with a short rise+fade so rail navigation reads as a
-      // transition instead of a hard cut. Same axis for every page (spatial
-      // consistency); the outgoing page unmounts under the incoming fade.
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
       style={{
         position: "relative",
         display: "flex",
@@ -191,7 +184,7 @@ function SubPageContent({
       }}
     >
       {children}
-    </motion.div>
+    </div>
   );
 }
 
@@ -209,7 +202,11 @@ function DialogContent({
   ...props
 }: DialogContentProps) {
   const { t } = useTranslation();
-  const { subPage } = useDialog();
+  const { subPage, motionEnabled } = useDialog();
+  const reduceMotion = useReducedMotion();
+  const inputModality = useInputModality();
+  const animateEntry =
+    motionEnabled && !reduceMotion && inputModality === "pointer";
 
   if (subPage) {
     return <SubPageContent>{children}</SubPageContent>;
@@ -217,8 +214,9 @@ function DialogContent({
 
   return (
     <DialogPortal data-slot="dialog-portal">
-      <DialogOverlay />
+      <DialogOverlay key="dialog-overlay" />
       <DialogPrimitive.Content
+        key="dialog-content"
         asChild
         forceMount
         onOpenAutoFocus={onOpenAutoFocus}
@@ -243,37 +241,28 @@ function DialogContent({
         <motion.div
           key="dialog-content"
           data-slot="dialog-content"
-          // Open/close motion modeled on transitions.dev's modal: a subtle
-          // scale from 0.96 → 1 with opacity, eased with cubic-bezier(0.22, 1,
-          // 0.36, 1). Open is 250ms; close is a quicker 150ms. The centering
-          // translate stays in `style` so `scale` animates around the center
-          // without fighting the transform-based positioning.
+          // Content is readable on the first frame, even in an occluded webview.
+          // Keyboard navigation skips the settle; closing unmounts immediately.
           style={{ transformOrigin: "center" }}
-          initial={{ opacity: 0, scale: 0.96 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{
-            opacity: 0,
-            scale: 0.96,
-            transition: transition ?? {
-              duration: 0.15,
-              ease: [0.22, 1, 0.36, 1],
-            },
-          }}
+          initial={animateEntry ? { scale: 0.985 } : false}
+          animate={{ scale: 1 }}
           transition={
-            transition ?? { duration: 0.25, ease: [0.22, 1, 0.36, 1] }
+            animateEntry
+              ? (transition ?? { duration: 0.2, ease: MOTION_EASE_OUT })
+              : { duration: 0 }
           }
           className={cn(
             // w-[calc(100%-2rem)] (not w-full + max-w) keeps the 1rem window
             // gutter even when callers override max-w-*: tailwind-merge drops
             // a base max-w in favor of the caller's, but leaves width alone.
-            "surface-material fixed top-[50%] left-[50%] z-10000 grid max-h-[calc(100vh-3rem)] w-[calc(100%-2rem)] max-w-lg -translate-[50%] gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg",
+            "fixed top-[50%] left-[50%] z-10000 grid max-h-[calc(100vh-3rem)] w-[calc(100%-2rem)] max-w-lg -translate-[50%] gap-4 overflow-y-auto rounded-lg border bg-background p-6",
             className,
           )}
           {...props}
         >
           {children}
           {!hideClose && dismissible && (
-            <DialogPrimitive.Close className="absolute top-4 right-4 cursor-pointer rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4">
+            <DialogPrimitive.Close className="absolute top-4 right-4 cursor-pointer rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-accent-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4">
               <RxCross2 />
               <span className="sr-only">{t("common.buttons.close")}</span>
             </DialogPrimitive.Close>

@@ -1,14 +1,16 @@
 "use client";
 
 import {
-  type ColumnDef,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
   type RowSelectionState,
   type SortingState,
-  useReactTable,
 } from "@tanstack/react-table";
+import {
+  type LegacyColumnDef as ColumnDef,
+  getCoreRowModel,
+  getSortedRowModel,
+  useLegacyTable as useReactTable,
+} from "@tanstack/react-table/legacy";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -66,7 +68,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
-import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { parseBackendError, translateBackendError } from "@/lib/backend-errors";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
@@ -78,6 +79,8 @@ import { VpnFormDialog } from "./vpn-form-dialog";
 import { VpnImportDialog } from "./vpn-import-dialog";
 
 type SyncStatus = "disabled" | "syncing" | "synced" | "error" | "waiting";
+const NO_VPN_CONFIGS: VpnConfig[] = [];
+const NO_VPN_USAGE: Record<string, number> = {};
 
 function getSyncStatusDot(
   item: { sync_enabled?: boolean; last_sync?: number },
@@ -159,10 +162,6 @@ export function ProxyManagementDialog({
   const [proxySyncErrors, setProxySyncErrors] = useState<
     Record<string, string>
   >({});
-  const [proxyInUse, setProxyInUse] = useState<Record<string, boolean>>({});
-  const [isTogglingSync, setIsTogglingSync] = useState<Record<string, boolean>>(
-    {},
-  );
 
   // VPN state
   const [showVpnForm, setShowVpnForm] = useState(false);
@@ -216,8 +215,15 @@ export function ProxyManagementDialog({
   const [showBulkDeleteVpnsDialog, setShowBulkDeleteVpnsDialog] =
     useState(false);
 
-  const { storedProxies: rawProxies, proxyUsage, isLoading } = useProxyEvents();
-  const { vpnConfigs, vpnUsage, isLoading: isLoadingVpns } = useVpnEvents();
+  const {
+    storedProxies: rawProxies,
+    proxyUsage,
+    isLoading,
+    error: proxyLoadError,
+  } = useProxyEvents();
+  const vpnConfigs = NO_VPN_CONFIGS;
+  const vpnUsage = NO_VPN_USAGE;
+  const isLoadingVpns = false;
 
   // Filter out cloud-managed and cloud-derived proxies (cloud proxies are
   // deprecated). Memoized — without this the derived array gets a new
@@ -288,38 +294,6 @@ export function ProxyManagementDialog({
     };
   }, []);
 
-  // Load cached check results on mount and when proxies change
-  useEffect(() => {
-    const loadCachedResults = async () => {
-      const results: Record<string, ProxyCheckResult> = {};
-      const inUse: Record<string, boolean> = {};
-      for (const proxy of storedProxies) {
-        try {
-          const cached = await invoke<ProxyCheckResult | null>(
-            "get_cached_proxy_check",
-            { proxyId: proxy.id },
-          );
-          if (cached) {
-            results[proxy.id] = cached;
-          }
-
-          const inUseBySynced = await invoke<boolean>(
-            "is_proxy_in_use_by_synced_profile",
-            { proxyId: proxy.id },
-          );
-          inUse[proxy.id] = inUseBySynced;
-        } catch (_error) {
-          // Ignore errors
-        }
-      }
-      setProxyCheckResults(results);
-      setProxyInUse(inUse);
-    };
-    if (storedProxies.length > 0) {
-      void loadCachedResults();
-    }
-  }, [storedProxies]);
-
   // Load VPN in-use status
   useEffect(() => {
     const loadVpnInUse = async () => {
@@ -340,7 +314,7 @@ export function ProxyManagementDialog({
     if (vpnConfigs.length > 0) {
       void loadVpnInUse();
     }
-  }, [vpnConfigs]);
+  }, []);
 
   // Proxy handlers
   const handleDeleteProxy = useCallback((proxy: StoredProxy) => {
@@ -377,34 +351,6 @@ export function ProxyManagementDialog({
     setShowProxyForm(false);
     setEditingProxy(null);
   }, []);
-
-  const handleToggleSync = useCallback(
-    async (proxy: StoredProxy) => {
-      setIsTogglingSync((prev) => ({ ...prev, [proxy.id]: true }));
-      try {
-        await invoke("set_proxy_sync_enabled", {
-          proxyId: proxy.id,
-          enabled: !proxy.sync_enabled,
-        });
-        showSuccessToast(
-          proxy.sync_enabled
-            ? t("proxies.management.syncDisabled")
-            : t("proxies.management.syncEnabled"),
-        );
-        await emit("stored-proxies-changed");
-      } catch (error) {
-        console.error("Failed to toggle sync:", error);
-        showErrorToast(
-          parseBackendError(error)
-            ? translateBackendError(t, error)
-            : t("proxies.management.updateSyncFailed"),
-        );
-      } finally {
-        setIsTogglingSync((prev) => ({ ...prev, [proxy.id]: false }));
-      }
-    },
-    [t],
-  );
 
   // VPN handlers
   const handleDeleteVpn = useCallback((vpn: VpnConfig) => {
@@ -589,40 +535,6 @@ export function ProxyManagementDialog({
         ),
       },
       {
-        id: "sync",
-        size: 96,
-        enableSorting: false,
-        header: () => t("proxies.management.syncCol"),
-        cell: ({ row }) => {
-          const proxy = row.original;
-          const locked = proxyInUse[proxy.id];
-          return (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="inline-flex items-center">
-                  <AnimatedSwitch
-                    checked={proxy.sync_enabled}
-                    onCheckedChange={() => void handleToggleSync(proxy)}
-                    disabled={isTogglingSync[proxy.id] || locked}
-                  />
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                {locked ? (
-                  <p>{t("syncTooltips.lockedInUse")}</p>
-                ) : (
-                  <p>
-                    {proxy.sync_enabled
-                      ? t("syncTooltips.disable")
-                      : t("syncTooltips.enable")}
-                  </p>
-                )}
-              </TooltipContent>
-            </Tooltip>
-          );
-        },
-      },
-      {
         id: "actions",
         size: 144,
         enableSorting: false,
@@ -675,14 +587,20 @@ export function ProxyManagementDialog({
                       onClick={() => {
                         handleDeleteProxy(proxy);
                       }}
-                      disabled={(proxyUsage[proxy.id] ?? 0) > 0}
+                      disabled={
+                        isLoading ||
+                        proxyLoadError !== null ||
+                        (proxyUsage[proxy.id] ?? 0) > 0
+                      }
                     >
                       <LuTrash2 className="size-4" />
                     </Button>
                   </span>
                 </TooltipTrigger>
                 <TooltipContent>
-                  {(proxyUsage[proxy.id] ?? 0) > 0 ? (
+                  {isLoading || proxyLoadError !== null ? (
+                    <p>{t("proxies.management.deleteUnavailable")}</p>
+                  ) : (proxyUsage[proxy.id] ?? 0) > 0 ? (
                     <p>
                       {(proxyUsage[proxy.id] ?? 0) === 1
                         ? t("proxies.management.cannotDelete_one", {
@@ -707,11 +625,10 @@ export function ProxyManagementDialog({
       proxySyncStatus,
       proxySyncErrors,
       proxyUsage,
-      isTogglingSync,
-      proxyInUse,
+      isLoading,
+      proxyLoadError,
       checkingProxyId,
       proxyCheckResults,
-      handleToggleSync,
       handleEditProxy,
       handleDeleteProxy,
     ],
@@ -726,7 +643,10 @@ export function ProxyManagementDialog({
     },
     onSortingChange: setProxiesSorting,
     onRowSelectionChange: setProxiesRowSelection,
-    enableRowSelection: (row) => !proxyInUse[row.original.id],
+    enableRowSelection: (row) =>
+      !isLoading &&
+      proxyLoadError === null &&
+      (proxyUsage[row.original.id] ?? 0) === 0,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getRowId: (row) => row.id,
@@ -932,7 +852,6 @@ export function ProxyManagementDialog({
       t,
       vpnSyncStatus,
       vpnSyncErrors,
-      vpnUsage,
       isTogglingVpnSync,
       vpnInUse,
       checkingVpnId,
@@ -966,6 +885,25 @@ export function ProxyManagementDialog({
 
   const handleBulkDeleteProxies = useCallback(async () => {
     if (selectedProxies.length === 0) return;
+    if (isLoading || proxyLoadError !== null) {
+      toast.error(t("proxies.management.deleteUnavailable"));
+      return;
+    }
+    const inUseCount = selectedProxies.reduce(
+      (count, proxy) => count + (proxyUsage[proxy.id] ?? 0),
+      0,
+    );
+    if (inUseCount > 0) {
+      toast.error(
+        t(
+          inUseCount === 1
+            ? "proxies.management.cannotDelete_one"
+            : "proxies.management.cannotDelete_other",
+          { count: inUseCount },
+        ),
+      );
+      return;
+    }
     setIsBulkDeletingProxies(true);
     try {
       const results = await Promise.allSettled(
@@ -987,7 +925,7 @@ export function ProxyManagementDialog({
       setIsBulkDeletingProxies(false);
       setShowBulkDeleteProxiesDialog(false);
     }
-  }, [selectedProxies, t]);
+  }, [isLoading, proxyLoadError, proxyUsage, selectedProxies, t]);
 
   const handleBulkDeleteVpns = useCallback(async () => {
     if (selectedVpns.length === 0) return;
@@ -1013,44 +951,6 @@ export function ProxyManagementDialog({
       setShowBulkDeleteVpnsDialog(false);
     }
   }, [selectedVpns, t]);
-
-  // Bulk-toggle sync: if every selectable row has sync ON, turn them all
-  // OFF; otherwise turn them all ON. Items locked by a synced profile
-  // (proxyInUse / vpnInUse) are skipped silently when the target is OFF.
-  const handleBulkToggleProxiesSync = useCallback(async () => {
-    if (selectedProxies.length === 0) return;
-    const allOn = selectedProxies.every((p) => p.sync_enabled);
-    const targetEnabled = !allOn;
-    const targets = selectedProxies.filter((p) =>
-      targetEnabled ? !p.sync_enabled : p.sync_enabled && !proxyInUse[p.id],
-    );
-    if (targets.length === 0) return;
-    const results = await Promise.allSettled(
-      targets.map((proxy) =>
-        invoke("set_proxy_sync_enabled", {
-          proxyId: proxy.id,
-          enabled: targetEnabled,
-        }),
-      ),
-    );
-    const firstRejection = results.find((r) => r.status === "rejected") as
-      | PromiseRejectedResult
-      | undefined;
-    if (firstRejection) {
-      showErrorToast(
-        parseBackendError(firstRejection.reason)
-          ? translateBackendError(t, firstRejection.reason)
-          : t("proxies.management.updateSyncFailed"),
-      );
-    } else {
-      showSuccessToast(
-        targetEnabled
-          ? t("proxies.management.syncEnabled")
-          : t("proxies.management.syncDisabled"),
-      );
-    }
-    await emit("stored-proxies-changed");
-  }, [selectedProxies, proxyInUse, t]);
 
   const handleBulkToggleVpnsSync = useCallback(async () => {
     if (selectedVpns.length === 0) return;
@@ -1113,12 +1013,6 @@ export function ProxyManagementDialog({
                     <span>{t("proxies.management.tabProxies")}</span>
                     <span className="text-xs text-muted-foreground tabular-nums">
                       {storedProxies.length}
-                    </span>
-                  </AnimatedTabsTrigger>
-                  <AnimatedTabsTrigger value="vpns">
-                    <span>{t("proxies.management.tabVpns")}</span>
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      {vpnConfigs.length}
                     </span>
                   </AnimatedTabsTrigger>
                 </AnimatedTabsList>
@@ -1517,13 +1411,6 @@ export function ProxyManagementDialog({
       {isOpen && activeTab === "proxies" && (
         <DataTableActionBar table={proxiesTable}>
           <DataTableActionBarSelection table={proxiesTable} />
-          <DataTableActionBarAction
-            tooltip={t("syncTooltips.bulkToggle")}
-            onClick={() => void handleBulkToggleProxiesSync()}
-            size="icon"
-          >
-            <LuRefreshCw />
-          </DataTableActionBarAction>
           <DataTableActionBarAction
             tooltip={t("common.buttons.delete")}
             onClick={() => {

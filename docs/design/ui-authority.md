@@ -52,6 +52,12 @@ These modes are not separate brands. They must share the Donut-compatible typogr
 - Do not add a new shell, color palette, typography family, icon family, radius scale, or card grammar without an ADR and design approval.
 - Do not implement a screen until its IA row, state matrix, capability contract, and approved reference package exist.
 
+## Identity Labels
+
+- Standard user-facing UI must use a verified person name, email address, device name, or a localized generic label. Never use account, workspace, member, device, profile, or resource IDs as ordinary labels, tooltips, or empty-value fallbacks.
+- Never invent or infer a person's identity or device name. If the source does not provide a verified display value, omit the identity or show a localized unavailable state.
+- IDs may appear only in an explicitly technical diagnostic surface where they are necessary to resolve a support issue; they must not leak into routine product workflows.
+
 ## Required evidence before resume
 
 Every UI work packet must include:

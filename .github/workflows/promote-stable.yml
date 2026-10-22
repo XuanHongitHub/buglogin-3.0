@@ -1,0 +1,66 @@
+name: Promote BugLogin RC to Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Existing published RC tag to promote (for example v1.2.3)
+        required: true
+        type: string
+      qa_evidence_url:
+        description: HTTPS link to completed Windows/macOS install, update, and sync acceptance evidence
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buglogin-stable-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref_name == github.event.repository.default_branch && github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: stable-promotion
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_REF: ${{ inputs.release_ref }}
+      QA_EVIDENCE_URL: ${{ inputs.qa_evidence_url }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Validate request and source tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Stable promotion requires a final semantic-version tag"; exit 1; }
+          [[ "$QA_EVIDENCE_URL" =~ ^https://[^[:space:]]+$ ]] || { echo "QA evidence must be an HTTPS URL"; exit 1; }
+          gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_REF" >/dev/null || { echo "Release tag is missing"; exit 1; }
+          RELEASE_JSON="$(gh release view "$RELEASE_REF" --json isDraft,isPrerelease,tagName)"
+          node -e 'const r=JSON.parse(process.argv[1]); if(r.tagName!==process.env.RELEASE_REF||r.isDraft||!r.isPrerelease) process.exit(1)' "$RELEASE_JSON" || { echo "Only an existing published prerelease may be promoted"; exit 1; }
+          echo "QA evidence: $QA_EVIDENCE_URL"
+      - name: Download and verify immutable RC assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir downloaded
+          gh release download "$RELEASE_REF" --dir downloaded
+          test -s downloaded/SHA256SUMS.txt
+          (cd downloaded && sha256sum --check SHA256SUMS.txt)
+          node scripts/release/verify-tauri-updater-feed.mjs downloaded/latest.json "${RELEASE_REF#v}" "$GH_REPO"
+          count="$(find downloaded -maxdepth 1 -type f -name 'BugLogin-*.zip' | wc -l | tr -d ' ')"
+          [[ "$count" == 3 ]] || { echo "Expected the exact Windows and macOS RC archives"; exit 1; }
+      - name: Promote existing release metadata without rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_REF" --prerelease=false --latest
+          RELEASE_JSON="$(gh release view "$RELEASE_REF" --json isDraft,isPrerelease,isLatest,tagName)"
+          node -e 'const r=JSON.parse(process.argv[1]); if(r.tagName!==process.env.RELEASE_REF||r.isDraft||r.isPrerelease||!r.isLatest) process.exit(1)' "$RELEASE_JSON"

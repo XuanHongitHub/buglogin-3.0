@@ -17,9 +17,7 @@ pub struct EncryptedChunk {
 
 impl EncryptedChunk {
     pub fn decrypt(&self, key: &ClientKey) -> Result<Vec<u8>, Problem> {
-        if checksum(&self.bytes) != self.ciphertext_checksum {
-            return Err(chunk_problem("encrypted_chunk_checksum_mismatch", false));
-        }
+        validate_chunk_metadata(self)?;
         let authenticated = AuthenticatedChunk::decode(&self.bytes)?;
         let associated_data = logical_chunk_key(&self.object_key, &self.ciphertext_checksum)?;
         let plaintext = authenticated.decrypt(key, associated_data.as_bytes())?;
@@ -39,7 +37,7 @@ pub fn encrypt_chunks(
     chunk_bytes: usize,
 ) -> Result<Vec<EncryptedChunk>, Problem> {
     validate_prefix(object_prefix)?;
-    if chunk_bytes == 0 {
+    if chunk_bytes == 0 || chunk_bytes > DEFAULT_CHUNK_BYTES {
         return Err(chunk_problem("invalid_chunk_size", false));
     }
     plaintext
@@ -88,6 +86,7 @@ pub fn upload_resumable(
     chunks: &[EncryptedChunk],
     max_retries: usize,
 ) -> Result<UploadReceipt, Problem> {
+    validate_chunk_set(chunks)?;
     let mut receipt = UploadReceipt::default();
     for chunk in chunks {
         match remote.checksum(&chunk.object_key)? {
@@ -109,6 +108,14 @@ pub fn upload_resumable(
                 Err(error) if error.retryable && attempt < max_retries => {
                     attempt += 1;
                     receipt.retries += 1;
+                    match remote.checksum(&chunk.object_key)? {
+                        Some(existing) if existing == chunk.ciphertext_checksum => {
+                            receipt.resumed += 1;
+                            break;
+                        }
+                        Some(_) => return Err(chunk_problem("remote_chunk_conflict", false)),
+                        None => {}
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -122,6 +129,7 @@ pub fn download_and_decrypt(
     key: &ClientKey,
     chunks: &[EncryptedChunk],
 ) -> Result<Vec<u8>, Problem> {
+    validate_chunk_set(chunks)?;
     let mut ordered = chunks.to_vec();
     ordered.sort_by_key(|chunk| chunk.index);
     let capacity = ordered
@@ -138,6 +146,53 @@ pub fn download_and_decrypt(
     Ok(plaintext)
 }
 
+fn validate_chunk_set(chunks: &[EncryptedChunk]) -> Result<(), Problem> {
+    let mut expected_prefix: Option<String> = None;
+    for (expected_index, chunk) in chunks.iter().enumerate() {
+        validate_chunk_metadata(chunk)?;
+        if chunk.index != expected_index as u64 {
+            return Err(chunk_problem("invalid_chunk_sequence", false));
+        }
+        let logical_key = logical_chunk_key(&chunk.object_key, &chunk.ciphertext_checksum)?;
+        let (prefix, _) = logical_key
+            .rsplit_once('/')
+            .ok_or_else(|| chunk_problem("invalid_chunk_sequence", false))?;
+        match &expected_prefix {
+            Some(expected) if expected != prefix => {
+                return Err(chunk_problem("invalid_chunk_sequence", false));
+            }
+            None => expected_prefix = Some(prefix.to_owned()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_chunk_metadata(chunk: &EncryptedChunk) -> Result<(), Problem> {
+    let expected_ciphertext_size = usize::try_from(chunk.plaintext_size)
+        .ok()
+        .filter(|size| (1..=DEFAULT_CHUNK_BYTES).contains(size))
+        .and_then(|size| size.checked_add(crate::crypto::AUTHENTICATED_CHUNK_OVERHEAD_BYTES));
+    if expected_ciphertext_size != Some(chunk.bytes.len()) {
+        return Err(chunk_problem("invalid_chunk_size", false));
+    }
+    if checksum(&chunk.bytes) != chunk.ciphertext_checksum {
+        return Err(chunk_problem("encrypted_chunk_checksum_mismatch", false));
+    }
+    let logical_key = logical_chunk_key(&chunk.object_key, &chunk.ciphertext_checksum)?;
+    let (_, leaf) = logical_key
+        .rsplit_once('/')
+        .ok_or_else(|| chunk_problem("invalid_chunk_sequence", false))?;
+    let (index, plaintext_checksum) = leaf
+        .split_once('-')
+        .ok_or_else(|| chunk_problem("invalid_chunk_sequence", false))?;
+    let encoded_index = format!("{:016x}", chunk.index);
+    if index != encoded_index || plaintext_checksum != chunk.plaintext_checksum {
+        return Err(chunk_problem("invalid_chunk_sequence", false));
+    }
+    Ok(())
+}
+
 fn validate_prefix(prefix: &str) -> Result<(), Problem> {
     if prefix.is_empty()
         || prefix.starts_with('/')
@@ -150,5 +205,30 @@ fn validate_prefix(prefix: &str) -> Result<(), Problem> {
 }
 
 fn chunk_problem(code: &str, retryable: bool) -> Problem {
-    Problem::new(code, "Encrypted chunk transfer failed", 409, "sync").retryable(retryable)
+    let (status, title) = match code {
+        "invalid_chunk_size" | "invalid_chunk_sequence" | "invalid_chunk_prefix" => {
+            (400, "Encrypted chunk request is invalid")
+        }
+        "plaintext_chunk_checksum_mismatch" | "encrypted_chunk_checksum_mismatch" => {
+            (422, "Encrypted chunk integrity check failed")
+        }
+        "remote_chunk_conflict" => (409, "Remote chunk conflicts with existing content"),
+        _ => (500, "Encrypted chunk transfer failed"),
+    };
+    Problem::new(code, title, status, "sync").retryable(retryable)
+}
+
+#[cfg(test)]
+mod error_contract_tests {
+    use super::chunk_problem;
+
+    #[test]
+    fn chunk_problem_uses_status_for_failure_class() {
+        assert_eq!(chunk_problem("invalid_chunk_sequence", false).status, 400);
+        assert_eq!(
+            chunk_problem("encrypted_chunk_checksum_mismatch", false).status,
+            422
+        );
+        assert_eq!(chunk_problem("remote_chunk_conflict", false).status, 409);
+    }
 }

@@ -65,6 +65,9 @@ impl SyncExport {
         manifest
             .tombstones
             .sort_by(|left, right| left.key.cmp(&right.key));
+        manifest
+            .file_chunks
+            .sort_by(|left, right| left.path.cmp(&right.path));
         blobs.sort_by(|left, right| left.key.cmp(&right.key));
         let export = Self {
             schema_version: SYNC_EXPORT_SCHEMA_VERSION,
@@ -87,6 +90,20 @@ impl SyncExport {
     }
 
     pub fn validate(&self) -> Result<(), Problem> {
+        self.validate_metadata()?;
+        validate_blobs(&self.blobs, &self.manifest)?;
+        if blob_set_checksum(&self.blobs)? != self.blob_set_sha256 {
+            return Err(invalid(
+                "sync_export_blob_set_checksum_mismatch",
+                "Sync export blob set checksum mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate the export envelope without requiring its potentially large blob payloads.
+    /// The full export must be validated before a caller moves the blob buffer out.
+    pub fn validate_metadata(&self) -> Result<(), Problem> {
         if self.schema_version != SYNC_EXPORT_SCHEMA_VERSION {
             return Err(invalid(
                 "sync_export_schema_unsupported",
@@ -122,13 +139,6 @@ impl SyncExport {
             ));
         }
         validate_revisions(&self.revisions, &self.manifest, self.base_generation)?;
-        validate_blobs(&self.blobs, &self.manifest)?;
-        if blob_set_checksum(&self.blobs)? != self.blob_set_sha256 {
-            return Err(invalid(
-                "sync_export_blob_set_checksum_mismatch",
-                "Sync export blob set checksum mismatch",
-            ));
-        }
         Ok(())
     }
 
@@ -156,6 +166,9 @@ pub fn canonical_manifest_checksum(manifest: &SyncManifest) -> Result<String, Pr
     canonical
         .tombstones
         .sort_by(|left, right| left.key.cmp(&right.key));
+    canonical
+        .file_chunks
+        .sort_by(|left, right| left.path.cmp(&right.path));
     let bytes = serde_json::to_vec(&canonical).map_err(|_| {
         invalid(
             "sync_export_serialization_failed",
@@ -166,9 +179,13 @@ pub fn canonical_manifest_checksum(manifest: &SyncManifest) -> Result<String, Pr
 }
 
 pub fn blob_set_checksum(blobs: &[SyncExportBlob]) -> Result<String, Problem> {
-    let mut ordered = blobs.to_vec();
+    let mut ordered = blobs.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.key.cmp(&right.key));
-    let mut bytes = Vec::new();
+    let capacity = ordered
+        .iter()
+        .map(|blob| blob.key.len() + 8 + blob.checksum.len() + 1)
+        .sum();
+    let mut bytes = Vec::with_capacity(capacity);
     for blob in ordered {
         bytes.extend_from_slice(blob.key.as_bytes());
         bytes.push(0);
@@ -226,7 +243,12 @@ fn validate_revisions(
 ) -> Result<(), Problem> {
     let mut previous = base_generation;
     for revision in revisions {
+        let expected_generation = match previous {
+            Some(generation) => generation.checked_add(1),
+            None => Some(1),
+        };
         if revision.generation == 0
+            || expected_generation != Some(revision.generation)
             || revision.parent_generation != previous
             || !valid_checksum(&revision.manifest_sha256)
         {

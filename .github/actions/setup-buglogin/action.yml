@@ -8,6 +8,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Prepare the canonical Windows build volume
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (-not (Test-Path -LiteralPath 'E:\')) {
+          subst E: "$env:RUNNER_TEMP"
+        }
+        if (-not (Test-Path -LiteralPath 'E:\')) {
+          throw 'Could not prepare the canonical E: build volume.'
+        }
+        New-Item -ItemType Directory -Force -Path 'E:\buglogin-target' | Out-Null
     - name: Configure Git checkout behavior
       shell: bash
       run: git config --global core.autocrlf false

@@ -13,19 +13,25 @@ export function useWayfernTerms(): UseWayfernTermsReturn {
 
   const checkTerms = useCallback(async () => {
     try {
-      const [accepted, downloaded] = await Promise.all([
-        invoke<boolean>("check_wayfern_terms_accepted"),
-        invoke<boolean>("check_wayfern_downloaded"),
-      ]);
-      // Only require terms when Wayfern is downloaded and terms not accepted
-      if (!downloaded) {
+      const installedVersions = await invoke<string[]>(
+        "runtime_installed_versions_get",
+        {
+          runtime: "wayfern",
+          correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}`,
+        },
+      );
+
+      // Consent is only needed when the Wayfern runtime can actually be used.
+      if (installedVersions.length === 0) {
         setTermsAccepted(true);
       } else {
-        setTermsAccepted(accepted);
+        setTermsAccepted(await invoke<boolean>("check_wayfern_terms_accepted"));
       }
     } catch (error) {
       console.error("Failed to check terms acceptance:", error);
-      setTermsAccepted(false);
+      // Unknown runtime state must not be presented as a consent request.
+      // Keep consent-dependent actions disabled until the runtime can be read.
+      setTermsAccepted(null);
     } finally {
       setIsLoading(false);
     }

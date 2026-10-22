@@ -1,34 +1,33 @@
 "use client";
 
-import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  LuCloud,
-  LuEye,
-  LuEyeOff,
+  LuCheck,
+  LuCopy,
+  LuCrown,
+  LuHardDrive,
+  LuKey,
+  LuLaptop,
   LuLogOut,
   LuRefreshCw,
+  LuShieldCheck,
   LuUser,
 } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
-import {
-  AnimatedTabs,
-  AnimatedTabsContent,
-  AnimatedTabsList,
-  AnimatedTabsTrigger,
-} from "@/components/ui/animated-tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
-import { translateBackendError } from "@/lib/backend-errors";
-import { getEntitlements } from "@/lib/entitlements";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
-import type { SyncSettings } from "@/types";
+import { RippleButton } from "./ui/ripple";
 
 interface AccountPageProps {
   isOpen: boolean;
@@ -37,7 +36,19 @@ interface AccountPageProps {
   onOpenSignIn: () => void;
 }
 
-type ConnectionStatus = "unknown" | "testing" | "connected" | "error";
+function readActiveIdentifier(): string {
+  try {
+    const active = window.localStorage.getItem(
+      "buglogin.auth.active_identifier",
+    );
+    if (active?.trim()) return active.trim();
+    const rem = window.localStorage.getItem("buglogin.auth.remember-email.v1");
+    if (rem?.trim()) return rem.trim();
+  } catch {
+    // fallback
+  }
+  return "";
+}
 
 export function AccountPage({
   isOpen,
@@ -46,40 +57,21 @@ export function AccountPage({
   onOpenSignIn,
 }: AccountPageProps) {
   const { t } = useTranslation();
-  const {
-    user,
-    isLoggedIn,
-    isLoading: isCloudLoading,
-    logout,
-    refreshProfile,
-  } = useCloudAuth();
+  const { user, account, isLoggedIn, logout, refreshProfile } = useCloudAuth();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-
-  // Self-hosted server state. Loaded once when the dialog opens and persisted
-  // via `save_sync_settings` so the rest of the app picks up the new URL/token
-  // from `SettingsManager`.
-  const [serverUrl, setServerUrl] = useState("");
-  const [token, setToken] = useState("");
-  const [showToken, setShowToken] = useState(false);
-  const [isSavingSelfHosted, setIsSavingSelfHosted] = useState(false);
-  const [isTestingConnection, setIsTestingConnection] = useState(false);
-  const [connectionStatus, setConnectionStatus] =
-    useState<ConnectionStatus>("unknown");
-
-  const hasConfig = Boolean(serverUrl && token);
-  // Self-hosted and cloud are mutually exclusive — both share the same sync
-  // engine and a profile can't be sync'd to two backends. The tab trigger is
-  // disabled here AND the backend rejects mixed state (see `save_sync_settings`
-  // / `cloud_logout`), so even if someone bypasses the UI we don't end up
-  // with split-brain.
-  const selfHostedDisabled = isLoggedIn || isCloudLoading;
+  const [copiedId, setCopiedId] = useState(false);
+  const [activeTab, setActiveTab] = useState("profile");
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
       await refreshProfile();
-      showSuccessToast(t("account.refreshed"));
+      showSuccessToast(
+        t("account.refreshed", {
+          defaultValue: "Đã làm mới thông tin tài khoản",
+        }),
+      );
     } catch (e) {
       showErrorToast(String(e));
     } finally {
@@ -90,13 +82,16 @@ export function AccountPage({
   const handleLogout = async () => {
     setIsLoggingOut(true);
     try {
+      try {
+        window.localStorage.removeItem("buglogin.auth.active_identifier");
+      } catch {
+        // ignore
+      }
       await logout();
-      // The backend wipes sync URL + token as part of cloud_logout (see
-      // `cloud_auth::cloud_logout`); pull the now-empty settings back into
-      // the form so a user who flips to the Self-hosted tab doesn't see the
-      // pre-logout production URL still sitting there.
-      await loadSelfHostedSettings();
-      showSuccessToast(t("account.loggedOut"));
+      showSuccessToast(
+        t("account.loggedOut", { defaultValue: "Đã đăng xuất" }),
+      );
+      onClose();
     } catch (e) {
       showErrorToast(String(e));
     } finally {
@@ -104,411 +99,310 @@ export function AccountPage({
     }
   };
 
-  const loadSelfHostedSettings = useCallback(async () => {
+  const accountId = account?.accountId || user?.id || "";
+  const activeIdentifier = readActiveIdentifier();
+  const actualEmailOrUser =
+    user?.email || activeIdentifier || account?.accountId || "User";
+  const plan = user?.plan ? user.plan.toUpperCase() : "STANDARD";
+  const role = user?.teamRole
+    ? user.teamRole.charAt(0).toUpperCase() + user.teamRole.slice(1)
+    : "Member";
+
+  const handleCopyAccountId = async () => {
     try {
-      const settings = await invoke<SyncSettings>("get_sync_settings");
-      setServerUrl(settings.sync_server_url ?? "");
-      setToken(settings.sync_token ?? "");
-      setConnectionStatus(
-        settings.sync_server_url && settings.sync_token ? "unknown" : "unknown",
+      await navigator.clipboard.writeText(accountId);
+      setCopiedId(true);
+      showSuccessToast(
+        t("account.idCopied", {
+          defaultValue: "Đã sao chép Account ID vào bộ nhớ tạm",
+        }),
       );
-    } catch (error) {
-      console.error("Failed to load sync settings:", error);
+      setTimeout(() => setCopiedId(false), 2000);
+    } catch (err) {
+      showErrorToast(String(err));
     }
-  }, []);
-
-  useEffect(() => {
-    if (isOpen) {
-      void loadSelfHostedSettings();
-    }
-  }, [isOpen, loadSelfHostedSettings]);
-
-  const handleTestConnection = useCallback(async () => {
-    if (!serverUrl) {
-      showErrorToast(t("sync.config.serverUrlRequired"));
-      return;
-    }
-    setIsTestingConnection(true);
-    setConnectionStatus("testing");
-    try {
-      const healthUrl = `${serverUrl.replace(/\/$/, "")}/health`;
-      const response = await fetch(healthUrl);
-      if (response.ok) {
-        setConnectionStatus("connected");
-        showSuccessToast(t("sync.config.connectionSuccess"));
-      } else {
-        setConnectionStatus("error");
-        showErrorToast(t("sync.config.serverError"));
-      }
-    } catch {
-      setConnectionStatus("error");
-      showErrorToast(t("sync.config.connectFailed"));
-    } finally {
-      setIsTestingConnection(false);
-    }
-  }, [serverUrl, t]);
-
-  const handleSaveSelfHosted = useCallback(async () => {
-    setIsSavingSelfHosted(true);
-    try {
-      await invoke<SyncSettings>("save_sync_settings", {
-        syncServerUrl: serverUrl || null,
-        syncToken: token || null,
-      });
-      try {
-        await invoke("restart_sync_service");
-      } catch (e) {
-        console.error("Failed to restart sync service:", e);
-      }
-      showSuccessToast(t("sync.config.settingsSaved"));
-    } catch (error) {
-      console.error("Failed to save sync settings:", error);
-      // Use the structured backend-error translator so the cloud-vs-self-
-      // hosted mutex (`SELF_HOSTED_REQUIRES_LOGOUT`) shows a clear message
-      // instead of the generic "save failed" toast.
-      showErrorToast(translateBackendError(t as never, error));
-    } finally {
-      setIsSavingSelfHosted(false);
-    }
-  }, [serverUrl, token, t]);
-
-  const handleDisconnectSelfHosted = useCallback(async () => {
-    setIsSavingSelfHosted(true);
-    try {
-      await invoke<SyncSettings>("save_sync_settings", {
-        syncServerUrl: null,
-        syncToken: null,
-      });
-      try {
-        await invoke("restart_sync_service");
-      } catch (e) {
-        console.error("Failed to restart sync service:", e);
-      }
-      setServerUrl("");
-      setToken("");
-      setConnectionStatus("unknown");
-      showSuccessToast(t("sync.config.disconnected"));
-    } catch (error) {
-      console.error("Failed to disconnect:", error);
-      showErrorToast(t("sync.config.disconnectFailed"));
-    } finally {
-      setIsSavingSelfHosted(false);
-    }
-  }, [t]);
+  };
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose} subPage={subPage}>
-      <DialogContent className="flex max-h-[calc(100vh-5rem)] max-w-3xl flex-col">
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className={cn(subPage && "mx-auto w-full max-w-4xl")}>
-            <AnimatedTabs defaultValue="account">
-              <AnimatedTabsList>
-                <AnimatedTabsTrigger value="account">
-                  {t("account.tabs.account")}
-                </AnimatedTabsTrigger>
-                <AnimatedTabsTrigger
-                  value="self-hosted"
-                  disabled={selfHostedDisabled}
-                  title={
-                    selfHostedDisabled
-                      ? t("account.selfHosted.disabledWhileLoggedIn")
-                      : undefined
-                  }
-                >
-                  {t("account.tabs.selfHosted")}
-                </AnimatedTabsTrigger>
-              </AnimatedTabsList>
+      <DialogContent
+        className={cn(
+          "max-w-2xl p-6",
+          subPage && "border-0 shadow-none bg-transparent",
+        )}
+      >
+        <DialogHeader className="border-b border-border/50 pb-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="grid size-11 place-items-center rounded-xl bg-primary/10 text-primary shadow-2xs">
+                <LuUser className="size-5" />
+              </div>
+              <div>
+                <DialogTitle className="text-base font-semibold">
+                  {t("account.title", {
+                    defaultValue: "Tài Khoản & Định Danh",
+                  })}
+                </DialogTitle>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {t("account.subtitle", {
+                    defaultValue:
+                      "Quản lý thông tin định danh người dùng, phiên bảo mật và bảo vệ dữ liệu",
+                  })}
+                </p>
+              </div>
+            </div>
+            {isLoggedIn && (
+              <Badge
+                variant="outline"
+                className="gap-1.5 border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary font-medium"
+              >
+                <LuCrown className="size-3.5 text-amber-500" />
+                <span>{plan}</span>
+              </Badge>
+            )}
+          </div>
+        </DialogHeader>
 
-              <AnimatedTabsContent value="account" className="mt-4">
-                <div className="flex flex-col gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className="grid size-12 shrink-0 place-items-center rounded-full bg-accent text-foreground">
-                      <LuUser className="size-6" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      {isLoggedIn && user ? (
-                        <>
-                          <h2 className="truncate text-base font-semibold">
-                            {user.email}
-                          </h2>
-                          <p className="mt-0.5 text-xs text-muted-foreground">
-                            {t("account.plan", {
-                              plan: user.plan,
-                              period: user.planPeriod ?? "—",
-                            })}
-                          </p>
-                        </>
-                      ) : (
-                        <>
-                          <h2 className="text-base font-semibold">
-                            {t("account.signedOut")}
-                          </h2>
-                          <p className="mt-0.5 text-xs text-muted-foreground">
-                            {t("account.signedOutDescription")}
-                          </p>
-                        </>
-                      )}
-                    </div>
+        <div className="space-y-4 py-2 text-xs">
+          {/* User info card */}
+          <div className="rounded-xl border border-border/70 bg-card p-4 space-y-3 shadow-2xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex size-11 items-center justify-center rounded-full bg-primary/15 font-bold text-primary text-sm shadow-2xs">
+                  {actualEmailOrUser[0]?.toUpperCase() || "A"}
+                </div>
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-foreground text-sm">
+                      {actualEmailOrUser}
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-500">
+                      <LuShieldCheck className="size-3" />
+                      <span>{role}</span>
+                    </span>
                   </div>
-
-                  {isLoggedIn && user && (
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                        <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                          {t("account.fields.plan")}
-                        </p>
-                        <p className="mt-0.5 font-medium uppercase">
-                          {user.plan}
-                        </p>
-                      </div>
-                      <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                        <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                          {t("account.fields.status")}
-                        </p>
-                        <p className="mt-0.5">
-                          {user.subscriptionStatus ?? "—"}
-                        </p>
-                      </div>
-                      {user.teamRole && (
-                        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                          <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                            {t("account.fields.teamRole")}
-                          </p>
-                          <p className="mt-0.5">{user.teamRole}</p>
-                        </div>
-                      )}
-                      {user.planPeriod && (
-                        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                          <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                            {t("account.fields.period")}
-                          </p>
-                          <p className="mt-0.5">{user.planPeriod}</p>
-                        </div>
-                      )}
-                      {typeof user.deviceOrdinal === "number" && (
-                        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                          <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                            {t("account.fields.device")}
-                          </p>
-                          <p className="mt-0.5">
-                            {t("account.deviceOrdinal", {
-                              ordinal: user.deviceOrdinal,
-                              count: user.deviceCount ?? user.deviceOrdinal,
-                            })}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {isLoggedIn &&
-                    user &&
-                    getEntitlements(user).browserAutomation &&
-                    user.isPrimaryDevice === false && (
-                      <p className="text-xs text-warning">
-                        {t("account.automationPrimaryOnly")}
-                      </p>
-                    )}
-                  {isLoggedIn &&
-                    user &&
-                    getEntitlements(user).browserAutomation &&
-                    user.isPrimaryDevice === true &&
-                    (user.deviceCount ?? 1) > 1 && (
-                      <p className="text-xs text-success">
-                        {t("account.automationActiveHere")}
-                      </p>
-                    )}
-
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {isLoggedIn ? (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            void handleRefresh();
-                          }}
-                          disabled={isRefreshing}
-                          className="h-8 gap-1.5 text-xs"
-                        >
-                          <LuRefreshCw className="size-3" />
-                          {t("account.refresh")}
-                        </Button>
-                        <LoadingButton
-                          size="sm"
-                          variant="destructive"
-                          isLoading={isLoggingOut}
-                          disabled={isRefreshing}
-                          onClick={() => {
-                            void handleLogout();
-                          }}
-                          className="h-8 gap-1.5 text-xs"
-                        >
-                          <LuLogOut className="size-3" />
-                          {t("account.logout")}
-                        </LoadingButton>
-                      </>
-                    ) : (
-                      <Button
-                        size="sm"
-                        onClick={onOpenSignIn}
-                        className="h-8 gap-1.5 text-xs"
-                      >
-                        <LuCloud className="size-3" />
-                        {t("account.signIn")}
-                      </Button>
-                    )}
+                  <div className="flex items-center gap-2 text-muted-foreground text-[11px]">
+                    <span className="font-mono text-muted-foreground/90">
+                      ID:{" "}
+                      {accountId.length > 28
+                        ? `${accountId.slice(0, 24)}...`
+                        : accountId}
+                    </span>
                   </div>
                 </div>
-              </AnimatedTabsContent>
+              </div>
 
-              <AnimatedTabsContent value="self-hosted" className="mt-4">
-                {selfHostedDisabled ? (
-                  // Defensive: the tab trigger is disabled while the user is
-                  // logged in, so this branch shouldn't be reachable via UI —
-                  // but if state flips mid-render (e.g. a cloud login finishes
-                  // while the tab is open), show the explanation instead of
-                  // a silent empty card.
-                  <p className="text-sm text-muted-foreground">
-                    {t("account.selfHosted.disabledWhileLoggedIn")}
-                  </p>
-                ) : (
-                  <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleCopyAccountId()}
+                  className="h-8 px-2.5 text-xs gap-1.5 cursor-pointer"
+                  title={t("account.copyId", {
+                    defaultValue: "Sao chép Account ID",
+                  })}
+                >
+                  {copiedId ? (
+                    <LuCheck className="size-3 text-emerald-500" />
+                  ) : (
+                    <LuCopy className="size-3" />
+                  )}
+                  <span>
+                    {copiedId
+                      ? t("common.copied", { defaultValue: "Đã chép" })
+                      : t("account.copyIdBtn", { defaultValue: "Copy ID" })}
+                  </span>
+                </Button>
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleRefresh()}
+                  disabled={isRefreshing}
+                  className="h-8 px-2.5 text-xs gap-1.5 cursor-pointer"
+                >
+                  <LuRefreshCw
+                    className={cn("size-3", isRefreshing && "animate-spin")}
+                  />
+                  <span>
+                    {t("common.buttons.refresh", { defaultValue: "Làm mới" })}
+                  </span>
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Tabbed details */}
+          <Tabs
+            value={activeTab}
+            onValueChange={setActiveTab}
+            className="w-full"
+          >
+            <TabsList className="grid grid-cols-2 h-9 p-0.5 bg-muted/50 rounded-lg">
+              <TabsTrigger
+                value="profile"
+                className="gap-2 text-xs py-1.5 data-[state=active]:bg-background data-[state=active]:shadow-2xs font-medium"
+              >
+                <LuUser className="size-3.5" />
+                <span>
+                  {t("account.tabProfile", {
+                    defaultValue: "Hồ Sơ & Hệ Thống",
+                  })}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="security"
+                className="gap-2 text-xs py-1.5 data-[state=active]:bg-background data-[state=active]:shadow-2xs font-medium"
+              >
+                <LuKey className="size-3.5" />
+                <span>
+                  {t("account.tabSecurity", {
+                    defaultValue: "Bảo Mật & Phiên",
+                  })}
+                </span>
+              </TabsTrigger>
+            </TabsList>
+
+            {/* TAB 1: Profile & System Info (Real data only, no mock quota bars) */}
+            <TabsContent value="profile" className="space-y-3 mt-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl border border-border/60 bg-muted/15 p-3.5 space-y-2">
+                  <div className="flex items-center gap-2 font-medium text-foreground text-xs">
+                    <LuShieldCheck className="size-4 text-emerald-500" />
+                    <span>Bảo Mật Dữ Liệu</span>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground space-y-1">
+                    <p>• Mã hóa E2EE Cloud S3 Vault độc lập</p>
+                    <p>• Khóa phần cứng bảo vệ cookies và storage</p>
+                    <p>
+                      • Trạng thái:{" "}
+                      <strong className="text-emerald-500 font-semibold">
+                        Được bảo vệ
+                      </strong>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-border/60 bg-muted/15 p-3.5 space-y-2">
+                  <div className="flex items-center gap-2 font-medium text-foreground text-xs">
+                    <LuHardDrive className="size-4 text-primary" />
+                    <span>Nhân Trình Duyệt</span>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground space-y-1">
+                    <p>
+                      • Antidetect Engine:{" "}
+                      <strong>Chromium Hardware Core</strong>
+                    </p>
+                    <p>• Fingerprint: Canvas, WebGL, WebRTC Masking</p>
+                    <p>• Chế độ: Cách ly tuyệt đối giữa các Profile</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-border/60 bg-muted/10 p-3.5 flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <div className="text-xs font-semibold text-foreground">
+                    Không Gian Hoạt Động (Workspace Active)
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Quản lý thành viên, nhóm và phân bổ quyền qua tab Quản lý
+                    Workspace
+                  </div>
+                </div>
+                <Badge
+                  variant="outline"
+                  className="border-border/80 bg-background text-xs font-mono"
+                >
+                  Active
+                </Badge>
+              </div>
+            </TabsContent>
+
+            {/* TAB 2: Security & Session Status */}
+            <TabsContent value="security" className="space-y-3 mt-3">
+              <div className="rounded-xl border border-border/60 bg-muted/15 p-3.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="grid size-8 place-items-center rounded-lg bg-emerald-500/10 text-emerald-500">
+                      <LuLaptop className="size-4" />
+                    </div>
                     <div>
-                      <p className="text-sm font-medium">
-                        {t("account.selfHosted.title")}
-                      </p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        {t("account.selfHosted.description")}
-                      </p>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label
-                        htmlFor="self-hosted-server-url"
-                        className="text-xs"
-                      >
-                        {t("sync.serverUrl")}
-                      </Label>
-                      <Input
-                        id="self-hosted-server-url"
-                        type="url"
-                        placeholder={t("sync.serverUrlPlaceholder")}
-                        value={serverUrl}
-                        onChange={(e) => {
-                          setServerUrl(e.target.value);
-                          setConnectionStatus("unknown");
-                        }}
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label htmlFor="self-hosted-token" className="text-xs">
-                        {t("sync.token")}
-                      </Label>
-                      <div className="relative">
-                        <Input
-                          id="self-hosted-token"
-                          type={showToken ? "text" : "password"}
-                          placeholder={t("sync.tokenPlaceholder")}
-                          value={token}
-                          onChange={(e) => {
-                            setToken(e.target.value);
-                            setConnectionStatus("unknown");
-                          }}
-                          autoComplete="off"
-                          spellCheck={false}
-                          className="pr-9"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setShowToken((v) => !v);
-                          }}
-                          aria-label={
-                            showToken
-                              ? t("common.aria.hideToken")
-                              : t("common.aria.showToken")
-                          }
-                          className="absolute top-1/2 right-2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground"
-                        >
-                          {showToken ? (
-                            <LuEyeOff className="size-3.5" />
-                          ) : (
-                            <LuEye className="size-3.5" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="text-muted-foreground">
-                        {t("account.selfHosted.connectionStatus")}
-                      </span>
-                      {connectionStatus === "connected" && (
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-foreground text-xs">
+                          Thiết bị Desktop Client
+                        </span>
                         <Badge
-                          variant="default"
-                          className="bg-success text-success-foreground"
+                          variant="outline"
+                          className="text-[10px] text-emerald-600 border-emerald-500/30"
                         >
-                          {t("sync.status.connected")}
+                          Phiên hiện tại
                         </Badge>
-                      )}
-                      {connectionStatus === "error" && (
-                        <Badge variant="destructive">
-                          {t("sync.status.error")}
-                        </Badge>
-                      )}
-                      {connectionStatus === "testing" && (
-                        <Badge variant="secondary">
-                          {t("sync.status.syncing")}
-                        </Badge>
-                      )}
-                      {connectionStatus === "unknown" && (
-                        <Badge variant="secondary">
-                          {t("account.selfHosted.statusUnknown")}
-                        </Badge>
-                      )}
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <LoadingButton
-                        size="sm"
-                        variant="outline"
-                        isLoading={isTestingConnection}
-                        disabled={!serverUrl || isSavingSelfHosted}
-                        onClick={() => void handleTestConnection()}
-                        className="h-8 text-xs"
-                      >
-                        {t("account.selfHosted.testConnection")}
-                      </LoadingButton>
-                      <LoadingButton
-                        size="sm"
-                        isLoading={isSavingSelfHosted}
-                        disabled={!serverUrl || !token || isTestingConnection}
-                        onClick={() => void handleSaveSelfHosted()}
-                        className="h-8 text-xs"
-                      >
-                        {t("common.buttons.save")}
-                      </LoadingButton>
-                      {hasConfig && (
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          disabled={isSavingSelfHosted || isTestingConnection}
-                          onClick={() => void handleDisconnectSelfHosted()}
-                          className="h-8 text-xs"
-                        >
-                          {t("account.selfHosted.disconnect")}
-                        </Button>
-                      )}
+                      </div>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Xác thực mật mã cục bộ • Phiên hoạt động an toàn
+                      </p>
                     </div>
                   </div>
-                )}
-              </AnimatedTabsContent>
-            </AnimatedTabs>
-          </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-border/60 bg-card p-3.5 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                  <LuKey className="size-4 text-primary" />
+                  <span>Chính sách duy trì phiên (Session Persistence)</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  BugLogin mặc định giữ phiên đăng nhập hoạt động liên tục trong
+                  suốt quá trình bạn sử dụng máy trạm. Tài khoản chỉ đăng xuất
+                  khi bạn chủ động bấm nút Đăng xuất hoặc bị quản trị viên thu
+                  hồi quyền từ xa.
+                </p>
+              </div>
+            </TabsContent>
+          </Tabs>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between border-t border-border/50 pt-3 mt-2">
+          {isLoggedIn ? (
+            <LoadingButton
+              variant="destructive"
+              size="sm"
+              isLoading={isLoggingOut}
+              onClick={() => void handleLogout()}
+              className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+            >
+              <LuLogOut className="size-3" />
+              <span>
+                {t("common.buttons.logout", {
+                  defaultValue: "Đăng xuất tài khoản",
+                })}
+              </span>
+            </LoadingButton>
+          ) : (
+            <Button
+              size="sm"
+              onClick={onOpenSignIn}
+              className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+            >
+              <LuKey className="size-3" />
+              <span>
+                {t("common.buttons.signIn", { defaultValue: "Đăng nhập" })}
+              </span>
+            </Button>
+          )}
+
+          {/* ONLY render close button in dialog/modal mode, NEVER in subPage mode */}
+          {!subPage && (
+            <RippleButton
+              variant="outline"
+              size="sm"
+              onClick={onClose}
+              className="h-8 text-xs font-medium cursor-pointer"
+            >
+              {t("common.buttons.close", { defaultValue: "Đóng" })}
+            </RippleButton>
+          )}
         </div>
       </DialogContent>
     </Dialog>

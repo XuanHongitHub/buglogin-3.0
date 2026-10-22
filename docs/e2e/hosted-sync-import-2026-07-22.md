@@ -51,7 +51,7 @@ Rust build target used `D:\buglogin-build` to avoid filling the repository volum
 2. Extend durable recovery coverage to package-upload journals and add orphan reference-scan/GC for crash-time `Staging` blobs.
 3. Orphan-blob retention/GC with reference scan, two-pass confirmation, and checksum-CAS delete.
 4. Real PostgreSQL/Redis/S3-compatible failure rehearsal, including unknown PostgreSQL commit result through a fresh connection.
-5. Streamed package verification; the current verified-package reconstruction has a 512 MiB in-memory ceiling.
+5. Streamed package verification before any increase beyond the current 64 MiB aggregate package cap.
 6. Remaining 20 migration fixtures and production source snapshot/export evidence.
 7. Windows and macOS signed build plus migration/launch/proxy/cookie/sync E2E evidence.
 

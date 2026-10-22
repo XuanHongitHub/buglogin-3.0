@@ -34,9 +34,11 @@ use buglogin_sync::{
         AuthenticatedChunk, ClientKey, ProxyCredentialEnvelope, RecoveryKey, ResourceKeyEnvelope,
     },
     manifest::{
-        ManifestDependency, ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
-        PayloadEncryptionAlgorithm, SyncManifest,
+        ManifestDependency, ManifestFileChunk, ManifestFileChunks, ManifestObject,
+        ManifestObjectReference, ManifestPayloadEncryption, PayloadEncryptionAlgorithm,
+        SyncManifest,
     },
+    payload::{PayloadDescriptor, PayloadObject},
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -46,6 +48,7 @@ use tower::ServiceExt;
 struct FakeCoordination {
     lease: Mutex<Option<LeaseGrant>>,
     replay: Mutex<BTreeMap<String, LeaseGrant>>,
+    release_replay: Mutex<BTreeMap<String, String>>,
     manifest: Mutex<Option<SyncManifest>>,
     event_reads: Arc<AtomicUsize>,
     events: Arc<Mutex<Vec<StreamEvent>>>,
@@ -53,14 +56,8 @@ struct FakeCoordination {
 
 #[async_trait]
 impl CoordinationBackend for FakeCoordination {
-    async fn acquire_lease(
-        &self,
-        scope: CoordinationScope<'_>,
-        resource_id: &ResourceId,
-        ttl: Duration,
-    ) -> Result<LeaseGrant, Problem> {
-        self.acquire_lease_idempotent(scope, resource_id, ttl, "fallback-idempotency-0001")
-            .await
+    async fn readiness(&self) -> Result<(), Problem> {
+        Ok(())
     }
 
     async fn acquire_lease_idempotent(
@@ -93,12 +90,13 @@ impl CoordinationBackend for FakeCoordination {
         Ok(lease)
     }
 
-    async fn renew_lease(
+    async fn renew_lease_idempotent(
         &self,
         _scope: CoordinationScope<'_>,
         _resource_id: &ResourceId,
         owner_token: &str,
         ttl: Duration,
+        _idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem> {
         let mut lease = self.lease.lock().unwrap();
         let current = lease.as_mut().ok_or_else(|| lease_missing())?;
@@ -114,24 +112,62 @@ impl CoordinationBackend for FakeCoordination {
         Ok(current.clone())
     }
 
-    async fn release_lease(
+    async fn release_lease_idempotent(
         &self,
-        _scope: CoordinationScope<'_>,
-        _resource_id: &ResourceId,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
         owner_token: &str,
+        idempotency_key: &str,
     ) -> Result<(), Problem> {
+        let fingerprint = format!(
+            "{}|{}|{}",
+            scope.auth.actor_id(),
+            resource_id.as_str(),
+            owner_token
+        );
+        let mut receipts = self.release_replay.lock().unwrap();
+        if let Some(previous) = receipts.get(idempotency_key) {
+            if previous != &fingerprint {
+                return Err(Problem::new(
+                    "idempotency_conflict",
+                    "Idempotency key was reused with different input",
+                    409,
+                    "test",
+                ));
+            }
+            return Ok(());
+        }
         let mut lease = self.lease.lock().unwrap();
-        let current = lease.as_ref().ok_or_else(lease_missing)?;
-        if current.owner_token != owner_token {
-            return Err(Problem::new(
-                "lease_not_owner",
-                "Lease owner mismatch",
-                409,
-                "test",
-            ));
+        if let Some(current) = lease.as_ref() {
+            if current.owner_token != owner_token {
+                return Err(Problem::new(
+                    "lease_not_owner",
+                    "Lease owner mismatch",
+                    409,
+                    "test",
+                ));
+            }
         }
         *lease = None;
+        receipts.insert(idempotency_key.to_owned(), fingerprint);
         Ok(())
+    }
+
+    async fn lease_status(
+        &self,
+        _scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+    ) -> Result<Option<buglogin_sync::coordination::LeaseStatus>, Problem> {
+        Ok(self.lease.lock().unwrap().as_ref().and_then(|lease| {
+            (&lease.resource_id == resource_id).then(|| buglogin_sync::coordination::LeaseStatus {
+                resource_id: lease.resource_id.clone(),
+                workspace_id: lease.workspace_id.clone(),
+                owner_id: lease.owner_id.clone(),
+                fencing_token: lease.fencing_token,
+                issued_at_ms: lease.issued_at_ms,
+                expires_at_ms: lease.expires_at_ms,
+            })
+        }))
     }
 
     async fn validate_write_authority(
@@ -261,6 +297,13 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         ),
         grant(
             &account,
+            "grant_proxy_update",
+            "CAP-NET-001",
+            Action::Update,
+            ResourceScope::workspace(workspace.clone()),
+        ),
+        grant(
+            &account,
             "grant_profile_launch",
             "profile.launch",
             Action::Execute,
@@ -352,6 +395,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         )
         .unwrap();
     let proxy_id = ProxyId::new("proxy_lease_1").unwrap();
+    let proxy_credential_version = CredentialId::new("credential-proxy_lease_1").unwrap();
     state
         .proxies
         .write()
@@ -364,7 +408,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
                 protocol: ProxyProtocol::Http,
                 host: "proxy.example".into(),
                 port: 8080,
-                credential_ref: Some(CredentialId::new("credential-proxy_lease_1").unwrap()),
+                credential_ref: Some(proxy_credential_version.clone()),
                 rotation_url: None,
                 bypass_rules: Vec::new(),
                 created_at: "2026-07-22T00:00:00Z".into(),
@@ -412,6 +456,29 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         workspace.as_str(),
         resource.as_str()
     );
+    let absent_status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "lease-status-absent-test")
+                .header("x-buglogin-actor-id", account.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(absent_status.status(), StatusCode::OK);
+    let absent: Value = serde_json::from_slice(
+        &to_bytes(absent_status.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(absent.is_null());
+
     let acquired = app
         .clone()
         .oneshot(request(
@@ -441,6 +508,45 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         serde_json::from_slice(&to_bytes(replayed.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(first["ownerToken"], replay["ownerToken"]);
     assert_eq!(first["fencingToken"], replay["fencingToken"]);
+
+    let lease_status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "lease-status-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lease_status.status(), StatusCode::OK);
+    let status: Value = serde_json::from_slice(
+        &to_bytes(lease_status.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["ownerId"], "desktop-1");
+    assert!(status.get("ownerToken").is_none());
+
+    let unauthorized_token = state.issue_token("acct_lease_no_access").unwrap();
+    let unauthorized_status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&path)
+                .header("authorization", format!("Bearer {unauthorized_token}"))
+                .header("x-correlation-id", "lease-status-forbidden-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized_status.status(), StatusCode::FORBIDDEN);
 
     let runtime_path = format!("/v1/profiles/{}/runtime/started", profile_id.as_str());
     let runtime_request = Request::builder()
@@ -822,6 +928,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         .push(ManifestDependency::Proxy {
             proxy_id: proxy_id.clone(),
             revision: 2,
+            credential_version: None,
             metadata_object: None,
             credential_envelope_object: None,
         });
@@ -842,6 +949,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     manifest.dependencies.push(ManifestDependency::Proxy {
         proxy_id: proxy_id.clone(),
         revision: 1,
+        credential_version: Some(proxy_credential_version),
         metadata_object: None,
         credential_envelope_object: Some(ManifestObjectReference::from(&credential_object)),
     });
@@ -904,7 +1012,7 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         .uri(&blob_path)
         .header("authorization", format!("Bearer {token}"))
         .header("x-correlation-id", "blob-get")
-        .header("x-buglogin-actor-id", "desktop-1")
+        .header("x-buglogin-actor-id", "acct_lease")
         .header("x-buglogin-generation", "1")
         .header("x-content-sha256", &blob_checksum)
         .body(Body::empty())
@@ -918,6 +1026,205 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
             .as_ref(),
         blob
     );
+
+    let proxy_update = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!(
+                "/v1/workspaces/{}/proxies/{}",
+                workspace.as_str(),
+                proxy_id.as_str()
+            ),
+            &token,
+            Some("proxy-update-stale-blob-repair-0001"),
+            json!({
+                "workspaceId": workspace,
+                "proxyId": proxy_id,
+                "expectedRevision": 1,
+                "proxy": {
+                    "id": proxy_id,
+                    "name": "Primary",
+                    "protocol": "http",
+                    "host": "proxy-updated.example",
+                    "port": 8080,
+                    "bypassRules": [],
+                    "createdAt": "2026-07-22T00:00:00Z",
+                    "updatedAt": "2026-07-22T00:00:00Z"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(proxy_update.status(), StatusCode::OK);
+
+    let stale_manifest_read = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/workspaces/{}/resources/{}/manifest?repairStaleProxy=true",
+                    workspace.as_str(),
+                    resource.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "manifest-stale-proxy-repair")
+                .header("x-buglogin-actor-id", "acct_lease")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_manifest_read.status(), StatusCode::OK);
+
+    let update_grants = {
+        let mut current_grants = state.grants.write().unwrap();
+        let mut removed = Vec::new();
+        current_grants.retain(|grant| {
+            let should_remove = matches!(
+                grant.id.as_str(),
+                "grant_profile_update_lease" | "grant_profile_update"
+            );
+            if should_remove {
+                removed.push(grant.clone());
+            }
+            !should_remove
+        });
+        removed
+    };
+    let unauthorized_manifest_repair = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/workspaces/{}/resources/{}/manifest?repairStaleProxy=true",
+                    workspace.as_str(),
+                    resource.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "manifest-stale-proxy-repair-denied")
+                .header("x-buglogin-actor-id", "acct_lease")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized_manifest_repair.status(), StatusCode::FORBIDDEN);
+
+    let unauthorized_blob_repair = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{blob_path}&repairStaleProxy=true"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "blob-stale-proxy-repair-denied")
+                .header("x-buglogin-actor-id", "acct_lease")
+                .header("x-buglogin-generation", "1")
+                .header("x-content-sha256", &blob_checksum)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized_blob_repair.status(), StatusCode::FORBIDDEN);
+    state.grants.write().unwrap().extend(update_grants);
+
+    let stale_blob_without_repair = Request::builder()
+        .method("GET")
+        .uri(&blob_path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-correlation-id", "blob-stale-proxy-no-repair")
+        .header("x-buglogin-actor-id", "acct_lease")
+        .header("x-buglogin-generation", "1")
+        .header("x-content-sha256", &blob_checksum)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(stale_blob_without_repair)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+
+    let stale_blob_repair = Request::builder()
+        .method("GET")
+        .uri(format!("{blob_path}&repairStaleProxy=true"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-correlation-id", "blob-stale-proxy-repair")
+        .header("x-buglogin-actor-id", "acct_lease")
+        .header("x-buglogin-generation", "1")
+        .header("x-content-sha256", &blob_checksum)
+        .body(Body::empty())
+        .unwrap();
+    let repaired_blob = app.clone().oneshot(stale_blob_repair).await.unwrap();
+    assert_eq!(repaired_blob.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(repaired_blob.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        blob
+    );
+
+    let repaired_credential_blob = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{credential_blob_path}&repairStaleProxy=true"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "proxy-credential-stale-blob-repair")
+                .header("x-buglogin-actor-id", "acct_lease")
+                .header("x-buglogin-generation", "1")
+                .header("x-content-sha256", &credential_checksum)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repaired_credential_blob.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(repaired_credential_blob.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        credential_bytes
+    );
+
+    let proxy_read_grant = {
+        let mut current_grants = state.grants.write().unwrap();
+        let grant = current_grants
+            .iter()
+            .find(|grant| grant.id.as_str() == "grant_proxy_read")
+            .cloned()
+            .unwrap();
+        current_grants.retain(|grant| grant.id.as_str() != "grant_proxy_read");
+        grant
+    };
+    let denied_credential_envelope_read = Request::builder()
+        .method("GET")
+        .uri(format!("{credential_blob_path}&repairStaleProxy=true"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-correlation-id", "proxy-credential-envelope-read-revoked")
+        .header("x-buglogin-actor-id", "acct_lease")
+        .header("x-buglogin-generation", "1")
+        .header("x-content-sha256", &credential_checksum)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(denied_credential_envelope_read)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    state.grants.write().unwrap().push(proxy_read_grant);
 
     let renewed = app
         .clone()
@@ -955,6 +1262,28 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         .await
         .unwrap();
     assert_eq!(released_retry.status(), StatusCode::OK);
+    let release_conflict = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &path,
+            &token,
+            Some("lease-release-key-0001"),
+            json!({
+                "ownerId":"desktop-1",
+                "ownerToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(release_conflict.status(), StatusCode::CONFLICT);
+    let release_conflict: Value = serde_json::from_slice(
+        &to_bytes(release_conflict.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(release_conflict["code"], "idempotency_conflict");
     let missing_key = app
         .oneshot(request(
             "POST",
@@ -966,6 +1295,134 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
         .await
         .unwrap();
     assert_eq!(missing_key.status(), StatusCode::BAD_REQUEST);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn proxy_update_is_rejected_while_bound_profile_is_launching() {
+    let root = std::env::temp_dir().join(format!(
+        "buglogin-http-proxy-launching-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let state = ApiState::new(ProfileService::new(LocalRepository::open(&root).unwrap()));
+    let token = state.issue_token("acct_proxy_launching").unwrap();
+    let account = AccountId::new("acct_proxy_launching").unwrap();
+    let workspace = WorkspaceId::new("ws_proxy_launching").unwrap();
+    let resource = ResourceId::new("res_proxy_launching").unwrap();
+    let profile_id = ProfileId::new("prf_proxy_launching").unwrap();
+    let proxy_id = ProxyId::new("proxy_launching").unwrap();
+    let mut grants = state.grants.write().unwrap();
+    grants.extend([
+        grant(
+            &account,
+            "grant_proxy_launch_create",
+            "CAP-NET-001",
+            Action::Create,
+            ResourceScope::workspace(workspace.clone()),
+        ),
+        grant(
+            &account,
+            "grant_proxy_launch_read",
+            "CAP-NET-001",
+            Action::Read,
+            ResourceScope::workspace(workspace.clone()),
+        ),
+        grant(
+            &account,
+            "grant_proxy_launch_update",
+            "CAP-NET-001",
+            Action::Update,
+            ResourceScope::workspace(workspace.clone()),
+        ),
+    ]);
+    let grant_snapshot = grants.clone();
+    drop(grants);
+    let principal = state.authenticate_token(&token, now()).unwrap();
+    state
+        .proxies
+        .write()
+        .unwrap()
+        .create(
+            workspace.clone(),
+            Proxy {
+                id: proxy_id.clone(),
+                name: Some("Primary".into()),
+                protocol: ProxyProtocol::Http,
+                host: "proxy.example".into(),
+                port: 8080,
+                credential_ref: None,
+                rotation_url: None,
+                bypass_rules: Vec::new(),
+                created_at: "2026-10-18T00:00:00Z".into(),
+                updated_at: "2026-10-18T00:00:00Z".into(),
+            },
+            &principal,
+            &grant_snapshot,
+        )
+        .unwrap();
+    state
+        .profiles
+        .create(Profile {
+            id: profile_id.clone(),
+            name: "Launching proxy consumer".into(),
+            runtime: Runtime::Wayfern,
+            runtime_version: Some("1.0.0".into()),
+            runtime_config: None,
+            state: ProfileState::Launching,
+            archived: false,
+            fingerprint: None,
+            note: None,
+            proxy_id: Some(proxy_id.clone()),
+            vpn_id: None,
+            group_ids: Vec::new(),
+            tags: Vec::new(),
+            extension_group_id: None,
+            sync_mode: Some(SyncMode::Managed),
+            created_at: "2026-10-18T00:00:00Z".into(),
+            updated_at: "2026-10-18T00:00:00Z".into(),
+        })
+        .unwrap();
+    let state = state.with_profile_resource(ProfileResource {
+        profile_id,
+        resource_id: resource,
+        workspace_id: workspace.clone(),
+        archive_state: ProfileArchiveState::Active,
+    });
+    let app = router(state);
+    let response = app
+        .oneshot(request(
+            "PATCH",
+            &format!(
+                "/v1/workspaces/{}/proxies/{}",
+                workspace.as_str(),
+                proxy_id.as_str()
+            ),
+            &token,
+            Some("proxy-update-during-launch-0001"),
+            json!({
+                "workspaceId": workspace,
+                "proxyId": proxy_id,
+                "expectedRevision": 1,
+                "proxy": {
+                    "id": proxy_id,
+                    "name": "Primary",
+                    "protocol": "http",
+                    "host": "proxy-updated.example",
+                    "port": 8080,
+                    "bypassRules": [],
+                    "createdAt": "2026-10-18T00:00:00Z",
+                    "updatedAt": "2026-10-18T00:00:00Z"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["code"], "proxy_in_use");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1026,7 +1483,39 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
             },
         )
         .unwrap();
-    let app = router(state.with_coordination(Arc::new(FakeCoordination::default())));
+    let profile_id = ProfileId::new("prf_manifest").unwrap();
+    state
+        .profiles
+        .create(Profile {
+            id: profile_id.clone(),
+            name: "Manifest profile".into(),
+            runtime: Runtime::Wayfern,
+            runtime_version: Some("1.0.0".into()),
+            runtime_config: None,
+            state: ProfileState::Ready,
+            archived: false,
+            fingerprint: None,
+            note: None,
+            proxy_id: None,
+            vpn_id: None,
+            group_ids: Vec::new(),
+            tags: Vec::new(),
+            extension_group_id: None,
+            sync_mode: Some(SyncMode::Managed),
+            created_at: "2026-07-22T00:00:00Z".into(),
+            updated_at: "2026-07-22T00:00:00Z".into(),
+        })
+        .unwrap();
+    let app = router(
+        state
+            .with_profile_resource(ProfileResource {
+                profile_id,
+                resource_id: resource.clone(),
+                workspace_id: workspace.clone(),
+                archive_state: ProfileArchiveState::Active,
+            })
+            .with_coordination(Arc::new(FakeCoordination::default())),
+    );
     let path = format!(
         "/v1/workspaces/{}/resources/{}/manifest",
         workspace.as_str(),
@@ -1108,19 +1597,153 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
         serde_json::from_slice(&to_bytes(rejected.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(rejected["code"], "payload_encryption_required");
 
+    let client_key = ClientKey::from_bytes([0x35; 32]);
+    let recovery_key = RecoveryKey::from_bytes([0x47; 32]);
+    let plaintext_chunks = [vec![0x5a; 4 * 1024 * 1024], vec![0x6b; 7]];
+    let mut chunk_objects = Vec::new();
+    let mut chunk_files = Vec::new();
+    let file_path = "Default/Cookies";
+    let mut whole_plaintext = Vec::new();
+    let path_hash = checksum(file_path.as_bytes());
+    let mut file_chunks = Vec::new();
+    for (index, plaintext) in plaintext_chunks.iter().enumerate() {
+        whole_plaintext.extend_from_slice(plaintext);
+        let plaintext_checksum = checksum(plaintext);
+        let aad = format!(
+            "buglogin/profile-file-chunk/v1/{}/{}/{}/{index:016x}/{plaintext_checksum}",
+            workspace.as_str(),
+            resource.as_str(),
+            file_path
+        );
+        let encrypted = AuthenticatedChunk::encrypt(&client_key, plaintext, aad.as_bytes())
+            .unwrap()
+            .encoded();
+        let ciphertext_checksum = checksum(&encrypted);
+        let object_key = format!(
+            ".buglogin/file-chunks/{path_hash}/{index:016x}-{plaintext_checksum}-{ciphertext_checksum}"
+        );
+        let object = ManifestObject::new(object_key.clone(), &encrypted).unwrap();
+        chunk_files.push((object_key, encrypted.clone()));
+        chunk_objects.push(object.clone());
+        file_chunks.push(ManifestFileChunk {
+            index: index as u64,
+            plaintext_size: plaintext.len() as u64,
+            plaintext_checksum,
+            object: ManifestObjectReference::from(&object),
+        });
+    }
+    let envelope = ResourceKeyEnvelope::wrap(
+        workspace.clone(),
+        resource.clone(),
+        &client_key,
+        &recovery_key,
+    )
+    .unwrap();
+    let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
+    let envelope_object =
+        ManifestObject::new(".buglogin/resource-key-envelope.json", &envelope_bytes).unwrap();
+    let mut all_objects = chunk_objects.clone();
+    all_objects.push(envelope_object.clone());
+    let descriptor = PayloadDescriptor::new_with_file_chunks(
+        workspace.clone(),
+        resource.clone(),
+        2,
+        all_objects
+            .iter()
+            .map(|object| PayloadObject {
+                path: object.key.clone(),
+                size: object.size,
+                checksum: object.checksum.clone(),
+            })
+            .collect(),
+        vec![ManifestFileChunks {
+            path: file_path.into(),
+            plaintext_size: whole_plaintext.len() as u64,
+            plaintext_checksum: checksum(&whole_plaintext),
+            chunks: file_chunks.clone(),
+        }],
+    )
+    .unwrap();
+    let chunked_manifest = SyncManifest::new_chunked(
+        workspace.clone(),
+        resource.clone(),
+        1,
+        2,
+        Some(1),
+        &descriptor.canonical_root_bytes(),
+        all_objects,
+        ManifestPayloadEncryption {
+            schema_version: 1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
+            key_version: Some(checksum(client_key.as_bytes())),
+            resource_key_envelope: ManifestObjectReference::from(&envelope_object),
+        },
+        descriptor.file_chunks.clone(),
+    )
+    .unwrap();
+
+    let owner_token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut upload_objects = chunk_files;
+    upload_objects.push((envelope_object.key.clone(), envelope_bytes));
+    for (index, (key, bytes)) in upload_objects.into_iter().enumerate() {
+        let object_checksum = checksum(&bytes);
+        let encoded_key = key.replace('/', "%2F");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/v1/workspaces/{}/resources/{}/blobs?key={encoded_key}",
+                        workspace.as_str(),
+                        resource.as_str()
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("x-correlation-id", "chunked-profile-upload")
+                    .header("content-type", "application/octet-stream")
+                    .header("idempotency-key", format!("chunk-object-upload-{index:04}"))
+                    .header("x-buglogin-owner-id", "desktop-manifest")
+                    .header("x-buglogin-owner-token", owner_token)
+                    .header("x-buglogin-fencing-token", "1")
+                    .header("x-buglogin-generation", "2")
+                    .header("x-content-sha256", object_checksum)
+                    .body(Body::from(bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let chunked_commit_request = Request::builder()
+        .method("PUT")
+        .uri(&path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-correlation-id", "manifest-v3-chunked-commit")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "manifest-v3-chunked-commit-0001")
+        .header("x-buglogin-owner-id", "desktop-manifest")
+        .header("x-buglogin-owner-token", owner_token)
+        .header("x-buglogin-fencing-token", "1")
+        .body(Body::from(
+            serde_json::to_string(&chunked_manifest).unwrap(),
+        ))
+        .unwrap();
+    let chunked_commit = app.clone().oneshot(chunked_commit_request).await.unwrap();
+    assert_eq!(chunked_commit.status(), StatusCode::OK);
+
     let get = Request::builder()
         .method("GET")
         .uri(&path)
         .header("authorization", format!("Bearer {token}"))
         .header("x-correlation-id", "manifest-http-read")
-        .header("x-buglogin-actor-id", "desktop-manifest")
+        .header("x-buglogin-actor-id", "acct_manifest")
         .body(Body::empty())
         .unwrap();
     let response = app.oneshot(get).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: SyncManifest =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(body, manifest);
+    assert_eq!(body, chunked_manifest);
     let _ = fs::remove_dir_all(root);
 }
 

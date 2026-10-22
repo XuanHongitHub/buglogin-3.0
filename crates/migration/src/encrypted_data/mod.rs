@@ -46,6 +46,16 @@ pub struct EncryptedProfileData {
     pub objects: BTreeMap<String, Vec<u8>>,
 }
 
+pub fn empty_encrypted_profile_data() -> EncryptedProfileData {
+    EncryptedProfileData {
+        index: EncryptedProfileDataIndex {
+            schema: INDEX_SCHEMA.to_owned(),
+            files: Vec::new(),
+        },
+        objects: BTreeMap::new(),
+    }
+}
+
 impl EncryptedProfileData {
     pub fn decrypt_file(&self, source_path: &str, key: &ClientKey) -> Result<Vec<u8>, Problem> {
         let file = self
@@ -140,7 +150,7 @@ pub fn decrypt_packaged_profile_data(
     Ok(data)
 }
 
-pub(crate) const fn index_path() -> &'static str {
+pub const fn index_path() -> &'static str {
     INDEX_PATH
 }
 

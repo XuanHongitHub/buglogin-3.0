@@ -78,12 +78,7 @@ export function WelcomeDialog({
   onComplete,
 }: {
   isOpen: boolean;
-  /**
-   * Whether this user still needs the browser-download + profile-creation flow.
-   * False when they already have a profile — then the welcome and commercial-use
-   * steps still show, but "continue" finishes onboarding instead of proceeding
-   * to permissions/download.
-   */
+  /** Whether onboarding should offer the first browser-runtime setup flow. */
   needsSetup: boolean;
   onComplete: () => void;
 }) {
@@ -102,6 +97,15 @@ export function WelcomeDialog({
   // dialog is open, so progress is live by the time the user reaches setup.
   const setup = useBrowserSetup("wayfern", isOpen);
   const browserName = getBrowserDisplayName("wayfern");
+  const setupErrorMessageKey =
+    setup.error?.stage === "catalog"
+      ? "welcome.ready.errorCatalog"
+      : setup.error?.stage === "downloading"
+        ? "welcome.ready.errorDownload"
+        : setup.error?.stage === "extracting" ||
+            setup.error?.stage === "verifying"
+          ? "welcome.ready.errorExtraction"
+          : "welcome.ready.errorGeneric";
 
   const requestPermissions = useCallback(async () => {
     setRequesting(true);
@@ -338,32 +342,23 @@ export function WelcomeDialog({
                       {t("welcome.ready.errorTitle")}
                     </h2>
                     <p className="max-w-[55ch] text-sm/6 text-pretty text-muted-foreground">
-                      {setup.error?.stage === "downloading"
-                        ? t("welcome.ready.errorDownload", {
-                            browser: browserName,
-                          })
-                        : setup.error?.stage === "extracting" ||
-                            setup.error?.stage === "verifying"
-                          ? t("welcome.ready.errorExtraction", {
-                              browser: browserName,
-                            })
-                          : t("welcome.ready.errorGeneric", {
-                              browser: browserName,
-                            })}
+                      {t(setupErrorMessageKey, { browser: browserName })}
                     </p>
                   </div>
 
-                  {/* No escape hatch here: a browser must finish downloading
-                      before onboarding can complete, so the only action on
-                      failure is to retry. */}
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setup.retry();
-                    }}
-                  >
-                    {t("welcome.ready.retry")}
-                  </Button>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    <Button variant="outline" size="sm" onClick={onComplete}>
+                      {t("welcome.ready.continueWithoutBrowser")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        setup.retry();
+                      }}
+                    >
+                      {t("welcome.ready.retry")}
+                    </Button>
+                  </div>
                 </>
               ) : (
                 <>

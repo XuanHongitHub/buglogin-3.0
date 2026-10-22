@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -170,6 +171,63 @@ impl LocalRepository {
             }
         }
         values.sort_by(|left, right| left.value.entity_id().cmp(right.value.entity_id()));
+        Ok(values)
+    }
+
+    pub fn list_after<T: LocalEntity>(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Versioned<T>>, Problem> {
+        if let Some(cursor) = cursor {
+            validate_id(cursor)?;
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let directory = self.root.join(T::KIND.directory());
+        if !directory.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut ids = BTreeSet::new();
+        for entry in
+            fs::read_dir(&directory).map_err(|error| io_problem("read entity directory", &error))?
+        {
+            let entry = entry.map_err(|error| io_problem("read entity entry", &error))?;
+            if !entry
+                .file_type()
+                .map_err(|error| io_problem("read entity entry type", &error))?
+                .is_dir()
+            {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            validate_id(&id)?;
+            if cursor.is_some_and(|cursor| id.as_str() <= cursor) {
+                continue;
+            }
+            ids.insert(id);
+            if ids.len() > limit {
+                let _ = ids.pop_last();
+            }
+        }
+
+        let mut values = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(value) = self.get::<T>(&id)? else {
+                continue;
+            };
+            if value.value.entity_id() != id.as_str() {
+                return Err(Problem::new(
+                    "storage_entity_id_mismatch",
+                    "Stored entity ID does not match its directory",
+                    500,
+                    "storage",
+                ));
+            }
+            values.push(value);
+        }
         Ok(values)
     }
 

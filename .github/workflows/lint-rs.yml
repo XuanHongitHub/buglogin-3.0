@@ -61,7 +61,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit --locked
 
       - name: Install dependencies (Ubuntu only)
         if: matrix.os == 'ubuntu-22.04'
@@ -73,7 +73,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build frontend
-        run: pnpm next build
+        run: pnpm run build:web
 
       - name: Get host target
         id: host_target

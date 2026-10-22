@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod chunks;
+mod clock;
 pub mod conflict;
 pub mod coordination;
 pub mod crypto;

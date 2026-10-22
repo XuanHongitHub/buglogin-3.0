@@ -30,6 +30,16 @@ jobs:
       - uses: ./.github/actions/setup-buglogin
         with:
           install-node-dependencies: false
+      - name: Install native dependencies for the Tauri workspace
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - name: Run scoped Rust checks
         shell: bash
         run: bash scripts/ci/check-rust.sh

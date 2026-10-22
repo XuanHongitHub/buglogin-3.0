@@ -87,13 +87,19 @@ pub fn verify_package(package: &NeutralPackage) -> Result<VerifiedPackage, Probl
         .contents
         .iter()
         .any(|content| content.path.starts_with("encrypted/"));
-    let encrypted_secret_paths = manifest.contents.iter().any(|content| {
-        content.path.starts_with("encrypted/proxy-credentials/")
-            || content.path.starts_with("encrypted/vpn-configs/")
+    let encrypted_profile_state_paths = manifest.contents.iter().any(|content| {
+        content.path.starts_with("encrypted/profile-data/")
+            && content.path != crate::encrypted_data::index_path()
     });
+    let encrypted_secret_paths = encrypted_profile_state_paths
+        || manifest.contents.iter().any(|content| {
+            content.path.starts_with("encrypted/proxy-credentials/")
+                || content.path.starts_with("encrypted/vpn-configs/")
+                || content.path == crate::legacy_account_credentials::PACKAGE_PATH
+        });
     let supported_encryption =
         manifest.security.encryption.as_deref() == Some("aes-256-gcm-chunks/1");
-    if manifest.security.contains_cookie_values
+    if manifest.security.contains_cookie_values != encrypted_profile_state_paths
         || manifest.security.contains_secrets != encrypted_secret_paths
         || manifest.security.encrypted != manifest.security.encryption.is_some()
         || manifest.security.encrypted != encrypted_paths

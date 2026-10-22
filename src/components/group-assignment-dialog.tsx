@@ -3,10 +3,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { GoPlus } from "react-icons/go";
+import {
+  LuArrowRightLeft,
+  LuCheck,
+  LuFolder,
+  LuFolderPlus,
+  LuInfo,
+  LuSearch,
+} from "react-icons/lu";
 import { toast } from "sonner";
 import { CreateGroupDialog } from "@/components/create-group-dialog";
-import { LoadingButton } from "@/components/loading-button";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -15,23 +22,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import type { BrowserProfile, ProfileGroup } from "@/types";
-import { RippleButton } from "./ui/ripple";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/lib/utils";
+import type { ProfileGroup } from "@/types";
 
 interface GroupAssignmentDialogProps {
   isOpen: boolean;
   onClose: () => void;
   selectedProfiles: string[];
   onAssignmentComplete: () => void;
-  profiles?: BrowserProfile[];
 }
 
 export function GroupAssignmentDialog({
@@ -39,15 +39,17 @@ export function GroupAssignmentDialog({
   onClose,
   selectedProfiles,
   onAssignmentComplete,
-  profiles = [],
 }: GroupAssignmentDialogProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const isVi = i18n.language === "vi";
+
   const [groups, setGroups] = useState<ProfileGroup[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isAssigning, setIsAssigning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const loadGroups = useCallback(async () => {
     setIsLoading(true);
@@ -77,13 +79,12 @@ export function GroupAssignmentDialog({
       const groupName = selectedGroupId
         ? groups.find((g) => g.id === selectedGroupId)?.name ||
           t("groups.unknownGroup")
-        : t("groups.noGroup");
+        : t("groups.noGroup", { defaultValue: "Chưa phân nhóm" });
 
       toast.success(
-        t("groups.assignSuccess", {
-          count: selectedProfiles.length,
-          group: groupName,
-        }),
+        isVi
+          ? `Đã chuyển ${selectedProfiles.length} profile sang nhóm "${groupName}"`
+          : `Assigned ${selectedProfiles.length} profile(s) to group "${groupName}"`,
       );
       onAssignmentComplete();
       onClose();
@@ -92,7 +93,9 @@ export function GroupAssignmentDialog({
       const errorMessage =
         err instanceof Error
           ? err.message
-          : t("groupAssignment.failedFallback");
+          : t("groupAssignment.failedFallback", {
+              defaultValue: "Không thể chuyển nhóm profile",
+            });
       setError(errorMessage);
       toast.error(errorMessage);
     } finally {
@@ -104,6 +107,7 @@ export function GroupAssignmentDialog({
     groups,
     onAssignmentComplete,
     onClose,
+    isVi,
     t,
   ]);
 
@@ -112,126 +116,210 @@ export function GroupAssignmentDialog({
       void loadGroups();
       setSelectedGroupId(null);
       setError(null);
+      setSearchQuery("");
     }
   }, [isOpen, loadGroups]);
 
+  const filteredGroups = groups.filter((g) =>
+    g.name.toLowerCase().includes(searchQuery.trim().toLowerCase()),
+  );
+
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>{t("groupAssignment.title")}</DialogTitle>
-          <DialogDescription>
-            {selectedProfiles.length === 1
-              ? t("groupAssignment.description_one", {
-                  count: selectedProfiles.length,
-                })
-              : t("groupAssignment.description_other", {
-                  count: selectedProfiles.length,
-                })}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label>{t("groupAssignment.selectedProfilesLabel")}</Label>
-            <div className="max-h-[min(8rem,20vh)] overflow-y-auto rounded-md bg-muted p-3">
-              <ul className="space-y-1 text-sm">
-                {selectedProfiles.map((profileId) => {
-                  // Find the profile name for display
-                  const profile = profiles.find(
-                    (p: BrowserProfile) => p.id === profileId,
-                  );
-                  const displayName = profile ? profile.name : profileId;
-                  return (
-                    <li key={profileId} className="truncate">
-                      • {displayName}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="group-select">
-                {t("groupAssignment.assignGroupLabel")}
-              </Label>
-              <RippleButton
-                size="sm"
-                variant="outline"
-                className="h-7 px-2 text-xs"
-                onClick={() => {
-                  setCreateDialogOpen(true);
-                }}
-              >
-                <GoPlus className="mr-1 size-3" />{" "}
-                {t("groupManagement.createGroup")}
-              </RippleButton>
-            </div>
-            {isLoading ? (
-              <div className="text-sm text-muted-foreground">
-                {t("groupManagement.loading")}
+    <>
+      <Dialog open={isOpen} onOpenChange={onClose}>
+        <DialogContent className="max-w-md p-0 overflow-hidden sm:rounded-2xl border-border bg-card shadow-2xl">
+          {/* Header */}
+          <DialogHeader className="p-5 pb-3 border-b border-border/60">
+            <div className="flex items-center gap-2.5">
+              <div className="flex size-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                <LuArrowRightLeft className="size-4" />
               </div>
-            ) : (
-              <Select
-                value={selectedGroupId ?? "__none__"}
-                onValueChange={(value) => {
-                  setSelectedGroupId(value === "__none__" ? null : value);
-                }}
+              <div>
+                <DialogTitle className="text-base font-semibold">
+                  {isVi
+                    ? "Chuyển Nhóm Profile"
+                    : "Move / Assign Profiles to Group"}
+                </DialogTitle>
+                <DialogDescription className="text-xs text-muted-foreground mt-0.5">
+                  {isVi
+                    ? `Đang chọn ${selectedProfiles.length} profile để chuyển sang nhóm đích`
+                    : `Moving ${selectedProfiles.length} selected profile(s) to destination group`}
+                </DialogDescription>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div className="p-5 space-y-4">
+            {/* Search and Quick Action */}
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <LuSearch className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  type="text"
+                  placeholder={
+                    isVi
+                      ? "Tìm kiếm nhóm đích..."
+                      : "Search destination group..."
+                  }
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="h-9 pl-8 text-xs bg-muted/40"
+                />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-9 gap-1.5 text-xs shrink-0"
+                onClick={() => setCreateDialogOpen(true)}
               >
-                <SelectTrigger>
-                  <SelectValue placeholder={t("groupAssignment.placeholder")} />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">
-                    {t("groups.noGroup")}
-                  </SelectItem>
-                  {groups.map((group) => (
-                    <SelectItem key={group.id} value={group.id}>
-                      {group.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <LuFolderPlus className="size-3.5" />
+                <span>{isVi ? "Tạo nhóm mới" : "New Group"}</span>
+              </Button>
+            </div>
+
+            {/* Destination Group Selection List */}
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-foreground">
+                {isVi ? "Chọn nhóm đích:" : "Select destination group:"}
+              </p>
+
+              <ScrollArea className="h-48 rounded-xl border border-border/80 bg-muted/20 p-1.5">
+                {isLoading ? (
+                  <div className="flex h-36 items-center justify-center text-xs text-muted-foreground">
+                    <span className="size-4 animate-spin rounded-full border-2 border-primary border-t-transparent mr-2" />
+                    {isVi ? "Đang tải danh sách nhóm..." : "Loading groups..."}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {/* Option: No Group / Remove from group */}
+                    <button
+                      type="button"
+                      onClick={() => setSelectedGroupId(null)}
+                      className={cn(
+                        "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs transition-colors",
+                        selectedGroupId === null
+                          ? "bg-primary text-primary-foreground font-medium shadow-xs"
+                          : "hover:bg-muted/60 text-foreground",
+                      )}
+                    >
+                      <div className="flex items-center gap-2.5 truncate">
+                        <span className="size-2 rounded-full bg-zinc-400 shrink-0" />
+                        <span className="truncate inline-flex items-center gap-1.5">
+                          <LuFolder className="size-3.5 text-muted-foreground" />
+                          {isVi
+                            ? "Chưa phân nhóm (Mặc định)"
+                            : "Unassigned / No Group"}
+                        </span>
+                      </div>
+                      {selectedGroupId === null && (
+                        <LuCheck className="size-4 shrink-0" />
+                      )}
+                    </button>
+
+                    {/* Group options */}
+                    {filteredGroups.map((group) => {
+                      const isSelected = selectedGroupId === group.id;
+                      return (
+                        <button
+                          key={group.id}
+                          type="button"
+                          onClick={() => setSelectedGroupId(group.id)}
+                          className={cn(
+                            "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs transition-colors",
+                            isSelected
+                              ? "bg-primary text-primary-foreground font-medium shadow-xs"
+                              : "hover:bg-muted/60 text-foreground",
+                          )}
+                        >
+                          <div className="flex items-center gap-2.5 truncate">
+                            <span
+                              className="size-2.5 rounded-full shrink-0"
+                              style={{
+                                backgroundColor: group.color || "#3b82f6",
+                              }}
+                            />
+                            <span className="truncate">{group.name}</span>
+                          </div>
+                          {isSelected && (
+                            <LuCheck className="size-4 shrink-0" />
+                          )}
+                        </button>
+                      );
+                    })}
+
+                    {filteredGroups.length === 0 && searchQuery && (
+                      <div className="py-6 text-center text-xs text-muted-foreground">
+                        {isVi
+                          ? `Không tìm thấy nhóm "${searchQuery}"`
+                          : `No group matching "${searchQuery}"`}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </ScrollArea>
+            </div>
+
+            {/* Informational Callout (User question resolution) */}
+            <div className="flex items-start gap-2.5 rounded-xl border border-border/80 bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed">
+              <LuInfo className="size-4 text-primary shrink-0 mt-0.5" />
+              <p>
+                {isVi
+                  ? "Profile sau khi chuyển nhóm vẫn luôn hiển thị trong bộ lọc 'Tất cả' (All). Đồng thời, profile sẽ thừa hưởng quyền truy cập thành viên và cấu hình proxy mặc định của nhóm đích."
+                  : "Profiles moved to another group will always remain visible under the 'All' filter, and will inherit the destination group's member permissions and default proxy configuration."}
+              </p>
+            </div>
+
+            {error && (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                {error}
+              </div>
             )}
           </div>
 
-          {error && (
-            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-              {error}
-            </div>
-          )}
-        </div>
+          {/* Footer Actions */}
+          <DialogFooter className="border-t border-border/60 bg-muted/20 px-5 py-3 gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onClose}
+              disabled={isAssigning}
+              className="text-xs"
+            >
+              {t("common.buttons.cancel", { defaultValue: "Hủy" })}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void handleAssign()}
+              disabled={isLoading || isAssigning}
+              className="text-xs gap-1.5"
+            >
+              {isAssigning && (
+                <span className="size-3.5 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+              )}
+              <span>{isVi ? "Xác nhận chuyển nhóm" : "Confirm Move"}</span>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-        <DialogFooter>
-          <RippleButton
-            variant="outline"
-            onClick={onClose}
-            disabled={isAssigning}
-          >
-            {t("common.buttons.cancel")}
-          </RippleButton>
-          <LoadingButton
-            isLoading={isAssigning}
-            onClick={() => void handleAssign()}
-            disabled={isLoading}
-          >
-            {t("groupAssignment.assignButton")}
-          </LoadingButton>
-        </DialogFooter>
-      </DialogContent>
+      {/* Submodal: Create Group */}
       <CreateGroupDialog
         isOpen={createDialogOpen}
-        onClose={() => {
-          setCreateDialogOpen(false);
-        }}
+        onClose={() => setCreateDialogOpen(false)}
         onGroupCreated={(group) => {
           setGroups((prev) => [...prev, group]);
           setSelectedGroupId(group.id);
           setCreateDialogOpen(false);
+          toast.success(
+            isVi
+              ? `Đã tạo nhóm "${group.name}"`
+              : `Created group "${group.name}"`,
+          );
         }}
       />
-    </Dialog>
+    </>
   );
 }

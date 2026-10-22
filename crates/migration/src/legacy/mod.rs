@@ -1,27 +1,40 @@
 mod control_plane;
 mod entities;
 mod extensions;
+mod postgres_export;
+mod s3_profiles;
 mod vpns;
+pub use crate::legacy_account_credentials::{
+    EncryptedLegacyCredentials, LegacyScryptCredential, decrypt_package_credentials,
+    decrypt_source_credentials, encrypt_package_credentials, encrypt_source_credentials,
+};
 pub use control_plane::{
-    LegacyCapabilityOverride, LegacyControlMembership, LegacyControlOrganization,
-    LegacyControlPlaneExport, LegacyControlPlaneMapping, LegacyControlShareGrant,
-    LegacyControlWorkspace, NeutralAccountData, NeutralAccountRecord, NeutralGrantData,
-    NeutralGrantRecord, NeutralMemberData, NeutralMemberRecord, NeutralOrganizationData,
-    NeutralOrganizationRecord, NeutralProfileResourceData, NeutralProfileResourceRecord,
-    NeutralResourceData, NeutralResourceRecord, NeutralTeamData, NeutralTeamRecord,
-    NeutralWorkspaceData, NeutralWorkspacePolicy, NeutralWorkspaceRecord,
-    canonicalize_legacy_control_plane_json, map_legacy_control_plane,
+    LegacyCapabilityOverride, LegacyControlGroup, LegacyControlMembership,
+    LegacyControlOrganization, LegacyControlPlaneExport, LegacyControlPlaneMapping,
+    LegacyControlProfile, LegacyControlProfileGroupAssignment, LegacyControlShareGrant,
+    LegacyControlWorkspace, LegacyPendingInvite, LegacyPendingShareGrant, NeutralAccountData,
+    NeutralAccountRecord, NeutralGrantData, NeutralGrantRecord, NeutralGroupShareGrantData,
+    NeutralGroupShareGrantRecord, NeutralMemberData, NeutralMemberRecord, NeutralOrganizationData,
+    NeutralOrganizationRecord, NeutralProfileGroupAssignment, NeutralProfileResourceData,
+    NeutralProfileResourceRecord, NeutralResourceData, NeutralResourceRecord, NeutralTeamData,
+    NeutralTeamRecord, NeutralWorkspaceData, NeutralWorkspacePolicy, NeutralWorkspaceRecord,
+    canonicalize_legacy_control_plane_json, legacy_local_profile_id, map_legacy_control_plane,
     map_legacy_control_plane_json,
 };
 pub use entities::{
     LegacyProxyBatchAnalysis, LegacyProxyRowResult, LegacyProxyRowStatus, NeutralGroupData,
     NeutralGroupRecord, NeutralProxyData, NeutralProxyRecord, analyze_legacy_proxy_batch,
     map_legacy_groups, map_legacy_proxies, map_legacy_proxies_for_encrypted_package,
+    map_legacy_proxies_for_ids,
 };
 pub use extensions::{
     ExtensionArtifact, LegacyExtensionExport, NeutralExtensionData, NeutralExtensionGroupData,
     NeutralExtensionGroupRecord, NeutralExtensionRecord, map_legacy_extensions,
 };
+pub use postgres_export::{
+    LegacyStoragePolicy, PostgresControlExport, export_read_only_postgres_control_plane,
+};
+pub use s3_profiles::{LegacyS3HydrationReport, hydrate_legacy_s3_profile_payloads};
 pub use vpns::{
     LegacyVpnExport, NeutralVpnData, NeutralVpnRecord, VpnConfigSecret, map_legacy_vpns,
 };
@@ -283,7 +296,7 @@ fn map_profile(
         .get("browser_adapter_config")
         .or_else(|| object.get("browserAdapterConfig"))
         .map(|value| {
-            if contains_secret(value) {
+            if buglogin_domain::security::contains_secret(value) {
                 serde_json::json!({"present": true, "classification": "excluded"})
             } else {
                 value.clone()
@@ -558,7 +571,7 @@ fn profile_reference_warnings(
 }
 
 fn profile_data_disposition(metadata: &Value) -> ProfileDataDisposition {
-    if contains_secret(metadata) {
+    if buglogin_domain::security::contains_secret(metadata) {
         return ProfileDataDisposition {
             classification: ProfileDataClassification::Excluded,
             reason_code: "source_profile_data_contains_unencrypted_secrets".to_owned(),
@@ -569,32 +582,6 @@ fn profile_data_disposition(metadata: &Value) -> ProfileDataDisposition {
         classification: ProfileDataClassification::Excluded,
         reason_code: "source_profile_data_not_authenticated_encrypted".to_owned(),
     }
-}
-
-fn contains_secret(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => object
-            .iter()
-            .any(|(key, child)| (is_secret_key(key) && !child.is_null()) || contains_secret(child)),
-        Value::Array(values) => values.iter().any(contains_secret),
-        _ => false,
-    }
-}
-
-fn is_secret_key(key: &str) -> bool {
-    matches!(
-        key.to_ascii_lowercase().replace(['-', '_'], "").as_str(),
-        "password"
-            | "proxypassword"
-            | "token"
-            | "accesstoken"
-            | "refreshtoken"
-            | "apikey"
-            | "secret"
-            | "privatekey"
-            | "cookie"
-            | "cookies"
-    )
 }
 
 fn profile_name(object: &Map<String, Value>, source_id: &str) -> String {

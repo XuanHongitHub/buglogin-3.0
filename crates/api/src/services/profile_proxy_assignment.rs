@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 
 use buglogin_domain::{
-    entities::{Profile, ProfileState},
+    entities::Profile,
     errors::Problem,
     ids::{ProfileId, ProxyId, WorkspaceId},
 };
 use serde::{Deserialize, Serialize};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,10 +39,15 @@ pub struct ProfileProxyAssignmentGetInput {
 pub struct ProfileProxyAssignmentService(BTreeMap<ProfileId, ProfileProxyAssignment>);
 
 impl ProfileProxyAssignmentService {
+    pub(crate) fn purge_profile(&mut self, profile_id: &ProfileId) {
+        self.0.remove(profile_id);
+    }
+
     pub fn validate_change(
         profile: &Profile,
         actual_revision: u64,
         input: &ProfileProxyAssignmentSetInput,
+        pending_assignment: Option<&ProfileProxyAssignment>,
     ) -> Result<(), Problem> {
         if actual_revision != input.expected_profile_revision {
             return Err(
@@ -52,14 +56,20 @@ impl ProfileProxyAssignmentService {
                     .with_field("actualRevision", actual_revision),
             );
         }
-        if profile.archived || profile.state == ProfileState::Running {
+        if profile.archived || !profile.state.allows_proxy_change() {
             return Err(problem(
                 "profile_proxy_assignment_not_allowed",
-                "Proxy assignment requires a stopped active profile",
+                "Profile state does not allow proxy assignment",
                 409,
             ));
         }
-        if profile.proxy_id == input.proxy_id {
+        let replaces_pending_assignment = pending_assignment.is_some_and(|assignment| {
+            assignment.profile_id == input.profile_id
+                && assignment.workspace_id == input.workspace_id
+        });
+        // The profile may keep its current proxy while a pending sync target
+        // changes; selecting the current proxy again replaces that stale target.
+        if profile.proxy_id == input.proxy_id && !replaces_pending_assignment {
             return Err(problem(
                 "profile_proxy_assignment_unchanged",
                 "The profile already uses this proxy",
@@ -96,6 +106,13 @@ impl ProfileProxyAssignmentService {
             .get(profile_id)
             .filter(|assignment| &assignment.workspace_id == workspace_id)
             .cloned()
+    }
+
+    pub fn references_proxy(&self, workspace_id: &WorkspaceId, proxy_id: &ProxyId) -> bool {
+        self.0.values().any(|assignment| {
+            &assignment.workspace_id == workspace_id
+                && assignment.proxy_id.as_ref() == Some(proxy_id)
+        })
     }
 
     pub fn set(
@@ -163,9 +180,7 @@ where
 }
 
 fn timestamp() -> Result<String, Problem> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|_| problem("clock_unavailable", "Clock unavailable", 500))
+    crate::clock::rfc3339("profile.proxy.assignment")
 }
 
 fn problem(code: &'static str, title: &'static str, status: u16) -> Problem {
@@ -175,7 +190,7 @@ fn problem(code: &'static str, title: &'static str, status: u16) -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buglogin_domain::entities::{Runtime, SyncMode};
+    use buglogin_domain::entities::{ProfileState, Runtime, SyncMode};
 
     fn profile(state: ProfileState, archived: bool, proxy_id: Option<ProxyId>) -> Profile {
         Profile {
@@ -212,29 +227,52 @@ mod tests {
     fn assignment_change_rules_are_canonical_for_all_adapters() {
         let proxy = ProxyId::from_str("pxy_assignment_validation").unwrap();
         let input = change_input(Some(proxy.clone()));
+        for state in [
+            ProfileState::Created,
+            ProfileState::Ready,
+            ProfileState::Failed,
+        ] {
+            assert!(
+                ProfileProxyAssignmentService::validate_change(
+                    &profile(state, false, None),
+                    7,
+                    &input,
+                    None,
+                )
+                .is_ok()
+            );
+        }
         let ready = profile(ProfileState::Ready, false, None);
-        assert!(ProfileProxyAssignmentService::validate_change(&ready, 7, &input).is_ok());
         assert_eq!(
-            ProfileProxyAssignmentService::validate_change(&ready, 6, &input)
+            ProfileProxyAssignmentService::validate_change(&ready, 6, &input, None)
                 .unwrap_err()
                 .code,
             "revision_conflict"
         );
-        assert_eq!(
-            ProfileProxyAssignmentService::validate_change(
-                &profile(ProfileState::Running, false, None),
-                7,
-                &input,
-            )
-            .unwrap_err()
-            .code,
-            "profile_proxy_assignment_not_allowed"
-        );
+        for state in [
+            ProfileState::Launching,
+            ProfileState::Running,
+            ProfileState::Stopping,
+            ProfileState::Recovering,
+        ] {
+            assert_eq!(
+                ProfileProxyAssignmentService::validate_change(
+                    &profile(state, false, None),
+                    7,
+                    &input,
+                    None,
+                )
+                .unwrap_err()
+                .code,
+                "profile_proxy_assignment_not_allowed"
+            );
+        }
         assert_eq!(
             ProfileProxyAssignmentService::validate_change(
                 &profile(ProfileState::Ready, true, None),
                 7,
                 &input,
+                None,
             )
             .unwrap_err()
             .code,
@@ -242,9 +280,47 @@ mod tests {
         );
         assert_eq!(
             ProfileProxyAssignmentService::validate_change(
+                &profile(ProfileState::Ready, false, Some(proxy.clone())),
+                7,
+                &input,
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "profile_proxy_assignment_unchanged"
+        );
+
+        let pending = ProfileProxyAssignment {
+            profile_id: input.profile_id.clone(),
+            workspace_id: input.workspace_id.clone(),
+            expected_profile_revision: 7,
+            proxy_id: None,
+            requested_at: "2026-10-19T00:00:00Z".into(),
+        };
+        assert!(
+            ProfileProxyAssignmentService::validate_change(
                 &profile(ProfileState::Ready, false, Some(proxy)),
                 7,
                 &input,
+                Some(&pending),
+            )
+            .is_ok()
+        );
+
+        let unrelated_pending = ProfileProxyAssignment {
+            profile_id: ProfileId::from_str("prf_other_pending_assignment").unwrap(),
+            ..pending
+        };
+        assert_eq!(
+            ProfileProxyAssignmentService::validate_change(
+                &profile(
+                    ProfileState::Ready,
+                    false,
+                    Some(ProxyId::from_str("pxy_assignment_validation").unwrap())
+                ),
+                7,
+                &input,
+                Some(&unrelated_pending),
             )
             .unwrap_err()
             .code,
@@ -274,6 +350,30 @@ mod tests {
             assignment
         );
         assert!(service.get_optional(&workspace, &profile).is_none());
+    }
+
+    #[test]
+    fn pending_assignment_keeps_its_proxy_from_being_deleted() {
+        let workspace = WorkspaceId::from_str("ws_pending_proxy_ref").unwrap();
+        let profile = ProfileId::from_str("prf_pending_proxy_ref").unwrap();
+        let proxy = ProxyId::from_str("prx_pending_proxy_ref").unwrap();
+        let other_workspace = WorkspaceId::from_str("ws_other_pending_proxy_ref").unwrap();
+        let mut service = ProfileProxyAssignmentService::default();
+
+        service
+            .set(
+                &workspace,
+                ProfileProxyAssignmentSetInput {
+                    workspace_id: workspace.clone(),
+                    profile_id: profile,
+                    expected_profile_revision: 1,
+                    proxy_id: Some(proxy.clone()),
+                },
+            )
+            .unwrap();
+
+        assert!(service.references_proxy(&workspace, &proxy));
+        assert!(!service.references_proxy(&other_workspace, &proxy));
     }
 
     #[test]

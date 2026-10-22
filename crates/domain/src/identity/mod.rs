@@ -2,8 +2,12 @@ use getrandom::fill;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
-use crate::{errors::Problem, ids::AccountId};
+use crate::{
+    errors::Problem,
+    ids::{AccountId, DeviceId},
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +28,18 @@ pub struct SessionRecord {
     pub last_seen_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_version: Option<u32>,
+    /// Short-lived, client-keyed encrypted response for an idempotent refresh
+    /// retry. The ciphertext is not useful without possession of the old token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_replay: Option<SessionRefreshReplay>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionRefreshReplay {
+    pub idempotency_key_hash: [u8; 32],
+    pub expires_at: u64,
+    pub ciphertext: Vec<u8>,
 }
 
 pub struct IssuedBrowserSession {
@@ -42,6 +58,13 @@ impl std::fmt::Debug for IssuedBrowserSession {
     }
 }
 
+impl Drop for IssuedBrowserSession {
+    fn drop(&mut self) {
+        self.raw_session.zeroize();
+        self.raw_csrf.zeroize();
+    }
+}
+
 pub struct IssuedSession {
     pub raw_token: String,
     pub record: SessionRecord,
@@ -55,6 +78,12 @@ impl std::fmt::Debug for IssuedSession {
     }
 }
 
+impl Drop for IssuedSession {
+    fn drop(&mut self) {
+        self.raw_token.zeroize();
+    }
+}
+
 pub fn issue(account_id: AccountId, expires_at: u64) -> Result<IssuedSession, Problem> {
     issue_for_device(account_id, expires_at, None)
 }
@@ -64,16 +93,29 @@ pub fn issue_for_device(
     expires_at: u64,
     device_id: Option<String>,
 ) -> Result<IssuedSession, Problem> {
+    if device_id
+        .as_deref()
+        .is_some_and(|value| DeviceId::new(value).is_err())
+    {
+        return Err(Problem::new(
+            "device_id_invalid",
+            "Device ID is invalid",
+            400,
+            "identity",
+        ));
+    }
     let mut bytes = [0u8; 32];
-    fill(&mut bytes).map_err(|_| {
-        Problem::new(
+    if fill(&mut bytes).is_err() {
+        bytes.zeroize();
+        return Err(Problem::new(
             "session_entropy_unavailable",
             "Session unavailable",
             503,
             "identity",
-        )
-    })?;
+        ));
+    }
     let raw_token = hex(&bytes);
+    bytes.zeroize();
     Ok(IssuedSession {
         record: SessionRecord {
             account_id,
@@ -86,6 +128,7 @@ pub fn issue_for_device(
             created_at: None,
             last_seen_at: None,
             credential_version: None,
+            refresh_replay: None,
         },
         raw_token,
     })
@@ -111,6 +154,7 @@ pub fn issue_browser(
             created_at: Some(created_at),
             last_seen_at: Some(created_at),
             credential_version: None,
+            refresh_replay: None,
         },
         raw_session,
         raw_csrf,
@@ -184,15 +228,18 @@ pub fn verify_csrf(record: &SessionRecord, raw_csrf: &str) -> Result<(), Problem
 
 fn random_hex() -> Result<String, Problem> {
     let mut bytes = [0u8; 32];
-    fill(&mut bytes).map_err(|_| {
-        Problem::new(
+    if fill(&mut bytes).is_err() {
+        bytes.zeroize();
+        return Err(Problem::new(
             "session_entropy_unavailable",
             "Session unavailable",
             503,
             "identity",
-        )
-    })?;
-    Ok(hex(&bytes))
+        ));
+    }
+    let value = hex(&bytes);
+    bytes.zeroize();
+    Ok(value)
 }
 fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -257,6 +304,16 @@ mod tests {
             !serde_json::to_string(&refreshed.record)
                 .unwrap()
                 .contains(&refreshed.raw_token)
+        );
+    }
+
+    #[test]
+    fn issue_for_device_rejects_noncanonical_device_ids() {
+        assert_eq!(
+            issue_for_device(account(), 100, Some("short".into()))
+                .unwrap_err()
+                .code,
+            "device_id_invalid"
         );
     }
 

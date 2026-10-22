@@ -133,11 +133,12 @@ export function WayfernConfigDialog({
             <SharedFingerprintConfigForm
               config={config}
               onConfigChange={updateConfig}
+              supportedConfigOnly
               forceAdvanced={true}
               readOnly={isRunning}
               crossOsUnlocked={crossOsUnlocked}
               limitedMode={!crossOsUnlocked}
-              profileVersion={profile.version}
+              profileVersion={profile.version ?? undefined}
               profileBrowser="wayfern"
             />
           </div>

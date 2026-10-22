@@ -1,4 +1,8 @@
-use buglogin_domain::{account::Account, errors::Problem, ids::AccountId};
+use buglogin_domain::{
+    account::{Account, AccountStatus},
+    errors::Problem,
+    ids::AccountId,
+};
 use buglogin_storage::control::{
     ControlAuditEntry, ControlPut, ControlRecord, ExecuteControlCommand, HttpResponse,
 };
@@ -20,16 +24,48 @@ impl AccountPersistence {
     }
 
     pub fn load(&self, account_id: &AccountId) -> Result<Option<Account>, Problem> {
-        self.store
-            .load::<Account>(TENANT, RECORD_TYPE, account_id.as_str())
+        let account = self
+            .store
+            .load::<Account>(TENANT, RECORD_TYPE, account_id.as_str())?;
+        if account
+            .as_ref()
+            .is_some_and(|account| account.id != *account_id)
+        {
+            return Err(corrupt());
+        }
+        Ok(account)
     }
 
     pub(crate) fn load_versioned(
         &self,
         account_id: &AccountId,
     ) -> Result<Option<(Account, u64)>, Problem> {
-        self.store
-            .load_versioned(TENANT, RECORD_TYPE, account_id.as_str())
+        let account =
+            self.store
+                .load_versioned::<Account>(TENANT, RECORD_TYPE, account_id.as_str())?;
+        if account
+            .as_ref()
+            .is_some_and(|(account, _)| account.id != *account_id)
+        {
+            return Err(corrupt());
+        }
+        Ok(account)
+    }
+
+    pub(crate) fn load_active_versioned(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<(Account, u64)>, Problem> {
+        let Some((account, revision)) = self.load_versioned(account_id)? else {
+            return Ok(None);
+        };
+        if account.revision != revision {
+            return Err(revision_conflict());
+        }
+        if account.status != AccountStatus::Active {
+            return Err(inactive_account());
+        }
+        Ok(Some((account, revision)))
     }
 
     pub(crate) fn prepare_import_put(
@@ -43,6 +79,40 @@ impl AccountPersistence {
             record_id: account.id.as_str().into(),
             expected_revision: Some(expected_revision),
             value: serde_json::to_value(account).map_err(|_| corrupt())?,
+        })
+    }
+
+    pub(crate) fn prepare_credential_issuance_put(
+        &self,
+        account_id: &AccountId,
+        expected_revision: u64,
+    ) -> Result<ControlPut, Problem> {
+        let Some((account, stored_revision)) = self.load_versioned(account_id)? else {
+            return Err(Problem::new(
+                "account_record_invalid",
+                "Account record is invalid",
+                500,
+                "identity",
+            ));
+        };
+        if stored_revision != expected_revision || account.revision != expected_revision {
+            return Err(revision_conflict());
+        }
+        if account.status != AccountStatus::Active {
+            return Err(Problem::new(
+                "account_inactive",
+                "Account is not active",
+                403,
+                "identity",
+            ));
+        }
+        let updated = account.advance_revision(expected_revision)?;
+        Ok(ControlPut {
+            tenant_id: TENANT.into(),
+            record_type: RECORD_TYPE.into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(expected_revision),
+            value: serde_json::to_value(updated).map_err(|_| corrupt())?,
         })
     }
 
@@ -114,6 +184,20 @@ fn corrupt() -> Problem {
         500,
         "api",
     )
+}
+
+fn revision_conflict() -> Problem {
+    Problem::new(
+        "storage_revision_conflict",
+        "Account state changed during credential issuance",
+        409,
+        "identity",
+    )
+    .retryable(true)
+}
+
+fn inactive_account() -> Problem {
+    Problem::new("account_inactive", "Account is not active", 403, "identity")
 }
 
 #[cfg(test)]

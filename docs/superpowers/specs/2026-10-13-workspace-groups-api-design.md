@@ -8,10 +8,11 @@ Provide durable workspace-scoped group CRUD and profile group reassignment throu
 
 - A group is visible and mutable only in its owning workspace; cross-workspace access is indistinguishable from not found.
 - Group and profile mutations require `CAP-PROF-003` and use the existing mutation/idempotency/audit path.
-- Updates use optimistic revision checks. Group deletion fails while a profile in that workspace references it.
+- Updates use optimistic revision checks. Group deletion fails while a profile references it or while share-grant provenance is retained; revoked grants stay available for migration/audit and are never orphaned by deletion.
 - Replacing a profile's group IDs validates every group against the profile's workspace and writes the profile through its canonical revisioned repository.
 - MCP and REST are adapters over the same Rust service and state transition; neither owns duplicate business rules.
 - Persisted aggregate changes survive restart. No frontend-only success or in-memory-only production state.
+- Group and group-share imports are all-or-nothing: any invalid or conflicting row leaves the service unchanged.
 
 ## Scope
 

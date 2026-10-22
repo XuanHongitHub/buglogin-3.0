@@ -14,6 +14,8 @@ Backend implementation verified locally. Production readiness is still gated on 
 
 ## Evidence and remaining production gates
 
+- 2026-10-17 follow-up: REST/MCP now return a stale pending assignment to its authorized owner, and the desktop drawer identifies its source revision so it can be restaged against the current one. Profile sync activation remains revision-strict. REST/MCP regression cases are written; execution is deferred to the consolidated pass requested by the owner.
+
 - `cargo test --locked -p buglogin-api` passed; follow-up unit, REST-profile, and MCP proxy-assignment tests also passed after adding atomic rollback/reopen coverage.
 - `cargo check --locked -p buglogin-desktop-app` passed.
 - `pnpm test:contract` passed with 97 canonical commands across REST, MCP, Tauri, and generated clients.
@@ -26,6 +28,7 @@ Backend implementation verified locally. Production readiness is still gated on 
 - A failed or stale commit never changes the effective proxy or current manifest.
 - A successful commit changes the profile proxy and manifest together and removes the pending assignment.
 - Existing manifest commits without pending assignment continue only when proxy dependencies match the active profile.
+- [x] Keep stale staged assignments readable through REST and MCP so the owner can see/restage the pending choice; sync activation continues to reject stale revisions. REST and MCP source paths return the stored assignment with its original expected revision; sync activation remains revision-strict. Regression source is present; consolidated verification is deferred.
 - Missing target proxy, cross-workspace proxy, wrong profile revision, running profile, missing vault credential/envelope, stale manifest, and lost-response replay all have explicit tested outcomes.
 - Generated API clients and REST/MCP/desktop adapters agree with the canonical registry.
 - This plan alone does not prove production readiness; PostgreSQL/S3 staging and release evidence remain required.

@@ -1,5 +1,5 @@
-import { WebRouteHost } from './web-route-host';
+import { WebRouteHost } from "./web-route-host";
 
 export default function Home() {
-  return <WebRouteHost initialPath="/" />;
+  return <WebRouteHost />;
 }

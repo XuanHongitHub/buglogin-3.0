@@ -1,10 +1,13 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { emit, listen } from "@tauri-apps/api/event";
+import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
+import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import Color from "color";
+import { motion, useReducedMotion } from "motion/react";
+import { Dialog as DialogPrimitive } from "radix-ui";
+import { DismissableLayer, FocusGuards, FocusScope } from "radix-ui/internal";
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { FaApple, FaLinux, FaWindows } from "react-icons/fa";
@@ -19,24 +22,42 @@ import {
   LuFingerprint,
   LuGlobe,
   LuGroup,
+  LuHouse,
   LuKey,
+  LuKeyRound,
+  LuLayoutTemplate,
   LuLink,
   LuLock,
   LuLockOpen,
   LuPlus,
   LuPuzzle,
+  LuRefreshCcwDot,
   LuRefreshCw,
   LuSettings,
   LuShield,
   LuShieldCheck,
+  LuSparkles,
   LuTrash2,
   LuUpload,
   LuUsers,
   LuX,
 } from "react-icons/lu";
+import { DnsServerField } from "@/components/dns-server-field";
+import {
+  formatProxyClipboard,
+  parseRawProxy,
+} from "@/components/profile-data-table";
+import { ProfileHandoffStatus } from "@/components/profile-handoff-status";
+import { ProfileLaunchActivity } from "@/components/profile-launch-activity";
+import { ProfileMetadataCard } from "@/components/profile-metadata-card";
+import { ExportProfileSection } from "@/components/profile-transfer";
+import { RestorePoints } from "@/components/restore-points";
 import { SharedFingerprintConfigForm } from "@/components/shared-fingerprint-config-form";
+import { ProfileTotpSection } from "@/components/totp-code";
 import { AnimatedSwitch } from "@/components/ui/animated-switch";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   ColorPicker,
   ColorPickerEyeDropper,
@@ -59,6 +80,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { SoftFields } from "@/components/ui/field-variant";
 import { Input } from "@/components/ui/input";
 import {
   Popover,
@@ -73,26 +95,60 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { LaunchArgumentsEditor } from "@/components/wayfern-config-form";
+import { WindowDragArea } from "@/components/window-drag-area";
+import { useInputModality } from "@/hooks/use-input-modality";
+import { hideOthers } from "@/lib/aria-hidden";
 import { translateBackendError } from "@/lib/backend-errors";
-import { getProfileIcon } from "@/lib/browser-utils";
+import { getProfileIcon, getProfileNativeOs } from "@/lib/browser-utils";
 import { DNS_BLOCKLIST_LEVELS } from "@/lib/dns-blocklist-levels";
 import { formatRelativeTime } from "@/lib/flag-utils";
+import { MOTION_EASE_OUT } from "@/lib/motion";
+import { rotateProxyIps } from "@/lib/proxy-rotation";
+import type { RemoteHandoffState } from "@/lib/remote-sessions";
+import { startPagesFromText } from "@/lib/start-pages";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import type {
   BrowserProfile,
   ProfileGroup,
+  ProxySettings,
   StoredProxy,
-  VpnConfig,
   WayfernConfig,
 } from "@/types";
+
+function isDynamicProxy(settings: ProxySettings): boolean {
+  return Boolean(settings.rotation_url?.trim());
+}
+
+function EphemeralSectionNotice({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <Alert>
+      <LuLock className="size-4" />
+      <div>
+        <AlertTitle>{title}</AlertTitle>
+        <AlertDescription>{description}</AlertDescription>
+      </div>
+    </Alert>
+  );
+}
 
 interface ProfileInfoDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  workspaceId: string | null;
+  presentation?: "modal" | "inspector";
+  openMethod?: "pointer" | "keyboard";
+  handoffState?: RemoteHandoffState | null;
   profile: BrowserProfile | null;
   storedProxies: StoredProxy[];
-  vpnConfigs: VpnConfig[];
   onOpenTrafficDialog?: (profileId: string) => void;
   onOpenProfileSyncDialog?: (profile: BrowserProfile) => void;
   onAssignProfilesToGroup?: (profileIds: string[]) => void;
@@ -104,6 +160,7 @@ interface ProfileInfoDialogProps {
   onOpenDnsBlocklist?: (profile: BrowserProfile) => void;
   onOpenLaunchHook?: (profile: BrowserProfile) => void;
   onCloneProfile?: (profile: BrowserProfile) => void;
+  onSaveAsTemplate?: (profile: BrowserProfile) => void;
   onDeleteProfile?: (profile: BrowserProfile) => void;
   onLaunchWithSync?: (profile: BrowserProfile) => void;
   onSetPassword?: (profile: BrowserProfile) => void;
@@ -161,7 +218,7 @@ function ClearOnCloseToggle({
   };
 
   return (
-    <div className="flex items-center gap-3 rounded-md border border-border bg-muted/40 px-3 py-2">
+    <div className="flex items-center gap-3 rounded-lg bg-foreground/4 px-3 py-2">
       <LuEraser className="size-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium">{t("clearOnClose.label")}</p>
@@ -179,11 +236,33 @@ function ClearOnCloseToggle({
   );
 }
 
-function InfoCard({ label, value }: { label: string; value: string }) {
+function InfoCard({
+  label,
+  value,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  if (onClick)
+    return (
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+        className="min-w-0 rounded-lg bg-foreground/4 px-3 py-2.5 text-left transition-colors hover:bg-foreground/7 focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
+      >
+        <span className="block text-xs text-muted-foreground">{label}</span>
+        <span className="mt-0.5 block break-words text-sm">{value}</span>
+      </button>
+    );
   return (
-    <div className="rounded-md border bg-muted/50 px-3 py-2.5">
+    <div className="rounded-lg bg-foreground/4 px-3 py-2.5">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-0.5 truncate text-sm">{value}</p>
+      <p className="mt-0.5 break-words text-sm">{value}</p>
     </div>
   );
 }
@@ -286,7 +365,7 @@ function WindowColorSwatch({ profile }: { profile: BrowserProfile }) {
           type="button"
           aria-label={t("profileInfo.fields.windowColor")}
           title={t("profileInfo.fields.windowColor")}
-          className="size-9 shrink-0 cursor-pointer rounded-lg border shadow-sm ring-offset-background transition-transform hover:scale-105 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          className="size-9 shrink-0 cursor-pointer rounded-lg border shadow-sm ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           style={{ backgroundColor: color ?? DEFAULT_SWATCH_COLOR }}
         />
       </PopoverTrigger>
@@ -313,12 +392,225 @@ function WindowColorSwatch({ profile }: { profile: BrowserProfile }) {
   );
 }
 
-export function ProfileInfoDialog({
+function profileInfoFocusSurfaces(surface: HTMLElement): HTMLElement[] {
+  const surfaces = [surface];
+  const seen = new Set<HTMLElement>(surfaces);
+  for (let index = 0; index < surfaces.length; index++) {
+    for (const trigger of surfaces[index].querySelectorAll(
+      '[aria-expanded="true"][aria-controls]',
+    )) {
+      for (const id of trigger.getAttribute("aria-controls")?.split(/\s+/) ??
+        []) {
+        const popup = surface.ownerDocument.getElementById(id);
+        if (popup && !seen.has(popup)) {
+          seen.add(popup);
+          surfaces.push(popup);
+        }
+      }
+    }
+  }
+  return surfaces;
+}
+
+export function ProfileInfoDialog(props: ProfileInfoDialogProps) {
+  const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const inputModality = useInputModality();
+  const {
+    isOpen,
+    onClose,
+    profile,
+    presentation = "modal",
+    openMethod = inputModality,
+  } = props;
+  const [section, setSection] = React.useState<ProfileSection>("overview");
+  const surfaceRef = React.useRef<HTMLDivElement>(null);
+  const returnFocusRef = React.useRef<HTMLElement | null>(null);
+  const titleId = React.useId();
+  const isModal = presentation === "modal";
+  const previousProfileId = React.useRef(profile?.id);
+  FocusGuards.useFocusGuards();
+
+  React.useLayoutEffect(() => {
+    if (!isOpen) return;
+    const activeElement = document.activeElement;
+    if (
+      activeElement instanceof HTMLElement &&
+      !surfaceRef.current?.contains(activeElement)
+    ) {
+      returnFocusRef.current = activeElement;
+    }
+  }, [isOpen]);
+
+  React.useEffect(() => {
+    if (!isOpen || !isModal || !surfaceRef.current) return;
+    // An open picker may already hide the inspector itself. Keep its owned
+    // portal accessible while that picker continues to manage its own layer.
+    return hideOthers(profileInfoFocusSurfaces(surfaceRef.current));
+  }, [isOpen, isModal]);
+
+  React.useLayoutEffect(() => {
+    const changedProfile = previousProfileId.current !== profile?.id;
+    previousProfileId.current = profile?.id;
+    if (isOpen && changedProfile && openMethod === "keyboard") {
+      surfaceRef.current
+        ?.querySelector<HTMLElement>('[aria-current="location"]')
+        ?.focus({ preventScroll: true });
+    }
+  }, [isOpen, openMethod, profile?.id]);
+
+  React.useLayoutEffect(() => {
+    const surface = surfaceRef.current;
+    if (
+      isOpen &&
+      isModal &&
+      surface &&
+      !profileInfoFocusSurfaces(surface).some((node) =>
+        node.contains(document.activeElement),
+      )
+    ) {
+      surface
+        .querySelector<HTMLElement>('[aria-current="location"]')
+        ?.focus({ preventScroll: true });
+    }
+  }, [isOpen, isModal]);
+
+  const restoreFocus = (event: Event) => {
+    event.preventDefault();
+    const activeElement = document.activeElement;
+    const returnTarget =
+      returnFocusRef.current?.isConnected &&
+      returnFocusRef.current !== document.body
+        ? returnFocusRef.current
+        : Array.from(
+            document.querySelectorAll<HTMLElement>(
+              '[data-slot="profile-inspect-trigger"]',
+            ),
+          ).find((trigger) => trigger.dataset.profileId === profile?.id);
+    // A profile action may have opened another dialog. Its focus wins.
+    if (
+      returnTarget &&
+      (activeElement === document.body ||
+        (activeElement instanceof Node &&
+          surfaceRef.current?.contains(activeElement)))
+    ) {
+      returnTarget.focus({ preventScroll: true });
+    }
+  };
+
+  if (!profile || !isOpen) return null;
+
+  // Dialog.Content changes component type when modal changes. Composing the
+  // same Radix primitives keeps the form DOM and drafts through window resizes.
+  return (
+    <DialogPrimitive.Root
+      open={isOpen}
+      modal={isModal}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      {isModal && (
+        <div
+          data-slot="dialog-overlay"
+          className="pointer-events-auto fixed inset-0 z-9999 bg-background/50"
+        >
+          <div
+            data-tauri-drag-region
+            data-window-drag-area="true"
+            aria-hidden="true"
+            className="absolute inset-x-0 top-0 h-11"
+          />
+          <WindowDragArea />
+        </div>
+      )}
+      <FocusScope.Root
+        asChild
+        trapped={isModal}
+        loop={isModal}
+        onMountAutoFocus={(event) => {
+          event.preventDefault();
+          if (isModal || openMethod === "keyboard") {
+            surfaceRef.current
+              ?.querySelector<HTMLElement>('[aria-current="location"]')
+              ?.focus({ preventScroll: true });
+          }
+        }}
+        onUnmountAutoFocus={restoreFocus}
+      >
+        <DismissableLayer.Root
+          asChild
+          disableOutsidePointerEvents={isModal}
+          deferPointerDownOutside
+          onDismiss={onClose}
+          onFocusOutside={(event) => event.preventDefault()}
+          onPointerDownOutside={(event) => {
+            const original = event.detail.originalEvent;
+            if (
+              original.button === 2 ||
+              (original.button === 0 && original.ctrlKey)
+            ) {
+              event.preventDefault();
+            }
+          }}
+          onInteractOutside={(event) => {
+            if (!isModal) event.preventDefault();
+            const target = event.target;
+            if (target instanceof Element) {
+              if (target.closest('[data-window-drag-area="true"]')) {
+                event.preventDefault();
+              }
+              const trigger = target.closest<HTMLElement>(
+                '[data-slot="profile-inspect-trigger"]',
+              );
+              if (trigger) returnFocusRef.current = trigger;
+            }
+          }}
+        >
+          <motion.div
+            ref={surfaceRef}
+            role="dialog"
+            aria-modal={isModal || undefined}
+            aria-labelledby={titleId}
+            data-slot={isModal ? "dialog-content" : "profile-inspector"}
+            data-profile-id={profile.id}
+            initial={
+              isModal || reduceMotion || openMethod === "keyboard"
+                ? false
+                : { x: 6 }
+            }
+            animate={{ x: 0 }}
+            transition={{ duration: 0.18, ease: MOTION_EASE_OUT }}
+            className={cn(
+              "@container/profile-info flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden rounded-lg bg-card text-card-foreground",
+              isModal
+                ? "fixed top-1/2 left-1/2 z-10000 h-[min(clamp(30rem,80vh,48rem),calc(100vh-3rem))] w-[calc(100%-2rem)] max-w-[60rem] -translate-1/2"
+                : "h-full w-[29rem]",
+            )}
+          >
+            <DialogPrimitive.Title id={titleId} className="sr-only">
+              {t("profileInfo.title")}: {profile.name}
+            </DialogPrimitive.Title>
+            <ProfileInfoContents
+              key={profile.id}
+              {...props}
+              section={section}
+              onSectionChange={setSection}
+            />
+          </motion.div>
+        </DismissableLayer.Root>
+      </FocusScope.Root>
+    </DialogPrimitive.Root>
+  );
+}
+
+function ProfileInfoContents({
   isOpen,
   onClose,
   profile,
+  workspaceId,
+  handoffState,
   storedProxies,
-  vpnConfigs,
   onOpenTrafficDialog,
   onOpenProfileSyncDialog,
   onAssignProfilesToGroup,
@@ -330,6 +622,7 @@ export function ProfileInfoDialog({
   onOpenDnsBlocklist,
   onOpenLaunchHook,
   onCloneProfile,
+  onSaveAsTemplate,
   onDeleteProfile,
   onLaunchWithSync,
   onSetPassword,
@@ -340,7 +633,12 @@ export function ProfileInfoDialog({
   isDisabled = false,
   isCrossOs = false,
   syncStatuses,
-}: ProfileInfoDialogProps) {
+  section,
+  onSectionChange,
+}: ProfileInfoDialogProps & {
+  section: ProfileSection;
+  onSectionChange: (section: ProfileSection) => void;
+}) {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
   const [groupName, setGroupName] = React.useState<string | null>(null);
@@ -349,38 +647,46 @@ export function ProfileInfoDialog({
   >(null);
 
   React.useEffect(() => {
+    let current = true;
+    setGroupName(null);
     if (!isOpen || !profile?.group_id) {
-      setGroupName(null);
       return;
     }
     void (async () => {
       try {
         const groups = await invoke<ProfileGroup[]>("get_groups");
         const group = groups.find((g) => g.id === profile.group_id);
-        setGroupName(group?.name ?? null);
+        if (current) setGroupName(group?.name ?? null);
       } catch {
-        setGroupName(null);
+        if (current) setGroupName(null);
       }
     })();
+    return () => {
+      current = false;
+    };
   }, [isOpen, profile?.group_id]);
 
   React.useEffect(() => {
+    let current = true;
+    setExtensionGroupName(null);
     if (!isOpen || !profile?.extension_group_id) {
-      setExtensionGroupName(null);
       return;
     }
     void (async () => {
       try {
         const group = await invoke<{ name: string } | null>(
           "get_extension_group_for_profile",
-          { profileId: profile.id },
+          { workspaceId, profileId: profile.id },
         );
-        setExtensionGroupName(group?.name ?? null);
+        if (current) setExtensionGroupName(group?.name ?? null);
       } catch {
-        setExtensionGroupName(null);
+        if (current) setExtensionGroupName(null);
       }
     })();
-  }, [isOpen, profile?.extension_group_id, profile?.id]);
+    return () => {
+      current = false;
+    };
+  }, [isOpen, workspaceId, profile?.extension_group_id, profile?.id]);
 
   React.useEffect(() => {
     if (!isOpen) {
@@ -397,14 +703,9 @@ export function ProfileInfoDialog({
   const proxyName = profile.proxy_id
     ? storedProxies.find((p) => p.id === profile.proxy_id)?.name
     : null;
-  const vpnName = profile.vpn_id
-    ? vpnConfigs.find((v) => v.id === profile.vpn_id)?.name
-    : null;
-  const networkLabel = vpnName
-    ? t("profileInfo.network.vpnLabel", { name: vpnName })
-    : proxyName
-      ? t("profileInfo.network.proxyLabel", { name: proxyName })
-      : t("profileInfo.values.none");
+  const networkLabel = proxyName
+    ? t("profileInfo.network.proxyLabel", { name: proxyName })
+    : t("profileInfo.values.none");
 
   const syncStatus = syncStatuses[profile.id];
   const syncMode = profile.sync_mode ?? "Disabled";
@@ -425,9 +726,6 @@ export function ProfileInfoDialog({
     onClose();
     action();
   };
-
-  const hasTags = profile.tags && profile.tags.length > 0;
-  const hasNote = !!profile.note;
 
   // Items in the settings tab `actions` list MUST only open another dialog
   // (or trigger a navigation/action that closes this one). Do NOT put inline
@@ -472,6 +770,7 @@ export function ProfileInfoDialog({
       hidden: profile.ephemeral === true,
     },
     {
+      id: "group",
       icon: <LuGroup className="size-4" />,
       label: t("profiles.actions.assignToGroup"),
       onClick: () => {
@@ -494,6 +793,7 @@ export function ProfileInfoDialog({
       hidden: !isWayfern || !onConfigureWayfern,
     },
     {
+      id: "synchronizer",
       icon: <LuUsers className="size-4" />,
       label: t("profiles.synchronizer.launchWithSync"),
       onClick: () => {
@@ -536,6 +836,15 @@ export function ProfileInfoDialog({
       disabled: isDisabled,
       runningBadge: isRunning,
       hidden: profile.ephemeral === true,
+    },
+    {
+      id: "saveTemplate",
+      icon: <LuLayoutTemplate className="size-4" />,
+      label: t("templates.saveCurrent"),
+      onClick: () => {
+        handleAction(() => onSaveAsTemplate?.(profile));
+      },
+      hidden: !onSaveAsTemplate,
     },
     {
       id: "extension",
@@ -620,47 +929,47 @@ export function ProfileInfoDialog({
   const visibleActions = actions.filter((a) => !a.hidden);
 
   return (
-    <Dialog
-      open={isOpen}
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DialogContent
-        hideClose
-        className="flex h-[min(clamp(30rem,80vh,48rem),calc(100vh-3rem))] max-w-[min(60rem,calc(100%-4rem))] flex-col gap-0 overflow-hidden p-0"
-      >
-        {/* The dialog renders its own custom header, so the accessible title is
-            visually hidden but present for screen readers (Radix requires it). */}
-        <DialogTitle className="sr-only">{t("profileInfo.title")}</DialogTitle>
-        <ProfileInfoLayout
-          profile={profile}
-          ProfileIcon={ProfileIcon}
-          isRunning={isRunning}
-          isDisabled={isDisabled}
-          networkLabel={networkLabel}
-          groupName={groupName}
-          extensionGroupName={extensionGroupName}
-          syncMode={syncMode}
+    <ProfileInfoLayout
+      profile={profile}
+      workspaceId={workspaceId}
+      ProfileIcon={ProfileIcon}
+      isRunning={isRunning}
+      isDisabled={isDisabled}
+      networkLabel={networkLabel}
+      groupName={groupName}
+      extensionGroupName={extensionGroupName}
+      syncMode={syncMode}
+      syncStatus={syncStatus}
+      handoffStatus={
+        <ProfileHandoffStatus
+          profileId={profile.id}
+          state={handoffState ?? null}
           syncStatus={syncStatus}
-          storedProxies={storedProxies}
-          vpnConfigs={vpnConfigs}
-          hasTags={hasTags}
-          hasNote={hasNote}
-          copied={copied}
-          handleCopyId={handleCopyId}
-          onClose={onClose}
-          onCloneProfile={onCloneProfile}
-          onKillProfile={undefined}
-          visibleActions={visibleActions}
-          t={t}
+          onOpenSync={
+            onOpenProfileSyncDialog
+              ? () => handleAction(() => onOpenProfileSyncDialog(profile))
+              : undefined
+          }
         />
-      </DialogContent>
-    </Dialog>
+      }
+      storedProxies={storedProxies}
+      copied={copied}
+      handleCopyId={handleCopyId}
+      onClose={onClose}
+      onCloneProfile={onCloneProfile}
+      onKillProfile={undefined}
+      visibleActions={visibleActions}
+      section={section}
+      onSectionChange={onSectionChange}
+      t={t}
+    />
   );
 }
 
 interface ProfileInfoLayoutProps {
+  workspaceId: string | null;
+  section: ProfileSection;
+  onSectionChange: (section: ProfileSection) => void;
   profile: BrowserProfile;
   ProfileIcon: React.ComponentType<{ className?: string }>;
   isRunning: boolean;
@@ -670,11 +979,9 @@ interface ProfileInfoLayoutProps {
   extensionGroupName: string | null;
   syncMode: string;
   syncStatus: { status: string; error?: string } | undefined;
-  hasTags: boolean | undefined;
-  hasNote: boolean;
+  handoffStatus: React.ReactNode;
   copied: boolean;
   storedProxies: StoredProxy[];
-  vpnConfigs: VpnConfig[];
   handleCopyId: () => Promise<void>;
   onClose: () => void;
   onCloneProfile?: (profile: BrowserProfile) => void;
@@ -696,14 +1003,20 @@ type ProfileSection =
   | "overview"
   | "fingerprint"
   | "network"
+  | "startPages"
   | "cookies"
   | "extensions"
   | "sync"
   | "automation"
+  | "transfer"
   | "security"
+  | "twoFactor"
   | "delete";
 
 function ProfileInfoLayout({
+  workspaceId,
+  section: requestedSection,
+  onSectionChange,
   profile,
   ProfileIcon,
   isRunning,
@@ -713,10 +1026,8 @@ function ProfileInfoLayout({
   extensionGroupName,
   syncMode,
   syncStatus,
+  handoffStatus,
   storedProxies,
-  vpnConfigs,
-  hasTags,
-  hasNote,
   copied,
   handleCopyId,
   onClose,
@@ -724,7 +1035,7 @@ function ProfileInfoLayout({
   visibleActions,
   t,
 }: ProfileInfoLayoutProps) {
-  const [section, setSection] = React.useState<ProfileSection>("overview");
+  const contentId = React.useId();
 
   // Map sidebar items to existing actions by their stable, language-independent
   // `id`, so clicking a section triggers the existing dialog handler. Matching
@@ -735,13 +1046,22 @@ function ProfileInfoLayout({
     [visibleActions],
   );
 
+  // An ephemeral profile is discarded when the browser closes, so it has
+  // nowhere to keep cookies, extensions or a synced copy. The sections were
+  // hidden outright, which left no way to discover that and read as the app
+  // being broken or the plan lacking the feature. Keep them listed and explain.
+  const isEphemeral = profile.ephemeral === true;
+  const isWayfernProfile = profile.browser === "wayfern";
+
   const deleteAction = findAction("delete");
   const fingerprintAction = findAction("fingerprint");
   const cookiesManageAction = findAction("cookiesManage");
   const cookiesCopyAction = findAction("cookiesCopy");
   const cookiesAction = cookiesManageAction ?? cookiesCopyAction;
   const extensionAction = findAction("extension");
+  const saveTemplateAction = findAction("saveTemplate");
   const syncAction = findAction("sync");
+  const synchronizerAction = findAction("synchronizer");
   const _launchHookAction = findAction("hook");
   const _networkAction = findAction("network");
   // Password actions are no longer routed via the legacy action handlers —
@@ -804,7 +1124,15 @@ function ProfileInfoLayout({
       id: "network",
       icon: <LuGlobe className="size-3.5" />,
       label: t("profileInfo.sections.network"),
-      badge: profile.proxy_id || profile.vpn_id ? networkLabel : undefined,
+      badge: profile.proxy_id ? networkLabel : undefined,
+    },
+    {
+      id: "startPages",
+      icon: <LuHouse className="size-3.5" />,
+      label: t("profileInfo.sections.startPages"),
+      badge: profile.start_urls?.length
+        ? String(profile.start_urls.length)
+        : undefined,
     },
     {
       id: "cookies",
@@ -814,20 +1142,20 @@ function ProfileInfoLayout({
         cookieCount !== null && cookieCount > 0
           ? cookieCount.toLocaleString()
           : undefined,
-      hidden: !cookiesAction,
+      hidden: !cookiesAction && !(isEphemeral && isWayfernProfile),
     },
     {
       id: "extensions",
       icon: <LuPuzzle className="size-3.5" />,
       label: t("profileInfo.sections.extensions"),
       badge: extensionGroupName ?? undefined,
-      hidden: !extensionAction,
+      hidden: !extensionAction && !isEphemeral,
     },
     {
       id: "sync",
       icon: <LuRefreshCw className="size-3.5" />,
       label: t("profileInfo.sections.sync"),
-      hidden: !syncAction,
+      hidden: !syncAction && !isEphemeral,
     },
     {
       id: "automation",
@@ -836,27 +1164,47 @@ function ProfileInfoLayout({
       badge: profile.launch_hook ? t("profileInfo.badges.active") : undefined,
     },
     {
+      id: "transfer",
+      icon: <LuDownload className="size-3.5" />,
+      label: t("profileInfo.sections.transfer"),
+      // Nothing to carry: an ephemeral profile keeps no data between launches
+      // and a temporary one is deleted when its browser stops.
+      hidden: isEphemeral || profile.temporary === true,
+    },
+    {
       id: "security",
       icon: <LuKey className="size-3.5" />,
       label: t("profileInfo.sections.security"),
     },
+    {
+      id: "twoFactor",
+      icon: <LuKeyRound className="size-3.5" />,
+      label: t("profileInfo.sections.twoFactor"),
+    },
   ];
+  const section = sidebarItems.some(
+    (item) => item.id === requestedSection && !item.hidden,
+  )
+    ? requestedSection
+    : "overview";
 
   return (
-    <>
+    <SoftFields>
       {/* Top bar */}
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
+      <div className="flex min-h-11 shrink-0 items-center gap-2 px-3 py-2">
         <LuUsers className="size-3.5 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs">
           <span className="font-semibold">
             {t("profileInfo.breadcrumbRoot")}
           </span>
           <span className="text-muted-foreground">/</span>
-          <span className="truncate text-muted-foreground">{profile.name}</span>
+          <span className="truncate text-muted-foreground" title={profile.name}>
+            {profile.name}
+          </span>
         </div>
         {onCloneProfile && (
           <Button
-            variant="ghost"
+            variant="subtle"
             size="sm"
             className="h-7 gap-1.5 px-2 text-xs"
             disabled={isDisabled}
@@ -866,20 +1214,51 @@ function ProfileInfoLayout({
             {t("profileInfo.duplicate")}
           </Button>
         )}
+        {saveTemplateAction && (
+          <Button
+            variant="subtle"
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-xs"
+            data-slot="profile-info-save-template"
+            onClick={saveTemplateAction.onClick}
+          >
+            <LuLayoutTemplate className="size-3" />
+            {saveTemplateAction.label}
+          </Button>
+        )}
+        {deleteAction && (
+          <Button
+            variant="subtle"
+            size="icon"
+            data-slot="profile-info-delete"
+            aria-label={t("profileInfo.sections.delete")}
+            title={t("profileInfo.sections.delete")}
+            className="size-7 text-destructive-text hover:bg-destructive/10 hover:text-destructive-text"
+            onClick={deleteAction.onClick}
+            disabled={deleteAction.disabled}
+          >
+            <LuTrash2 className="size-3.5" />
+          </Button>
+        )}
         <button
           type="button"
+          data-slot="profile-info-close"
           aria-label={t("common.buttons.close")}
           onClick={onClose}
-          className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors duration-100 hover:bg-accent/50 hover:text-foreground"
+          className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors duration-100 hover:bg-foreground/6 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
           <LuX className="size-3.5" />
         </button>
       </div>
 
       {/* Body */}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col @[40rem]/profile-info:flex-row">
         {/* Sidebar */}
-        <nav className="flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2">
+        <nav
+          aria-label={t("profileMotion.inspectorSections")}
+          data-slot="profile-info-sections"
+          className="flex max-h-[40%] shrink-0 flex-wrap gap-1 overflow-y-auto px-3 py-2 @[40rem]/profile-info:max-h-none @[40rem]/profile-info:w-44 @[40rem]/profile-info:flex-col @[40rem]/profile-info:flex-nowrap @[40rem]/profile-info:px-2"
+        >
           {sidebarItems
             .filter((it) => !it.hidden)
             .map((it) => {
@@ -888,54 +1267,52 @@ function ProfileInfoLayout({
                 <button
                   key={it.id}
                   type="button"
-                  onClick={() => setSection(it.id)}
+                  data-slot="profile-info-section"
+                  data-section={it.id}
+                  aria-current={active ? "location" : undefined}
+                  aria-controls={contentId}
+                  onClick={() => onSectionChange(it.id)}
                   className={cn(
-                    "flex h-7 items-center gap-2 rounded-md px-2 text-left text-xs transition-colors duration-100",
+                    "flex min-h-8 max-w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors duration-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                     active
-                      ? "bg-accent text-accent-foreground"
-                      : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                      ? "bg-foreground/8 text-foreground"
+                      : "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
                   )}
                 >
                   <span className="shrink-0">{it.icon}</span>
-                  <span className="flex-1 truncate">{it.label}</span>
+                  <span className="min-w-0 flex-1 break-words">{it.label}</span>
                   {it.badge && (
-                    <span className="max-w-[60px] truncate text-[9px] tracking-wide text-muted-foreground uppercase">
+                    <span
+                      title={it.badge}
+                      className={cn(
+                        "hidden max-w-[60px] truncate text-[10px] @[40rem]/profile-info:inline",
+                        active ? "opacity-80" : "text-muted-foreground",
+                      )}
+                    >
                       {it.badge}
                     </span>
                   )}
                 </button>
               );
             })}
-          {deleteAction && (
-            <>
-              <div className="my-1 h-px bg-border" />
-              <button
-                type="button"
-                onClick={deleteAction.onClick}
-                disabled={deleteAction.disabled}
-                className="flex h-7 items-center gap-2 rounded-md px-2 text-xs text-destructive transition-colors duration-100 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-50"
-              >
-                <LuTrash2 className="size-3.5 shrink-0" />
-                <span className="flex-1 text-left">
-                  {t("profileInfo.sections.delete")}
-                </span>
-              </button>
-            </>
-          )}
         </nav>
 
         {/* Main */}
-        <div className="scroll-fade min-w-0 flex-1 overflow-y-auto p-4">
+        <div
+          id={contentId}
+          data-slot="profile-info-content"
+          data-profile-id={profile.id}
+          data-section={section}
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4"
+        >
           {section === "overview" && (
             <div className="flex flex-col gap-3">
               {/* Hero */}
               <div className="flex items-center gap-3">
-                <div className="shrink-0 rounded-lg bg-muted p-2.5">
-                  <ProfileIcon className="size-7 text-foreground" />
-                </div>
+                <ProfileIcon className="size-7 shrink-0 text-foreground" />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
-                    <h3 className="truncate text-base font-semibold">
+                    <h3 className="break-words text-base font-semibold">
                       {profile.name}
                     </h3>
                   </div>
@@ -945,15 +1322,29 @@ function ProfileInfoLayout({
                     </span>
                   </div>
                 </div>
-                <WindowColorSwatch profile={profile} />
+                <div className="flex shrink-0 flex-col items-center gap-1">
+                  <WindowColorSwatch profile={profile} />
+                  <span className="max-w-20 text-center text-[10px] text-muted-foreground">
+                    {t("profileInfo.fields.windowColor")}
+                  </span>
+                </div>
               </div>
 
+              {handoffStatus}
+              <ProfileLaunchActivity
+                profileId={profile.id}
+                running={isRunning}
+              />
+
               {/* ID */}
-              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2">
-                <span className="shrink-0 text-[10px] tracking-wide text-muted-foreground uppercase">
-                  ID
+              <div className="flex items-center gap-2 rounded-lg bg-foreground/4 px-3 py-2">
+                <span className="shrink-0 text-xs font-medium text-muted-foreground">
+                  {t("profiles.table.profileId")}
                 </span>
-                <span className="flex-1 truncate font-mono text-xs">
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-xs"
+                  title={profile.id}
+                >
                   {profile.id}
                 </span>
                 <button
@@ -975,32 +1366,31 @@ function ProfileInfoLayout({
                 <InfoCard
                   label={t("profileInfo.fields.group")}
                   value={groupName ?? t("profileInfo.values.none")}
+                  onClick={findAction("group")?.onClick}
+                  disabled={findAction("group")?.disabled}
                 />
                 <InfoCard
                   label={t("profileInfo.fields.proxyVpn")}
                   value={networkLabel}
+                  onClick={() => onSectionChange("network")}
                 />
-                <InfoCard
-                  label={t("profileInfo.fields.tags")}
-                  value={
-                    hasTags
-                      ? (profile.tags ?? []).join(", ")
-                      : t("profileInfo.values.none")
-                  }
+                <ProfileMetadataCard
+                  key={`${profile.id}:tags`}
+                  profile={profile}
+                  field="tags"
+                  disabled={isDisabled}
                 />
-                <InfoCard
-                  label={t("profileInfo.fields.note")}
-                  value={
-                    hasNote
-                      ? (profile.note ?? "")
-                      : t("profileInfo.values.none")
-                  }
+                <ProfileMetadataCard
+                  key={`${profile.id}:note`}
+                  profile={profile}
+                  field="note"
+                  disabled={isDisabled}
                 />
               </div>
 
               {/* Activity */}
               <div className="mt-1 flex flex-col gap-1.5">
-                <span className="text-[10px] tracking-wide text-muted-foreground uppercase">
+                <span className="text-xs font-medium text-muted-foreground">
                   {t("profileInfo.sections.activity")}
                 </span>
                 <div className="grid grid-cols-2 gap-2">
@@ -1034,8 +1424,8 @@ function ProfileInfoLayout({
               )}
 
               {profile.created_by_email && (
-                <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                  <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
+                <div className="rounded-lg bg-foreground/4 px-3 py-2">
+                  <p className="text-xs font-medium text-muted-foreground">
                     {t("sync.team.title")}
                   </p>
                   <p className="mt-0.5 text-sm">
@@ -1067,43 +1457,89 @@ function ProfileInfoLayout({
             <NetworkSectionInline
               profile={profile}
               storedProxies={storedProxies}
-              vpnConfigs={vpnConfigs}
               isDisabled={isDisabled}
               t={t}
             />
           )}
 
-          {section === "cookies" && (
-            <CookiesSectionInline
-              profile={profile}
-              isRunning={isRunning}
-              isDisabled={isDisabled}
-              onCopyCookies={cookiesCopyAction?.onClick}
-              onImportCookies={cookiesManageAction?.onClick}
-              t={t}
-            />
+          {section === "startPages" && (
+            <StartPagesEditor profile={profile} isDisabled={isDisabled} t={t} />
           )}
 
-          {section === "extensions" && (
-            <ExtensionsSectionInline
-              profile={profile}
-              isDisabled={isDisabled}
-              t={t}
-            />
-          )}
+          {section === "cookies" &&
+            (isEphemeral ? (
+              <EphemeralSectionNotice
+                title={t("profileInfo.sections.cookies")}
+                description={t("profileInfo.ephemeral.cookiesUnavailable")}
+              />
+            ) : (
+              <CookiesSectionInline
+                profile={profile}
+                isRunning={isRunning}
+                isDisabled={isDisabled}
+                onCopyCookies={cookiesCopyAction?.onClick}
+                t={t}
+              />
+            ))}
 
-          {section === "sync" && (
-            <SyncSectionInline
-              profile={profile}
-              syncMode={syncMode}
-              syncStatus={syncStatus}
-              isDisabled={isDisabled}
-              t={t}
-            />
-          )}
+          {section === "extensions" &&
+            (isEphemeral ? (
+              <EphemeralSectionNotice
+                title={t("profileInfo.sections.extensions")}
+                description={t("profileInfo.ephemeral.extensionsUnavailable")}
+              />
+            ) : (
+              <ExtensionsSectionInline
+                profile={profile}
+                workspaceId={workspaceId}
+                isDisabled={isDisabled}
+                t={t}
+              />
+            ))}
+
+          {section === "sync" &&
+            (isEphemeral ? (
+              <EphemeralSectionNotice
+                title={t("profileInfo.sections.sync")}
+                description={t("profileInfo.ephemeral.syncUnavailable")}
+              />
+            ) : (
+              <SyncSectionInline
+                profile={profile}
+                syncMode={syncMode}
+                syncStatus={syncStatus}
+                isDisabled={isDisabled}
+                t={t}
+              />
+            ))}
 
           {section === "automation" && (
-            <LaunchHookEditor profile={profile} t={t} />
+            <div className="flex flex-col gap-5">
+              <LaunchHookEditor profile={profile} t={t} />
+              {synchronizerAction && (
+                <Button
+                  data-slot="profile-start-synchronizer"
+                  variant="soft"
+                  size="sm"
+                  className="h-auto min-h-8 self-start whitespace-normal"
+                  onClick={synchronizerAction.onClick}
+                  disabled={synchronizerAction.disabled}
+                >
+                  {synchronizerAction.icon}
+                  {synchronizerAction.label}
+                </Button>
+              )}
+            </div>
+          )}
+
+          {section === "transfer" && (
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <LuDownload className="size-4" />
+                {t("profileInfo.sections.transfer")}
+              </div>
+              <ExportProfileSection profile={profile} />
+            </div>
           )}
 
           {section === "security" && (
@@ -1113,9 +1549,19 @@ function ProfileInfoLayout({
               t={t}
             />
           )}
+
+          {section === "twoFactor" && (
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <LuKeyRound className="size-4" />
+                {t("profileInfo.sections.twoFactor")}
+              </div>
+              <ProfileTotpSection profileId={profile.id} />
+            </div>
+          )}
         </div>
       </div>
-    </>
+    </SoftFields>
   );
 }
 
@@ -1144,7 +1590,7 @@ function _SectionPlaceholder({
       </div>
       <p className="text-xs text-muted-foreground">{description}</p>
       {hint && (
-        <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
+        <div className="rounded-lg bg-foreground/4 px-3 py-2 text-xs">
           {hint}
         </div>
       )}
@@ -1181,8 +1627,8 @@ function _SectionAction({
       className={cn(
         "flex h-9 items-center gap-2 rounded-md px-3 text-left text-xs transition-colors",
         destructive
-          ? "text-destructive hover:bg-destructive/10"
-          : "hover:bg-accent",
+          ? "text-destructive-text hover:bg-destructive/10"
+          : "hover:bg-accent hover:text-accent-foreground",
         "disabled:pointer-events-none disabled:opacity-50",
       )}
     >
@@ -1246,6 +1692,7 @@ function LaunchHookEditor({
       </p>
       <Input
         type="url"
+        data-slot="profile-launch-hook-input"
         value={value}
         onChange={(e) => {
           setValue(e.target.value);
@@ -1254,11 +1701,11 @@ function LaunchHookEditor({
         className="font-mono text-xs"
       />
       {showInvalidHint && (
-        <p className="text-xs text-warning">
+        <p className="text-xs text-warning-text">
           {t("profileInfo.launchHook.invalidUrlHint")}
         </p>
       )}
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error && <p className="text-xs text-destructive-text">{error}</p>}
       <div className="flex items-center gap-2">
         <Button
           size="sm"
@@ -1267,6 +1714,89 @@ function LaunchHookEditor({
           onClick={() => {
             void onSave();
           }}
+        >
+          {isSaving ? t("common.buttons.saving") : t("common.buttons.save")}
+        </Button>
+        {dirty && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 text-xs"
+            onClick={() => {
+              setValue(initial);
+              setError(null);
+            }}
+          >
+            {t("common.buttons.cancel")}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StartPagesEditor({
+  profile,
+  isDisabled,
+  t,
+}: {
+  profile: BrowserProfile;
+  isDisabled: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const { t: tFn } = useTranslation();
+  const initial = (profile.start_urls ?? []).join("\n");
+  const [value, setValue] = React.useState(initial);
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const dirty = value.trim() !== initial;
+
+  React.useEffect(() => {
+    setValue(initial);
+  }, [initial]);
+
+  const onSave = async () => {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const saved = await invoke<BrowserProfile>("update_profile_start_urls", {
+        profileId: profile.id,
+        startUrls: startPagesFromText(value),
+      });
+      setValue((saved.start_urls ?? []).join("\n"));
+    } catch (e) {
+      setError(translateBackendError(tFn, e));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        <LuHouse className="size-4" />
+        {t("profileInfo.sections.startPages")}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {t("startPages.description")}
+      </p>
+      <Textarea
+        data-slot="profile-start-pages-input"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={t("startPages.placeholder")}
+        rows={5}
+        spellCheck={false}
+        disabled={isDisabled || isSaving}
+        className="font-mono text-xs"
+      />
+      {error && <p className="text-xs text-destructive-text">{error}</p>}
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          className="h-7 text-xs"
+          disabled={!dirty || isSaving || isDisabled}
+          onClick={() => void onSave()}
         >
           {isSaving ? t("common.buttons.saving") : t("common.buttons.save")}
         </Button>
@@ -1328,8 +1858,8 @@ function SyncSectionInline({
       <p className="text-xs text-muted-foreground">
         {t("profileInfo.sectionDesc.sync")}
       </p>
-      <div className="flex items-center gap-2">
-        <span className="shrink-0 text-[10px] tracking-wide text-muted-foreground uppercase">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-muted-foreground">
           {t("profileInfo.fields.syncMode")}
         </span>
         <Select
@@ -1339,7 +1869,7 @@ function SyncSectionInline({
             void onChangeMode(v);
           }}
         >
-          <SelectTrigger className="h-7 flex-1 text-xs">
+          <SelectTrigger className="h-8 w-full text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1352,19 +1882,24 @@ function SyncSectionInline({
         </Select>
       </div>
       {syncStatus && (
-        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-          <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
+        <div className="rounded-lg bg-foreground/4 px-3 py-2">
+          <p className="text-xs font-medium text-muted-foreground">
             {t("profileInfo.fields.syncStatus")}
           </p>
           <p className="mt-0.5 text-sm">
             {t(`profileInfo.syncStatusValue.${syncStatus.status}`)}
           </p>
           {syncStatus.error && (
-            <p className="mt-1 text-xs text-destructive">{syncStatus.error}</p>
+            <p className="mt-1 text-xs text-destructive-text">
+              {syncStatus.error}
+            </p>
           )}
         </div>
       )}
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {syncMode !== "Disabled" && (
+        <RestorePoints profileId={profile.id} isDisabled={isDisabled} />
+      )}
+      {error && <p className="text-xs text-destructive-text">{error}</p>}
     </div>
   );
 }
@@ -1372,34 +1907,78 @@ function SyncSectionInline({
 function NetworkSectionInline({
   profile,
   storedProxies,
-  vpnConfigs,
   isDisabled,
   t,
 }: {
   profile: BrowserProfile;
   storedProxies: StoredProxy[];
-  vpnConfigs: VpnConfig[];
   isDisabled: boolean;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [isSaving, setIsSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  // Track the effective selection so the dropdown reflects the last save
-  // even before the parent `profile` prop refreshes from a backend event.
   const [proxyId, setProxyId] = React.useState<string | null>(
     profile.proxy_id ?? null,
   );
-  const [vpnId, setVpnId] = React.useState<string | null>(
-    profile.vpn_id ?? null,
+  const [activeTab, setActiveTab] = React.useState<"paste" | "saved">("paste");
+  const [rawProxyInput, setRawProxyInput] = React.useState("");
+  const [searchFilter, setSearchFilter] = React.useState("");
+  const [isTestingProxy, setIsTestingProxy] = React.useState(false);
+
+  const effectiveProxy = React.useMemo(
+    () => storedProxies.find((p) => p.id === proxyId) ?? null,
+    [storedProxies, proxyId],
   );
+
+  const rotatableProxy = React.useMemo(() => {
+    if (!effectiveProxy) return null;
+    return isDynamicProxy(effectiveProxy.proxy_settings)
+      ? effectiveProxy
+      : null;
+  }, [effectiveProxy]);
+
+  const dnsServerId = React.useId();
+  const [savedDnsServer, setSavedDnsServer] = React.useState(
+    profile.dns_server ?? "",
+  );
+  const [dnsServer, setDnsServer] = React.useState(profile.dns_server ?? "");
+  const [dnsServerValid, setDnsServerValid] = React.useState(true);
+  const dnsServerChanged = dnsServer.trim() !== savedDnsServer;
 
   React.useEffect(() => {
     setProxyId(profile.proxy_id ?? null);
-    setVpnId(profile.vpn_id ?? null);
-  }, [profile.proxy_id, profile.vpn_id]);
+  }, [profile.proxy_id]);
 
-  const onProxyChange = async (value: string) => {
-    const nextId = value === "__none__" ? null : value;
+  React.useEffect(() => {
+    setSavedDnsServer(profile.dns_server ?? "");
+    setDnsServer(profile.dns_server ?? "");
+  }, [profile.dns_server]);
+
+  const onDnsServerSave = async () => {
+    if (!dnsServerChanged || !dnsServerValid) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      const updated = await invoke<BrowserProfile>(
+        "update_profile_dns_server",
+        {
+          profileId: profile.id,
+          dnsServer: dnsServer.trim() || null,
+        },
+      );
+      setSavedDnsServer(updated.dns_server ?? "");
+      setDnsServer(updated.dns_server ?? "");
+      showSuccessToast(
+        t("common.saved", { defaultValue: "Đã lưu DNS server" }),
+      );
+    } catch (e) {
+      setError(translateBackendError(t as never, e));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const onProxyChange = async (nextId: string | null) => {
     setIsSaving(true);
     setError(null);
     try {
@@ -1407,10 +1986,8 @@ function NetworkSectionInline({
         profileId: profile.id,
         proxyId: nextId,
       });
-      // Clearing the proxy implicitly clears any VPN binding too on the
-      // backend, but we mirror it locally for an immediate visual.
       setProxyId(nextId);
-      if (nextId !== null) setVpnId(null);
+      await emit("profiles-changed", { profileId: profile.id });
     } catch (e) {
       setError(translateBackendError(t as never, e));
     } finally {
@@ -1418,99 +1995,388 @@ function NetworkSectionInline({
     }
   };
 
-  const onVpnChange = async (value: string) => {
-    const nextId = value === "__none__" ? null : value;
+  const handleApplyRawProxy = async () => {
+    const parsed = parseRawProxy(rawProxyInput);
+    if (!parsed) {
+      showErrorToast(
+        t("proxies.form.invalidFormat", {
+          defaultValue:
+            "Định dạng không hợp lệ (hỗ trợ host:port:user:pass hoặc URL)",
+        }),
+      );
+      return;
+    }
+
     setIsSaving(true);
-    setError(null);
     try {
-      await invoke("update_profile_vpn", {
-        profileId: profile.id,
-        vpnId: nextId,
+      const newProxyId = `proxy_${crypto.randomUUID()}`;
+      await invoke("create_stored_proxy", {
+        name: `${parsed.host}:${parsed.port}`,
+        proxySettings: {
+          proxy_type: parsed.proxy_type,
+          host: parsed.host,
+          port: parsed.port,
+          username: parsed.username,
+          password: parsed.password,
+        },
+        idempotencyKey: crypto.randomUUID(),
+        proxyId: newProxyId,
+        createdAt: new Date().toISOString(),
       });
-      setVpnId(nextId);
-      if (nextId !== null) setProxyId(null);
+      await onProxyChange(newProxyId);
+      await emit("stored-proxies-changed");
+      setRawProxyInput("");
+      showSuccessToast(
+        t("proxies.assigned", {
+          defaultValue: `Đã gán proxy ${parsed.host}:${parsed.port}`,
+        }),
+      );
     } catch (e) {
-      setError(translateBackendError(t as never, e));
+      showErrorToast(translateBackendError(t as never, e));
     } finally {
       setIsSaving(false);
     }
   };
+
+  const handlePasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) setRawProxyInput(text.trim());
+    } catch {
+      showErrorToast("Không thể đọc từ clipboard");
+    }
+  };
+
+  const filteredStored = React.useMemo(() => {
+    return storedProxies.filter(
+      (p) =>
+        !p.is_cloud_managed &&
+        !p.is_cloud_derived &&
+        (p.name.toLowerCase().includes(searchFilter.toLowerCase()) ||
+          p.proxy_settings.host.includes(searchFilter)),
+    );
+  }, [storedProxies, searchFilter]);
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4 text-xs">
       <div className="flex items-center gap-2 text-sm font-semibold">
-        <LuGlobe className="size-4" />
-        {t("profileInfo.sections.network")}
+        <LuGlobe className="size-4 text-primary" />
+        {t("profileInfo.sections.network", {
+          defaultValue: "Cấu hình Mạng & Proxy",
+        })}
       </div>
       <p className="text-xs text-muted-foreground">
-        {t("profileInfo.sectionDesc.network")}
+        {t("profileInfo.sectionDesc.network", {
+          defaultValue:
+            "Cấu hình proxy riêng biệt, kiểm tra độ trễ và thiết lập DNS cho profile.",
+        })}
       </p>
 
-      <div className="flex items-center gap-2">
-        <span className="w-12 shrink-0 text-[10px] tracking-wide text-muted-foreground uppercase">
-          {t("profileInfo.fields.proxy")}
-        </span>
-        <Select
-          value={proxyId ?? "__none__"}
-          disabled={isDisabled || isSaving}
-          onValueChange={(v) => {
-            void onProxyChange(v);
-          }}
-        >
-          <SelectTrigger className="h-7 flex-1 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__none__">
-              {t("profileInfo.values.none")}
-            </SelectItem>
-            {storedProxies.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      {/* Active proxy card */}
+      {effectiveProxy ? (
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-mono text-xs font-semibold text-emerald-400 truncate">
+              <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>
+                {effectiveProxy.proxy_settings.host}:
+                {effectiveProxy.proxy_settings.port}
+              </span>
+              <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] uppercase text-emerald-300 font-sans">
+                {effectiveProxy.proxy_settings.proxy_type}
+              </span>
+              {effectiveProxy.name !==
+                `${effectiveProxy.proxy_settings.host}:${effectiveProxy.proxy_settings.port}` && (
+                <span className="text-muted-foreground font-normal truncate max-w-[140px]">
+                  ({effectiveProxy.name})
+                </span>
+              )}
+            </div>
+            {rotatableProxy && (
+              <Button
+                type="button"
+                variant="soft"
+                size="sm"
+                className="h-6 px-2 text-[10px] gap-1 shrink-0"
+                disabled={isSaving}
+                onClick={() =>
+                  void rotateProxyIps([rotatableProxy], t as never)
+                }
+              >
+                <LuRefreshCcwDot className="size-3 text-primary animate-spin-reverse" />
+                <span>
+                  {t("proxies.rotation.action", { defaultValue: "Xoay IP" })}
+                </span>
+              </Button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 pt-1 border-t border-emerald-500/20">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[10px] gap-1"
+              onClick={() => {
+                const str = formatProxyClipboard(effectiveProxy);
+                navigator.clipboard.writeText(str);
+                showSuccessToast(`Đã sao chép: ${str}`);
+              }}
+            >
+              <LuCopy className="size-2.5" />
+              <span>{t("common.buttons.copy", { defaultValue: "Copy" })}</span>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[10px] gap-1"
+              disabled={isTestingProxy}
+              onClick={async () => {
+                setIsTestingProxy(true);
+                try {
+                  const res = await invoke<{ is_valid: boolean; ip?: string }>(
+                    "check_proxy_validity",
+                    { proxySettings: effectiveProxy.proxy_settings },
+                  );
+                  if (res.is_valid) {
+                    showSuccessToast(
+                      `Proxy hoạt động tốt (IP: ${res.ip ?? "OK"})`,
+                    );
+                  } else {
+                    showErrorToast("Proxy không thể kết nối hoặc bị timeout");
+                  }
+                } catch {
+                  showErrorToast("Kiểm tra proxy thất bại");
+                } finally {
+                  setIsTestingProxy(false);
+                }
+              }}
+            >
+              <LuSparkles className="size-2.5 text-primary" />
+              <span>
+                {isTestingProxy
+                  ? t("common.checking", { defaultValue: "Đang test..." })
+                  : t("proxies.form.checkProxy", { defaultValue: "Kiểm tra" })}
+              </span>
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[10px] text-destructive hover:bg-destructive/10 hover:text-destructive gap-1 ml-auto"
+              disabled={isSaving}
+              onClick={() => void onProxyChange(null)}
+            >
+              <LuTrash2 className="size-2.5" />
+              <span>{t("proxies.remove", { defaultValue: "Gỡ proxy" })}</span>
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border/60 bg-muted/30 p-2.5 text-muted-foreground flex items-center justify-between text-xs">
+          <span>
+            {t("profileInfo.values.none", {
+              defaultValue: "Chưa gán proxy (kết nối trực tiếp)",
+            })}
+          </span>
+          <span className="rounded bg-muted px-2 py-0.5 text-[10px] font-medium uppercase">
+            Direct
+          </span>
+        </div>
+      )}
+
+      {/* Proxy switcher tabs */}
+      <div className="rounded-lg border border-border/60 bg-card p-3 space-y-3">
+        <div className="grid grid-cols-2 gap-1 rounded-md bg-muted p-1 text-[11px]">
+          <button
+            type="button"
+            onClick={() => setActiveTab("paste")}
+            className={cn(
+              "rounded py-1 font-medium transition-all",
+              activeTab === "paste"
+                ? "bg-background text-foreground shadow-xs font-semibold"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {t("proxies.quickInput", { defaultValue: "Nhập / Dán IP mới" })}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("saved")}
+            className={cn(
+              "rounded py-1 font-medium transition-all",
+              activeTab === "saved"
+                ? "bg-background text-foreground shadow-xs font-semibold"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {t("createProfile.proxy.savedTab", {
+              defaultValue: "Proxy đã lưu",
+            })}{" "}
+            ({storedProxies.length})
+          </button>
+        </div>
+
+        {activeTab === "paste" ? (
+          <div className="space-y-2">
+            <div className="relative">
+              <Input
+                value={rawProxyInput}
+                onChange={(e) => setRawProxyInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void handleApplyRawProxy();
+                  }
+                }}
+                placeholder="host:port:user:pass hoặc http://..."
+                className="h-8 font-mono text-xs pr-16"
+                disabled={isDisabled || isSaving}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={handlePasteClipboard}
+                disabled={isDisabled || isSaving}
+                className="absolute right-1 top-1 h-6 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                <LuCopy className="size-2.5 mr-1" />
+                {t("common.buttons.paste", { defaultValue: "Dán" })}
+              </Button>
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>
+                Hỗ trợ format: ip:port, ip:port:user:pass, socks5://...
+              </span>
+              <Button
+                size="sm"
+                className="h-7 text-xs px-3"
+                disabled={!rawProxyInput.trim() || isSaving || isDisabled}
+                onClick={handleApplyRawProxy}
+              >
+                {isSaving
+                  ? t("common.checking", { defaultValue: "Đang gán..." })
+                  : t("common.buttons.apply", { defaultValue: "Áp dụng" })}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <Input
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              placeholder={t("createProfile.proxy.searchSaved", {
+                defaultValue: "Tìm kiếm proxy đã lưu theo tên hoặc IP...",
+              })}
+              className="h-7 text-xs"
+            />
+            <div className="max-h-44 overflow-y-auto space-y-1 rounded border border-border/50 p-1 bg-background/50">
+              <button
+                type="button"
+                onClick={() => void onProxyChange(null)}
+                className={cn(
+                  "w-full flex items-center justify-between rounded px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                  !proxyId && "bg-accent/70 font-semibold text-primary",
+                )}
+              >
+                <span>
+                  {t("profileInfo.values.none", {
+                    defaultValue: "Không dùng proxy (Direct)",
+                  })}
+                </span>
+                {!proxyId && (
+                  <span className="text-[10px] text-primary">Đang chọn</span>
+                )}
+              </button>
+              {filteredStored.map((p) => {
+                const isSelected = p.id === proxyId;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => void onProxyChange(p.id)}
+                    className={cn(
+                      "w-full flex items-center justify-between rounded px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                      isSelected && "bg-accent/70 font-semibold text-primary",
+                    )}
+                  >
+                    <div className="flex flex-col min-w-0 pr-2">
+                      <span className="truncate font-medium">{p.name}</span>
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {p.proxy_settings.host}:{p.proxy_settings.port} (
+                        {p.proxy_settings.proxy_type})
+                      </span>
+                    </div>
+                    {isSelected && (
+                      <span className="text-[10px] text-primary shrink-0">
+                        Đang chọn
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {filteredStored.length === 0 && (
+                <div className="py-3 text-center text-xs text-muted-foreground">
+                  Không tìm thấy proxy nào phù hợp
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="flex items-center gap-2">
-        <span className="w-12 shrink-0 text-[10px] tracking-wide text-muted-foreground uppercase">
-          {t("profileInfo.fields.vpn")}
-        </span>
-        <Select
-          value={vpnId ?? "__none__"}
-          disabled={isDisabled || isSaving}
-          onValueChange={(v) => {
-            void onVpnChange(v);
-          }}
+      {/* DNS server field */}
+      <form
+        className="flex items-start gap-2 pt-1 border-t border-border/40"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onDnsServerSave();
+        }}
+      >
+        <label
+          htmlFor={dnsServerId}
+          className="w-12 shrink-0 pt-2 text-xs font-medium text-muted-foreground"
         >
-          <SelectTrigger className="h-7 flex-1 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__none__">
-              {t("profileInfo.values.none")}
-            </SelectItem>
-            {vpnConfigs.map((v) => (
-              <SelectItem key={v.id} value={v.id}>
-                {v.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+          {t("profileInfo.fields.dns", { defaultValue: "DNS" })}
+        </label>
+        <div className="min-w-0 flex-1">
+          <DnsServerField
+            id={dnsServerId}
+            value={dnsServer}
+            onChange={setDnsServer}
+            onValidityChange={setDnsServerValid}
+            disabled={isDisabled || isSaving}
+            action={
+              dnsServerChanged && (
+                <Button
+                  type="submit"
+                  size="sm"
+                  className="shrink-0 h-8"
+                  disabled={isDisabled || isSaving || !dnsServerValid}
+                >
+                  {t("common.buttons.save", { defaultValue: "Lưu DNS" })}
+                </Button>
+              )
+            }
+          />
+        </div>
+      </form>
 
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error && <p className="text-xs text-destructive-text">{error}</p>}
     </div>
   );
 }
 
 function ExtensionsSectionInline({
   profile,
+  workspaceId,
   isDisabled,
   t,
 }: {
   profile: BrowserProfile;
+  workspaceId: string | null;
   isDisabled: boolean;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
@@ -1530,9 +2396,11 @@ function ExtensionsSectionInline({
     let mounted = true;
     let unlisten: (() => void) | undefined;
     const load = async () => {
+      if (!workspaceId) return;
       try {
         const data = await invoke<ExtensionGroupOption[]>(
           "list_extension_groups",
+          { workspaceId },
         );
         if (mounted) setGroups(data);
       } catch (e) {
@@ -1550,7 +2418,7 @@ function ExtensionsSectionInline({
       mounted = false;
       unlisten?.();
     };
-  }, [t]);
+  }, [workspaceId, t]);
 
   const onChange = async (value: string) => {
     const next = value === "__none__" ? null : value;
@@ -1558,6 +2426,7 @@ function ExtensionsSectionInline({
     setError(null);
     try {
       await invoke("assign_extension_group_to_profile", {
+        workspaceId,
         profileId: profile.id,
         extensionGroupId: next,
       });
@@ -1578,8 +2447,8 @@ function ExtensionsSectionInline({
       <p className="text-xs text-muted-foreground">
         {t("profileInfo.sectionDesc.extensions")}
       </p>
-      <div className="flex items-center gap-2">
-        <span className="w-16 shrink-0 text-[10px] tracking-wide text-muted-foreground uppercase">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-muted-foreground">
           {t("profileInfo.fields.extensionGroup")}
         </span>
         <Select
@@ -1589,7 +2458,7 @@ function ExtensionsSectionInline({
             void onChange(v);
           }}
         >
-          <SelectTrigger className="h-7 flex-1 text-xs">
+          <SelectTrigger className="h-8 w-full text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1604,7 +2473,7 @@ function ExtensionsSectionInline({
           </SelectContent>
         </Select>
       </div>
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error && <p className="text-xs text-destructive-text">{error}</p>}
     </div>
   );
 }
@@ -1614,14 +2483,12 @@ function CookiesSectionInline({
   isRunning,
   isDisabled,
   onCopyCookies,
-  onImportCookies,
   t,
 }: {
   profile: BrowserProfile;
   isRunning: boolean;
   isDisabled: boolean;
   onCopyCookies?: () => void;
-  onImportCookies?: () => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   type CookieStats = {
@@ -1666,6 +2533,40 @@ function CookiesSectionInline({
   // Export all of this profile's cookies in one of the same formats import
   // accepts (JSON or Netscape). The backend formats every cookie; we just pick
   // a destination file.
+  const handleDirectImportCookies = async () => {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "Cookies", extensions: ["json", "txt"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      const content = await readTextFile(selected);
+      const res = await invoke<{ cookies_imported: number }>(
+        "import_profile_cookies",
+        {
+          profileId: profile.id,
+          content,
+        },
+      );
+      showSuccessToast(
+        t("cookies.import.success", {
+          defaultValue: `Đã nhập thành công ${res.cookies_imported} cookies`,
+          count: res.cookies_imported,
+        }),
+      );
+      try {
+        const data = await invoke<CookieStats>("get_profile_cookie_stats", {
+          profileId: profile.id,
+        });
+        setStats(data);
+      } catch {
+        // ignore
+      }
+    } catch (e) {
+      showErrorToast(translateBackendError(t as never, e));
+    }
+  };
+
   const handleExport = React.useCallback(
     async (format: "json" | "netscape") => {
       setIsExporting(true);
@@ -1700,16 +2601,16 @@ function CookiesSectionInline({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <LuCookie className="size-4" />
           {t("profileInfo.sections.cookies")}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
-                variant="outline"
+                variant="soft"
                 size="sm"
                 className="h-7 gap-1.5"
                 disabled={
@@ -1741,21 +2642,21 @@ function CookiesSectionInline({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          {onImportCookies && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 gap-1.5"
-              disabled={isDisabled || isRunning}
-              onClick={onImportCookies}
-            >
-              <LuUpload className="size-3.5" />
-              {t("common.buttons.import")}
-            </Button>
-          )}
+          <Button
+            variant="soft"
+            size="sm"
+            className="h-7 gap-1.5"
+            disabled={isDisabled || isRunning}
+            onClick={() => {
+              void handleDirectImportCookies();
+            }}
+          >
+            <LuUpload className="size-3.5" />
+            {t("common.buttons.import")}
+          </Button>
           {onCopyCookies && (
             <Button
-              variant="outline"
+              variant="soft"
               size="sm"
               className="h-7 gap-1.5"
               disabled={isDisabled}
@@ -1771,15 +2672,15 @@ function CookiesSectionInline({
         {t("profileInfo.sectionDesc.cookies")}
       </p>
       {isRunning ? (
-        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
+        <div className="rounded-lg bg-foreground/4 px-3 py-2">
           <p className="text-xs text-muted-foreground">
             {t("profileInfo.cookies.runningNotice")}
           </p>
         </div>
       ) : (
         <>
-          <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-            <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
+          <div className="rounded-lg bg-foreground/4 px-3 py-2">
+            <p className="text-xs font-medium text-muted-foreground">
               {t("profileInfo.fields.cookieCount")}
             </p>
             <p className="mt-0.5 text-sm">
@@ -1790,9 +2691,16 @@ function CookiesSectionInline({
                   : "—"}
             </p>
           </div>
+          {profile.ephemeral !== true && !profile.password_protected && (
+            <StorageStateBlock
+              profile={profile}
+              isDisabled={isDisabled}
+              t={t}
+            />
+          )}
           {domains.length > 0 && (
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border bg-muted/40">
-              <p className="shrink-0 border-b border-border px-3 py-2 text-[10px] tracking-wide text-muted-foreground uppercase">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg bg-foreground/4">
+              <p className="shrink-0 border-b border-foreground/6 px-3 py-2 text-xs font-medium text-muted-foreground">
                 {t("profileInfo.cookies.domainsHeader", {
                   count: domains.length,
                 })}
@@ -1812,9 +2720,173 @@ function CookiesSectionInline({
               </ul>
             </div>
           )}
-          {error && <p className="text-xs text-destructive">{error}</p>}
+          {error && <p className="text-xs text-destructive-text">{error}</p>}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The profile's Local Storage with its cookies, as one Playwright
+ * `storageState` file: export it to an automation tool, or import one.
+ */
+function StorageStateBlock({
+  profile,
+  isDisabled,
+  t,
+}: {
+  profile: BrowserProfile;
+  isDisabled: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const [stats, setStats] = React.useState<{
+    origins: number;
+    items: number;
+  } | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [withIndexedDb, setWithIndexedDb] = React.useState(false);
+
+  const loadStats = React.useCallback(async () => {
+    try {
+      setStats(
+        await invoke<{ origins: number; items: number }>(
+          "get_profile_local_storage_stats",
+          { profileId: profile.id },
+        ),
+      );
+    } catch {
+      setStats(null);
+    }
+  }, [profile.id]);
+
+  React.useEffect(() => {
+    void loadStats();
+  }, [loadStats]);
+
+  const handleExport = async () => {
+    setBusy(true);
+    try {
+      const content = await invoke<string>("export_profile_storage_state", {
+        profileId: profile.id,
+        includeCookies: true,
+        includeIndexedDb: withIndexedDb,
+      });
+      const filePath = await save({
+        defaultPath: `${profile.name}_storage_state.json`,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!filePath) return;
+      await writeTextFile(filePath, content);
+      showSuccessToast(t("profileInfo.localStorage.exported"));
+    } catch (e) {
+      showErrorToast(translateBackendError(t as never, e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleImport = async () => {
+    setBusy(true);
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      const content = await readTextFile(selected);
+      const result = await invoke<{
+        origins: number;
+        items: number;
+        cookies_imported: number;
+        indexed_db_records: number;
+      }>("import_profile_storage_state", { profileId: profile.id, content });
+      showSuccessToast(
+        t(
+          result.indexed_db_records > 0
+            ? "profileInfo.localStorage.importedWithIndexedDb"
+            : "profileInfo.localStorage.imported",
+          {
+            items: result.items,
+            origins: result.origins,
+            cookies: result.cookies_imported,
+            records: result.indexed_db_records,
+          },
+        ),
+      );
+      void loadStats();
+    } catch (e) {
+      showErrorToast(translateBackendError(t as never, e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      data-slot="profile-storage-state"
+      className="flex items-center justify-between gap-3 rounded-lg bg-foreground/4 px-3 py-2"
+    >
+      <div className="min-w-0">
+        <p className="text-xs font-medium text-muted-foreground">
+          {t("profileInfo.localStorage.title")}
+        </p>
+        <p className="mt-0.5 text-sm" data-slot="profile-local-storage-stats">
+          {stats
+            ? t("profileInfo.localStorage.stats", {
+                origins: stats.origins,
+                items: stats.items,
+              })
+            : "—"}
+        </p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {t("profileInfo.localStorage.hint")}
+        </p>
+        <label
+          htmlFor={`storage-indexed-db-${profile.id}`}
+          className="mt-1.5 flex cursor-pointer items-start gap-2 text-xs"
+        >
+          <Checkbox
+            id={`storage-indexed-db-${profile.id}`}
+            checked={withIndexedDb}
+            disabled={isDisabled || busy}
+            onCheckedChange={(checked) => setWithIndexedDb(checked === true)}
+            data-slot="storage-state-indexed-db"
+          />
+          <span>
+            <span className="block">
+              {t("profileInfo.localStorage.includeIndexedDb")}
+            </span>
+            <span className="block text-muted-foreground">
+              {t("profileInfo.localStorage.indexedDbHint")}
+            </span>
+          </span>
+        </label>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button
+          variant="soft"
+          size="sm"
+          className="h-7 gap-1.5"
+          data-slot="storage-state-export"
+          disabled={isDisabled || busy}
+          onClick={() => void handleExport()}
+        >
+          <LuDownload className="size-3.5" />
+          {t("common.buttons.export")}
+        </Button>
+        <Button
+          variant="soft"
+          size="sm"
+          className="h-7 gap-1.5"
+          data-slot="storage-state-import"
+          disabled={isDisabled || busy}
+          onClick={() => void handleImport()}
+        >
+          <LuUpload className="size-3.5" />
+          {t("common.buttons.import")}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -1866,20 +2938,6 @@ function FingerprintSectionInline({
     );
   }
 
-  if (!crossOsUnlocked) {
-    return (
-      <div className="flex flex-col items-center gap-3 rounded-lg border p-6 text-center">
-        <LuLock className="size-4 shrink-0 text-muted-foreground" />
-        <h3 className="text-sm font-medium text-foreground">
-          {t("profileInfo.fingerprint.lockedTitle")}
-        </h3>
-        <p className="max-w-[48ch] text-sm text-pretty text-muted-foreground">
-          {t("profileInfo.fingerprint.lockedDescription")}
-        </p>
-      </div>
-    );
-  }
-
   const onWayfernChange = (key: keyof WayfernConfig, value: unknown) => {
     setWayfernConfig((prev) => ({ ...prev, [key]: value }));
     setSuccess(null);
@@ -1917,21 +2975,42 @@ function FingerprintSectionInline({
         {t("profileInfo.sectionDesc.fingerprint")}
       </p>
 
-      <SharedFingerprintConfigForm
-        config={wayfernConfig}
-        onConfigChange={onWayfernChange}
-        forceAdvanced={true}
-        readOnly={isDisabled}
-        crossOsUnlocked={crossOsUnlocked}
-        limitedMode={false}
-        profileVersion={profile.version}
-        profileBrowser={profile.browser}
-      />
+      {crossOsUnlocked ? (
+        <SharedFingerprintConfigForm
+          config={wayfernConfig}
+          onConfigChange={onWayfernChange}
+          forceAdvanced={true}
+          readOnly={isDisabled}
+          crossOsUnlocked={crossOsUnlocked}
+          limitedMode={false}
+          profileVersion={profile.version ?? undefined}
+          profileBrowser={profile.browser}
+        />
+      ) : (
+        <>
+          <div className="flex flex-col items-center gap-3 rounded-lg bg-foreground/4 p-6 text-center">
+            <LuLock className="size-4 shrink-0 text-muted-foreground" />
+            <h3 className="text-sm font-medium text-foreground">
+              {t("profileInfo.fingerprint.lockedTitle")}
+            </h3>
+            <p className="max-w-[48ch] text-sm text-pretty text-muted-foreground">
+              {t("profileInfo.fingerprint.lockedDescription")}
+            </p>
+          </div>
+          <LaunchArgumentsEditor
+            config={wayfernConfig}
+            onConfigChange={onWayfernChange}
+            readOnly={isDisabled}
+          />
+        </>
+      )}
 
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      {success && !error && <p className="text-xs text-success">{success}</p>}
+      {error && <p className="text-xs text-destructive-text">{error}</p>}
+      {success && !error && (
+        <p className="text-xs text-success-text">{success}</p>
+      )}
 
-      <div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
+      <div className="mt-3 flex items-center gap-2 border-t border-foreground/6 pt-3">
         <Button
           size="sm"
           className="h-7 text-xs"
@@ -2030,8 +3109,7 @@ function SecuritySectionInline({
     }
     if (mode === "set" || mode === "change") {
       if (password.length < 8) return t("profilePassword.errors.tooShort");
-      if (password !== confirm)
-        return t("profilePassword.errors.passwordMismatch");
+      if (password !== confirm) return t("profilePassword.errors.mismatch");
     }
     return null;
   };
@@ -2101,8 +3179,7 @@ function SecuritySectionInline({
               setIsVerifyOpen(true);
             }}
             className={cn(
-              "h-7 flex-1 rounded-md border px-2 text-xs transition-colors",
-              "border-border text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+              "h-8 flex-1 rounded-lg bg-foreground/5 px-2 text-xs text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground",
             )}
           >
             {t("profilePassword.modes.validate")}
@@ -2114,10 +3191,10 @@ function SecuritySectionInline({
               reset();
             }}
             className={cn(
-              "h-7 flex-1 rounded-md border px-2 text-xs transition-colors",
+              "h-8 flex-1 rounded-lg px-2 text-xs transition-colors",
               mode === "change"
-                ? "border-transparent bg-accent text-accent-foreground"
-                : "border-border text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                ? "bg-foreground/10 text-foreground"
+                : "bg-foreground/5 text-muted-foreground hover:bg-foreground/8 hover:text-foreground",
             )}
           >
             {t("profilePassword.modes.change")}
@@ -2129,10 +3206,10 @@ function SecuritySectionInline({
               reset();
             }}
             className={cn(
-              "h-7 flex-1 rounded-md border px-2 text-xs transition-colors",
+              "h-8 flex-1 rounded-lg px-2 text-xs transition-colors",
               mode === "remove"
-                ? "border-transparent bg-destructive/10 text-destructive"
-                : "border-border text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                ? "bg-destructive/10 text-destructive-text"
+                : "bg-foreground/5 text-muted-foreground hover:bg-foreground/8 hover:text-foreground",
             )}
           >
             {t("profilePassword.modes.remove")}
@@ -2182,8 +3259,10 @@ function SecuritySectionInline({
         )}
       </div>
 
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      {success && !error && <p className="text-xs text-success">{success}</p>}
+      {error && <p className="text-xs text-destructive-text">{error}</p>}
+      {success && !error && (
+        <p className="text-xs text-success-text">{success}</p>
+      )}
 
       {isRunning && (
         <p className="text-xs text-muted-foreground">
@@ -2395,7 +3474,7 @@ export function ProfileDnsBlocklistDialog({
             href="https://github.com/hagezi/dns-blocklists"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-primary hover:underline"
+            className="text-primary-text hover:underline"
           >
             {t("common.buttons.moreInfo")}
           </a>
@@ -2408,8 +3487,8 @@ export function ProfileDnsBlocklistDialog({
               onClick={() => setLevel(option.value)}
               className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
                 level === option.value
-                  ? "bg-primary/10 text-primary border border-primary/30"
-                  : "hover:bg-accent border border-transparent"
+                  ? "border border-primary/30 bg-primary/10 text-primary-text"
+                  : "border border-transparent hover:bg-accent hover:text-accent-foreground"
               }`}
             >
               {option.label}
@@ -2531,7 +3610,7 @@ export function ProfileBypassRulesDialog({
                       onClick={() => {
                         handleRemoveRule(rule);
                       }}
-                      className="shrink-0 text-muted-foreground transition-colors hover:text-destructive"
+                      className="shrink-0 text-muted-foreground transition-colors hover:text-destructive-text"
                     >
                       <LuX className="size-3.5" />
                     </button>

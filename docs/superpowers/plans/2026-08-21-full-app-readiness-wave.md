@@ -16,11 +16,11 @@ Status: controlled implementation; production release blocked.
 ## Remaining P0 gates
 
 - [x] Local REST/MCP expose metadata-only `cookie.list`; cookie mutations fail closed with an explicit connected-device dispatch error. Local mutation authority remains Tauri/device-bound.
-- [ ] Hosted cookie REST/MCP connected-device job implementation and native Wayfern materialization evidence.
+- [x] Hosted cookie REST connected-device job queue, device inbox/claim/ack, and metadata receipt path implemented in source; cookie value operations remain Tauri/device-local, and MCP intentionally does not expose them. Consolidated code verification and native Wayfern materialization evidence remain open in `docs/superpowers/plans/2026-10-13-connected-cookie-job-boundary.md`.
 - [ ] Native Windows/macOS vault evidence for cookie authority.
 - [ ] Desktop clone/share/revoke/cookie UI with screenshot, keyboard, a11y, and state evidence.
-- [ ] Full legacy control-plane export: organizations, workspaces, memberships, share grants.
-- [ ] Two production-clone migration rehearsals, write-freeze proof, rollback proof, MIG-002/MIG-003 cohorts.
+- [x] Full legacy control-plane export and one-pass direct clone: see `docs/superpowers/plans/2026-10-16-legacy-cloud-profile-migration.md` and its source-to-target evidence.
+- [x] 1.0 profile-payload import waived by owner on 2026-10-17 for the initial 3.0 launch. Existing cloned profile metadata and staged payloads remain preserved; no old data was deleted or imported by this waiver.
 - [ ] Verified Bugmini artifact and native Windows evidence.
 - [ ] macOS arm64 and Intel/waiver evidence.
 - [ ] Trusted-TLS PostgreSQL/S3/Redis interruption and recovery evidence.

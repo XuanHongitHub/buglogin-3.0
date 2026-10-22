@@ -4,9 +4,14 @@ use aes_gcm::{
     Aes256Gcm, Nonce, Tag,
     aead::{AeadInPlace, KeyInit},
 };
+pub use buglogin_domain::profile::ProfileKeyShareEnvelope;
 use buglogin_domain::{
     errors::Problem,
-    ids::{ProxyId, ResourceId, WorkspaceId},
+    ids::{DeviceId, ProxyId, ResourceId, WorkspaceId},
+};
+use hpke::{
+    Deserializable, Kem, OpModeR, OpModeS, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
+    kem::X25519HkdfSha256,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +19,214 @@ const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const ENCRYPTION_VERSION: u8 = 1;
+const PROFILE_KEY_SHARE_VERSION: u8 = 2;
+const PROFILE_KEY_SHARE_INFO: &[u8] = b"buglogin/profile-key-share/v2";
 pub const AUTHENTICATED_CHUNK_OVERHEAD_BYTES: usize = 1 + NONCE_BYTES + TAG_BYTES;
 pub const AUTHENTICATED_CHUNK_VERSION: u8 = ENCRYPTION_VERSION;
+
+type ProfileKeyShareKem = X25519HkdfSha256;
+type ProfileKeyShareAead = ChaCha20Poly1305;
+type ProfileKeyShareKdf = HkdfSha256;
+
+/// Device-held private key for receiving profile resource keys. The raw key is
+/// kept by the caller in the platform secret vault and is never serializable.
+pub struct DevicePrivateKey([u8; 32]);
+
+impl DevicePrivateKey {
+    pub fn generate() -> Result<Self, Problem> {
+        let mut raw = [0_u8; 32];
+        if getrandom::fill(&mut raw).is_err() {
+            raw.fill(0);
+            return Err(crypto_problem("device_key_generation_failed"));
+        }
+        Ok(Self(raw))
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn public_key(&self) -> Result<DevicePublicKey, Problem> {
+        let private_key = <ProfileKeyShareKem as Kem>::PrivateKey::from_bytes(&self.0)
+            .map_err(|_| crypto_problem("invalid_device_private_key"))?;
+        let public_key = ProfileKeyShareKem::sk_to_pk(&private_key).to_bytes();
+        let mut bytes = [0_u8; 32];
+        bytes.copy_from_slice(public_key.as_slice());
+        Ok(DevicePublicKey(bytes))
+    }
+}
+
+impl fmt::Debug for DevicePrivateKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DevicePrivateKey(<redacted>)")
+    }
+}
+
+impl Drop for DevicePrivateKey {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+/// Public HPKE key for a device that is eligible to receive profile access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DevicePublicKey([u8; 32]);
+
+impl DevicePublicKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Keys needed by an authorized recipient to read and continue syncing a
+/// shared encrypted profile. Debug output deliberately omits both secrets.
+pub struct SharedProfileKeys {
+    pub client: ClientKey,
+    pub recovery: RecoveryKey,
+}
+
+impl fmt::Debug for SharedProfileKeys {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SharedProfileKeys(<redacted>)")
+    }
+}
+
+/// Client-generated HPKE envelope that gives one recipient device the keys
+/// needed to read and continue syncing a profile without exposing them to the
+/// API or object store.
+pub fn seal_profile_key_share(
+    workspace_id: WorkspaceId,
+    resource_id: ResourceId,
+    recipient_device_id: String,
+    key_version: String,
+    recipient_public_key: &DevicePublicKey,
+    client_key: &ClientKey,
+    recovery_key: &RecoveryKey,
+) -> Result<ProfileKeyShareEnvelope, Problem> {
+    validate_share_scope(&recipient_device_id, &key_version)?;
+    let public_key =
+        <ProfileKeyShareKem as Kem>::PublicKey::from_bytes(recipient_public_key.as_bytes())
+            .map_err(|_| crypto_problem("invalid_device_public_key"))?;
+    let aad = profile_key_share_aad(
+        &workspace_id,
+        &resource_id,
+        &recipient_device_id,
+        &key_version,
+    );
+    let mut plaintext = [0_u8; KEY_BYTES * 2];
+    plaintext[..KEY_BYTES].copy_from_slice(client_key.as_bytes());
+    plaintext[KEY_BYTES..].copy_from_slice(recovery_key.as_bytes());
+    let seal_result =
+        hpke::single_shot_seal::<ProfileKeyShareAead, ProfileKeyShareKdf, ProfileKeyShareKem>(
+            &OpModeS::Base,
+            &public_key,
+            PROFILE_KEY_SHARE_INFO,
+            &plaintext,
+            &aad,
+        );
+    plaintext.fill(0);
+    let (encapped_key, ciphertext) =
+        seal_result.map_err(|_| crypto_problem("profile_key_share_seal_failed"))?;
+    Ok(ProfileKeyShareEnvelope {
+        schema_version: PROFILE_KEY_SHARE_VERSION,
+        workspace_id,
+        resource_id,
+        recipient_device_id,
+        key_version,
+        encapped_key: encapped_key.to_bytes().as_slice().to_vec(),
+        ciphertext,
+    })
+}
+
+pub fn open_profile_key_share(
+    envelope: &ProfileKeyShareEnvelope,
+    expected_workspace_id: &WorkspaceId,
+    expected_resource_id: &ResourceId,
+    expected_device_id: &str,
+    expected_key_version: &str,
+    private_key: &DevicePrivateKey,
+) -> Result<SharedProfileKeys, Problem> {
+    if envelope.schema_version != PROFILE_KEY_SHARE_VERSION
+        || &envelope.workspace_id != expected_workspace_id
+        || &envelope.resource_id != expected_resource_id
+        || envelope.recipient_device_id != expected_device_id
+        || envelope.key_version != expected_key_version
+    {
+        return Err(crypto_problem("profile_key_share_scope_mismatch"));
+    }
+    validate_share_scope(&envelope.recipient_device_id, &envelope.key_version)?;
+    let private_key = <ProfileKeyShareKem as Kem>::PrivateKey::from_bytes(private_key.as_bytes())
+        .map_err(|_| crypto_problem("invalid_device_private_key"))?;
+    let encapped_key = <ProfileKeyShareKem as Kem>::EncappedKey::from_bytes(&envelope.encapped_key)
+        .map_err(|_| crypto_problem("invalid_profile_key_share_envelope"))?;
+    let aad = profile_key_share_aad(
+        expected_workspace_id,
+        expected_resource_id,
+        expected_device_id,
+        expected_key_version,
+    );
+    let mut plaintext =
+        hpke::single_shot_open::<ProfileKeyShareAead, ProfileKeyShareKdf, ProfileKeyShareKem>(
+            &OpModeR::Base,
+            &private_key,
+            &encapped_key,
+            PROFILE_KEY_SHARE_INFO,
+            &envelope.ciphertext,
+            &aad,
+        )
+        .map_err(|_| crypto_problem("profile_key_share_open_failed"))?;
+    if plaintext.len() != KEY_BYTES * 2 {
+        plaintext.fill(0);
+        return Err(crypto_problem("invalid_profile_key_share_envelope"));
+    }
+    let mut client = [0_u8; KEY_BYTES];
+    let mut recovery = [0_u8; KEY_BYTES];
+    client.copy_from_slice(&plaintext[..KEY_BYTES]);
+    recovery.copy_from_slice(&plaintext[KEY_BYTES..]);
+    plaintext.fill(0);
+    let client_key = ClientKey::from_bytes(client);
+    client.fill(0);
+    let recovery_key = RecoveryKey::from_bytes(recovery);
+    recovery.fill(0);
+    Ok(SharedProfileKeys {
+        client: client_key,
+        recovery: recovery_key,
+    })
+}
+
+fn validate_share_scope(device_id: &str, key_version: &str) -> Result<(), Problem> {
+    if DeviceId::new(device_id).is_err()
+        || key_version.len() != 64
+        || !key_version.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(crypto_problem("invalid_profile_key_share_scope"));
+    }
+    Ok(())
+}
+
+fn profile_key_share_aad(
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+    recipient_device_id: &str,
+    key_version: &str,
+) -> Vec<u8> {
+    format!(
+        "buglogin/profile-key-share/v2/{}/{}/{}/{}",
+        workspace_id.as_str(),
+        resource_id.as_str(),
+        recipient_device_id,
+        key_version
+    )
+    .into_bytes()
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ClientKey([u8; KEY_BYTES]);
@@ -349,5 +560,44 @@ impl AuthenticatedChunk {
 }
 
 fn crypto_problem(code: &'static str) -> Problem {
-    Problem::new(code, "Encrypted chunk operation failed", 409, "sync-crypto")
+    let (status, title, retryable) =
+        if code.ends_with("_generation_failed") || code == "nonce_generation_failed" {
+            (503, "Cryptographic key generation is unavailable", true)
+        } else if code.ends_with("_scope_mismatch") {
+            (
+                409,
+                "Encrypted data belongs to a different resource scope",
+                false,
+            )
+        } else if code.ends_with("_authentication_failed") || code.ends_with("_open_failed") {
+            (422, "Encrypted data could not be authenticated", false)
+        } else if code.starts_with("invalid_") || code.starts_with("unsupported_") {
+            (400, "Encrypted sync input is invalid", false)
+        } else {
+            (500, "Cryptographic operation failed", false)
+        };
+    Problem::new(code, title, status, "sync-crypto").retryable(retryable)
+}
+
+#[cfg(test)]
+mod error_contract_tests {
+    use super::crypto_problem;
+
+    #[test]
+    fn crypto_problem_uses_status_for_failure_class() {
+        let invalid = crypto_problem("invalid_encrypted_chunk");
+        assert_eq!((invalid.status, invalid.retryable), (400, false));
+
+        let scope = crypto_problem("resource_key_envelope_scope_mismatch");
+        assert_eq!((scope.status, scope.retryable), (409, false));
+
+        let authentication = crypto_problem("chunk_authentication_failed");
+        assert_eq!(
+            (authentication.status, authentication.retryable),
+            (422, false)
+        );
+
+        let unavailable = crypto_problem("key_generation_failed");
+        assert_eq!((unavailable.status, unavailable.retryable), (503, true));
+    }
 }

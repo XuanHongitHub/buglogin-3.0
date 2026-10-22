@@ -9,7 +9,7 @@ if (webHost && process.env.BUGLOGIN_ENV === "production" && !apiBaseUrl) {
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  output: webHost ? undefined : "export",
+  output: webHost ? "standalone" : "export",
   images: {
     unoptimized: true,
   },
@@ -19,6 +19,9 @@ const nextConfig: NextConfig = {
   },
   ...(webHost
     ? {
+        experimental: {
+          cpus: Number(process.env.BUGLOGIN_BUILD_CPUS || 2),
+        },
         async rewrites() {
           return {
             beforeFiles: [

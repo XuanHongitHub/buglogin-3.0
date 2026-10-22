@@ -126,9 +126,9 @@ async fn migration_http_flow_inspects_imports_and_preserves_source() {
             &token,
             "migration-import-0001",
             serde_json::json!({
-                "sourceRoot": source,
-                "stagingParent": staging,
-                "destinationRoot": destination,
+                "sourceRoot": source.to_string_lossy(),
+                "stagingParent": staging.to_string_lossy(),
+                "destinationRoot": destination.to_string_lossy(),
                 "runId": "http-cutover-001",
                 "confirmation": "CUTOVER_AND_PROMOTE"
             }),
@@ -228,6 +228,14 @@ fn control_plane_export() -> Value {
             "platformRole": null,
             "accessSource": "direct",
             "createdAt": "2025-01-02T00:00:00Z"
+        }],
+        "profiles": [{
+            "id": "prf_0123456789abcdef0123456789abcdef",
+            "workspaceId": "workspace-http", "name": "HTTP Profile", "runtime": "wayfern",
+            "runtimeVersion": "146.0.7680.177.4", "releaseType": "stable",
+            "proxyId": null, "vpnId": null, "groupId": null, "extensionGroupId": null,
+            "ephemeral": false, "createdAt": "2025-01-01T00:00:00Z",
+            "updatedAt": "2025-01-01T00:00:00Z", "tags": [], "note": null
         }],
         "shareGrants": [{
             "id": "share-http",

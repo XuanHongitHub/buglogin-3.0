@@ -1,19 +1,54 @@
 use std::fmt;
-use std::{env, sync::Mutex};
+use std::{env, io, sync::Mutex};
 
 use buglogin_domain::errors::Problem;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    ConcurrentRemoteChunkStore, RemoteChunk, RemoteChunkStore, checksum_problem,
-    validate_object_key,
+    ConcurrentRemoteChunkStore, MAX_REMOTE_OBJECT_BYTES, RemoteChunk, RemoteChunkStore,
+    checksum_problem, validate_object_key, validate_remote_object_size,
 };
 use crate::blob::checksum;
 
 const CHECKSUM_METADATA: &str = "sha256";
+
+struct BoundedRemoteObjectWriter {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+    maximum_bytes: usize,
+}
+
+impl BoundedRemoteObjectWriter {
+    fn new(maximum_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            exceeded_limit: false,
+            maximum_bytes,
+        }
+    }
+}
+
+impl io::Write for BoundedRemoteObjectWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.len() > self.maximum_bytes.saturating_sub(self.bytes.len()) {
+            self.exceeded_limit = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "remote object exceeds configured size limit",
+            ));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct S3Config {
@@ -57,17 +92,30 @@ impl S3Config {
     }
 
     pub fn from_env() -> Result<Self, Problem> {
+        let endpoint = required_env("BUGLOGIN_S3_ENDPOINT")?;
+        let bucket = required_env("BUGLOGIN_S3_BUCKET")?;
+        let region = env::var("BUGLOGIN_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        let tenant_id = required_env("BUGLOGIN_TENANT_ID")?;
+        let prefix = env::var("BUGLOGIN_S3_PREFIX").unwrap_or_else(|_| "buglogin/v1".to_owned());
+        let access_key = Zeroizing::new(required_env("BUGLOGIN_S3_ACCESS_KEY")?);
+        let secret_key = Zeroizing::new(required_env("BUGLOGIN_S3_SECRET_KEY")?);
+        let session_token = env::var("BUGLOGIN_S3_SESSION_TOKEN")
+            .ok()
+            .map(Zeroizing::new);
+        let path_style = env::var("BUGLOGIN_S3_PATH_STYLE")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         Self::new(
-            required_env("BUGLOGIN_S3_ENDPOINT")?,
-            required_env("BUGLOGIN_S3_BUCKET")?,
-            env::var("BUGLOGIN_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
-            required_env("BUGLOGIN_TENANT_ID")?,
-            env::var("BUGLOGIN_S3_PREFIX").unwrap_or_else(|_| "buglogin/v1".to_owned()),
-            required_env("BUGLOGIN_S3_ACCESS_KEY")?,
-            required_env("BUGLOGIN_S3_SECRET_KEY")?,
-            env::var("BUGLOGIN_S3_SESSION_TOKEN").ok(),
-            env::var("BUGLOGIN_S3_PATH_STYLE")
-                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+            endpoint,
+            bucket,
+            region,
+            tenant_id,
+            prefix,
+            access_key.as_str().to_owned(),
+            secret_key.as_str().to_owned(),
+            session_token
+                .as_ref()
+                .map(|token| token.as_str().to_owned()),
+            path_style,
         )
     }
 
@@ -80,8 +128,18 @@ impl S3Config {
     }
 
     fn validate(&self) -> Result<(), Problem> {
-        if !self.endpoint.starts_with("https://")
-            || self.endpoint.contains(['\r', '\n'])
+        let endpoint = url::Url::parse(&self.endpoint);
+        if self.endpoint.contains(['\r', '\n'])
+            || endpoint.is_err()
+            || endpoint.as_ref().is_ok_and(|url| {
+                url.scheme() != "https"
+                    || url.host_str().is_none_or(str::is_empty)
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || endpoint_authority_has_userinfo(&self.endpoint)
+            })
             || self.bucket.is_empty()
             || self.region.is_empty()
             || self.access_key.is_empty()
@@ -99,13 +157,27 @@ impl S3Config {
         }
         Ok(())
     }
+
+    fn zeroize_credentials(&mut self) {
+        self.access_key.zeroize();
+        self.secret_key.zeroize();
+        if let Some(session_token) = &mut self.session_token {
+            session_token.zeroize();
+        }
+    }
+}
+
+impl Drop for S3Config {
+    fn drop(&mut self) {
+        self.zeroize_credentials();
+    }
 }
 
 impl fmt::Debug for S3Config {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("S3Config")
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &"<redacted>")
             .field("bucket", &self.bucket)
             .field("region", &self.region)
             .field("tenant_id", &self.tenant_id)
@@ -121,6 +193,13 @@ impl fmt::Debug for S3Config {
     }
 }
 
+fn endpoint_authority_has_userinfo(endpoint: &str) -> bool {
+    endpoint
+        .split_once("://")
+        .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'))
+}
+
 pub struct S3RemoteChunkStore {
     bucket: Box<Bucket>,
     config: S3Config,
@@ -128,7 +207,7 @@ pub struct S3RemoteChunkStore {
 }
 
 impl S3RemoteChunkStore {
-    pub fn new(config: S3Config) -> Result<Self, Problem> {
+    pub fn new(mut config: S3Config) -> Result<Self, Problem> {
         let region = Region::Custom {
             region: config.region.clone(),
             endpoint: config.endpoint.clone(),
@@ -147,6 +226,7 @@ impl S3RemoteChunkStore {
         } else {
             bucket
         };
+        config.zeroize_credentials();
         Ok(Self {
             bucket,
             config,
@@ -190,6 +270,7 @@ impl S3RemoteChunkStore {
     ) -> Result<(), Problem> {
         let _lock = self.lock_object(object_key)?;
         let key = self.config.namespaced_key(object_key)?;
+        validate_remote_object_size(bytes.len() as u64)?;
         if checksum(bytes) != expected_checksum {
             return Err(checksum_problem());
         }
@@ -247,8 +328,20 @@ impl S3RemoteChunkStore {
     fn store_get(&self, object_key: &str, expected_checksum: &str) -> Result<RemoteChunk, Problem> {
         let _lock = self.lock_object(object_key)?;
         let key = self.config.namespaced_key(object_key)?;
-        let response = self.bucket.get_object(&key).map_err(|_| unavailable())?;
-        if response.status_code() == 404 {
+        let mut body = BoundedRemoteObjectWriter::new(MAX_REMOTE_OBJECT_BYTES as usize);
+        let status = match self.bucket.get_object_to_writer(&key, &mut body) {
+            Ok(status) => status,
+            Err(_) if body.exceeded_limit => {
+                return Err(Problem::new(
+                    "remote_chunk_too_large",
+                    "Remote object exceeds the configured size limit",
+                    502,
+                    "storage",
+                ));
+            }
+            Err(_) => return Err(unavailable()),
+        };
+        if status == 404 {
             return Err(Problem::new(
                 "remote_chunk_not_found",
                 "Remote chunk not found",
@@ -256,15 +349,14 @@ impl S3RemoteChunkStore {
                 "storage",
             ));
         }
-        if !(200..=299).contains(&response.status_code()) {
+        if !(200..=299).contains(&status) {
             return Err(unavailable());
         }
-        let bytes = response.bytes().to_vec();
-        if checksum(&bytes) != expected_checksum {
+        if checksum(&body.bytes) != expected_checksum {
             return Err(checksum_problem());
         }
         Ok(RemoteChunk {
-            bytes,
+            bytes: body.bytes,
             checksum: expected_checksum.to_owned(),
         })
     }
@@ -403,6 +495,16 @@ fn unavailable() -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn bounded_remote_object_writer_rejects_over_limit_without_growing_buffer() {
+        let mut writer = BoundedRemoteObjectWriter::new(1);
+        let result = writer.write_all(&[1, 2]);
+        assert!(result.is_err());
+        assert!(writer.exceeded_limit);
+        assert!(writer.bytes.is_empty());
+    }
 
     fn config() -> S3Config {
         S3Config::new(
@@ -432,8 +534,107 @@ mod tests {
         assert!(
             S3Config::new("http://localhost", "b", "r", "t", "p", "a", "s", None, true).is_err()
         );
+        assert!(
+            S3Config::new(
+                "https://user:pass@objects.example.test",
+                "b",
+                "r",
+                "t",
+                "p",
+                "a",
+                "s",
+                None,
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            S3Config::new(
+                "https://@objects.example.test",
+                "b",
+                "r",
+                "t",
+                "p",
+                "a",
+                "s",
+                None,
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            S3Config::new(
+                "https://objects.example.test?token=secret",
+                "b",
+                "r",
+                "t",
+                "p",
+                "a",
+                "s",
+                None,
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            S3Config::new(
+                "https://objects.example.test/#fragment",
+                "b",
+                "r",
+                "t",
+                "p",
+                "a",
+                "s",
+                None,
+                true,
+            )
+            .is_err()
+        );
+        assert!(S3Config::new("https://", "b", "r", "t", "p", "a", "s", None, true).is_err());
+        assert!(
+            S3Config::new(
+                "https://objects.example.test:9443/s3-prefix",
+                "b",
+                "r",
+                "t",
+                "p",
+                "a",
+                "s",
+                None,
+                true,
+            )
+            .is_ok()
+        );
         let debug = format!("{:?}", config());
+        assert!(!debug.contains("objects.example.test"));
         assert!(!debug.contains("access-canary"));
         assert!(!debug.contains("secret-canary"));
+    }
+
+    #[test]
+    fn config_zeroizes_cloud_credentials() {
+        let mut configured = S3Config::new(
+            "https://objects.example.test",
+            "chunks",
+            "us-east-1",
+            "tenant-a",
+            "buglogin/v1",
+            "access-canary",
+            "secret-canary",
+            Some("session-canary".to_owned()),
+            true,
+        )
+        .unwrap();
+
+        configured.zeroize_credentials();
+
+        assert!(configured.access_key.is_empty());
+        assert!(configured.secret_key.is_empty());
+        assert_eq!(configured.session_token.as_deref(), Some(""));
+
+        let store = S3RemoteChunkStore::new(config()).unwrap();
+        assert!(store.config.access_key.is_empty());
+        assert!(store.config.secret_key.is_empty());
+        assert!(store.config.session_token.is_none());
     }
 }

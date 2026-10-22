@@ -1,46 +1,53 @@
 import type { SortingState } from "@tanstack/react-table";
-import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import type { TableSortingSettings } from "@/types";
 
+const SORTING_STORAGE_KEY = "buglogin.profile-table.sorting.v1";
+const DEFAULT_SORTING: TableSortingSettings = {
+  column: "name",
+  direction: "asc",
+};
+
 export function useTableSorting() {
-  const [sortingSettings, setSortingSettings] = useState<TableSortingSettings>({
-    column: "name",
-    direction: "asc",
-  });
+  const [sortingSettings, setSortingSettings] =
+    useState<TableSortingSettings>(DEFAULT_SORTING);
   const [isLoaded, setIsLoaded] = useState(false);
 
   // Load sorting settings on mount
   useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        const settings = await invoke<TableSortingSettings>(
-          "get_table_sorting_settings",
-        );
-        setSortingSettings(settings);
-      } catch (error) {
-        console.error("Failed to load table sorting settings:", error);
-        // Keep default settings if loading fails
-      } finally {
-        setIsLoaded(true);
+    try {
+      const saved = window.sessionStorage.getItem(SORTING_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<TableSortingSettings>;
+        if (
+          typeof parsed.column === "string" &&
+          (parsed.direction === "asc" || parsed.direction === "desc")
+        ) {
+          setSortingSettings({
+            column: parsed.column,
+            direction: parsed.direction,
+          });
+        }
       }
-    };
-
-    void loadSettings();
+    } catch {
+      // A malformed or unavailable browser-session preference falls back to
+      // the default sort; it must not block profile loading.
+    }
+    setIsLoaded(true);
   }, []);
 
-  // Save sorting settings to disk
-  const saveSortingSettings = useCallback(
-    async (settings: TableSortingSettings) => {
-      try {
-        await invoke("save_table_sorting_settings", { sorting: settings });
-        setSortingSettings(settings);
-      } catch (error) {
-        console.error("Failed to save table sorting settings:", error);
-      }
-    },
-    [],
-  );
+  // Sorting is a transient table view preference, scoped to this app session.
+  const saveSortingSettings = useCallback((settings: TableSortingSettings) => {
+    try {
+      window.sessionStorage.setItem(
+        SORTING_STORAGE_KEY,
+        JSON.stringify(settings),
+      );
+      setSortingSettings(settings);
+    } catch {
+      setSortingSettings(settings);
+    }
+  }, []);
 
   // Convert our settings to tanstack table sorting format
   const getTableSorting = useCallback((): SortingState => {
@@ -64,7 +71,7 @@ export function useTableSorting() {
           column: sorting[0].id,
           direction: sorting[0].desc ? "desc" : "asc",
         };
-        void saveSortingSettings(newSettings);
+        saveSortingSettings(newSettings);
       }
     },
     [saveSortingSettings, isLoaded],

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export async function verifyVersionAuthority(root = resolve(import.meta.dirname, "../..")) {
@@ -14,6 +14,10 @@ export async function verifyVersionAuthority(root = resolve(import.meta.dirname,
   requireEqual(cargoVersion, packageJson.version, "Cargo.toml workspace version");
   requireEqual(lockedPackage.version, packageJson.version, "Cargo.lock version");
   requireEqual(tauriConfig.version, packageJson.version, "tauri.conf.json version");
+  if (!tauriConfig.bundle?.icon?.includes("icons/icon.icns")) {
+    throw new Error("[release-policy] macOS bundle must include icons/icon.icns");
+  }
+  await access(resolve(root, "apps/desktop/src-tauri/icons/icon.icns"));
   if (!rootPackage.scripts?.tauri?.includes("apps/desktop")) throw new Error("[release-policy] root tauri script must target apps/desktop");
   if (tauriConfig.bundle?.active !== true) throw new Error("[release-policy] production desktop bundling must be active");
 

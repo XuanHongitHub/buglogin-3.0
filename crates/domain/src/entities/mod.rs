@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::ids::{
@@ -15,11 +15,37 @@ pub enum Runtime {
     Bugmini,
     Bugthor,
     Bughelium,
+    /// Migration-only marker for a legacy runtime with no approved local adapter.
+    Preserved,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileCreateRuntime {
+    Wayfern,
+    Bugmini,
+}
+
+impl From<ProfileCreateRuntime> for Runtime {
+    fn from(runtime: ProfileCreateRuntime) -> Self {
+        match runtime {
+            ProfileCreateRuntime::Wayfern => Self::Wayfern,
+            ProfileCreateRuntime::Bugmini => Self::Bugmini,
+        }
+    }
+}
+
+fn deserialize_profile_create_runtime<'de, D>(deserializer: D) -> Result<Runtime, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    ProfileCreateRuntime::deserialize(deserializer).map(Into::into)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProfileState {
+    #[serde(alias = "idle")]
     Created,
     Ready,
     Launching,
@@ -27,6 +53,23 @@ pub enum ProfileState {
     Stopping,
     Failed,
     Recovering,
+}
+
+#[cfg(test)]
+mod profile_state_compat_tests {
+    use super::ProfileState;
+
+    #[test]
+    fn legacy_idle_state_deserializes_as_created() {
+        assert_eq!(
+            serde_json::from_str::<ProfileState>("\"idle\"").unwrap(),
+            ProfileState::Created
+        );
+        assert_eq!(
+            serde_json::to_string(&ProfileState::Created).unwrap(),
+            "\"created\""
+        );
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -46,6 +89,7 @@ pub struct ProfileCreateInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
+    #[serde(deserialize_with = "deserialize_profile_create_runtime")]
     pub runtime: Runtime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_version: Option<String>,
@@ -55,6 +99,135 @@ pub struct ProfileCreateInput {
     pub proxy_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint_target: Option<ProfileFingerprintTarget>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FingerprintOperatingSystem {
+    Windows,
+    Macos,
+    Linux,
+    Android,
+    Ios,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileFingerprintTarget {
+    pub operating_system: FingerprintOperatingSystem,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operating_system_version: Option<String>,
+}
+
+pub const PROFILE_RUNTIME_CONFIG_SCHEMA_VERSION: u8 = 1;
+
+/// Versioned runtime configuration used by the Wayfern profile adapter.
+/// Keep this DTO shared across API validation and desktop launch parsing.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WayfernProfileRuntimeConfig {
+    pub schema_version: u8,
+    pub wayfern: WayfernRuntimeConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WayfernRuntimeConfig {
+    pub fingerprint_target: ProfileFingerprintTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WayfernRuntimeConfigError {
+    Invalid,
+    UnsupportedSchema,
+    FingerprintRuntimeUnsupported,
+    MobileFingerprintUnavailable,
+    FingerprintVersionInvalid,
+    FingerprintVersionUnsupported,
+}
+
+impl WayfernRuntimeConfigError {
+    pub fn problem_details(self) -> (&'static str, &'static str, u16) {
+        match self {
+            Self::Invalid => (
+                "profile_runtime_config_invalid",
+                "Wayfern profile configuration is invalid",
+                409,
+            ),
+            Self::UnsupportedSchema => (
+                "profile_runtime_config_version_unsupported",
+                "Wayfern profile configuration version is unsupported",
+                409,
+            ),
+            Self::FingerprintRuntimeUnsupported => (
+                "fingerprint_runtime_unsupported",
+                "Fingerprint targets are supported only by the Wayfern runtime",
+                400,
+            ),
+            Self::MobileFingerprintUnavailable => (
+                "fingerprint_provider_unavailable",
+                "This BugLogin build cannot generate mobile fingerprints",
+                409,
+            ),
+            Self::FingerprintVersionInvalid => (
+                "fingerprint_version_invalid",
+                "Fingerprint operating system version must use numeric components",
+                400,
+            ),
+            Self::FingerprintVersionUnsupported => (
+                "fingerprint_version_unsupported",
+                "The installed Wayfern provider cannot select an operating system version",
+                409,
+            ),
+        }
+    }
+}
+
+pub fn validate_wayfern_fingerprint_target(
+    target: &ProfileFingerprintTarget,
+) -> Result<(), WayfernRuntimeConfigError> {
+    if matches!(
+        target.operating_system,
+        FingerprintOperatingSystem::Android | FingerprintOperatingSystem::Ios
+    ) {
+        return Err(WayfernRuntimeConfigError::MobileFingerprintUnavailable);
+    }
+    if let Some(version) = target.operating_system_version.as_deref() {
+        let valid = !version.is_empty()
+            && version.len() <= 12
+            && version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+            && version.as_bytes()[0].is_ascii_digit()
+            && version.as_bytes()[version.len() - 1].is_ascii_digit()
+            && !version.contains("..");
+        return Err(if valid {
+            WayfernRuntimeConfigError::FingerprintVersionUnsupported
+        } else {
+            WayfernRuntimeConfigError::FingerprintVersionInvalid
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_wayfern_runtime_config(
+    runtime: &Runtime,
+    value: &Value,
+) -> Result<(), WayfernRuntimeConfigError> {
+    if value.get("wayfern").is_none() {
+        return Ok(());
+    }
+    if runtime != &Runtime::Wayfern {
+        return Err(WayfernRuntimeConfigError::FingerprintRuntimeUnsupported);
+    }
+    let config: WayfernProfileRuntimeConfig =
+        serde_json::from_value(value.clone()).map_err(|_| WayfernRuntimeConfigError::Invalid)?;
+    if config.schema_version != PROFILE_RUNTIME_CONFIG_SCHEMA_VERSION {
+        return Err(WayfernRuntimeConfigError::UnsupportedSchema);
+    }
+    validate_wayfern_fingerprint_target(&config.wayfern.fingerprint_target)
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

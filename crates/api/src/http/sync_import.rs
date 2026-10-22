@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    io::{self, Read, Write},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -22,24 +23,30 @@ use buglogin_storage::control::{
     ClaimControlCommand, ControlIdempotencyClaim, ControlIdempotencyClaimToken,
 };
 use buglogin_sync::{
-    coordination::{CoordinationAuth, CoordinationBackend, CoordinationScope},
+    coordination::{
+        CoordinationAuth, CoordinationBackend, CoordinationScope, lease_release_idempotency_key,
+    },
     export::SyncExport,
     import::{
-        SyncImportPlan, SyncStageReceipt, SyncStagedObject, plan_sync_import,
+        SyncImportPlan, SyncStageReceipt, SyncStagedObject, plan_sync_import_manifest,
         sync_object_storage_key,
     },
 };
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     sync::{Semaphore, oneshot},
     task::JoinHandle,
-    time::{interval, timeout},
+    time::{interval, sleep, timeout},
 };
+use tokio_util::io::{StreamReader, SyncIoBridge};
+use zeroize::Zeroizing;
 
 use super::{
-    ApiState, SyncMigrationJournal, SyncMigrationJournalObject, SyncMigrationJournalState,
-    authenticate, grants, hex_encode, now, problem, response,
+    ApiState, SyncMigrationJournal, SyncMigrationJournalLock, SyncMigrationJournalObject,
+    SyncMigrationJournalState, authenticate, checked_now, checked_now_ms, grants, hex_encode,
+    problem, request_now_ms, response,
 };
 
 const JOURNAL_SCHEMA: &str = "buglogin.migration-sync-journal/1";
@@ -62,27 +69,33 @@ impl LeaseHeartbeat {
         resource_id: buglogin_domain::ids::ResourceId,
         auth: CoordinationAuth,
         owner_token: String,
+        operation_id: String,
     ) -> Self {
+        let mut heartbeat_sequence = 0_u64;
         spawn_lease_heartbeat(
             move || {
+                let idempotency_key =
+                    next_lease_heartbeat_sequence(&mut heartbeat_sequence).map(|sequence| {
+                        lease_heartbeat_idempotency_key(&operation_id, &owner_token, &sequence)
+                    });
                 let backend = Arc::clone(&backend);
                 let workspace_id = workspace_id.clone();
                 let resource_id = resource_id.clone();
                 let auth = auth.clone();
                 let owner_token = owner_token.clone();
                 async move {
-                    backend
-                        .renew_lease(
-                            CoordinationScope {
-                                workspace_id: &workspace_id,
-                                auth: &auth,
-                            },
-                            &resource_id,
-                            &owner_token,
-                            IMPORT_LEASE_TTL,
-                        )
-                        .await
-                        .map(|_| ())
+                    let idempotency_key = idempotency_key?;
+                    renew_lease_with_retry(
+                        backend.as_ref(),
+                        &workspace_id,
+                        &resource_id,
+                        &auth,
+                        &owner_token,
+                        IMPORT_LEASE_TTL,
+                        &idempotency_key,
+                    )
+                    .await
+                    .map(|_| ())
                 }
             },
             IMPORT_LEASE_HEARTBEAT,
@@ -98,6 +111,36 @@ impl LeaseHeartbeat {
             .is_err()
         {
             self.task.abort();
+        }
+    }
+}
+
+async fn renew_lease_with_retry(
+    backend: &dyn CoordinationBackend,
+    workspace_id: &buglogin_domain::ids::WorkspaceId,
+    resource_id: &buglogin_domain::ids::ResourceId,
+    auth: &CoordinationAuth,
+    owner_token: &str,
+    ttl: Duration,
+    idempotency_key: &str,
+) -> Result<buglogin_sync::coordination::LeaseGrant, Problem> {
+    let mut attempt = 0;
+    loop {
+        match backend
+            .renew_lease_idempotent(
+                CoordinationScope { workspace_id, auth },
+                resource_id,
+                owner_token,
+                ttl,
+                idempotency_key,
+            )
+            .await
+        {
+            Err(error) if error.retryable && attempt == 0 => {
+                attempt += 1;
+                sleep(Duration::from_millis(250)).await;
+            }
+            result => return result,
         }
     }
 }
@@ -177,7 +220,6 @@ pub(super) async fn import_sync(
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
     let principal = authenticate(&state, &headers)?;
-    let _admission = sync_import_request_slot()?;
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -190,46 +232,107 @@ pub(super) async fn import_sync(
             415,
         )));
     }
+    if super::declared_body_exceeds_limit(&headers, MAX_SYNC_IMPORT_REQUEST_BYTES)
+        .map_err(response)?
+    {
+        return Err(response(
+            problem(
+                "sync_import_request_too_large",
+                "Sync import request exceeds the configured size limit",
+                413,
+            )
+            .with_field("maxBytes", MAX_SYNC_IMPORT_REQUEST_BYTES),
+        ));
+    }
+    let _admission = sync_import_request_slot()?;
     let input = parse_sync_import_input(body, MAX_SYNC_IMPORT_REQUEST_BYTES).await?;
     let receipt = import_sync_authorized(&state, &headers, &principal, input).await?;
     Ok((StatusCode::OK, Json(receipt)).into_response())
 }
 
-fn sync_import_request_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
-    Arc::clone(SYNC_IMPORT_REQUEST_SLOT.get_or_init(|| Arc::new(Semaphore::new(1))))
-        .try_acquire_owned()
-        .map_err(|_| {
-            response(
-                problem(
-                    "sync_import_capacity_exhausted",
-                    "Another direct sync import is already running",
-                    503,
+fn sync_import_request_slot() -> Result<
+    (
+        tokio::sync::OwnedSemaphorePermit,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    Response,
+> {
+    let import_permit =
+        Arc::clone(SYNC_IMPORT_REQUEST_SLOT.get_or_init(|| Arc::new(Semaphore::new(1))))
+            .try_acquire_owned()
+            .map_err(|_| {
+                response(
+                    problem(
+                        "sync_import_capacity_exhausted",
+                        "Another direct sync import is already running",
+                        503,
+                    )
+                    .retryable(true),
                 )
-                .retryable(true),
-            )
-        })
+            })?;
+    let transfer_permit = super::large_transfer_body_slot().map_err(response)?;
+    Ok((import_permit, transfer_permit))
 }
 
 async fn parse_sync_import_input(
     body: axum::body::Body,
     max_bytes: usize,
 ) -> Result<SyncImportInput, Response> {
-    let bytes = axum::body::to_bytes(body, max_bytes).await.map_err(|_| {
+    let stream = body
+        .into_data_stream()
+        .map_err(|error| io::Error::other(error.to_string()));
+    let reader = StreamReader::new(stream);
+    let parse_result = tokio::task::spawn_blocking(move || {
+        let bridge = SyncIoBridge::new(reader);
+        // Leave one byte of headroom so a complete JSON body over the configured cap is
+        // distinguishable from a valid body exactly at the cap, without buffering the body.
+        let limit = u64::try_from(max_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut bounded = bridge.take(limit);
+        // `from_reader` deserializes one value and can return without consuming trailing
+        // bytes. Drive the deserializer to the end so chunked requests cannot bypass the
+        // byte limit with a valid JSON prefix and so a second/trailing JSON value is rejected.
+        let parsed = (|| {
+            let mut deserializer = serde_json::Deserializer::from_reader(&mut bounded);
+            let input = SyncImportInput::deserialize(&mut deserializer)?;
+            deserializer.end().map(|()| input)
+        })();
+        if bounded.limit() == 0 {
+            Err(true)
+        } else {
+            parsed.map_err(|_| false)
+        }
+    })
+    .await
+    .map_err(|_| {
         response(
             problem(
-                "sync_import_request_too_large",
-                "Sync import request exceeds the configured size limit",
-                413,
+                "sync_import_parser_unavailable",
+                "Sync import parser is temporarily unavailable",
+                503,
             )
-            .with_field("maxBytes", max_bytes),
+            .retryable(true),
         )
     })?;
-    serde_json::from_slice::<SyncImportInput>(&bytes).map_err(|_| {
-        response(problem(
-            "sync_import_request_invalid",
-            "Sync import request JSON is invalid",
-            422,
-        ))
+
+    parse_result.map_err(|too_large| {
+        if too_large {
+            response(
+                problem(
+                    "sync_import_request_too_large",
+                    "Sync import request exceeds the configured size limit",
+                    413,
+                )
+                .with_field("maxBytes", max_bytes),
+            )
+        } else {
+            response(problem(
+                "sync_import_request_invalid",
+                "Sync import request JSON is invalid",
+                422,
+            ))
+        }
     })
 }
 
@@ -237,7 +340,7 @@ pub(super) async fn import_sync_authorized(
     state: &ApiState,
     headers: &HeaderMap,
     principal: &buglogin_domain::permissions::Principal,
-    input: SyncImportInput,
+    mut input: SyncImportInput,
 ) -> Result<SyncImportReceipt, Response> {
     let actor_id = principal
         .account_id
@@ -252,11 +355,43 @@ pub(super) async fn import_sync_authorized(
         .as_str()
         .to_owned();
     input.export.validate().map_err(response)?;
+    state.refresh_control_aggregate().map_err(response)?;
+    let now = checked_now("sync-import-preflight").map_err(response)?;
+    let principal = state
+        .authenticate_token(&bearer_token(headers)?, now)
+        .map_err(response)?;
+    if principal
+        .account_id
+        .as_ref()
+        .map(|account| account.as_str())
+        != Some(actor_id.as_str())
+    {
+        return Err(response(problem(
+            "authentication_required",
+            "Authentication is no longer valid for this import",
+            401,
+        )));
+    }
     authorize(&state, &principal, &input.export)?;
     verify_binding(&state, &input.export)?;
+    let grants = state.grants().map_err(response)?;
+    super::control::validate_profile_proxy_dependencies_problem(
+        state,
+        &principal,
+        &grants,
+        &input.export.workspace_id,
+        &input.export.resource_id,
+        &input.export.manifest,
+        false,
+        false,
+        true,
+    )
+    .map_err(response)?;
     let idempotency_key = required_idempotency(&headers)?;
-    let request_hash = sha256_json(&input)?;
-    let export_hash = sha256_json(&input.export)?;
+    let (request_hash, export_hash) = sync_import_hashes(&input)?;
+    // Full export validation and request hashing are complete. Move, rather than clone, the
+    // large payload buffer out of the metadata envelope used by authorization/finalization.
+    let import_blobs = std::mem::take(&mut input.export.blobs);
     let canonical_key = sha256_parts(&[
         "migration-sync-v1",
         &actor_id,
@@ -268,15 +403,22 @@ pub(super) async fn import_sync_authorized(
     let operation_id = format!("op_{}", &request_hash[..32]);
     let journal_id = format!("msi_{}", &canonical_key[..40]);
 
-    let current = state
-        .current_sync_manifest(&input.export.workspace_id, &input.export.resource_id)
-        .map_err(response)?;
     if input.dry_run {
-        let fencing_token = current
-            .as_ref()
-            .map_or(1, |manifest| manifest.fencing_token.saturating_add(1));
-        let plan =
-            plan_sync_import(&input.export, current.as_ref(), fencing_token).map_err(response)?;
+        let current = state
+            .current_sync_manifest_fresh(&input.export.workspace_id, &input.export.resource_id)
+            .map_err(response)?;
+        let fencing_token = match current.as_ref() {
+            Some(manifest) => manifest.fencing_token.checked_add(1).ok_or_else(|| {
+                response(problem(
+                    "sync_fencing_token_exhausted",
+                    "Profile sync fencing token cannot be incremented",
+                    409,
+                ))
+            })?,
+            None => 1,
+        };
+        let plan = plan_sync_import_manifest(&input.export, current.as_ref(), fencing_token)
+            .map_err(response)?;
         return Ok(receipt(
             &operation_id,
             &input.export,
@@ -287,6 +429,19 @@ pub(super) async fn import_sync_authorized(
             "planned",
         ));
     }
+
+    // Recovery takes the same journal-scoped lock before fencing a stale staging or finalizing
+    // record. Holding it through commit/release prevents age-based cleanup from racing a live
+    // importer that is still renewing its resource lease.
+    let _journal_lock = SyncMigrationJournalLock::acquire(state, &journal_id).map_err(response)?;
+
+    // The in-process semaphore does not coordinate multiple API instances. A
+    // PostgreSQL advisory lock prevents two retries with the same idempotency
+    // key from both reconstructing the same pending claim and writing the same
+    // journal concurrently. Different idempotency keys remain coordinated by
+    // the resource lease below.
+    let _idempotency_lock =
+        SyncImportIdempotencyLock::acquire(state, &store_key).map_err(response)?;
 
     let claim_token = sha256_parts(&[
         "migration-sync-claim-v1",
@@ -350,9 +505,7 @@ pub(super) async fn import_sync_authorized(
                 || journal.resource_id != input.export.resource_id.as_str()
                 || matches!(
                     journal.state,
-                    SyncMigrationJournalState::Active
-                        | SyncMigrationJournalState::CleanupPending
-                        | SyncMigrationJournalState::Abandoned
+                    SyncMigrationJournalState::Active | SyncMigrationJournalState::CleanupPending
                 )
             {
                 return Err(response(problem(
@@ -361,7 +514,30 @@ pub(super) async fn import_sync_authorized(
                     409,
                 )));
             }
-            (journal, revision)
+            if journal.state == SyncMigrationJournalState::Abandoned {
+                let mut journal = journal;
+                journal.state = SyncMigrationJournalState::Staging;
+                journal.created_objects.clear();
+                journal.resumed_objects.clear();
+                journal.reserved_objects.clear();
+                journal.destination_fencing_token = None;
+                journal.control_revision_before = control_revision_before;
+                journal.control_revision_after = None;
+                journal.updated_at_ms = request_now_ms(headers)?;
+                journal.error_code = None;
+                let next_revision = state
+                    .persist_sync_migration_journal(
+                        &journal_id,
+                        revision,
+                        journal_write_key(&journal_id, "staging-reopen", revision),
+                        actor_id.clone(),
+                        &journal,
+                    )
+                    .map_err(response)?;
+                (journal, next_revision)
+            } else {
+                (journal, revision)
+            }
         }
         None => {
             let journal = SyncMigrationJournal {
@@ -378,10 +554,11 @@ pub(super) async fn import_sync_authorized(
                 state: SyncMigrationJournalState::Staging,
                 created_objects: vec![],
                 resumed_objects: vec![],
+                reserved_objects: vec![],
                 destination_fencing_token: None,
                 control_revision_before,
                 control_revision_after: None,
-                updated_at_ms: now().saturating_mul(1_000),
+                updated_at_ms: request_now_ms(headers)?,
                 error_code: None,
             };
             let revision = state
@@ -397,8 +574,9 @@ pub(super) async fn import_sync_authorized(
         }
     };
 
-    let auth =
-        CoordinationAuth::new(actor_id.clone(), bearer_token(&headers)?).map_err(response)?;
+    let mut raw_bearer = bearer_token(&headers)?;
+    let auth = CoordinationAuth::new(actor_id.clone(), std::mem::take(&mut *raw_bearer))
+        .map_err(response)?;
     let backend = state.coordination().map_err(response)?;
     let lease_idempotency_key = lease_attempt_idempotency_key(&operation_id).map_err(response)?;
     let mut lease = backend
@@ -414,26 +592,85 @@ pub(super) async fn import_sync_authorized(
         .await
         .map_err(|error| {
             let error = error.retryable(true);
-            persist_stage_failure(
+            let error = persist_stage_failure(
                 state,
                 &journal_id,
                 journal_revision,
                 &actor_id,
                 &mut journal,
-                &error,
+                error,
             );
             response(error)
         })?;
-    let plan = match plan_sync_import(&input.export, current.as_ref(), lease.fencing_token) {
-        Ok(plan) => plan,
+    // The request may have waited behind authorization or a previous writer while acquiring the
+    // lease. Refresh and revalidate the actor, ACL, binding, and proxy dependencies before any
+    // object-store writes, then plan against the same refreshed control snapshot.
+    let current = (|| {
+        let _mutation = state
+            .control_mutation()
+            .lock()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        state.refresh_control_aggregate_locked()?;
+        let current_principal =
+            state.authenticate_token(auth.bearer_token(), checked_now("sync-import-stage")?)?;
+        if current_principal
+            .account_id
+            .as_ref()
+            .map(|account| account.as_str())
+            != Some(actor_id.as_str())
+        {
+            return Err(problem(
+                "authentication_required",
+                "Authentication is no longer valid for this import",
+                401,
+            ));
+        }
+        authorize_problem(state, &current_principal, &input.export)?;
+        let current_grants = state.grants()?;
+        let aggregate = state.control_aggregate()?;
+        verify_binding_aggregate(&aggregate, &input.export)?;
+        super::control::validate_profile_proxy_dependencies_problem(
+            state,
+            &current_principal,
+            &current_grants,
+            &input.export.workspace_id,
+            &input.export.resource_id,
+            &input.export.manifest,
+            false,
+            false,
+            true,
+        )?;
+        state.current_sync_manifest(&input.export.workspace_id, &input.export.resource_id)
+    })();
+    let current = match current {
+        Ok(current) => current,
         Err(error) => {
-            persist_stage_failure(
+            let error = persist_stage_failure(
                 state,
                 &journal_id,
                 journal_revision,
                 &actor_id,
                 &mut journal,
-                &error,
+                error,
+            );
+            release(&*backend, &input.export, &auth, &lease.owner_token).await;
+            return Err(response(error));
+        }
+    };
+    let plan = match plan_sync_import_manifest(&input.export, current.as_ref(), lease.fencing_token)
+    {
+        Ok(mut plan) => {
+            plan.blobs = import_blobs;
+            plan
+        }
+        Err(error) => {
+            let error = persist_stage_failure(
+                state,
+                &journal_id,
+                journal_revision,
+                &actor_id,
+                &mut journal,
+                error,
             );
             release(&*backend, &input.export, &auth, &lease.owner_token).await;
             return Err(response(error));
@@ -445,6 +682,7 @@ pub(super) async fn import_sync_authorized(
         input.export.resource_id.clone(),
         auth.clone(),
         lease.owner_token.clone(),
+        operation_id.clone(),
     );
     let stage_state = state.clone();
     let stage_plan = plan;
@@ -493,13 +731,13 @@ pub(super) async fn import_sync_authorized(
                 "sync-import",
             )
             .retryable(true);
-            persist_stage_failure(
+            let error = persist_stage_failure(
                 state,
                 &journal_id,
                 journal_revision,
                 &actor_id,
                 &mut journal,
-                &error,
+                error,
             );
             release(&*backend, &input.export, &auth, &lease.owner_token).await;
             return Err(response(error));
@@ -509,14 +747,8 @@ pub(super) async fn import_sync_authorized(
     let (staged, next_journal_revision) = match stage_result {
         Ok(result) => result,
         Err((error, revision)) => {
-            persist_stage_failure(
-                state,
-                &journal_id,
-                revision,
-                &actor_id,
-                &mut journal,
-                &error,
-            );
+            let error =
+                persist_stage_failure(state, &journal_id, revision, &actor_id, &mut journal, error);
             release(&*backend, &input.export, &auth, &lease.owner_token).await;
             return Err(response(error));
         }
@@ -533,51 +765,75 @@ pub(super) async fn import_sync_authorized(
                 )
             })
             .retryable(true);
-        persist_stage_failure(
+        let error = persist_stage_failure(
             state,
             &journal_id,
             journal_revision,
             &actor_id,
             &mut journal,
-            &error,
+            error,
         );
         release(&*backend, &input.export, &auth, &lease.owner_token).await;
         return Err(response(error));
     }
-    lease = match backend
-        .renew_lease(
-            CoordinationScope {
-                workspace_id: &input.export.workspace_id,
-                auth: &auth,
-            },
-            &input.export.resource_id,
-            &lease.owner_token,
-            Duration::from_secs(300),
-        )
-        .await
+    let finalize_fencing_token = lease.fencing_token.to_string();
+    let finalize_lease_expiry = lease.expires_at_ms.to_string();
+    let finalize_renewal_key = format!(
+        "lease-renew-{}",
+        sha256_parts(&[
+            &operation_id,
+            "finalize",
+            &finalize_fencing_token,
+            &finalize_lease_expiry,
+        ])
+    );
+    lease = match renew_lease_with_retry(
+        backend.as_ref(),
+        &input.export.workspace_id,
+        &input.export.resource_id,
+        &auth,
+        &lease.owner_token,
+        Duration::from_secs(300),
+        &finalize_renewal_key,
+    )
+    .await
     {
         Ok(lease) => lease,
         Err(error) => {
             let error = error.retryable(true);
-            persist_stage_failure(
+            let error = persist_stage_failure(
                 state,
                 &journal_id,
                 journal_revision,
                 &actor_id,
                 &mut journal,
-                &error,
+                error,
             );
             release(&*backend, &input.export, &auth, &lease.owner_token).await;
             return Err(response(error));
         }
     };
 
-    let (created_objects, resumed_objects) = journal_objects(&plan, &staged);
+    let (created_objects, resumed_objects) = match journal_objects(&plan, &staged) {
+        Ok(objects) => objects,
+        Err(error) => {
+            let error = persist_stage_failure(
+                state,
+                &journal_id,
+                journal_revision,
+                &actor_id,
+                &mut journal,
+                error,
+            );
+            release(&*backend, &input.export, &auth, &lease.owner_token).await;
+            return Err(response(error));
+        }
+    };
     journal.state = SyncMigrationJournalState::Finalizing;
     journal.created_objects = created_objects;
     journal.resumed_objects = resumed_objects;
     journal.destination_fencing_token = Some(lease.fencing_token);
-    journal.updated_at_ms = now().saturating_mul(1_000);
+    journal.updated_at_ms = request_now_ms(headers)?;
     journal.error_code = None;
     journal_revision = match state.persist_sync_migration_journal(
         &journal_id,
@@ -611,13 +867,13 @@ pub(super) async fn import_sync_authorized(
         .await
     {
         let error = error.retryable(true);
-        persist_stage_failure(
+        let error = persist_stage_failure(
             state,
             &journal_id,
             journal_revision,
             &actor_id,
             &mut journal,
-            &error,
+            error,
         );
         drop(snapshot);
         release(&*backend, &input.export, &auth, &lease.owner_token).await;
@@ -636,7 +892,8 @@ pub(super) async fn import_sync_authorized(
         state.refresh_control_aggregate_locked()?;
         let token = bearer_token(headers)
             .map_err(|_| problem("authentication_required", "Authentication required", 401))?;
-        let current_principal = state.authenticate_token(&token, now())?;
+        let current_principal =
+            state.authenticate_token(&token, checked_now("sync-import-commit")?)?;
         let current_actor_id = current_principal
             .account_id
             .as_ref()
@@ -649,6 +906,7 @@ pub(super) async fn import_sync_authorized(
             ));
         }
         authorize_problem(state, &current_principal, &input.export)?;
+        let grant_snapshot = state.grants()?;
         let mut target = state.control_aggregate()?;
         verify_binding_aggregate(&target, &input.export)?;
         let key = format!(
@@ -657,14 +915,40 @@ pub(super) async fn import_sync_authorized(
             input.export.resource_id.as_str()
         );
         let current = target.sync_manifests.get(&key).cloned();
-        let final_plan = plan_sync_import(&input.export, current.as_ref(), lease.fencing_token)?;
+        let final_plan =
+            plan_sync_import_manifest(&input.export, current.as_ref(), lease.fencing_token)?;
+        super::control::validate_profile_proxy_dependencies_problem(
+            state,
+            &current_principal,
+            &grant_snapshot,
+            &input.export.workspace_id,
+            &input.export.resource_id,
+            &final_plan.manifest,
+            true,
+            false,
+            true,
+        )?;
+        super::validate_manifest_gc_claims(&final_plan.manifest, &target.sync_gc_claims)?;
         target
             .sync_manifests
             .insert(key, final_plan.manifest.clone());
+        target.mark_migrated_profile_ready_after_sync(&final_plan.manifest)?;
         journal.state = SyncMigrationJournalState::Active;
         journal.control_revision_before = state.control_revision()?;
-        journal.control_revision_after = Some(journal.control_revision_before.saturating_add(1));
-        journal.updated_at_ms = now().saturating_mul(1_000);
+        journal.control_revision_after = Some(
+            journal
+                .control_revision_before
+                .checked_add(1)
+                .ok_or_else(|| {
+                    Problem::new(
+                        "control_revision_exhausted",
+                        "Control revision cannot be incremented",
+                        409,
+                        "sync-import",
+                    )
+                })?,
+        );
+        journal.updated_at_ms = checked_now_ms("sync-import-commit")?;
         let created = staged
             .objects
             .iter()
@@ -801,15 +1085,8 @@ fn verify_binding_problem(state: &ApiState, export: &SyncExport) -> Result<(), P
         .map_err(|_| problem("resource_unavailable", "Resource state unavailable", 503))?
         .exists_in_workspace(&export.resource_id, &export.workspace_id);
     let binding_exists = state
-        .profile_resources
-        .read()
-        .map_err(|_| problem("binding_unavailable", "Profile binding unavailable", 503))?
-        .values()
-        .any(|binding| {
-            binding.workspace_id == export.workspace_id
-                && binding.resource_id == export.resource_id
-                && binding.archive_state == ProfileArchiveState::Active
-        });
+        .profile_resource_for_resource(&export.workspace_id, &export.resource_id)?
+        .is_some_and(|binding| binding.archive_state == ProfileArchiveState::Active);
     if resource_exists && binding_exists {
         Ok(())
     } else {
@@ -854,6 +1131,29 @@ fn stage_import_objects(
 ) -> Result<(SyncStageReceipt, u64), (Problem, u64)> {
     let mut staged = Vec::with_capacity(plan.blobs.len());
     journal.state = SyncMigrationJournalState::Staging;
+    journal.reserved_objects = plan
+        .blobs
+        .iter()
+        .map(|blob| SyncMigrationJournalObject {
+            storage_key: sync_object_storage_key(&plan.manifest, blob),
+            checksum: blob.checksum.clone(),
+            size: blob.size,
+        })
+        .collect();
+    if let Err(error) =
+        persist_staging_checkpoint(state, journal_id, &mut journal_revision, actor_id, journal)
+    {
+        return Err((error, journal_revision));
+    }
+    if let Err(error) = state.reserve_sync_blob_uploads(
+        &plan.manifest.workspace_id,
+        &plan.manifest.resource_id,
+        &journal.reserved_objects,
+        checked_now_ms("sync-import-stage").map_err(|error| (error, journal_revision))?,
+        actor_id,
+    ) {
+        return Err((error, journal_revision));
+    }
     for blob in &plan.blobs {
         let storage_key = sync_object_storage_key(&plan.manifest, blob);
         let already_created = journal
@@ -866,24 +1166,72 @@ fn stage_import_objects(
         };
         match existing {
             Some(existing) if existing == blob.checksum => {
-                if already_created {
-                    staged.push(SyncStagedObject {
+                let workspace_id = plan.manifest.workspace_id.as_str();
+                let resource_id = plan.manifest.resource_id.as_str();
+                match state.try_sync_object_write_lock(workspace_id, resource_id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err((
+                            Problem::new(
+                                "sync_object_cleanup_in_progress",
+                                "Sync object cleanup is in progress; retry the import",
+                                503,
+                                "sync-import",
+                            )
+                            .retryable(true),
+                            journal_revision,
+                        ));
+                    }
+                    Err(error) => return Err((error, journal_revision)),
+                }
+                let stage_result = (|| {
+                    state.validate_sync_stage_write(journal_id, journal_revision, &storage_key)?;
+                    let current = state.remote_chunk_checksum(&storage_key)?;
+                    match current {
+                        Some(current) if current == blob.checksum => {
+                            if !already_created {
+                                remember_journal_object(
+                                    &mut journal.resumed_objects,
+                                    &storage_key,
+                                    &blob.checksum,
+                                    blob.size,
+                                );
+                            }
+                            journal.error_code = None;
+                            persist_staging_checkpoint(
+                                state,
+                                journal_id,
+                                &mut journal_revision,
+                                actor_id,
+                                journal,
+                            )?;
+                            Ok(())
+                        }
+                        Some(_) => Err(Problem::new(
+                            "sync_import_blob_collision",
+                            "Sync import blob collides with destination",
+                            409,
+                            "sync-import",
+                        )),
+                        None => Err(Problem::new(
+                            "sync_import_blob_missing",
+                            "Sync import blob disappeared during staging",
+                            409,
+                            "sync-import",
+                        )
+                        .retryable(true)),
+                    }
+                })();
+                let release_result =
+                    state.release_sync_object_write_lock(workspace_id, resource_id);
+                match (stage_result, release_result) {
+                    (Ok(()), Ok(())) => staged.push(SyncStagedObject {
                         storage_key,
                         checksum: blob.checksum.clone(),
-                        created: true,
-                    });
-                } else {
-                    remember_journal_object(
-                        &mut journal.resumed_objects,
-                        &storage_key,
-                        &blob.checksum,
-                        blob.size,
-                    );
-                    staged.push(SyncStagedObject {
-                        storage_key,
-                        checksum: blob.checksum.clone(),
-                        created: false,
-                    });
+                        created: already_created,
+                    }),
+                    (Err(error), _) => return Err((error, journal_revision)),
+                    (Ok(()), Err(error)) => return Err((error, journal_revision)),
                 }
             }
             Some(_) => {
@@ -917,15 +1265,79 @@ fn stage_import_objects(
                 ) {
                     return Err((error, journal_revision));
                 }
-                if let Err(error) = state.put_remote_chunk(&storage_key, &blob.data, &blob.checksum)
-                {
-                    return Err((error, journal_revision));
+                let workspace_id = plan.manifest.workspace_id.as_str();
+                let resource_id = plan.manifest.resource_id.as_str();
+                match state.try_sync_object_write_lock(workspace_id, resource_id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err((
+                            Problem::new(
+                                "sync_object_cleanup_in_progress",
+                                "Sync object cleanup is in progress; retry the import",
+                                503,
+                                "sync-import",
+                            )
+                            .retryable(true),
+                            journal_revision,
+                        ));
+                    }
+                    Err(error) => return Err((error, journal_revision)),
                 }
+                let stage_result = (|| {
+                    state.validate_sync_stage_write(journal_id, journal_revision, &storage_key)?;
+                    match state.remote_chunk_checksum(&storage_key)? {
+                        Some(existing) if existing == blob.checksum => {
+                            journal.created_objects.retain(|object| {
+                                object.storage_key != storage_key
+                                    || object.checksum != blob.checksum
+                            });
+                            remember_journal_object(
+                                &mut journal.resumed_objects,
+                                &storage_key,
+                                &blob.checksum,
+                                blob.size,
+                            );
+                            persist_staging_checkpoint(
+                                state,
+                                journal_id,
+                                &mut journal_revision,
+                                actor_id,
+                                journal,
+                            )?;
+                            Ok(false)
+                        }
+                        Some(_) => Err(Problem::new(
+                            "sync_import_blob_collision",
+                            "Sync import blob collides with destination",
+                            409,
+                            "sync-import",
+                        )),
+                        None => {
+                            state.put_remote_chunk(&storage_key, &blob.data, &blob.checksum)?;
+                            persist_staging_checkpoint(
+                                state,
+                                journal_id,
+                                &mut journal_revision,
+                                actor_id,
+                                journal,
+                            )?;
+                            Ok(true)
+                        }
+                    }
+                })();
+                let release_result =
+                    state.release_sync_object_write_lock(workspace_id, resource_id);
+                let created = match (stage_result, release_result) {
+                    (Ok(created), Ok(())) => created,
+                    (Err(error), _) => return Err((error, journal_revision)),
+                    (Ok(_), Err(error)) => return Err((error, journal_revision)),
+                };
                 staged.push(SyncStagedObject {
                     storage_key,
                     checksum: blob.checksum.clone(),
-                    created: true,
+                    created,
                 });
+                continue;
             }
         }
         journal.error_code = None;
@@ -966,7 +1378,7 @@ fn persist_staging_checkpoint(
     actor_id: &str,
     journal: &mut SyncMigrationJournal,
 ) -> Result<(), Problem> {
-    journal.updated_at_ms = now().saturating_mul(1_000);
+    journal.updated_at_ms = checked_now_ms("sync-import-stage")?;
     *journal_revision = state.persist_sync_migration_journal(
         journal_id,
         *journal_revision,
@@ -983,15 +1395,53 @@ fn persist_stage_failure(
     mut journal_revision: u64,
     actor_id: &str,
     journal: &mut SyncMigrationJournal,
-    error: &Problem,
-) {
+    error: Problem,
+) -> Problem {
     journal.state = if error.retryable {
         SyncMigrationJournalState::Staging
     } else {
         SyncMigrationJournalState::CleanupPending
     };
     journal.error_code = Some(error.code.clone());
-    let _ = persist_staging_checkpoint(state, journal_id, &mut journal_revision, actor_id, journal);
+    match persist_staging_checkpoint(state, journal_id, &mut journal_revision, actor_id, journal) {
+        Ok(()) if journal.state == SyncMigrationJournalState::CleanupPending => {
+            let objects = journal
+                .reserved_objects
+                .iter()
+                .chain(&journal.created_objects)
+                .chain(&journal.resumed_objects)
+                .cloned()
+                .collect::<Vec<_>>();
+            match state.release_sync_blob_reservations_for_import(
+                journal_id,
+                &journal.workspace_id,
+                &journal.resource_id,
+                &objects,
+                actor_id,
+            ) {
+                Ok(()) => error,
+                Err(release_error) => Problem::new(
+                    "sync_import_reservation_release_failed",
+                    "Sync import failed and storage reservations could not be released",
+                    503,
+                    "sync-import",
+                )
+                .retryable(true)
+                .with_field("stageErrorCode", error.code)
+                .with_field("releaseErrorCode", release_error.code),
+            }
+        }
+        Ok(()) => error,
+        Err(checkpoint_error) => Problem::new(
+            "sync_import_recovery_checkpoint_failed",
+            "Sync import failed and its recovery checkpoint could not be saved",
+            503,
+            "sync-import",
+        )
+        .retryable(true)
+        .with_field("stageErrorCode", error.code)
+        .with_field("checkpointErrorCode", checkpoint_error.code),
+    }
 }
 
 fn verify_staged(
@@ -1007,18 +1457,32 @@ fn verify_staged(
 fn journal_objects(
     plan: &SyncImportPlan,
     staged: &buglogin_sync::import::SyncStageReceipt,
-) -> (
-    Vec<SyncMigrationJournalObject>,
-    Vec<SyncMigrationJournalObject>,
-) {
+) -> Result<
+    (
+        Vec<SyncMigrationJournalObject>,
+        Vec<SyncMigrationJournalObject>,
+    ),
+    Problem,
+> {
+    let sizes_by_storage_key = plan
+        .blobs
+        .iter()
+        .map(|blob| (sync_object_storage_key(&plan.manifest, blob), blob.size))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut created = vec![];
     let mut resumed = vec![];
     for object in &staged.objects {
-        let size = plan
-            .blobs
-            .iter()
-            .find(|blob| sync_object_storage_key(&plan.manifest, blob) == object.storage_key)
-            .map_or(0, |blob| blob.size);
+        let size = sizes_by_storage_key
+            .get(&object.storage_key)
+            .copied()
+            .ok_or_else(|| {
+                Problem::new(
+                    "sync_import_staged_object_missing",
+                    "Staged sync object is missing from the import plan",
+                    500,
+                    "sync-import",
+                )
+            })?;
         let value = SyncMigrationJournalObject {
             storage_key: object.storage_key.clone(),
             checksum: object.checksum.clone(),
@@ -1030,7 +1494,7 @@ fn journal_objects(
             resumed.push(value);
         }
     }
-    (created, resumed)
+    Ok((created, resumed))
 }
 
 fn required_idempotency(headers: &HeaderMap) -> Result<&str, Response> {
@@ -1047,12 +1511,12 @@ fn required_idempotency(headers: &HeaderMap) -> Result<&str, Response> {
         })
 }
 
-fn bearer_token(headers: &HeaderMap) -> Result<String, Response> {
+fn bearer_token(headers: &HeaderMap) -> Result<Zeroizing<String>, Response> {
     headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::to_owned)
+        .map(|value| Zeroizing::new(value.to_owned()))
         .ok_or_else(|| {
             response(problem(
                 "authentication_required",
@@ -1068,15 +1532,13 @@ async fn release(
     auth: &CoordinationAuth,
     owner_token: &str,
 ) {
+    let scope = CoordinationScope {
+        workspace_id: &export.workspace_id,
+        auth,
+    };
+    let idempotency_key = lease_release_idempotency_key(&scope, &export.resource_id, owner_token);
     let _ = backend
-        .release_lease(
-            CoordinationScope {
-                workspace_id: &export.workspace_id,
-                auth,
-            },
-            &export.resource_id,
-            owner_token,
-        )
+        .release_lease_idempotent(scope, &export.resource_id, owner_token, &idempotency_key)
         .await;
 }
 
@@ -1111,10 +1573,40 @@ fn journal_write_key(journal_id: &str, state: &str, revision: u64) -> String {
     )
 }
 
-fn sha256_json(value: &impl Serialize) -> Result<String, Response> {
-    serde_json::to_vec(value)
-        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
-        .map_err(|_| response(problem("invalid_input", "Input is invalid", 400)))
+fn sync_import_hashes(input: &SyncImportInput) -> Result<(String, String), Response> {
+    struct HashWriter {
+        request: Sha256,
+        export: Sha256,
+    }
+
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.request.update(bytes);
+            self.export.update(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = HashWriter {
+        request: Sha256::new(),
+        export: Sha256::new(),
+    };
+    writer.request.update(b"{\"export\":");
+    serde_json::to_writer(&mut writer, &input.export)
+        .map_err(|_| response(problem("invalid_input", "Input is invalid", 400)))?;
+    writer.request.update(if input.dry_run {
+        &b",\"dryRun\":true}"[..]
+    } else {
+        &b",\"dryRun\":false}"[..]
+    });
+    Ok((
+        format!("{:x}", writer.request.finalize()),
+        format!("{:x}", writer.export.finalize()),
+    ))
 }
 
 fn sha256_parts(parts: &[&str]) -> String {
@@ -1141,6 +1633,68 @@ fn lease_attempt_idempotency_key(operation_id: &str) -> Result<String, Problem> 
     ))
 }
 
+struct SyncImportIdempotencyLock<'a> {
+    state: &'a ApiState,
+    lock_id: i64,
+}
+
+impl<'a> SyncImportIdempotencyLock<'a> {
+    fn acquire(state: &'a ApiState, store_key: &str) -> Result<Self, Problem> {
+        let namespace = "migration-sync-idempotency-lock-v1";
+        let mut digest = Sha256::new();
+        digest.update((namespace.len() as u64).to_be_bytes());
+        digest.update(namespace.as_bytes());
+        digest.update((store_key.len() as u64).to_be_bytes());
+        digest.update(store_key.as_bytes());
+        let digest = digest.finalize();
+        let mut lock_bytes = [0_u8; 8];
+        lock_bytes.copy_from_slice(&digest[..8]);
+        let lock_id = i64::from_be_bytes(lock_bytes);
+        if !state.control_persistence.try_advisory_lock(lock_id)? {
+            return Err(problem(
+                "migration_sync_import_in_progress",
+                "Sync migration import is already in progress",
+                409,
+            ));
+        }
+        Ok(Self { state, lock_id })
+    }
+}
+
+impl Drop for SyncImportIdempotencyLock<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .state
+            .control_persistence
+            .release_advisory_lock(self.lock_id);
+    }
+}
+
+fn lease_heartbeat_idempotency_key(
+    operation_id: &str,
+    owner_token: &str,
+    sequence: &str,
+) -> String {
+    format!(
+        "lease-renew-{}",
+        sha256_parts(&[operation_id, "heartbeat", owner_token, sequence])
+    )
+}
+
+fn next_lease_heartbeat_sequence(sequence: &mut u64) -> Result<String, Problem> {
+    let next = sequence.checked_add(1).ok_or_else(|| {
+        Problem::new(
+            "sync_lease_sequence_exhausted",
+            "Sync lease heartbeat sequence is exhausted",
+            409,
+            "sync-import",
+        )
+    })?;
+    let current = *sequence;
+    *sequence = next;
+    Ok(current.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1151,7 +1705,59 @@ mod tests {
         time::Duration,
     };
 
-    use super::{SyncImportInput, lease_attempt_idempotency_key, spawn_lease_heartbeat};
+    use super::{
+        SyncImportIdempotencyLock, SyncImportInput, journal_objects, lease_attempt_idempotency_key,
+        lease_heartbeat_idempotency_key, next_lease_heartbeat_sequence, spawn_lease_heartbeat,
+        sync_import_hashes, sync_object_storage_key,
+    };
+
+    #[test]
+    fn sync_import_idempotency_lock_serializes_same_key_and_releases_on_drop() {
+        let state = ApiState::new(ProfileService::disabled());
+        let first = SyncImportIdempotencyLock::acquire(&state, "migration-sync:test-key").unwrap();
+        let concurrent = SyncImportIdempotencyLock::acquire(&state, "migration-sync:test-key")
+            .err()
+            .expect("concurrent request must be rejected");
+        assert_eq!(concurrent.code, "migration_sync_import_in_progress");
+        drop(first);
+
+        assert!(SyncImportIdempotencyLock::acquire(&state, "migration-sync:test-key").is_ok());
+    }
+
+    #[test]
+    fn sync_import_idempotency_lock_does_not_serialize_distinct_keys() {
+        let state = ApiState::new(ProfileService::disabled());
+        let first = SyncImportIdempotencyLock::acquire(&state, "migration-sync:key-a").unwrap();
+        let second = SyncImportIdempotencyLock::acquire(&state, "migration-sync:key-b");
+        assert!(second.is_ok());
+        drop(second);
+        drop(first);
+    }
+
+    #[test]
+    fn lease_heartbeat_keys_are_stable_per_lease_and_distinct_across_reacquire() {
+        let first = lease_heartbeat_idempotency_key("import-1", "owner-token-1", "0");
+        assert_eq!(
+            first,
+            lease_heartbeat_idempotency_key("import-1", "owner-token-1", "0")
+        );
+        assert_ne!(
+            first,
+            lease_heartbeat_idempotency_key("import-1", "owner-token-2", "0")
+        );
+        assert_ne!(
+            first,
+            lease_heartbeat_idempotency_key("import-1", "owner-token-1", "1")
+        );
+    }
+
+    #[test]
+    fn lease_heartbeat_sequence_fails_closed_at_exhaustion() {
+        let mut sequence = u64::MAX;
+        let error = next_lease_heartbeat_sequence(&mut sequence).unwrap_err();
+        assert_eq!(error.code, "sync_lease_sequence_exhausted");
+        assert_eq!(sequence, u64::MAX);
+    }
     use crate::http::{ApiState, SyncMigrationJournal, SyncMigrationJournalState};
     use axum::http::StatusCode;
     use buglogin_browser::profile::ProfileService;
@@ -1162,10 +1768,79 @@ mod tests {
     };
     use buglogin_sync::{
         export::{SyncExport, SyncExportBlob, SyncRevision, canonical_manifest_checksum},
-        import::plan_sync_import,
+        import::{SyncImportPlan, SyncStageReceipt, SyncStagedObject, plan_sync_import},
         manifest::{ManifestObject, SyncManifest},
     };
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn journal_objects_index_sizes_and_reject_staged_objects_missing_from_plan() {
+        let workspace = WorkspaceId::new("ws_journal_sizes").unwrap();
+        let resource = ResourceId::new("res_journal_sizes").unwrap();
+        let first_bytes = b"first-object";
+        let second_bytes = b"second-object-with-different-size";
+        let first = SyncExportBlob {
+            key: "profile/first".into(),
+            size: first_bytes.len() as u64,
+            checksum: format!("{:x}", Sha256::digest(first_bytes)),
+            data: first_bytes.to_vec(),
+        };
+        let second = SyncExportBlob {
+            key: "profile/second".into(),
+            size: second_bytes.len() as u64,
+            checksum: format!("{:x}", Sha256::digest(second_bytes)),
+            data: second_bytes.to_vec(),
+        };
+        let manifest = SyncManifest::new(
+            workspace,
+            resource,
+            1,
+            1,
+            None,
+            b"root",
+            vec![
+                ManifestObject::new(first.key.clone(), first_bytes).unwrap(),
+                ManifestObject::new(second.key.clone(), second_bytes).unwrap(),
+            ],
+        )
+        .unwrap();
+        let plan = SyncImportPlan {
+            export_id: "journal-size-test".into(),
+            replayed: false,
+            manifest,
+            blobs: vec![first.clone(), second.clone()],
+        };
+        let staged = SyncStageReceipt {
+            objects: vec![
+                SyncStagedObject {
+                    storage_key: sync_object_storage_key(&plan.manifest, &second),
+                    checksum: second.checksum.clone(),
+                    created: false,
+                },
+                SyncStagedObject {
+                    storage_key: sync_object_storage_key(&plan.manifest, &first),
+                    checksum: first.checksum.clone(),
+                    created: true,
+                },
+            ],
+        };
+
+        let (created, resumed) = journal_objects(&plan, &staged).unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].size, first.size);
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].size, second.size);
+
+        let missing = SyncStageReceipt {
+            objects: vec![SyncStagedObject {
+                storage_key: "profiles/unplanned/object".into(),
+                checksum: "a".repeat(64),
+                created: true,
+            }],
+        };
+        let error = journal_objects(&plan, &missing).unwrap_err();
+        assert_eq!(error.code, "sync_import_staged_object_missing");
+    }
 
     #[test]
     fn sync_import_rejects_unknown_fields_at_every_request_boundary() {
@@ -1202,11 +1877,35 @@ mod tests {
             "0.1.0",
         )
         .unwrap();
-        let valid = serde_json::to_value(SyncImportInput {
+        let input = SyncImportInput {
             export,
             dry_run: false,
-        })
-        .unwrap();
+        };
+        let (request_hash, export_hash) = sync_import_hashes(&input).unwrap();
+        assert_eq!(
+            request_hash,
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&input).unwrap()))
+        );
+        assert_eq!(
+            export_hash,
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&input.export).unwrap())
+            )
+        );
+        let mut dry_run_input = input.clone();
+        dry_run_input.dry_run = true;
+        let (dry_run_request_hash, dry_run_export_hash) =
+            sync_import_hashes(&dry_run_input).unwrap();
+        assert_eq!(
+            dry_run_request_hash,
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&dry_run_input).unwrap())
+            )
+        );
+        assert_eq!(dry_run_export_hash, export_hash);
+        let valid = serde_json::to_value(input).unwrap();
 
         let mut without_dry_run = valid.clone();
         without_dry_run.as_object_mut().unwrap().remove("dryRun");
@@ -1291,12 +1990,88 @@ mod tests {
         assert_eq!(body["fields"]["maxBytes"], 4);
     }
 
+    fn valid_sync_import_body() -> Vec<u8> {
+        let workspace = WorkspaceId::new("ws_bounded_import").unwrap();
+        let resource = ResourceId::new("res_bounded_import").unwrap();
+        let object_bytes = b"encrypted-object";
+        let manifest = SyncManifest::new(
+            workspace,
+            resource,
+            7,
+            1,
+            None,
+            b"root",
+            vec![ManifestObject::new("profile/state", object_bytes).unwrap()],
+        )
+        .unwrap();
+        let export = SyncExport::new(
+            "bounded-import-export",
+            "source-instance",
+            manifest.clone(),
+            None,
+            vec![SyncRevision {
+                generation: 1,
+                parent_generation: None,
+                manifest_sha256: canonical_manifest_checksum(&manifest).unwrap(),
+            }],
+            vec![SyncExportBlob {
+                key: "profile/state".into(),
+                size: object_bytes.len() as u64,
+                checksum: format!("{:x}", Sha256::digest(object_bytes)),
+                data: object_bytes.to_vec(),
+            }],
+            1,
+            "0.1.0",
+        )
+        .unwrap();
+        serde_json::to_vec(&SyncImportInput {
+            export,
+            dry_run: false,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sync_import_parser_consumes_one_document_within_byte_limit() {
+        let valid = valid_sync_import_body();
+        let exact_limit =
+            super::parse_sync_import_input(axum::body::Body::from(valid.clone()), valid.len())
+                .await;
+        assert!(
+            exact_limit.is_ok(),
+            "a valid body exactly at the cap is accepted"
+        );
+
+        let mut second_document = valid.clone();
+        second_document.extend_from_slice(b" {} ");
+        let trailing_document_error = super::parse_sync_import_input(
+            axum::body::Body::from(second_document.clone()),
+            second_document.len(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            trailing_document_error.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let mut oversized_whitespace = valid.clone();
+        oversized_whitespace.extend_from_slice(b"  ");
+        let oversized_error = super::parse_sync_import_input(
+            axum::body::Body::from(oversized_whitespace),
+            valid.len() + 1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(oversized_error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     #[test]
     fn direct_sync_import_admission_is_bounded_and_retryable() {
-        let permit = super::sync_import_request_slot().unwrap();
+        let first = super::sync_import_request_slot().unwrap();
         let error = super::sync_import_request_slot().unwrap_err();
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
-        drop(permit);
+        drop(first);
         assert!(super::sync_import_request_slot().is_ok());
     }
 
@@ -1375,6 +2150,10 @@ mod tests {
     }
 
     impl ConcurrentRemoteChunkStore for AmbiguousPutStore {
+        fn readiness(&self) -> Result<(), buglogin_domain::errors::Problem> {
+            ConcurrentRemoteChunkStore::readiness(&self.inner)
+        }
+
         fn checksum(
             &self,
             object_key: &str,
@@ -1425,6 +2204,12 @@ mod tests {
 
     #[test]
     fn staging_checkpoint_resumes_ambiguous_put_after_state_reopen() {
+        use buglogin_domain::{
+            ids::{AccountId, OrganizationId},
+            organization::{Organization, OrganizationPolicy},
+            permissions::{Principal, Role},
+            workspace::{Workspace, WorkspacePolicy},
+        };
         let workspace = WorkspaceId::new("ws_checkpoint").unwrap();
         let resource = ResourceId::new("res_checkpoint").unwrap();
         let bytes = b"encrypted-profile-object";
@@ -1470,6 +2255,43 @@ mod tests {
             ApiState::hosted_with_control_store(ProfileService::disabled(), control_store.clone())
                 .unwrap()
                 .with_concurrent_remote_chunks(Box::new(remote.clone()));
+        let organization = Organization {
+            id: OrganizationId::new("org_checkpoint").unwrap(),
+            account_id: AccountId::new("acct_checkpoint").unwrap(),
+            name: "Checkpoint test".into(),
+            created_at: "2026-10-16T00:00:00Z".into(),
+        };
+        let mut workspaces = crate::services::workspaces::WorkspaceService::new(
+            organization.clone(),
+            OrganizationPolicy {
+                max_workspaces: 1,
+                offline_entitled: false,
+            },
+        )
+        .unwrap();
+        workspaces
+            .create_workspace(
+                &Principal {
+                    roles: [Role::PlatformAdmin].into_iter().collect(),
+                    ..Principal::default()
+                },
+                &[],
+                &organization.id,
+                Workspace {
+                    id: workspace.clone(),
+                    organization_id: organization.id.clone(),
+                    name: "Checkpoint test".into(),
+                    policy: WorkspacePolicy {
+                        max_profiles: 10,
+                        max_members: 10,
+                        max_storage_bytes: 1024 * 1024,
+                        offline_entitled: false,
+                    },
+                    created_at: "2026-10-16T00:00:00Z".into(),
+                },
+            )
+            .unwrap();
+        *state.workspaces.write().unwrap() = workspaces;
         let mut journal = SyncMigrationJournal {
             schema: "buglogin.migration-sync-journal/1".into(),
             operation_id: "op_checkpoint".into(),
@@ -1484,6 +2306,7 @@ mod tests {
             state: SyncMigrationJournalState::Staging,
             created_objects: Vec::new(),
             resumed_objects: Vec::new(),
+            reserved_objects: Vec::new(),
             destination_fencing_token: None,
             control_revision_before: 0,
             control_revision_after: None,
@@ -1519,7 +2342,7 @@ mod tests {
             revision,
             "acct_checkpoint",
             &mut journal,
-            &error,
+            error,
         );
 
         let reopened =
@@ -1565,6 +2388,7 @@ mod tests {
             state: SyncMigrationJournalState::Staging,
             created_objects: Vec::new(),
             resumed_objects: Vec::new(),
+            reserved_objects: Vec::new(),
             destination_fencing_token: None,
             control_revision_before: 0,
             control_revision_after: None,
@@ -1594,7 +2418,7 @@ mod tests {
             revision,
             "acct_plan_failure",
             &mut journal,
-            &error,
+            error,
         );
 
         let (persisted, _) = state

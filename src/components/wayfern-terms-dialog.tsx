@@ -1,7 +1,7 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LoadingButton } from "@/components/loading-button";
 import {
@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
+import { showSuccessToast } from "@/lib/toast-utils";
 
 interface WayfernTermsDialogProps {
   isOpen: boolean;
@@ -25,20 +25,25 @@ export function WayfernTermsDialog({
 }: WayfernTermsDialogProps) {
   const { t } = useTranslation();
   const [isAccepting, setIsAccepting] = useState(false);
+  const [acceptError, setAcceptError] = useState(false);
+  const acceptingRef = useRef(false);
 
   const handleAccept = useCallback(async () => {
+    if (acceptingRef.current) return;
+    acceptingRef.current = true;
+    setAcceptError(false);
     setIsAccepting(true);
     try {
-      await invoke("accept_wayfern_terms");
+      await invoke("accept_wayfern_terms", {
+        correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}`,
+      });
       showSuccessToast(t("wayfernTerms.acceptSuccess"));
       onAccepted();
     } catch (error) {
       console.error("Failed to accept terms:", error);
-      showErrorToast(t("wayfernTerms.acceptFailed"), {
-        description:
-          error instanceof Error ? error.message : t("wayfernTerms.tryAgain"),
-      });
+      setAcceptError(true);
     } finally {
+      acceptingRef.current = false;
       setIsAccepting(false);
     }
   }, [onAccepted, t]);
@@ -84,6 +89,11 @@ export function WayfernTermsDialog({
             {t("wayfernTerms.acceptButton")}
           </LoadingButton>
         </DialogFooter>
+        {acceptError && (
+          <p role="alert" className="text-sm text-destructive">
+            {t("wayfernTerms.acceptFailed")}. {t("wayfernTerms.tryAgain")}
+          </p>
+        )}
       </DialogContent>
     </Dialog>
   );

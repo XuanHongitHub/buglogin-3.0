@@ -19,6 +19,22 @@ fn rest_registry_has_stable_operation_ids() {
 }
 
 #[test]
+fn native_cookie_mutations_are_not_published_as_server_routes() {
+    let openapi = include_str!("../openapi/openapi-v1.yaml");
+    for path in [
+        "/v1/profiles/{profileId}/cookies/stage:",
+        "/v1/profiles/{profileId}/cookies/import:",
+        "/v1/profiles/{profileId}/cookies/copy:",
+    ] {
+        assert!(
+            !openapi.contains(path),
+            "native cookie mutation route must not be part of the server API: {path}"
+        );
+    }
+    assert!(openapi.contains("/v1/cookie-jobs:"));
+}
+
+#[test]
 fn profile_create_openapi_includes_the_shared_command_dto() {
     let openapi = include_str!("../openapi/openapi-v1.yaml");
     let dto = openapi

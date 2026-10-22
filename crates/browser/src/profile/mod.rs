@@ -65,6 +65,13 @@ impl ProfileService {
     pub fn list(&self) -> Result<Vec<Versioned<Profile>>, Problem> {
         self.repository()?.list()
     }
+    pub fn list_after(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Versioned<Profile>>, Problem> {
+        self.repository()?.list_after(cursor, limit)
+    }
     pub fn update(
         &self,
         expected_revision: u64,

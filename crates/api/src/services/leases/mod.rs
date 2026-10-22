@@ -85,5 +85,17 @@ fn problem(error: LeaseError) -> Problem {
             403,
             "lease",
         ),
+        LeaseError::SequenceExhausted => Problem::new(
+            "lease_sequence_exhausted",
+            "Lease fencing sequence cannot be incremented",
+            503,
+            "lease",
+        ),
+        LeaseError::TimeExhausted => Problem::new(
+            "lease_time_exhausted",
+            "Lease expiration time cannot be represented",
+            503,
+            "lease",
+        ),
     }
 }

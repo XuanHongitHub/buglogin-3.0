@@ -1,10 +1,13 @@
 # Password Verification Admission Plan
 
-Status: implemented and locally verified; deployment-level distributed rate limiting remains outside the process.
+Status: implemented; a concurrent lockout/CAS retry race was corrected in source and awaits the consolidated verification pass. Deployment-level distributed rate limiting remains outside the process.
+
+Source-only follow-up (2026-10-17): release the per-process password-verification permit immediately after Argon2id/legacy hash verification, before lockout persistence or successful credential upgrade writes. This matches the admission contract and prevents storage latency from occupying hash-work capacity. Existing tests/build remain deferred to the consolidated pass.
 
 - [x] Bound concurrent Argon2id verification to four per process and fail fast with retryable 503.
 - [x] Verify saturation behavior plus existing login, lockout, and unknown-identity behavior.
 - [x] Record process-local scope and deployment rate-limit requirements.
+- [x] Re-check the current lockout state on credential compare-and-swap retries so concurrent failed logins cannot have their lock cleared by a success path based on an older record (source change written; verification deferred).
 
 ## Evidence
 

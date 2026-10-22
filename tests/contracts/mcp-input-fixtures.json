@@ -11,6 +11,19 @@
     "name": "Fixture group",
     "appearance": { "color": "blue" }
   },
+  "GroupShareCreateInput": {
+    "workspaceId": "ws_fixture",
+    "groupId": "grp_fixture",
+    "memberId": "mem_fixture",
+    "action": "read",
+    "effect": "allow"
+  },
+  "GroupShareRevokeInput": {
+    "workspaceId": "ws_fixture",
+    "groupId": "grp_fixture",
+    "grantId": "grt_fixture",
+    "expectedRevision": 1
+  },
   "GroupUpdateInput": {
     "workspaceId": "ws_fixture_001",
     "groupId": "grp_fixture_001",
@@ -28,6 +41,12 @@
     "profileId": "prf_fixture_001",
     "expectedRevision": 1,
     "groupIds": ["grp_fixture_001"]
+  },
+  "ProfileExtensionGroupSetInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001",
+    "expectedRevision": 1,
+    "extensionGroupId": "exg_fixture_001"
   },
   "ProfileProxyAssignmentGetInput": {
     "workspaceId": "ws_fixture_001",
@@ -50,12 +69,45 @@
     "cursor": null,
     "limit": 25
   },
+  "ExtensionGroupCreateInput": {
+    "workspaceId": "ws_fixture_001",
+    "extensionGroupId": "exg_fixture_001",
+    "name": "Fixture extension group",
+    "extensionIds": [],
+    "syncMode": null
+  },
+  "ExtensionGroupDeleteInput": {
+    "workspaceId": "ws_fixture_001",
+    "extensionGroupId": "exg_fixture_001",
+    "expectedRevision": 1
+  },
+  "ExtensionGroupIdInput": {
+    "workspaceId": "ws_fixture_001",
+    "extensionGroupId": "exg_fixture_001"
+  },
+  "ExtensionGroupListInput": { "workspaceId": "ws_fixture_001" },
+  "ExtensionGroupUpdateInput": {
+    "workspaceId": "ws_fixture_001",
+    "extensionGroupId": "exg_fixture_001",
+    "expectedRevision": 1,
+    "name": "Updated fixture extension group",
+    "extensionIds": [],
+    "syncMode": null
+  },
   "ProfileListInput": { "includeArchived": false },
   "ProfileIdInput": { "profileId": "prf_fixture_001" },
   "ProfileCreateInput": {
     "name": "Fixture profile",
     "runtime": "wayfern",
     "workspaceId": "ws_fixture_001"
+  },
+  "ProfileUpdateInput": {
+    "workspaceId": "ws_fixture_001",
+    "profileId": "prf_fixture_001",
+    "expectedRevision": 1,
+    "name": "Updated fixture profile",
+    "note": null,
+    "tags": ["account"]
   },
   "ProfileCloneInput": {
     "sourceProfileId": "prf_source_001",
@@ -76,46 +128,19 @@
     "expectedRevision": 1
   },
   "ProfileLaunchInput": {
+    "profileId": "prf_fixture_001",
     "profilesRoot": "C:/BugLogin/profiles",
     "extraArgs": []
   },
   "ProfileDeleteInput": {
     "profileId": "prf_fixture_001",
     "revision": 1,
-    "confirmation": "DELETE_PROFILE"
+    "confirmation": "QUARANTINE_PROFILE_DATA"
   },
   "ProfileRevisionInput": { "profileId": "prf_fixture_001", "revision": 1 },
   "CookieListInput": {
     "workspaceId": "ws_fixture_001",
     "profileId": "prf_fixture_001"
-  },
-  "CookieStageInput": {
-    "workspaceId": "ws_fixture_001",
-    "profileId": "prf_fixture_001",
-    "cookies": [
-      {
-        "name": "sid",
-        "domain": "example.com",
-        "path": "/",
-        "secure": true,
-        "httpOnly": true,
-        "sameSite": "lax",
-        "value": "fixture-cookie"
-      }
-    ]
-  },
-  "CookieImportInput": {
-    "workspaceId": "ws_fixture_001",
-    "profileId": "prf_fixture_001",
-    "stageId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "expectedGeneration": 0
-  },
-  "CookieCopyInput": {
-    "sourceWorkspaceId": "ws_source_001",
-    "sourceProfileId": "prf_source_001",
-    "destinationWorkspaceId": "ws_destination_001",
-    "destinationProfileId": "prf_destination_001",
-    "expectedGeneration": 0
   },
   "ProxyParseInput": { "text": "http://127.0.0.1:8080" },
   "ProxyListInput": { "workspaceId": "ws_fixture_001" },
@@ -278,6 +303,13 @@
     "resourceId": "res_fixture_001",
     "memberId": "mem_fixture_001"
   },
+  "GrantListPageInput": {
+    "workspaceId": "ws_fixture_001",
+    "resourceId": "res_fixture_001",
+    "memberId": "mem_fixture_001",
+    "cursor": "grt_fixture_001",
+    "limit": 50
+  },
   "GrantCreateInput": {
     "id": "grt_fixture_001",
     "workspaceId": "ws_fixture_001",
@@ -289,5 +321,8 @@
   "GrantIdInput": {
     "workspaceId": "ws_fixture_001",
     "grantId": "grt_fixture_001"
+  },
+  "MigrationPackageActivationInput": {
+    "packageId": "pkg_fixture_001"
   }
 }

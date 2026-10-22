@@ -5,7 +5,7 @@
 - Scope: copy-only migration into rebuilt BugLogin desktop product
 - Evidence:
   - Legacy BugLogin `v1.1.84`, commit `81f9af637825c79c7ca60bbbdf2c11b4fecfa310`, 2026-07-08
-  - DonutBrowser baseline `v0.28.2`, commit `a4ed5c855afc4242b6c89c7d73ad767f2357c7f0`, 2026-07-18
+  - DonutBrowser baseline `v0.34.0`, commit `f70a6c9671b17ab03a6e6f87a7362f8076c8339d`, 2026-10-16
 
 ## Support classification
 
@@ -21,10 +21,10 @@
 
 | Source | Version/range | Evidence required | Default class | Eligibility |
 |---|---|---|---|---|
-| Legacy BugLogin | `1.1.84` | Three version files, source-root hash | Direct/adapter by entity | Yes after two rehearsals |
+| Legacy BugLogin | `1.1.84` | Three version files, source-root hash | Direct/adapter by entity | One direct source diff, signed clone, and post-import reconciliation; no repeated rehearsal cycle |
 | Legacy BugLogin | `1.1.0`–`1.1.83` | Fixture per storage-layout epoch | Unknown until proven | No |
 | Legacy BugLogin | `<1.1.0` | Exact build and directory inventory | Unknown | No |
-| DonutBrowser | `0.28.2` | Export or immutable data-root snapshot | Direct where schema matches | Rehearsal only |
+| DonutBrowser | `0.34.0` | Export or immutable data-root snapshot | Direct where schema matches | Rehearsal only |
 | DonutBrowser | Other versions | Exact tag/commit plus compatibility test | Unknown | No |
 | Chromium-family import | Installed profile directory | Browser/version, Local State, profile inventory | Partial | User-driven only |
 | Firefox-family import | Installed profile directory | Browser/version, `profiles.ini`, profile inventory | Partial | User-driven only |

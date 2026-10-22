@@ -16,6 +16,15 @@ fn admin() -> Principal {
     }
 }
 
+fn platform_admin() -> Principal {
+    Principal {
+        account_id: Some(AccountId::from_str("acct_platform_admin").unwrap()),
+        member_id: Some(MemberId::from_str("mem_platform_admin").unwrap()),
+        roles: BTreeSet::from([Role::PlatformAdmin]),
+        ..Principal::default()
+    }
+}
+
 fn member(id: &str, account: &str, role: MemberRole) -> Member {
     Member {
         id: MemberId::from_str(id).unwrap(),
@@ -26,6 +35,23 @@ fn member(id: &str, account: &str, role: MemberRole) -> Member {
         status: MemberStatus::Invited,
         invite_expires_at: Some(100),
     }
+}
+
+fn seed_active_workspace_admin(service: &mut MemberService) {
+    let platform_admin = platform_admin();
+    let workspace_admin = member("mem_admin", "acct_admin", MemberRole::Admin);
+    service
+        .invite(&platform_admin, &[], workspace_admin, 1)
+        .unwrap();
+    service
+        .activate(
+            &platform_admin,
+            &[],
+            &WorkspaceId::from_str("ws_1").unwrap(),
+            &MemberId::from_str("mem_admin").unwrap(),
+            99,
+        )
+        .unwrap();
 }
 
 fn deny_manage() -> Grant {
@@ -43,7 +69,9 @@ fn deny_manage() -> Grant {
 #[test]
 fn member_mutations_are_acl_backed_and_duplicate_invites_do_not_replace() {
     let mut service = MemberService::default();
+    seed_active_workspace_admin(&mut service);
     let actor = admin();
+    let workspace_id = WorkspaceId::from_str("ws_1").unwrap();
     service
         .invite(
             &actor,
@@ -76,6 +104,7 @@ fn member_mutations_are_acl_backed_and_duplicate_invites_do_not_replace() {
             .suspend(
                 &actor,
                 &[deny_manage()],
+                &workspace_id,
                 &MemberId::from_str("mem_1").unwrap()
             )
             .unwrap_err()
@@ -99,18 +128,9 @@ fn member_mutations_are_acl_backed_and_duplicate_invites_do_not_replace() {
 #[test]
 fn invite_self_accepts_but_role_changes_cannot_escalate_actor() {
     let mut service = MemberService::default();
+    seed_active_workspace_admin(&mut service);
     let actor = admin();
-    service
-        .invite(
-            &actor,
-            &[],
-            member("mem_admin", "acct_admin", MemberRole::Admin),
-            1,
-        )
-        .unwrap();
-    service
-        .activate(&actor, &[], &MemberId::from_str("mem_admin").unwrap(), 99)
-        .unwrap();
+    let workspace_id = WorkspaceId::from_str("ws_1").unwrap();
     let invitee = member("mem_1", "acct_1", MemberRole::Member);
     service.invite(&actor, &[], invitee, 1).unwrap();
     let self_principal = Principal {
@@ -121,6 +141,7 @@ fn invite_self_accepts_but_role_changes_cannot_escalate_actor() {
         .activate(
             &self_principal,
             &[],
+            &workspace_id,
             &MemberId::from_str("mem_1").unwrap(),
             99,
         )
@@ -130,6 +151,7 @@ fn invite_self_accepts_but_role_changes_cannot_escalate_actor() {
             .set_role(
                 &actor,
                 &[],
+                &workspace_id,
                 &MemberId::from_str("mem_1").unwrap(),
                 MemberRole::Owner
             )

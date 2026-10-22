@@ -143,6 +143,57 @@ pub async fn check_proxy_connectivity(spec: ProxyBridgeSpec) -> Result<u64, Prob
     check_proxy_connectivity_with_limiter(spec, &PROXY_CHECK_LIMITER).await
 }
 
+pub async fn check_proxy_exit_ip(spec: ProxyBridgeSpec) -> Result<(String, u64), Problem> {
+    let _permit = PROXY_CHECK_LIMITER.try_acquire().map_err(|_| {
+        problem(
+            "proxy_check_busy",
+            "Too many proxy connectivity checks are already running",
+            429,
+        )
+    })?;
+    let bridge = ProxyBridgeHandle::start(spec).await?;
+    let started = Instant::now();
+    let result = async {
+        let proxy = reqwest::Proxy::all(bridge.proxy_url()).map_err(|_| ())?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(proxy)
+            .timeout(IO_TIMEOUT)
+            .build()
+            .map_err(|_| ())?;
+        let response = client
+            .get("https://api.ipify.org")
+            .send()
+            .await
+            .map_err(|_| ())?;
+        if !response.status().is_success() {
+            return Err(());
+        }
+        let ip = response.text().await.map_err(|_| ())?.trim().to_owned();
+        ip.parse::<std::net::IpAddr>().map_err(|_| ())?;
+        Ok::<_, ()>((
+            ip,
+            started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        ))
+    }
+    .await;
+    let stopped = bridge.stop().await;
+    if stopped.is_err() {
+        return Err(problem(
+            "proxy_check_cleanup_failed",
+            "Proxy check could not close its local tunnel",
+            500,
+        ));
+    }
+    result.map_err(|_| {
+        problem(
+            "proxy_check_connection_failed",
+            "Proxy could not fetch its public IP address",
+            502,
+        )
+    })
+}
+
 async fn check_proxy_connectivity_with_limiter(
     spec: ProxyBridgeSpec,
     limiter: &Semaphore,

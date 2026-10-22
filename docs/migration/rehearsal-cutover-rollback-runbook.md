@@ -1,11 +1,13 @@
-# Migration Rehearsal, Cutover, and Rollback Runbook
+# One-Pass Migration, Cutover, and Rollback Runbook
 
 ## Command contract
 
 Names define required semantics; implementation may wrap them.
 
 ```text
+buglogin-migrate export-control-plane --expected-database <source-db-name> --source-instance-id <stable-source-id> --storage-policy <workspace-storage-policy.json> --key-namespace <namespace> --key-name <name> --output <new-control-plane-export.json> --read-only
 buglogin-migrate prepare-source --source <root> --control-plane <export.json> --output <staging-source> --read-only
+buglogin-migrate hydrate-s3-profile-payloads --source <staging-source> --read-only
 buglogin-migrate inspect --source <root> --report <new-dir>
 buglogin-migrate snapshot --source <root> --output <new-file> --read-only
 buglogin-migrate export --report <inspect.json> --snapshot <snapshot.json> --output <new-dir> --created-at <UTC> --tool-commit <sha> --redacted --signing-key-namespace <namespace> --signing-key-name <name> --signing-key-id <id> --signer <actor> --signed-at <UTC>
@@ -17,13 +19,30 @@ buglogin-migrate reconcile --source-report <inspect.json> --destination <root> -
 buglogin-migrate rollback --destination <root> --cutover-id <id> --confirm ROLLBACK_MIGRATION_RUN
 ```
 
-`prepare-source` is the required first step for a real legacy export. It copies the source without mutation, rejects symlinks and output paths inside the source, validates and deterministically canonicalizes the separately exported control plane, writes `control-plane-export.json` only into the prepared copy, and proves the source tree hash is unchanged. Run `inspect`, `export`, and all rehearsals against the prepared copy; never against a live production root.
+`export-control-plane` reads `BUGLOGIN_LEGACY_DATABASE_URL` from the process environment. The URL must point to loopback through an authenticated tunnel and its database name must exactly match `--expected-database`. The command uses one repeatable-read, read-only transaction with bounded statement and lock timeouts. Legacy password salt/hash fields are encrypted in memory with the migration key before they enter the control-plane export; plaintext credential fields are never written to disk, reports, or CLI output. OAuth subjects, invite tokens, and billing secrets are never selected.
 
-`export` defaults to encrypted profile data and reads exactly 32 encryption-key bytes from the native OS vault. Every production package is signed with a separate vault-backed HMAC-SHA256 key and `signature.json` authenticates the checksum-manifest hash. `--redacted` produces the neutral report-only package. `--unsigned` and `verify --checksums-only` are sanitized-fixture options only and are forbidden as release evidence. Plaintext key arguments and environment variables are unsupported. Proxy credentials and VPN configs receive deterministic vault references; secret values are authenticated encrypted objects and never occur in entity JSON, reports, filenames, errors, or debug output. `import --dry-run` decrypts and validates the package, checks destination vault/entity/artifact create/reuse/collision state, builds the complete profile-resource-grant graph, then reports all IDs without creating destination records. Import stages workspaces/memberships, vault objects and artifacts, groups/proxies/extensions/extension groups/VPNs, profiles, resources, `profileResource` bindings, then grants. Activation remains unavailable until graph validation passes; metadata activation is atomic, with grants last. Failure cleanup and confirmed rollback remove/quarantine only journal-owned data in reverse dependency order using vault/entity/artifact CAS: grants, profile-resource bindings, resources, profiles, dependent entities, artifacts, vault objects, memberships/workspaces. `reconcile` proves vault version/hash, artifact checksum/path, entity counts/revisions/SHA-256, profile-resource edge uniqueness/workspace/archive consistency, profile references, and grant-to-binding coverage. `sync-export.json` manifest/blob/tombstone/revision envelopes are preserved and checksum-verified inside migration packages. Hosted sync import remains blocked until PostgreSQL-backed staging journal, single-transaction manifest promotion/idempotency/audit, ambiguous-commit probing, memory rehydration, and orphan-blob GC are implemented and tested. PostgreSQL is the only hosted manifest visibility authority; Redis remains lease/fencing/event infrastructure and must never receive a second authoritative migration manifest commit. This runbook is not production cutover authorization.
+The storage policy is a separate reviewed JSON file with exact coverage for the cloned workspaces. No storage quota is inferred from incomplete S3 path matches:
 
-Every command returns non-zero on incomplete verification and writes JSON reports. No command modifies source.
+```json
+{
+  "schema": "buglogin.legacy-storage-policy/1",
+  "workspace_max_storage_bytes": {
+    "<workspace-id>": 1073741824
+  }
+}
+```
+
+Replace the example key with every workspace ID from the clone and set each quota from reconciled object inventory plus the approved capacity policy. Missing, zero, or extra workspace entries fail closed. Active shares for a direct workspace member remain grants. Pending invitations are written to `reports/pending-invite-provenance.jsonl` with hashed identity, role, expiry, and creator data; their bearer tokens are omitted and new 3.0 invitations must be issued. An active share aimed at exactly one unconsumed invite becomes a checksummed `reports/pending-share-provenance.jsonl` entry cross-checked against that invite; import does not activate it. Ambiguous invite matches block export.
+
+`prepare-source` copies the local profile snapshot without changing it, rejects symlinks and output paths inside the source, validates and deterministically canonicalizes the separately exported control plane, and writes `control-plane-export.json` only into the prepared copy. Next, `hydrate-s3-profile-payloads` reads the 1.0 manifests and files from S3 using `BUGLOGIN_LEGACY_S3_ENDPOINT`, `BUGLOGIN_LEGACY_S3_BUCKET`, `BUGLOGIN_LEGACY_S3_ACCESS_KEY`, `BUGLOGIN_LEGACY_S3_SECRET_KEY`, and the optional `BUGLOGIN_LEGACY_S3_REGION`, `BUGLOGIN_LEGACY_S3_ROOT_PREFIX`, `BUGLOGIN_LEGACY_S3_PATH_STYLE`, and `BUGLOGIN_LEGACY_S3_SESSION_TOKEN`. It performs only S3 GETs, verifies manifest/profile/workspace identity, relative paths, per-file size and BLAKE3, and hydrates valid cloud payloads into the prepared copy. Invalid or missing payloads use a non-empty local copy when available; otherwise the profile remains preserve-only. Temporary downloaded files live under the OS temp directory and are removed after each profile. Run `inspect`, `snapshot`, and `export` against the hydrated prepared copy; never against a live production root.
+
+`export` defaults to encrypted profile data and reads exactly 32 encryption-key bytes from the native OS vault. Every production package is signed with a separate vault-backed HMAC-SHA256 key and `signature.json` authenticates the checksum-manifest hash. `--redacted` produces the neutral report-only package. `--unsigned` and `verify --checksums-only` are sanitized-fixture options only and are forbidden as release evidence. Plaintext key arguments and environment variables are unsupported. Proxy credentials and VPN configs receive deterministic vault references; secret values are authenticated encrypted objects and never occur in entity JSON, reports, filenames, errors, or debug output. `import --dry-run` decrypts and validates the package, checks destination vault/entity/artifact create/reuse/collision state, builds the complete profile-resource-grant graph, then reports all IDs without creating destination records. Import stages workspaces/memberships, vault objects and artifacts, groups/proxies/extensions/extension groups/VPNs, profiles, resources, `profileResource` bindings, then grants. Activation remains unavailable until graph validation passes; metadata activation is atomic, with grants last. Failure cleanup and confirmed rollback remove/quarantine only journal-owned data in reverse dependency order using vault/entity/artifact CAS: grants, profile-resource bindings, resources, profiles, dependent entities, artifacts, vault objects, memberships/workspaces. `reconcile` proves vault version/hash, artifact checksum/path, entity counts/revisions/SHA-256, profile-resource edge uniqueness/workspace/archive consistency, profile references, and grant-to-binding coverage. `sync-export.json` manifest/blob/tombstone/revision envelopes are preserved and checksum-verified inside migration packages. Hosted sync import already promotes manifest state, migration journal, audit entry, and idempotency receipt through one PostgreSQL control transaction after staged blobs verify; the route also probes the durable idempotency receipt after an uncertain response. Production acceptance remains blocked on live PostgreSQL atomicity/unknown-outcome proof, safe orphan-blob retention and GC, restart recovery evidence, and the remaining sync-import release blockers in `production-launch-sync-v1.yaml`. PostgreSQL is the only hosted manifest visibility authority; Redis remains lease/fencing/event infrastructure and must never receive a second authoritative migration manifest commit. This runbook is not production cutover authorization.
+
+Commands return non-zero on infrastructure or package-integrity failures and write JSON reports. S3 per-profile payload failures are counted and leave the profile on a verified local fallback or preserve-only. No command modifies the original local snapshot or writes/deletes S3 objects; hydration writes only to the prepared copy.
 
 Control-plane packages containing `entities/accounts.jsonl` must use the authenticated `POST /v1/migrations/import` flow. The standalone CLI rejects those packages to prevent a false-success local import that omits workspace, member, resource, binding, or grant state. The API flow requires `destinationRoot` to equal the active profile repository root and applies local plus control state with compensating rollback on control activation failure.
+
+Control import and package rollback acquire the same PostgreSQL session advisory lock derived from the package ID before entering the local control-mutation gate. Concurrent requests for one package fail with `409 migration_control_import_in_progress`; requests for other packages remain independently addressable. Durable idempotency receipts still govern completed retries, and the database snapshot/rollback checkpoint remains the recovery boundary for the single direct clone. No repeated rehearsal cycle is required.
 
 ## Roles
 
@@ -38,46 +57,29 @@ Control-plane packages containing `entities/accounts.jsonl` must use the authent
 
 Cutover needs release commander plus source/destination owner. ACL exceptions also need security approval.
 
-## Rehearsal prerequisites
+## One-pass migration prerequisites
 
 - Supported source version.
-- Immutable access-controlled clone; no production access from development tools.
+- Read-only, consistent source export; the 1.0 service may remain online during the clone.
 - Destination build/schema pinned.
 - Package schema/signing key pinned.
-- Fixture suite passing Windows/macOS.
+- Run the consolidated verification once after implementation is frozen, as requested.
 - Free space: at least `2.5 × source logical bytes + installer/runtime reserve`.
 - Destination pre-state recovery copy.
 - Secret canaries.
 - Cohorts: critical, large, proxy-auth, cookie-heavy, extension-heavy, ACL, unsupported-runtime.
 
-## Rehearsal
+## One-pass diff and clone
 
-1. Record source version/build, OS, root, counts, bytes, tree hash.
-2. Run `inspect`; resolve unknown versions, invalid records, secret findings.
-3. Create/hash immutable snapshot.
-4. Export package; verify paths, checksums, signature, redaction.
-5. Dry-run; review ID map, exact legacy `prf` conversions, collisions, unsupported records, profile-resource graph, ACL, capacity.
-6. Import into isolated staging root.
-7. Reconcile counts, references, object hashes, effective ACL, and every profile-resource edge.
-8. Run migration cohorts on both OS families.
-9. Re-import; require zero creates, duplicate objects, unintended updates.
-10. Roll back; require exact destination pre-state.
-11. Import again; require identical IDs/results.
-12. Archive signed evidence and risks.
-
-Two complete rehearsals required. Rehearsal 2 uses release-candidate binary and final runbook.
-
-### Synthetic control-plane rehearsal evidence
-
-The synthetic rehearsal must include an ACL-complete export equivalent to `MIG-018-acl-complete` and prove, in one test run:
-
-- canonical control-plane key ordering and rejection of forbidden secret/token fields;
-- exact accounts, organizations, workspaces, teams, members, resources, `profileResource` bindings, and grant counts;
-- signed-package verification before any import planning;
-- local dry-run creates no profile, entity, vault, or control-plane state;
-- source snapshot remains byte-equivalent before and after the rehearsal.
-
-This proves the package/export boundary only. It does not prove hosted control-plane import, PostgreSQL transactionality, API authorization, or production cutover readiness.
+1. Record source version/build, counts, bytes, and source identity.
+2. Take one read-only source-to-target diff; list every missing, extra, transformed, and unsupported record.
+3. Create one immutable, consistent DB/profile snapshot and record the destination pre-state. Do not require a source write-freeze for this low-volume direct clone; changes made in 1.0 after the snapshot are outside this clone.
+4. Export/map once; verify package paths, checksums, signature, and redaction.
+5. Review deterministic ID mapping, collisions, unsupported records, profile-resource graph, ACL, and capacity against the diff.
+6. Import once into the isolated 3.0 destination.
+7. Reconcile source and destination counts, references, object hashes, effective ACL, and every profile-resource edge.
+8. Keep the source snapshot and destination pre-state checkpoint for rollback; do not repeat rehearsals or imports.
+9. Archive the diff, signed package evidence, reconciliation result, and unresolved exclusions.
 
 ## Acceptance
 
@@ -91,40 +93,36 @@ This proves the package/export boundary only. It does not prove hosted control-p
 - Critical cohorts launch/stop/relaunch; cookies/extensions/proxy persist.
 - Unsupported runtimes remain recoverable and blocked.
 - Secret canaries absent from logs/reports/temp/CI/screenshots.
-- Rollback and repeat import pass.
+- Rollback restores the recorded destination pre-state if reconciliation fails.
 
-Synthetic evidence must also record the source tree hash, destination pre-state hash, package ID, expected/activated counts, reconciliation result, run ID, and redaction status. Evidence must not contain source paths, profile bytes, credentials, or secret canaries. The rehearsal must reject incorrect cutover/rollback confirmations before writes and prove repeated activation rollback is safe.
+The one-pass evidence must record the source snapshot hash, destination pre-state hash, package ID, expected/activated counts, reconciliation result, run ID, and redaction status. Evidence must not contain source paths, profile bytes, credentials, or secret canaries. The migration command must reject incorrect cutover/rollback confirmations before writes.
 
 ## Cutover preparation
 
-- Freeze destination schema/migration code.
+- Pin destination schema/migration code for the one-pass import.
 - Publish signed RC/checksums.
-- Confirm old-client write block.
-- Confirm contacts, maintenance notice, decision channel, evidence location.
+- Do not require an old-client write block for the data clone; document the source snapshot time so any later 1.0 changes can be handled explicitly.
 - Recalculate capacity from latest inspect.
 - Validate backups/restore timing.
 - Assign cutover ID/evidence directory.
-- Set maximum freeze and rollback deadline.
-- Any transformation-rule change forces another rehearsal.
+- Set the rollback deadline.
+- Freeze transformation rules before the one-pass export; a change after the source snapshot invalidates that package and requires a new diff/snapshot before writing.
 
 ## Cutover
 
 1. Announce maintenance; block new sessions/jobs.
 2. Drain browser, sync, API, MCP, background jobs.
-3. Freeze source writes server/client-side; verify rejected writes.
-4. Record final counts/tree/object hashes.
-5. Create final immutable snapshot.
-6. Export, sign, verify, dry-run.
-7. Evaluate stops; obtain go approval.
-8. Import to destination staging paths.
-9. Reconcile counts, hashes, references, ACL, unsupported ledger, exact `prf` mapping, profile-resource graph, archive states, and grant coverage.
-10. Promote metadata/objects atomically.
-11. Run critical Windows/macOS smoke and migration cohorts.
-12. Enable reads only; validate diagnostics/support visibility.
-13. Verify rollback checkpoint.
-14. Enable writes.
-15. Keep source immutable; monitor through rollback deadline.
-16. Close only after evidence sign-off.
+3. Capture the agreed source snapshot while the low-volume 1.0 service remains online; record its timestamp and counts.
+4. Record the snapshot's tree/object hashes and destination pre-state.
+5. Export and sign that snapshot once.
+6. Export, sign, verify, and review the diff.
+7. Import once to destination staging paths.
+8. Reconcile counts, hashes, references, ACL, unsupported ledger, exact `prf` mapping, profile-resource graph, archive states, and grant coverage.
+9. Promote metadata/objects atomically only if reconciliation is exact and the diff has no unapproved exclusions.
+10. Verify the rollback checkpoint is available.
+11. Enable reads and observe diagnostics/support visibility.
+12. Enable 3.0 writes; retain the original 1.0 source and snapshot unchanged for rollback. Writes made in 1.0 after the snapshot are not included in 3.0.
+13. Close only after reconciliation and rollback evidence are archived.
 
 ## Stop conditions
 
@@ -146,7 +144,7 @@ Rollback is mandatory for data loss, permission expansion, unrecoverable critica
 8. Verify legacy launch, proxy, cookies, sync, API, ACL.
 9. Notify users with exact affected window/divergence process.
 10. Retain snapshots, packages, maps, checksums, graph reports, logs.
-11. Require new rehearsal cycle.
+11. Close the migration after reconciliation and rollback evidence are archived; no repeat rehearsal cycle is required.
 
 ## Evidence package
 

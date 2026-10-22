@@ -130,20 +130,69 @@ mod live_redis {
         };
 
         let lease = backend
-            .acquire_lease(scope(), &resource, Duration::from_secs(5))
+            .acquire_lease_idempotent(
+                scope(),
+                &resource,
+                Duration::from_secs(5),
+                "test-lease-acquire-initial-0001",
+            )
             .await
             .unwrap();
-        let renewed = backend
-            .renew_lease(
+        let renewed_once = backend
+            .renew_lease_idempotent(
                 scope(),
                 &resource,
                 &lease.owner_token,
                 Duration::from_secs(10),
+                "lease-renew-idempotency-0001",
             )
             .await
             .unwrap();
-        assert!(renewed.expires_at_ms > lease.expires_at_ms);
-        assert_eq!(renewed.fencing_token, lease.fencing_token);
+        assert!(renewed_once.expires_at_ms > lease.expires_at_ms);
+        assert_eq!(renewed_once.fencing_token, lease.fencing_token);
+        let renewed_replay = backend
+            .renew_lease_idempotent(
+                scope(),
+                &resource,
+                &renewed_once.owner_token,
+                Duration::from_secs(10),
+                "lease-renew-idempotency-0001",
+            )
+            .await
+            .unwrap();
+        assert_eq!(renewed_once, renewed_replay);
+        assert_eq!(
+            backend
+                .renew_lease_idempotent(
+                    scope(),
+                    &resource,
+                    &renewed_once.owner_token,
+                    Duration::from_secs(20),
+                    "lease-renew-idempotency-0001",
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "idempotency_conflict"
+        );
+        let other_auth = CoordinationAuth::new("actor-2", "test-credential").unwrap();
+        assert_eq!(
+            backend
+                .renew_lease_idempotent(
+                    CoordinationScope {
+                        workspace_id: &workspace,
+                        auth: &other_auth,
+                    },
+                    &resource,
+                    &renewed_once.owner_token,
+                    Duration::from_secs(10),
+                    "lease-renew-idempotency-0001",
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "idempotency_conflict"
+        );
 
         backend
             .heartbeat_presence(
@@ -180,18 +229,87 @@ mod live_redis {
             1
         );
         backend
-            .release_lease(scope(), &resource, &renewed.owner_token)
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &renewed_once.owner_token,
+                "test-release-lease-initial-0001",
+            )
             .await
             .unwrap();
         let reacquired = backend
-            .acquire_lease(scope(), &resource, Duration::from_secs(5))
+            .acquire_lease_idempotent(
+                scope(),
+                &resource,
+                Duration::from_secs(5),
+                "test-lease-acquire-again-0001",
+            )
             .await
             .unwrap();
-        assert!(reacquired.fencing_token > renewed.fencing_token);
+        assert!(reacquired.fencing_token > renewed_once.fencing_token);
         backend
-            .release_lease(scope(), &resource, &reacquired.owner_token)
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &reacquired.owner_token,
+                "test-release-lease-reacquired-01",
+            )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_redis_lease_cannot_be_renewed_while_key_remains() {
+        let Some(url) = redis_test_url() else {
+            return;
+        };
+        let namespace = format!("test-expired-renew-{}", std::process::id());
+        let backend = RedisCoordination::connect(
+            RedisCoordinationConfig::new(url.clone(), namespace.clone()),
+            Arc::new(AllowAll),
+        )
+        .await
+        .unwrap();
+        let workspace = WorkspaceId::new("workspace-1").unwrap();
+        let resource = ResourceId::new("resource-1").unwrap();
+        let auth = CoordinationAuth::new("actor-1", "test-credential").unwrap();
+        let scope = || CoordinationScope {
+            workspace_id: &workspace,
+            auth: &auth,
+        };
+        let lease = backend
+            .acquire_lease_idempotent(
+                scope(),
+                &resource,
+                Duration::from_secs(10),
+                "expired-renew-acquire-0001",
+            )
+            .await
+            .unwrap();
+
+        let lease_key = format!("buglogin:{{{namespace}:workspace-1}}:lease:resource-1");
+        let client = redis::Client::open(url.as_str()).unwrap();
+        let mut connection = client.get_multiplexed_async_connection().await.unwrap();
+        let _: usize = redis::cmd("HSET")
+            .arg(&lease_key)
+            .arg("expiresAt")
+            .arg(1u64)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+
+        let error = backend
+            .renew_lease_idempotent(
+                scope(),
+                &resource,
+                &lease.owner_token,
+                Duration::from_secs(10),
+                "expired-renew-attempt-0001",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "lease_expired");
+        assert_eq!(error.status, 409);
     }
 
     #[tokio::test]
@@ -242,8 +360,27 @@ mod live_redis {
             .await
             .unwrap_err();
         assert_eq!(conflict.code, "idempotency_conflict");
+        let other_auth = CoordinationAuth::new("actor-2", "test-credential").unwrap();
+        let actor_conflict = backend
+            .acquire_lease_idempotent(
+                CoordinationScope {
+                    workspace_id: &workspace,
+                    auth: &other_auth,
+                },
+                &resource,
+                Duration::from_secs(10),
+                "lease-idempotency-key-0001",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(actor_conflict.code, "idempotency_conflict");
         backend
-            .release_lease(scope(), &resource, &first.owner_token)
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &first.owner_token,
+                "test-release-lease-first-000001",
+            )
             .await
             .unwrap();
     }
@@ -289,7 +426,88 @@ mod live_redis {
         assert!(retry.fencing_token > first.fencing_token);
         assert_ne!(retry.owner_token, first.owner_token);
         backend
-            .release_lease(scope(), &resource, &retry.owner_token)
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &retry.owner_token,
+                "test-release-lease-expired-0001",
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn idempotent_lease_release_replays_without_releasing_a_new_lease() {
+        let Some(url) = redis_test_url() else {
+            return;
+        };
+        let namespace = format!("test-lease-release-idempotency-{}", std::process::id());
+        let backend = RedisCoordination::connect(
+            RedisCoordinationConfig::new(url, namespace),
+            Arc::new(AllowAll),
+        )
+        .await
+        .unwrap();
+        let workspace = WorkspaceId::new("workspace-1").unwrap();
+        let resource = ResourceId::new("resource-release-idempotency-1").unwrap();
+        let auth = CoordinationAuth::new("actor-1", "test-credential").unwrap();
+        let scope = || CoordinationScope {
+            workspace_id: &workspace,
+            auth: &auth,
+        };
+        let first = backend
+            .acquire_lease_idempotent(
+                scope(),
+                &resource,
+                Duration::from_secs(10),
+                "release-test-acquire-first-0001",
+            )
+            .await
+            .unwrap();
+        backend
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &first.owner_token,
+                "release-test-key-same-input-01",
+            )
+            .await
+            .unwrap();
+        backend
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &first.owner_token,
+                "release-test-key-same-input-01",
+            )
+            .await
+            .unwrap();
+        let second = backend
+            .acquire_lease_idempotent(
+                scope(),
+                &resource,
+                Duration::from_secs(10),
+                "release-test-acquire-second-0001",
+            )
+            .await
+            .unwrap();
+        let conflict = backend
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &second.owner_token,
+                "release-test-key-same-input-01",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code, "idempotency_conflict");
+        backend
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &second.owner_token,
+                "release-test-key-second-lease-01",
+            )
             .await
             .unwrap();
     }
@@ -341,7 +559,12 @@ mod live_redis {
         assert_eq!(err.code, "lease_not_found");
 
         let lease1 = backend
-            .acquire_lease(scope(), &resource, Duration::from_secs(10))
+            .acquire_lease_idempotent(
+                scope(),
+                &resource,
+                Duration::from_secs(10),
+                "test-lease-acquire-manifest-0001",
+            )
             .await
             .unwrap();
         m1.fencing_token = lease1.fencing_token;
@@ -441,11 +664,21 @@ mod live_redis {
         assert_eq!(current.parent_generation, Some(1));
 
         backend
-            .release_lease(scope(), &resource, &lease1.owner_token)
+            .release_lease_idempotent(
+                scope(),
+                &resource,
+                &lease1.owner_token,
+                "test-release-lease-manifest-0001",
+            )
             .await
             .unwrap();
         let lease2 = backend
-            .acquire_lease(scope(), &resource, Duration::from_secs(10))
+            .acquire_lease_idempotent(
+                scope(),
+                &resource,
+                Duration::from_secs(10),
+                "test-lease-acquire-manifest-0002",
+            )
             .await
             .unwrap();
         assert!(lease2.fencing_token > lease1.fencing_token);
@@ -488,6 +721,65 @@ mod live_redis {
             .unwrap();
         assert_eq!(current.generation, 3);
         assert_eq!(current.fencing_token, lease2.fencing_token);
+
+        let high_generation_resource = ResourceId::new("resource-high-generation").unwrap();
+        let high_generation_lease = backend
+            .acquire_lease_idempotent(
+                scope(),
+                &high_generation_resource,
+                Duration::from_secs(10),
+                "test-lease-acquire-high-generation-01",
+            )
+            .await
+            .unwrap();
+        let high_generation = 9_007_199_254_740_993_u64;
+        let high_generation_manifest = buglogin_sync::manifest::SyncManifest::new(
+            workspace.clone(),
+            high_generation_resource.clone(),
+            high_generation_lease.fencing_token,
+            high_generation,
+            Some(high_generation - 1),
+            b"data-high-generation",
+            vec![],
+        )
+        .unwrap();
+        backend
+            .commit_manifest(
+                scope(),
+                &high_generation_resource,
+                &high_generation_lease.owner_token,
+                high_generation_manifest,
+            )
+            .await
+            .unwrap();
+        let high_generation_successor = buglogin_sync::manifest::SyncManifest::new(
+            workspace.clone(),
+            high_generation_resource.clone(),
+            high_generation_lease.fencing_token,
+            high_generation + 1,
+            Some(high_generation),
+            b"data-high-generation-successor",
+            vec![],
+        )
+        .unwrap();
+        backend
+            .commit_manifest(
+                scope(),
+                &high_generation_resource,
+                &high_generation_lease.owner_token,
+                high_generation_successor,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .current_manifest(scope(), &high_generation_resource)
+                .await
+                .unwrap()
+                .unwrap()
+                .generation,
+            high_generation + 1
+        );
     }
 
     #[tokio::test]

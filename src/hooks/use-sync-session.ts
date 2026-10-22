@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
 import type { SyncSessionInfo } from "@/types";
@@ -10,13 +9,22 @@ import type { SyncSessionInfo } from "@/types";
 export function useSyncSessions() {
   const [sessions, setSessions] = useState<SyncSessionInfo[]>([]);
 
-  const loadSessions = useCallback(async () => {
-    try {
-      const data = await invoke<SyncSessionInfo[]>("get_sync_sessions");
-      setSessions(data);
-    } catch (err) {
-      console.error("Failed to load sync sessions:", err);
-    }
+  /**
+   * Fold an authoritative session record into the list.
+   *
+   * The pause, hold and arrange commands all return the session as the backend
+   * now holds it. Applying that return value alongside the event means a
+   * control never has to show what it hopes happened, and a dropped event
+   * cannot leave a button lying about the state.
+   */
+  const applySession = useCallback((session: SyncSessionInfo) => {
+    setSessions((prev) => {
+      const idx = prev.findIndex((s) => s.id === session.id);
+      if (idx < 0) return [...prev, session];
+      const next = [...prev];
+      next[idx] = session;
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -24,8 +32,6 @@ export function useSyncSessions() {
     let endedUnlisten: (() => void) | undefined;
 
     const setup = async () => {
-      await loadSessions();
-
       changedUnlisten = await listen<SyncSessionInfo>(
         "sync-session-changed",
         (event) => {
@@ -52,7 +58,7 @@ export function useSyncSessions() {
       changedUnlisten?.();
       endedUnlisten?.();
     };
-  }, [loadSessions]);
+  }, []);
 
   /** Find the session a profile belongs to and its role */
   const getProfileSyncInfo = useCallback(
@@ -85,5 +91,5 @@ export function useSyncSessions() {
     [sessions],
   );
 
-  return { sessions, getProfileSyncInfo, loadSessions };
+  return { sessions, getProfileSyncInfo, applySession };
 }

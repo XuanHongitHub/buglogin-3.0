@@ -38,10 +38,17 @@ impl ProfileLifecycleService {
         let current = profiles
             .get(&command.profile_id)?
             .ok_or_else(|| problem("profile_not_found", "Profile not found", 404))?;
-        if current.value.archived || current.value.state == ProfileState::Running {
+        if current.value.runtime == Runtime::Preserved {
+            return Err(problem(
+                "profile_runtime_preserved",
+                "This legacy runtime is preserved for migration and cannot be launched",
+                409,
+            ));
+        }
+        if current.value.archived || current.value.state != ProfileState::Ready {
             return Err(problem(
                 "profile_not_launchable",
-                "Profile cannot be launched",
+                "Only a ready, active profile can be launched",
                 409,
             ));
         }
@@ -54,10 +61,12 @@ impl ProfileLifecycleService {
         })?;
         if active_lifecycles.contains_key(command.profile_id.as_str()) {
             return Err(problem(
-                "profile_not_launchable",
-                "Profile cannot be launched",
+                "profile_lifecycle_already_active",
+                "Profile already has an active browser lifecycle",
                 409,
-            ));
+            )
+            .with_detail("A lifecycle is still registered for this profile; stop or reconcile it before launching again.")
+            .with_field("profileId", command.profile_id.as_str()));
         }
 
         let binary = runtime_binaries
@@ -169,4 +178,80 @@ fn runtime_key(runtime: &Runtime) -> String {
 
 fn problem(code: &'static str, title: &'static str, status: u16) -> Problem {
     Problem::new(code, title, status, "api")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buglogin_domain::entities::Profile;
+    use buglogin_storage::local::LocalRepository;
+    use std::fs;
+
+    fn profile(runtime: Runtime, state: ProfileState) -> Profile {
+        Profile {
+            id: ProfileId::from_str("prf_lifecycle_gate").unwrap(),
+            name: "Migration profile".into(),
+            runtime,
+            runtime_version: None,
+            runtime_config: None,
+            state,
+            archived: false,
+            fingerprint: None,
+            note: None,
+            proxy_id: None,
+            vpn_id: None,
+            group_ids: Vec::new(),
+            tags: Vec::new(),
+            extension_group_id: None,
+            sync_mode: None,
+            created_at: "2026-10-16T00:00:00Z".into(),
+            updated_at: "2026-10-16T00:00:00Z".into(),
+        }
+    }
+
+    fn launch_error(runtime: Runtime, state: ProfileState) -> Problem {
+        let runtime_key = match &runtime {
+            Runtime::Wayfern => "wayfern",
+            Runtime::Preserved => "preserved",
+            _ => "other",
+        };
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-profile-launch-gate-{}-{}",
+            std::process::id(),
+            runtime_key
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let profiles = ProfileService::new(LocalRepository::open(&root).unwrap());
+        profiles.create(profile(runtime, state)).unwrap();
+        let error = ProfileLifecycleService
+            .launch(
+                &profiles,
+                &Arc::new(RwLock::new(HashMap::new())),
+                &Arc::new(RwLock::new(HashMap::new())),
+                ProfileLifecycleCommand {
+                    profile_id: ProfileId::from_str("prf_lifecycle_gate").unwrap(),
+                    profiles_root: root.clone(),
+                    extra_args: Vec::new(),
+                },
+            )
+            .unwrap_err();
+        let _ = fs::remove_dir_all(root);
+        error
+    }
+
+    #[test]
+    fn created_profile_cannot_launch_before_profile_data_is_ready() {
+        assert_eq!(
+            launch_error(Runtime::Wayfern, ProfileState::Created).code,
+            "profile_not_launchable"
+        );
+    }
+
+    #[test]
+    fn preserved_runtime_cannot_launch_or_become_an_engine() {
+        assert_eq!(
+            launch_error(Runtime::Preserved, ProfileState::Created).code,
+            "profile_runtime_preserved"
+        );
+    }
 }

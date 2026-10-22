@@ -52,7 +52,7 @@ pass
 - Signed control+sync package E2E passes, including exact activation replay and Redis manifest non-commit.
 - Proven sync failure now demonstrates control rollback plus successful same-idempotency reactivation in package E2E.
 - Sync-journal startup recovery now handles stale proven-uncommitted finalization/cleanup states idempotently; package-upload journal recovery and staging orphan GC remain open.
-- Verification currently reconstructs at most 512 MiB in memory; streamed verification is required before large production migration.
+- Verification currently reconstructs at most 64 MiB in memory. Keep the aggregate package cap at this value on the current VPS; implement streamed verification before raising it for larger migrations.
 - Orphan object GC, real PostgreSQL/Redis/S3 rehearsal, remaining migration fixtures, and Windows/macOS signed E2E remain open.
 - The local filesystem `/v1/migrations/import` guard for `sync/export.json` remains intentional; production uses hosted package ingress only.
 

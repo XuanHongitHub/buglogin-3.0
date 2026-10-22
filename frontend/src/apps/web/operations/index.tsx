@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   Button,
   colors,
@@ -12,13 +12,11 @@ import {
 } from "../../../design-system";
 import {
   errorMessage,
-  type LaunchInput,
   type Operation,
   type Profile,
   type ProfileCreateInput,
+  type ProfileCreateRuntime,
   type ProxyParseReport,
-  type Runtime,
-  type SyncMode,
   type VersionedProfile,
   type VersionedProfilePage,
   type WebApiClient,
@@ -32,15 +30,7 @@ import {
   WebShell,
 } from "../shells";
 
-const runtimeOptions: Runtime[] = [
-  "wayfern",
-  "bugox",
-  "bugium",
-  "bugmini",
-  "bugthor",
-  "bughelium",
-];
-const syncOptions: SyncMode[] = ["local", "managed", "disabled"];
+const runtimeOptions: ProfileCreateRuntime[] = ["wayfern", "bugmini"];
 
 export function OperationsPage({
   api,
@@ -128,9 +118,8 @@ function ProfileCreateForm({
     () => `prf_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
   );
   const [name, setName] = useState("");
-  const [runtime, setRuntime] = useState<Runtime>("wayfern");
+  const [runtime, setRuntime] = useState<ProfileCreateRuntime>("wayfern");
   const [runtimeVersion, setRuntimeVersion] = useState("");
-  const [syncMode, setSyncMode] = useState<SyncMode>("local");
   const [note, setNote] = useState("");
   const [state, setState] = useState<"idle" | "loading" | "success" | "error">(
     "idle",
@@ -177,7 +166,7 @@ function ProfileCreateForm({
   return (
     <Panel
       title="Create profile"
-      description="Creates a real profile record. Runtime and sync policy are sent to the backend; no local mock state is used."
+      description="Creates a real profile record using the sync policy enforced by the workspace API; no local mock state is used."
     >
       <form onSubmit={submit} style={{ display: "grid", gap: spacing[3] }}>
         <div
@@ -205,7 +194,9 @@ function ProfileCreateForm({
             <span style={typography.label}>Runtime</span>
             <select
               aria-label="Runtime"
-              onChange={(event) => setRuntime(event.target.value as Runtime)}
+              onChange={(event) =>
+                setRuntime(event.target.value as ProfileCreateRuntime)
+              }
               value={runtime}
               style={controlStyle}
             >
@@ -222,21 +213,6 @@ function ProfileCreateForm({
             onChange={(event) => setRuntimeVersion(event.target.value)}
             value={runtimeVersion}
           />
-          <label style={{ display: "grid", gap: spacing[1] }}>
-            <span style={typography.label}>Sync mode</span>
-            <select
-              aria-label="Sync mode"
-              onChange={(event) => setSyncMode(event.target.value as SyncMode)}
-              value={syncMode}
-              style={controlStyle}
-            >
-              {syncOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
         <Field
           label="Note"
@@ -357,7 +333,11 @@ function ProfileInventory({
         </div>
       ),
     },
-    { key: "runtime", header: "Runtime", render: (row) => row.value.runtime },
+    {
+      key: "runtime",
+      header: "Runtime",
+      render: (row) => runtimeLabel(row.value),
+    },
     {
       key: "sync",
       header: "Sync",
@@ -386,7 +366,10 @@ function ProfileInventory({
         <div style={{ display: "flex", flexWrap: "wrap", gap: spacing[2] }}>
           <Button
             disabled={
-              disabled || row.value.archived || row.value.state === "running"
+              disabled ||
+              row.value.archived ||
+              row.value.state !== "ready" ||
+              row.value.runtime === "preserved"
             }
             loading={operation[row.value.id]?.status === "loading"}
             onClick={() => void run(row.value, "launch")}
@@ -486,6 +469,26 @@ function ProfileInventory({
       </div>
     </Panel>
   );
+}
+
+function runtimeLabel(profile: Profile): string {
+  if (profile.runtime !== "preserved") return profile.runtime;
+  if (
+    typeof profile.runtimeConfig === "object" &&
+    profile.runtimeConfig !== null &&
+    !Array.isArray(profile.runtimeConfig)
+  ) {
+    const migration = profile.runtimeConfig.migration;
+    if (
+      typeof migration === "object" &&
+      migration !== null &&
+      !Array.isArray(migration) &&
+      typeof migration.legacyRuntime === "string"
+    ) {
+      return `${migration.legacyRuntime} (preserved)`;
+    }
+  }
+  return "Legacy runtime (preserved)";
 }
 
 function ProxyParser({

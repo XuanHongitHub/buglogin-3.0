@@ -4,7 +4,7 @@
 - Status: discovery only; no product implementation approved
 - Reference sources:
   - `.tmp/buglogin-legacy`: local clone of `E:\bug-login`; source branch snapshot `main`, working source had untracked files before cloning
-  - `.tmp/donutbrowser-upstream`: shallow clone of `https://github.com/zhom/donutbrowser`; `HEAD=a4ed5c855afc4242b6c89c7d73ad767f2357c7f0`, `2026-07-18`; latest stable tag observed: `v0.28.2`, `2026-07-12`
+  - `.tmp/donutbrowser-upstream`: read-only reference checkout of `https://github.com/zhom/donutbrowser`; current baseline is `v0.34.0` at `f70a6c9671b17ab03a6e6f87a7362f8076c8339d` (`2026-10-16`). This supersedes the original discovery snapshot.
 
 ## 1. Decision summary
 

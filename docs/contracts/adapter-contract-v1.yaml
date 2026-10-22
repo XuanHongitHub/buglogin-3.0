@@ -2,9 +2,25 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: ce66e0b3c6e7f4131132909c815dd0989f2e87b13a015e8e4739d2e5240dc6d1
-projectionCount: 100
+sourceSha256: 423bc36c6ebbcf555923caf57f1066819af15675b05a44dcacd00f08af47f4b9
+projectionCount: 135
 projections:
+  - commandId: runtime.catalog.get
+    kind: query
+    capability: CAP-RUN-001
+    action: read
+    inputSchema: Empty
+    outputSchema: RuntimeCatalog
+    auth: public
+    audit: metadata-only
+    idempotency: none
+    timeoutMs: 30000
+    adapters:
+      - rest
+      - mcp
+    names:
+      rest: runtime.catalog.get
+      mcp: runtime_catalog_get
   - commandId: system.health.get
     kind: query
     capability: system.read
@@ -111,6 +127,22 @@ projections:
       tauri: profile_get
       rest: profile.get
       mcp: profile_get
+  - commandId: profile.binding.get
+    kind: query
+    capability: profile.read
+    action: read
+    inputSchema: ProfileIdInput
+    outputSchema: ProfileResource
+    auth: required
+    audit: metadata-only
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: profile_binding_get
+      rest: profile.binding.get
   - commandId: profile.create
     kind: command
     capability: profile.create
@@ -129,6 +161,28 @@ projections:
       tauri: profile_create
       rest: profile.create
       mcp: profile_create
+  - commandId: profile.update
+    kind: command
+    capability: profile.update
+    action: update
+    inputSchema: ProfileUpdateInput
+    outputSchema: ProfileRecord
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    preconditions: &a1
+      - active-profile-binding
+      - profile-not-running
+      - expected-revision-current
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: profile_update
+      rest: profile.update
+      mcp: profile_update
   - commandId: profile.clone
     kind: command
     capability: profile.create
@@ -139,7 +193,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a1
+    preconditions: &a2
       - source-profile-readable
       - source-revision-current
       - metadata-only
@@ -161,7 +215,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a2
+    preconditions: &a3
       - active-workspace-member
       - profile-revision-current
     adapters:
@@ -182,7 +236,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a3
+    preconditions: &a4
       - active-workspace-member
       - profile-revision-current
     adapters:
@@ -193,6 +247,88 @@ projections:
       tauri: profile_share_revoke
       rest: profile.share.revoke
       mcp: profile_share_revoke
+  - commandId: profile.share.recipientdevicekeys.list
+    kind: query
+    capability: CAP-SHARE-001
+    action: manage
+    inputSchema: ProfileShareRecipientDeviceKeysInput
+    outputSchema: DeviceEncryptionKeyList
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    preconditions: &a10
+      - profile-share-authorized
+      - active-workspace-member
+      - active-device-session
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: profile_share_recipientdevicekeys_list
+      rest: profile.share.recipientdevicekeys.list
+  - commandId: profile.share.keyenvelope.get
+    kind: query
+    capability: CAP-SHARE-001
+    action: read
+    inputSchema: ProfileIdInput
+    outputSchema: ProfileKeyShareEnvelope
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    preconditions: &a11
+      - active-direct-profile-share
+      - active-device-session
+      - no-key-rotation-pending
+    adapters:
+      - rest
+    names:
+      rest: profile.share.keyenvelope.get
+  - commandId: profile.keyrotation.recipients.list
+    kind: query
+    capability: profile.update
+    action: update
+    inputSchema: ProfileIdInput
+    outputSchema: ProfileKeyRotationRecipientDevicesList
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    preconditions: &a12
+      - profile-update-authorized
+      - rotation-pending
+      - effective-shared-read-or-execute-members
+      - active-device-session
+      - bounded-active-device-key-set
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: profile_keyrotation_recipients_list
+      rest: profile.keyrotation.recipients.list
+  - commandId: profile.keyrotation.execute
+    kind: operation
+    capability: profile.update
+    action: update
+    inputSchema: ProfileKeyRotationExecuteInput
+    outputSchema: OperationAccepted
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 120000
+    events: &a41
+      - operation.updated
+      - profile.runtime.updated
+    preconditions: &a42
+      - profile-update-authorized
+      - rotation-pending
+      - exact-recipient-device-fingerprint-confirmation
+      - active-device-session
+    adapters:
+      - tauri
+    names:
+      tauri: profile_keyrotation_execute
   - commandId: profile.launch
     kind: operation
     capability: profile.launch
@@ -203,7 +339,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 120000
-    events: &a4
+    events: &a5
       - operation.updated
       - profile.runtime.updated
     adapters:
@@ -224,7 +360,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 60000
-    events: &a5
+    events: &a6
       - operation.updated
       - profile.runtime.updated
     adapters:
@@ -235,6 +371,88 @@ projections:
       tauri: profile_stop
       rest: profile.stop
       mcp: profile_stop
+  - commandId: runtime.dispatch.enqueue
+    kind: command
+    capability: CAP-RUN-001
+    action: execute
+    inputSchema: RuntimeDispatchInput
+    outputSchema: RuntimeDispatchJobEnvelope
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    preconditions: &a13
+      - account-authorized-profile
+      - active-target-device-owned-by-account
+    adapters:
+      - rest
+    names:
+      rest: runtime.dispatch.enqueue
+  - commandId: runtime.dispatch.inbox
+    kind: query
+    capability: CAP-RUN-001
+    action: read
+    inputSchema: Empty
+    outputSchema: RuntimeDispatchInbox
+    auth: required
+    audit: metadata-only
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - rest
+    names:
+      rest: runtime.dispatch.inbox
+  - commandId: runtime.dispatch.claim
+    kind: command
+    capability: CAP-RUN-001
+    action: execute
+    inputSchema: RuntimeDispatchJobIdInput
+    outputSchema: RuntimeDispatchJobEnvelope
+    auth: required
+    audit: required
+    idempotency: none
+    timeoutMs: 30000
+    preconditions: &a14
+      - authenticated-target-device
+      - current-profile-lifecycle-permission
+    adapters:
+      - rest
+    names:
+      rest: runtime.dispatch.claim
+  - commandId: runtime.dispatch.complete
+    kind: command
+    capability: CAP-RUN-001
+    action: execute
+    inputSchema: RuntimeDispatchReceipt
+    outputSchema: RuntimeDispatchJobEnvelope
+    auth: required
+    audit: required
+    idempotency: none
+    timeoutMs: 30000
+    preconditions: &a15
+      - claimed-by-authenticated-target-device
+      - matching-runtime-receipt
+    adapters:
+      - rest
+    names:
+      rest: runtime.dispatch.complete
+  - commandId: runtime.dispatch.fail
+    kind: command
+    capability: CAP-RUN-001
+    action: execute
+    inputSchema: RuntimeDispatchFailure
+    outputSchema: RuntimeDispatchJobEnvelope
+    auth: required
+    audit: required
+    idempotency: none
+    timeoutMs: 30000
+    preconditions: &a16
+      - claimed-by-authenticated-target-device
+      - stable-failure-code
+    adapters:
+      - rest
+    names:
+      rest: runtime.dispatch.fail
   - commandId: profile.sync.recovery.code.get
     kind: query
     capability: profile.read
@@ -245,7 +463,7 @@ projections:
     audit: metadata-only
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a32
+    preconditions: &a43
       - active-profile-binding
       - local-profile-key-present
     adapters:
@@ -262,7 +480,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a33
+    preconditions: &a44
       - active-profile-binding
       - recovery-code-valid
       - local-vault-write
@@ -281,8 +499,10 @@ projections:
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
     names:
+      tauri: profile_runtime_get
       rest: profile.runtime.get
   - commandId: profile.runtime.started
     kind: command
@@ -322,7 +542,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a6
+    preconditions: &a7
       - profile-not-running
       - explicit-data-policy
     adapters:
@@ -343,7 +563,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a7
+    preconditions: &a8
       - profile-not-running
     adapters:
       - tauri
@@ -381,7 +601,7 @@ projections:
     audit: metadata-only
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a8
+    preconditions: &a9
       - profile-not-running
     adapters:
       - tauri
@@ -401,7 +621,7 @@ projections:
     audit: metadata-only
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a11
+    preconditions: &a17
       - device-session-bound-to-target-device
     adapters:
       - rest
@@ -419,12 +639,8 @@ projections:
     timeoutMs: 30000
     adapters:
       - tauri
-      - rest
-      - mcp
     names:
       tauri: cookie_stage
-      rest: cookie.stage
-      mcp: cookie_stage
   - commandId: cookie.import
     kind: command
     capability: CAP-COOK-001
@@ -435,19 +651,15 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a9
+    preconditions: &a45
       - profile-not-running
       - destination-lease
       - expected-generation-current
       - staged-import-one-use
     adapters:
       - tauri
-      - rest
-      - mcp
     names:
       tauri: cookie_import
-      rest: cookie.import
-      mcp: cookie_import
   - commandId: cookie.copy
     kind: command
     capability: CAP-COOK-001
@@ -458,19 +670,15 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a10
+    preconditions: &a46
       - source-profile-not-running
       - destination-profile-not-running
       - destination-lease
       - expected-generation-current
     adapters:
       - tauri
-      - rest
-      - mcp
     names:
       tauri: cookie_copy
-      rest: cookie.copy
-      mcp: cookie_copy
   - commandId: proxy.parse
     kind: query
     capability: CAP-NET-001
@@ -489,6 +697,23 @@ projections:
       tauri: proxy_parse
       rest: proxy.parse
       mcp: proxy_parse
+  - commandId: proxy.import
+    kind: command
+    capability: CAP-NET-001
+    action: create
+    inputSchema: ProxyImportInput
+    outputSchema: ProxyImportReport
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 120000
+    preconditions: &a47
+      - workspace-authorized
+      - credential-stored-in-device-vault
+    adapters:
+      - tauri
+    names:
+      tauri: proxy_import
   - commandId: proxy.check
     kind: query
     capability: CAP-NET-002
@@ -603,7 +828,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 300000
-    events: &a12
+    events: &a18
       - operation.updated
     adapters:
       - tauri
@@ -621,10 +846,10 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 0
-    events: &a13
+    events: &a19
       - operation.updated
       - migration.item.updated
-    preconditions: &a14
+    preconditions: &a20
       - source-read-only
       - snapshot-present
       - dry-run-approved
@@ -634,6 +859,28 @@ projections:
     names:
       tauri: migration_import
       rest: migration.import
+  - commandId: migration.profile.data.import
+    kind: operation
+    capability: profile.update
+    action: update
+    inputSchema: MigrationProfileDataImportInput
+    outputSchema: OperationAccepted
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 0
+    events: &a48
+      - operation.updated
+      - migration.item.updated
+    preconditions: &a49
+      - profile-update-authorized
+      - active-profile-resource-binding
+      - empty-genesis-manifest
+      - local-profile-source-verified
+    adapters:
+      - tauri
+    names:
+      tauri: migration_profile_data_import
   - commandId: migration.control.import
     kind: command
     capability: migration.write
@@ -644,7 +891,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a15
+    preconditions: &a21
       - verified-control-graph
       - package-identity-bound
       - dry-run-before-activation
@@ -662,7 +909,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a16
+    preconditions: &a22
       - exact-rollback-confirmation
       - imported-graph-unchanged
     adapters:
@@ -679,7 +926,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 0
-    preconditions: &a17
+    preconditions: &a23
       - active-profile-resource-binding
       - destination-lease
       - verified-sync-export
@@ -719,7 +966,7 @@ projections:
     kind: command
     capability: migration.write
     action: execute
-    inputSchema: Empty
+    inputSchema: MigrationPackageActivationInput
     outputSchema: MigrationPackageActivationReceipt
     auth: required
     audit: required
@@ -727,8 +974,10 @@ projections:
     timeoutMs: 30000
     adapters:
       - rest
+      - mcp
     names:
       rest: migration.package.activate
+      mcp: migration_package_activate
   - commandId: auth.device.start
     kind: command
     capability: CAP-ID-001
@@ -739,7 +988,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a18
+    preconditions: &a24
       - cryptographic-device-code-issuance
     adapters:
       - rest
@@ -755,13 +1004,30 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a19
+    preconditions: &a25
       - same-origin-https
       - argon2id-credential-verification
     adapters:
       - rest
     names:
       rest: auth.login
+  - commandId: auth.desktop.login
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    inputSchema: DesktopLoginInput
+    outputSchema: DeviceAuthTokenResponse
+    auth: optional-local
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    preconditions: &a26
+      - argon2id-credential-verification
+      - device-bound-session
+    adapters:
+      - rest
+    names:
+      rest: auth.desktop.login
   - commandId: auth.api.tokens.list
     kind: query
     capability: CAP-ID-001
@@ -772,7 +1038,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a20
+    preconditions: &a27
       - browser-session
     adapters:
       - rest
@@ -788,7 +1054,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a21
+    preconditions: &a28
       - browser-session
       - raw-token-one-time
     adapters:
@@ -805,7 +1071,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a22
+    preconditions: &a29
       - browser-session
       - owner-scoped
     adapters:
@@ -822,7 +1088,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a23
+    preconditions: &a30
       - same-origin-https
       - generic-enumeration-response
       - configured-recovery-delivery
@@ -840,7 +1106,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a24
+    preconditions: &a31
       - same-origin-https
       - single-use-recovery-token
       - atomic-password-reset
@@ -859,7 +1125,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a25
+    preconditions: &a32
       - http-only-session-cookie
     adapters:
       - rest
@@ -875,7 +1141,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a26
+    preconditions: &a33
       - http-only-session-cookie
     adapters:
       - rest
@@ -891,7 +1157,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a27
+    preconditions: &a34
       - session-owner
       - csrf-token
     adapters:
@@ -912,34 +1178,20 @@ projections:
       - tauri
     names:
       tauri: desktop_auth_status
-  - commandId: desktop.auth.device.start
+  - commandId: desktop.auth.login
     kind: command
     capability: CAP-ID-001
-    action: execute
-    inputSchema: Empty
+    action: create
+    inputSchema: DesktopCredentialLoginInput
     outputSchema: DesktopAuthStatus
     auth: optional-local
     audit: required
-    idempotency: required-for-command-and-long-running-operation
+    idempotency: none
     timeoutMs: 30000
     adapters:
       - tauri
     names:
-      tauri: desktop_auth_device_start
-  - commandId: desktop.auth.device.poll
-    kind: command
-    capability: CAP-ID-001
-    action: execute
-    inputSchema: Empty
-    outputSchema: DesktopAuthStatus
-    auth: optional-local
-    audit: required
-    idempotency: required-for-command-and-long-running-operation
-    timeoutMs: 30000
-    adapters:
-      - tauri
-    names:
-      tauri: desktop_auth_device_poll
+      tauri: desktop_auth_login
   - commandId: desktop.auth.logout
     kind: command
     capability: CAP-ID-001
@@ -964,7 +1216,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a28
+    preconditions: &a35
       - authenticated-account
     adapters:
       - rest
@@ -975,17 +1227,51 @@ projections:
     capability: CAP-ID-001
     action: create
     inputSchema: DeviceAuthorizationTokenInput
-    outputSchema: AuthTokenResponse
+    outputSchema: DeviceAuthTokenResponse
     auth: optional-local
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a29
+    preconditions: &a36
       - single-use-device-authorization
     adapters:
       - rest
     names:
       rest: auth.device.token
+  - commandId: auth.device.refresh
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    inputSchema: DeviceRefreshInput
+    outputSchema: DeviceAuthTokenResponse
+    auth: optional-local
+    audit: required
+    idempotency: none
+    timeoutMs: 30000
+    preconditions: &a37
+      - single-use-device-refresh-credential
+      - device-bound-session
+    adapters:
+      - rest
+    names:
+      rest: auth.device.refresh
+  - commandId: auth.device.encryptionkey.register
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    inputSchema: DeviceEncryptionKeyRegistrationInput
+    outputSchema: DeviceEncryptionKey
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    preconditions: &a38
+      - device-bound-session
+      - immutable-device-key
+    adapters:
+      - rest
+    names:
+      rest: auth.device.encryptionkey.register
   - commandId: auth.refresh
     kind: command
     capability: CAP-ID-001
@@ -994,9 +1280,9 @@ projections:
     outputSchema: AuthTokenResponse
     auth: required
     audit: required
-    idempotency: required
+    idempotency: none
     timeoutMs: 30000
-    preconditions: &a30
+    preconditions: &a39
       - single-use-session-rotation
     adapters:
       - rest
@@ -1012,7 +1298,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a31
+    preconditions: &a40
       - session-revocation
     adapters:
       - rest
@@ -1023,7 +1309,7 @@ projections:
     capability: CAP-ID-001
     action: read
     inputSchema: Empty
-    outputSchema: Account
+    outputSchema: AccountView
     auth: required
     audit: required
     idempotency: required-for-command-and-long-running-operation
@@ -1036,6 +1322,38 @@ projections:
       tauri: account_get
       rest: account.get
       mcp: account_get
+  - commandId: account.list
+    kind: query
+    capability: CAP-ADM-001
+    action: read
+    inputSchema: Empty
+    outputSchema: AccountPage
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_list
+      rest: account.list
+  - commandId: account.status.update
+    kind: command
+    capability: CAP-ADM-001
+    action: manage
+    inputSchema: AccountStatusUpdateCommandInput
+    outputSchema: Account
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_status_update
+      rest: account.status.update
   - commandId: organization.list
     kind: query
     capability: CAP-ORG-001
@@ -1072,6 +1390,24 @@ projections:
       tauri: organization_get
       rest: organization.get
       mcp: organization_get
+  - commandId: organization.record.get
+    kind: query
+    capability: CAP-ORG-001
+    action: read
+    inputSchema: OrganizationIdInput
+    outputSchema: OrganizationRecord
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: organization_record_get
+      rest: organization.record.get
+      mcp: organization_record_get
   - commandId: organization.create
     kind: command
     capability: CAP-ORG-001
@@ -1144,6 +1480,24 @@ projections:
       tauri: workspace_get
       rest: workspace.get
       mcp: workspace_get
+  - commandId: workspace.record.get
+    kind: query
+    capability: CAP-WS-001
+    action: read
+    inputSchema: WorkspaceIdInput
+    outputSchema: WorkspaceRecord
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: workspace_record_get
+      rest: workspace.record.get
+      mcp: workspace_record_get
   - commandId: workspace.create
     kind: command
     capability: CAP-WS-001
@@ -1191,9 +1545,11 @@ projections:
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: group_list
       rest: group.list
       mcp: group_list
   - commandId: group.get
@@ -1207,9 +1563,11 @@ projections:
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: group_get
       rest: group.get
       mcp: group_get
   - commandId: group.create
@@ -1223,9 +1581,11 @@ projections:
     idempotency: required
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: group_create
       rest: group.create
       mcp: group_create
   - commandId: group.update
@@ -1239,9 +1599,11 @@ projections:
     idempotency: required
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: group_update
       rest: group.update
       mcp: group_update
   - commandId: group.delete
@@ -1255,11 +1617,175 @@ projections:
     idempotency: required
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: group_delete
       rest: group.delete
       mcp: group_delete
+  - commandId: extension.group.list
+    kind: query
+    capability: CAP-EXT-002
+    action: read
+    inputSchema: ExtensionGroupListInput
+    outputSchema: ExtensionGroupRecordList
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: extension_group_list
+      rest: extension.group.list
+      mcp: extension_group_list
+  - commandId: extension.group.get
+    kind: query
+    capability: CAP-EXT-002
+    action: read
+    inputSchema: ExtensionGroupIdInput
+    outputSchema: ExtensionGroupRecord
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: extension_group_get
+      rest: extension.group.get
+      mcp: extension_group_get
+  - commandId: extension.group.create
+    kind: command
+    capability: CAP-EXT-002
+    action: create
+    inputSchema: ExtensionGroupCreateInput
+    outputSchema: ExtensionGroupRecord
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: extension_group_create
+      rest: extension.group.create
+      mcp: extension_group_create
+  - commandId: extension.group.update
+    kind: command
+    capability: CAP-EXT-002
+    action: update
+    inputSchema: ExtensionGroupUpdateInput
+    outputSchema: ExtensionGroupRecord
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: extension_group_update
+      rest: extension.group.update
+      mcp: extension_group_update
+  - commandId: extension.group.delete
+    kind: command
+    capability: CAP-EXT-002
+    action: delete
+    inputSchema: ExtensionGroupDeleteInput
+    outputSchema: ExtensionGroupRecord
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: extension_group_delete
+      rest: extension.group.delete
+      mcp: extension_group_delete
+  - commandId: profile.extension.group.set
+    kind: command
+    capability: CAP-EXT-002
+    action: update
+    inputSchema: ProfileExtensionGroupSetInput
+    outputSchema: ProfileRecord
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: profile_extension_group_set
+      rest: profile.extension.group.set
+      mcp: profile_extension_group_set
+  - commandId: group.share.list
+    kind: query
+    capability: CAP-PROF-003
+    action: read
+    inputSchema: GroupIdInput
+    outputSchema: GroupShareGrantList
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: group_share_list
+      rest: group.share.list
+      mcp: group_share_list
+  - commandId: group.share.create
+    kind: command
+    capability: CAP-PROF-003
+    action: share
+    inputSchema: GroupShareCreateInput
+    outputSchema: GroupShareGrant
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: group_share_create
+      rest: group.share.create
+      mcp: group_share_create
+  - commandId: group.share.revoke
+    kind: command
+    capability: CAP-PROF-003
+    action: share
+    inputSchema: GroupShareRevokeInput
+    outputSchema: GroupShareGrant
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: group_share_revoke
+      rest: group.share.revoke
+      mcp: group_share_revoke
   - commandId: profile.groups.replace
     kind: command
     capability: CAP-PROF-003
@@ -1271,9 +1797,11 @@ projections:
     idempotency: required
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: profile_groups_replace
       rest: profile.groups.replace
       mcp: profile_groups_replace
   - commandId: profile.proxy.assignment.get
@@ -1287,9 +1815,11 @@ projections:
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: profile_proxy_assignment_get
       rest: profile.proxy.assignment.get
       mcp: profile_proxy_assignment_get
   - commandId: profile.proxy.assignment.set
@@ -1303,9 +1833,11 @@ projections:
     idempotency: required
     timeoutMs: 30000
     adapters:
+      - tauri
       - rest
       - mcp
     names:
+      tauri: profile_proxy_assignment_set
       rest: profile.proxy.assignment.set
       mcp: profile_proxy_assignment_set
   - commandId: team.list
@@ -1448,6 +1980,54 @@ projections:
       tauri: member_invite
       rest: member.invite
       mcp: member_invite
+  - commandId: member.invitation.create
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    inputSchema: MemberInvitationCreateInput
+    outputSchema: MemberInvitationCreateReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: member_invitation_create
+      rest: member.invitation.create
+  - commandId: member.invitation.redeem
+    kind: command
+    capability: CAP-MEM-001
+    action: update
+    inputSchema: MemberInvitationRedeemInput
+    outputSchema: Member
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: member_invitation_redeem
+      rest: member.invitation.redeem
+  - commandId: member.invitation.revoke
+    kind: command
+    capability: CAP-MEM-001
+    action: manage
+    inputSchema: MemberInvitationIdInput
+    outputSchema: MemberInvitationRevocationReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: member_invitation_revoke
+      rest: member.invitation.revoke
   - commandId: member.activate
     kind: command
     capability: CAP-MEM-001
@@ -1598,6 +2178,24 @@ projections:
       - rest
     names:
       rest: resource.lease.release
+  - commandId: resource.lease.get
+    kind: query
+    capability: profile.read
+    action: read
+    inputSchema: ResourceIdInput
+    outputSchema: OptionalLeaseStatus
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: resource_lease_get
+      rest: resource.lease.get
+      mcp: resource_lease_get
   - commandId: profile.manifest.get
     kind: query
     capability: profile.read
@@ -1610,8 +2208,10 @@ projections:
     timeoutMs: 30000
     adapters:
       - rest
+      - mcp
     names:
       rest: profile.manifest.get
+      mcp: profile_manifest_get
   - commandId: profile.manifest.commit
     kind: command
     capability: profile.update
@@ -1679,13 +2279,41 @@ projections:
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
     adapters:
+      - mcp
+    names:
+      mcp: grant_list
+  - commandId: grant.list.legacy
+    kind: query
+    capability: CAP-SHARE-001
+    action: read
+    inputSchema: GrantListInput
+    outputSchema: GrantList
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - rest
+    names:
+      rest: grant.list.legacy
+  - commandId: grant.list.page
+    kind: query
+    capability: CAP-SHARE-001
+    action: read
+    inputSchema: GrantListPageInput
+    outputSchema: GrantPage
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
       - tauri
       - rest
       - mcp
     names:
-      tauri: grant_list
-      rest: grant.list
-      mcp: grant_list
+      tauri: grant_list_page
+      rest: grant.list.page
+      mcp: grant_list_page
   - commandId: grant.create
     kind: command
     capability: CAP-SHARE-001
@@ -1740,6 +2368,22 @@ mcp:
           text: string
       structuredContent: Problem
   tools:
+    - name: runtime_catalog_get
+      commandId: runtime.catalog.get
+      kind: query
+      capability: CAP-RUN-001
+      action: read
+      inputSchema: Empty
+      outputSchema: RuntimeCatalog
+      auth: public
+      audit: metadata-only
+      idempotency: none
+      timeoutMs: 30000
+      security:
+        authentication: public
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
     - name: system_health_get
       commandId: system.health.get
       kind: query
@@ -1854,6 +2498,25 @@ mcp:
         secrets: never-returned
       requires:
         - Idempotency-Key
+    - name: profile_update
+      commandId: profile.update
+      kind: command
+      capability: profile.update
+      action: update
+      inputSchema: ProfileUpdateInput
+      outputSchema: ProfileRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      preconditions: *a1
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
     - name: profile_clone
       commandId: profile.clone
       kind: command
@@ -1865,7 +2528,7 @@ mcp:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a1
+      preconditions: *a2
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
@@ -1884,7 +2547,7 @@ mcp:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a2
+      preconditions: *a3
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
@@ -1903,7 +2566,7 @@ mcp:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a3
+      preconditions: *a4
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
@@ -1922,7 +2585,7 @@ mcp:
       audit: required
       idempotency: required
       timeoutMs: 120000
-      events: *a4
+      events: *a5
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
@@ -1941,7 +2604,7 @@ mcp:
       audit: required
       idempotency: required
       timeoutMs: 60000
-      events: *a5
+      events: *a6
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
@@ -1960,7 +2623,7 @@ mcp:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a6
+      preconditions: *a7
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
@@ -1979,7 +2642,7 @@ mcp:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a7
+      preconditions: *a8
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
@@ -2016,68 +2679,12 @@ mcp:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a8
-      security:
-        authentication: bearer-token
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        secrets: never-returned
-    - name: cookie_stage
-      commandId: cookie.stage
-      kind: command
-      capability: CAP-COOK-001
-      action: create
-      inputSchema: CookieStageInput
-      outputSchema: CookieStageReceipt
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      security:
-        authentication: bearer-token
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        secrets: never-returned
-      requires:
-        - Idempotency-Key
-    - name: cookie_import
-      commandId: cookie.import
-      kind: command
-      capability: CAP-COOK-001
-      action: create
-      inputSchema: CookieImportInput
-      outputSchema: CookieMutationResult
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
       preconditions: *a9
       security:
         authentication: bearer-token
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         secrets: never-returned
-      requires:
-        - Idempotency-Key
-    - name: cookie_copy
-      commandId: cookie.copy
-      kind: command
-      capability: CAP-COOK-001
-      action: create
-      inputSchema: CookieCopyInput
-      outputSchema: CookieMutationResult
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      preconditions: *a10
-      security:
-        authentication: bearer-token
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        secrets: never-returned
-      requires:
-        - Idempotency-Key
     - name: proxy_parse
       commandId: proxy.parse
       kind: query
@@ -2180,13 +2787,31 @@ mcp:
         secrets: never-returned
       requires:
         - Idempotency-Key
+    - name: migration_package_activate
+      commandId: migration.package.activate
+      kind: command
+      capability: migration.write
+      action: execute
+      inputSchema: MigrationPackageActivationInput
+      outputSchema: MigrationPackageActivationReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
     - name: account_get
       commandId: account.get
       kind: query
       capability: CAP-ID-001
       action: read
       inputSchema: Empty
-      outputSchema: Account
+      outputSchema: AccountView
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -2219,6 +2844,22 @@ mcp:
       action: read
       inputSchema: OrganizationIdInput
       outputSchema: Organization
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: organization_record_get
+      commandId: organization.record.get
+      kind: query
+      capability: CAP-ORG-001
+      action: read
+      inputSchema: OrganizationIdInput
+      outputSchema: OrganizationRecord
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -2287,6 +2928,22 @@ mcp:
       action: read
       inputSchema: WorkspaceIdInput
       outputSchema: Workspace
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: workspace_record_get
+      commandId: workspace.record.get
+      kind: query
+      capability: CAP-WS-001
+      action: read
+      inputSchema: WorkspaceIdInput
+      outputSchema: WorkspaceRecord
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -2407,6 +3064,162 @@ mcp:
       action: delete
       inputSchema: GroupDeleteInput
       outputSchema: GroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
+    - name: extension_group_list
+      commandId: extension.group.list
+      kind: query
+      capability: CAP-EXT-002
+      action: read
+      inputSchema: ExtensionGroupListInput
+      outputSchema: ExtensionGroupRecordList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: extension_group_get
+      commandId: extension.group.get
+      kind: query
+      capability: CAP-EXT-002
+      action: read
+      inputSchema: ExtensionGroupIdInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: extension_group_create
+      commandId: extension.group.create
+      kind: command
+      capability: CAP-EXT-002
+      action: create
+      inputSchema: ExtensionGroupCreateInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
+    - name: extension_group_update
+      commandId: extension.group.update
+      kind: command
+      capability: CAP-EXT-002
+      action: update
+      inputSchema: ExtensionGroupUpdateInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
+    - name: extension_group_delete
+      commandId: extension.group.delete
+      kind: command
+      capability: CAP-EXT-002
+      action: delete
+      inputSchema: ExtensionGroupDeleteInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
+    - name: profile_extension_group_set
+      commandId: profile.extension.group.set
+      kind: command
+      capability: CAP-EXT-002
+      action: update
+      inputSchema: ProfileExtensionGroupSetInput
+      outputSchema: ProfileRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
+    - name: group_share_list
+      commandId: group.share.list
+      kind: query
+      capability: CAP-PROF-003
+      action: read
+      inputSchema: GroupIdInput
+      outputSchema: GroupShareGrantList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: group_share_create
+      commandId: group.share.create
+      kind: command
+      capability: CAP-PROF-003
+      action: share
+      inputSchema: GroupShareCreateInput
+      outputSchema: GroupShareGrant
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
+    - name: group_share_revoke
+      commandId: group.share.revoke
+      kind: command
+      capability: CAP-PROF-003
+      action: share
+      inputSchema: GroupShareRevokeInput
+      outputSchema: GroupShareGrant
       auth: required
       audit: required
       idempotency: required
@@ -2692,12 +3505,60 @@ mcp:
         secrets: never-returned
       requires:
         - Idempotency-Key
+    - name: resource_lease_get
+      commandId: resource.lease.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ResourceIdInput
+      outputSchema: OptionalLeaseStatus
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: profile_manifest_get
+      commandId: profile.manifest.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ResourceIdInput
+      outputSchema: OptionalSyncManifest
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
     - name: grant_list
       commandId: grant.list
       kind: query
       capability: CAP-SHARE-001
       action: read
       inputSchema: GrantListInput
+      outputSchema: GrantPage
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+    - name: grant_list_page
+      commandId: grant.list.page
+      kind: query
+      capability: CAP-SHARE-001
+      action: read
+      inputSchema: GrantListPageInput
       outputSchema: GrantPage
       auth: required
       audit: required
@@ -2753,6 +3614,22 @@ rest:
   operationIdNaming: command-id
   routes: defined-by-runtime-HTTP-authority; not specified here
   commands:
+    - operationId: runtime.catalog.get
+      commandId: runtime.catalog.get
+      kind: query
+      capability: CAP-RUN-001
+      action: read
+      inputSchema: Empty
+      outputSchema: RuntimeCatalog
+      auth: public
+      audit: metadata-only
+      idempotency: none
+      timeoutMs: 30000
+      security:
+        authentication: public
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
     - operationId: system.health.get
       commandId: system.health.get
       kind: query
@@ -2849,6 +3726,22 @@ rest:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: profile.binding.get
+      commandId: profile.binding.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileResource
+      auth: required
+      audit: metadata-only
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
     - operationId: profile.create
       commandId: profile.create
       kind: command
@@ -2867,6 +3760,25 @@ rest:
         errors: Problem
       requires:
         - Idempotency-Key
+    - operationId: profile.update
+      commandId: profile.update
+      kind: command
+      capability: profile.update
+      action: update
+      inputSchema: ProfileUpdateInput
+      outputSchema: ProfileRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      preconditions: *a1
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
     - operationId: profile.clone
       commandId: profile.clone
       kind: command
@@ -2878,7 +3790,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a1
+      preconditions: *a2
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -2897,7 +3809,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a2
+      preconditions: *a3
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -2916,7 +3828,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a3
+      preconditions: *a4
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -2924,6 +3836,57 @@ rest:
         errors: Problem
       requires:
         - Idempotency-Key
+    - operationId: profile.share.recipientdevicekeys.list
+      commandId: profile.share.recipientdevicekeys.list
+      kind: query
+      capability: CAP-SHARE-001
+      action: manage
+      inputSchema: ProfileShareRecipientDeviceKeysInput
+      outputSchema: DeviceEncryptionKeyList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      preconditions: *a10
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: profile.share.keyenvelope.get
+      commandId: profile.share.keyenvelope.get
+      kind: query
+      capability: CAP-SHARE-001
+      action: read
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileKeyShareEnvelope
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      preconditions: *a11
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: profile.keyrotation.recipients.list
+      commandId: profile.keyrotation.recipients.list
+      kind: query
+      capability: profile.update
+      action: update
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileKeyRotationRecipientDevicesList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      preconditions: *a12
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
     - operationId: profile.launch
       commandId: profile.launch
       kind: operation
@@ -2935,7 +3898,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 120000
-      events: *a4
+      events: *a5
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -2954,7 +3917,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 60000
-      events: *a5
+      events: *a6
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -2962,6 +3925,92 @@ rest:
         errors: Problem
       requires:
         - Idempotency-Key
+    - operationId: runtime.dispatch.enqueue
+      commandId: runtime.dispatch.enqueue
+      kind: command
+      capability: CAP-RUN-001
+      action: execute
+      inputSchema: RuntimeDispatchInput
+      outputSchema: RuntimeDispatchJobEnvelope
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      preconditions: *a13
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: runtime.dispatch.inbox
+      commandId: runtime.dispatch.inbox
+      kind: query
+      capability: CAP-RUN-001
+      action: read
+      inputSchema: Empty
+      outputSchema: RuntimeDispatchInbox
+      auth: required
+      audit: metadata-only
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: runtime.dispatch.claim
+      commandId: runtime.dispatch.claim
+      kind: command
+      capability: CAP-RUN-001
+      action: execute
+      inputSchema: RuntimeDispatchJobIdInput
+      outputSchema: RuntimeDispatchJobEnvelope
+      auth: required
+      audit: required
+      idempotency: none
+      timeoutMs: 30000
+      preconditions: *a14
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: runtime.dispatch.complete
+      commandId: runtime.dispatch.complete
+      kind: command
+      capability: CAP-RUN-001
+      action: execute
+      inputSchema: RuntimeDispatchReceipt
+      outputSchema: RuntimeDispatchJobEnvelope
+      auth: required
+      audit: required
+      idempotency: none
+      timeoutMs: 30000
+      preconditions: *a15
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: runtime.dispatch.fail
+      commandId: runtime.dispatch.fail
+      kind: command
+      capability: CAP-RUN-001
+      action: execute
+      inputSchema: RuntimeDispatchFailure
+      outputSchema: RuntimeDispatchJobEnvelope
+      auth: required
+      audit: required
+      idempotency: none
+      timeoutMs: 30000
+      preconditions: *a16
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
     - operationId: profile.runtime.get
       commandId: profile.runtime.get
       kind: query
@@ -3025,7 +4074,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a6
+      preconditions: *a7
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3044,7 +4093,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a7
+      preconditions: *a8
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3081,7 +4130,7 @@ rest:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a8
+      preconditions: *a9
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3098,68 +4147,12 @@ rest:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a11
+      preconditions: *a17
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
-    - operationId: cookie.stage
-      commandId: cookie.stage
-      kind: command
-      capability: CAP-COOK-001
-      action: create
-      inputSchema: CookieStageInput
-      outputSchema: CookieStageReceipt
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: cookie.import
-      commandId: cookie.import
-      kind: command
-      capability: CAP-COOK-001
-      action: create
-      inputSchema: CookieImportInput
-      outputSchema: CookieMutationResult
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      preconditions: *a9
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: cookie.copy
-      commandId: cookie.copy
-      kind: command
-      capability: CAP-COOK-001
-      action: create
-      inputSchema: CookieCopyInput
-      outputSchema: CookieMutationResult
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      preconditions: *a10
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
     - operationId: proxy.parse
       commandId: proxy.parse
       kind: query
@@ -3273,7 +4266,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 300000
-      events: *a12
+      events: *a18
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3292,8 +4285,8 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 0
-      events: *a13
-      preconditions: *a14
+      events: *a19
+      preconditions: *a20
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3312,7 +4305,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a15
+      preconditions: *a21
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3331,7 +4324,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a16
+      preconditions: *a22
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3350,7 +4343,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 0
-      preconditions: *a17
+      preconditions: *a23
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3399,7 +4392,7 @@ rest:
       kind: command
       capability: migration.write
       action: execute
-      inputSchema: Empty
+      inputSchema: MigrationPackageActivationInput
       outputSchema: MigrationPackageActivationReceipt
       auth: required
       audit: required
@@ -3423,7 +4416,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a18
+      preconditions: *a24
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -3440,7 +4433,24 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a19
+      preconditions: *a25
+      security:
+        authentication: optional-local-auth
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: auth.desktop.login
+      commandId: auth.desktop.login
+      kind: command
+      capability: CAP-ID-001
+      action: create
+      inputSchema: DesktopLoginInput
+      outputSchema: DeviceAuthTokenResponse
+      auth: optional-local
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      preconditions: *a26
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -3457,7 +4467,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a20
+      preconditions: *a27
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3474,7 +4484,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a21
+      preconditions: *a28
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3491,7 +4501,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a22
+      preconditions: *a29
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3510,7 +4520,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a23
+      preconditions: *a30
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -3527,7 +4537,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a24
+      preconditions: *a31
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -3546,7 +4556,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a25
+      preconditions: *a32
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3563,7 +4573,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a26
+      preconditions: *a33
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3580,7 +4590,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a27
+      preconditions: *a34
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3599,7 +4609,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a28
+      preconditions: *a35
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3611,17 +4621,53 @@ rest:
       capability: CAP-ID-001
       action: create
       inputSchema: DeviceAuthorizationTokenInput
-      outputSchema: AuthTokenResponse
+      outputSchema: DeviceAuthTokenResponse
       auth: optional-local
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a29
+      preconditions: *a36
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: auth.device.refresh
+      commandId: auth.device.refresh
+      kind: command
+      capability: CAP-ID-001
+      action: update
+      inputSchema: DeviceRefreshInput
+      outputSchema: DeviceAuthTokenResponse
+      auth: optional-local
+      audit: required
+      idempotency: none
+      timeoutMs: 30000
+      preconditions: *a37
+      security:
+        authentication: optional-local-auth
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: auth.device.encryptionkey.register
+      commandId: auth.device.encryptionkey.register
+      kind: command
+      capability: CAP-ID-001
+      action: create
+      inputSchema: DeviceEncryptionKeyRegistrationInput
+      outputSchema: DeviceEncryptionKey
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      preconditions: *a38
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
     - operationId: auth.refresh
       commandId: auth.refresh
       kind: command
@@ -3631,16 +4677,14 @@ rest:
       outputSchema: AuthTokenResponse
       auth: required
       audit: required
-      idempotency: required
+      idempotency: none
       timeoutMs: 30000
-      preconditions: *a30
+      preconditions: *a39
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
-      requires:
-        - Idempotency-Key
     - operationId: auth.logout
       commandId: auth.logout
       kind: command
@@ -3652,7 +4696,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a31
+      preconditions: *a40
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -3666,7 +4710,7 @@ rest:
       capability: CAP-ID-001
       action: read
       inputSchema: Empty
-      outputSchema: Account
+      outputSchema: AccountView
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -3676,6 +4720,40 @@ rest:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: account.list
+      commandId: account.list
+      kind: query
+      capability: CAP-ADM-001
+      action: read
+      inputSchema: Empty
+      outputSchema: AccountPage
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: account.status.update
+      commandId: account.status.update
+      kind: command
+      capability: CAP-ADM-001
+      action: manage
+      inputSchema: AccountStatusUpdateCommandInput
+      outputSchema: Account
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
     - operationId: organization.list
       commandId: organization.list
       kind: query
@@ -3699,6 +4777,22 @@ rest:
       action: read
       inputSchema: OrganizationIdInput
       outputSchema: Organization
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: organization.record.get
+      commandId: organization.record.get
+      kind: query
+      capability: CAP-ORG-001
+      action: read
+      inputSchema: OrganizationIdInput
+      outputSchema: OrganizationRecord
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -3767,6 +4861,22 @@ rest:
       action: read
       inputSchema: WorkspaceIdInput
       outputSchema: Workspace
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: workspace.record.get
+      commandId: workspace.record.get
+      kind: query
+      capability: CAP-WS-001
+      action: read
+      inputSchema: WorkspaceIdInput
+      outputSchema: WorkspaceRecord
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -3887,6 +4997,162 @@ rest:
       action: delete
       inputSchema: GroupDeleteInput
       outputSchema: GroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: extension.group.list
+      commandId: extension.group.list
+      kind: query
+      capability: CAP-EXT-002
+      action: read
+      inputSchema: ExtensionGroupListInput
+      outputSchema: ExtensionGroupRecordList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: extension.group.get
+      commandId: extension.group.get
+      kind: query
+      capability: CAP-EXT-002
+      action: read
+      inputSchema: ExtensionGroupIdInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: extension.group.create
+      commandId: extension.group.create
+      kind: command
+      capability: CAP-EXT-002
+      action: create
+      inputSchema: ExtensionGroupCreateInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: extension.group.update
+      commandId: extension.group.update
+      kind: command
+      capability: CAP-EXT-002
+      action: update
+      inputSchema: ExtensionGroupUpdateInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: extension.group.delete
+      commandId: extension.group.delete
+      kind: command
+      capability: CAP-EXT-002
+      action: delete
+      inputSchema: ExtensionGroupDeleteInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: profile.extension.group.set
+      commandId: profile.extension.group.set
+      kind: command
+      capability: CAP-EXT-002
+      action: update
+      inputSchema: ProfileExtensionGroupSetInput
+      outputSchema: ProfileRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: group.share.list
+      commandId: group.share.list
+      kind: query
+      capability: CAP-PROF-003
+      action: read
+      inputSchema: GroupIdInput
+      outputSchema: GroupShareGrantList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: group.share.create
+      commandId: group.share.create
+      kind: command
+      capability: CAP-PROF-003
+      action: share
+      inputSchema: GroupShareCreateInput
+      outputSchema: GroupShareGrant
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: group.share.revoke
+      commandId: group.share.revoke
+      kind: command
+      capability: CAP-PROF-003
+      action: share
+      inputSchema: GroupShareRevokeInput
+      outputSchema: GroupShareGrant
       auth: required
       audit: required
       idempotency: required
@@ -4086,6 +5352,60 @@ rest:
         errors: Problem
       requires:
         - Idempotency-Key
+    - operationId: member.invitation.create
+      commandId: member.invitation.create
+      kind: command
+      capability: CAP-MEM-001
+      action: create
+      inputSchema: MemberInvitationCreateInput
+      outputSchema: MemberInvitationCreateReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: member.invitation.redeem
+      commandId: member.invitation.redeem
+      kind: command
+      capability: CAP-MEM-001
+      action: update
+      inputSchema: MemberInvitationRedeemInput
+      outputSchema: Member
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: member.invitation.revoke
+      commandId: member.invitation.revoke
+      kind: command
+      capability: CAP-MEM-001
+      action: manage
+      inputSchema: MemberInvitationIdInput
+      outputSchema: MemberInvitationRevocationReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
     - operationId: member.activate
       commandId: member.activate
       kind: command
@@ -4244,6 +5564,22 @@ rest:
         errors: Problem
       requires:
         - Idempotency-Key
+    - operationId: resource.lease.get
+      commandId: resource.lease.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ResourceIdInput
+      outputSchema: OptionalLeaseStatus
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
     - operationId: profile.manifest.get
       commandId: profile.manifest.get
       kind: query
@@ -4328,12 +5664,28 @@ rest:
         errors: Problem
       requires:
         - Idempotency-Key
-    - operationId: grant.list
-      commandId: grant.list
+    - operationId: grant.list.legacy
+      commandId: grant.list.legacy
       kind: query
       capability: CAP-SHARE-001
       action: read
       inputSchema: GrantListInput
+      outputSchema: GrantList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: grant.list.page
+      commandId: grant.list.page
+      kind: query
+      capability: CAP-SHARE-001
+      action: read
+      inputSchema: GrantListPageInput
       outputSchema: GrantPage
       auth: required
       audit: required
@@ -4470,6 +5822,22 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: profile_binding_get
+      commandId: profile.binding.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileResource
+      auth: required
+      audit: metadata-only
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
     - invoke: profile_create
       commandId: profile.create
       kind: command
@@ -4487,6 +5855,24 @@ tauri:
         scope: canonical-resource-scope
         filesystem: rust-only
       retry: use-idempotency-key
+    - invoke: profile_update
+      commandId: profile.update
+      kind: command
+      capability: profile.update
+      action: update
+      inputSchema: ProfileUpdateInput
+      outputSchema: ProfileRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      preconditions: *a1
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
     - invoke: profile_clone
       commandId: profile.clone
       kind: command
@@ -4498,7 +5884,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a1
+      preconditions: *a2
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4516,7 +5902,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a2
+      preconditions: *a3
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4534,7 +5920,60 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a3
+      preconditions: *a4
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: profile_share_recipientdevicekeys_list
+      commandId: profile.share.recipientdevicekeys.list
+      kind: query
+      capability: CAP-SHARE-001
+      action: manage
+      inputSchema: ProfileShareRecipientDeviceKeysInput
+      outputSchema: DeviceEncryptionKeyList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      preconditions: *a10
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: profile_keyrotation_recipients_list
+      commandId: profile.keyrotation.recipients.list
+      kind: query
+      capability: profile.update
+      action: update
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileKeyRotationRecipientDevicesList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      preconditions: *a12
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: profile_keyrotation_execute
+      commandId: profile.keyrotation.execute
+      kind: operation
+      capability: profile.update
+      action: update
+      inputSchema: ProfileKeyRotationExecuteInput
+      outputSchema: OperationAccepted
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 120000
+      events: *a41
+      preconditions: *a42
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4552,7 +5991,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 120000
-      events: *a4
+      events: *a5
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4570,7 +6009,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 60000
-      events: *a5
+      events: *a6
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4588,7 +6027,7 @@ tauri:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a32
+      preconditions: *a43
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4605,13 +6044,29 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a33
+      preconditions: *a44
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
       retry: use-idempotency-key
+    - invoke: profile_runtime_get
+      commandId: profile.runtime.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ProfileIdInput
+      outputSchema: OptionalRuntimeProjection
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
     - invoke: profile_delete
       commandId: profile.delete
       kind: command
@@ -4623,7 +6078,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a6
+      preconditions: *a7
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4641,7 +6096,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a7
+      preconditions: *a8
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4676,7 +6131,7 @@ tauri:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a8
+      preconditions: *a9
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4710,7 +6165,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a9
+      preconditions: *a45
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4728,7 +6183,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a10
+      preconditions: *a46
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4751,6 +6206,24 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: proxy_import
+      commandId: proxy.import
+      kind: command
+      capability: CAP-NET-001
+      action: create
+      inputSchema: ProxyImportInput
+      outputSchema: ProxyImportReport
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 120000
+      preconditions: *a47
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
     - invoke: proxy_check
       commandId: proxy.check
       kind: query
@@ -4861,7 +6334,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 300000
-      events: *a12
+      events: *a18
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4879,8 +6352,27 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 0
-      events: *a13
-      preconditions: *a14
+      events: *a19
+      preconditions: *a20
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: migration_profile_data_import
+      commandId: migration.profile.data.import
+      kind: operation
+      capability: profile.update
+      action: update
+      inputSchema: MigrationProfileDataImportInput
+      outputSchema: OperationAccepted
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 0
+      events: *a48
+      preconditions: *a49
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -4903,32 +6395,16 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
-    - invoke: desktop_auth_device_start
-      commandId: desktop.auth.device.start
+    - invoke: desktop_auth_login
+      commandId: desktop.auth.login
       kind: command
       capability: CAP-ID-001
-      action: execute
-      inputSchema: Empty
+      action: create
+      inputSchema: DesktopCredentialLoginInput
       outputSchema: DesktopAuthStatus
       auth: optional-local
       audit: required
-      idempotency: required-for-command-and-long-running-operation
-      timeoutMs: 30000
-      security:
-        authentication: optional-local-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        filesystem: rust-only
-    - invoke: desktop_auth_device_poll
-      commandId: desktop.auth.device.poll
-      kind: command
-      capability: CAP-ID-001
-      action: execute
-      inputSchema: Empty
-      outputSchema: DesktopAuthStatus
-      auth: optional-local
-      audit: required
-      idempotency: required-for-command-and-long-running-operation
+      idempotency: none
       timeoutMs: 30000
       security:
         authentication: optional-local-session
@@ -4957,7 +6433,7 @@ tauri:
       capability: CAP-ID-001
       action: read
       inputSchema: Empty
-      outputSchema: Account
+      outputSchema: AccountView
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -4967,6 +6443,39 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: account_list
+      commandId: account.list
+      kind: query
+      capability: CAP-ADM-001
+      action: read
+      inputSchema: Empty
+      outputSchema: AccountPage
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: account_status_update
+      commandId: account.status.update
+      kind: command
+      capability: CAP-ADM-001
+      action: manage
+      inputSchema: AccountStatusUpdateCommandInput
+      outputSchema: Account
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
     - invoke: organization_list
       commandId: organization.list
       kind: query
@@ -4990,6 +6499,22 @@ tauri:
       action: read
       inputSchema: OrganizationIdInput
       outputSchema: Organization
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: organization_record_get
+      commandId: organization.record.get
+      kind: query
+      capability: CAP-ORG-001
+      action: read
+      inputSchema: OrganizationIdInput
+      outputSchema: OrganizationRecord
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -5065,6 +6590,22 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: workspace_record_get
+      commandId: workspace.record.get
+      kind: query
+      capability: CAP-WS-001
+      action: read
+      inputSchema: WorkspaceIdInput
+      outputSchema: WorkspaceRecord
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
     - invoke: workspace_create
       commandId: workspace.create
       kind: command
@@ -5089,6 +6630,289 @@ tauri:
       action: update
       inputSchema: WorkspaceUpdateInput
       outputSchema: Workspace
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: group_list
+      commandId: group.list
+      kind: query
+      capability: CAP-PROF-003
+      action: read
+      inputSchema: GroupListInput
+      outputSchema: GroupRecordList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: group_get
+      commandId: group.get
+      kind: query
+      capability: CAP-PROF-003
+      action: read
+      inputSchema: GroupIdInput
+      outputSchema: GroupRecord
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: group_create
+      commandId: group.create
+      kind: command
+      capability: CAP-PROF-003
+      action: create
+      inputSchema: GroupCreateInput
+      outputSchema: GroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: group_update
+      commandId: group.update
+      kind: command
+      capability: CAP-PROF-003
+      action: update
+      inputSchema: GroupUpdateInput
+      outputSchema: GroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: group_delete
+      commandId: group.delete
+      kind: command
+      capability: CAP-PROF-003
+      action: delete
+      inputSchema: GroupDeleteInput
+      outputSchema: GroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: extension_group_list
+      commandId: extension.group.list
+      kind: query
+      capability: CAP-EXT-002
+      action: read
+      inputSchema: ExtensionGroupListInput
+      outputSchema: ExtensionGroupRecordList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: extension_group_get
+      commandId: extension.group.get
+      kind: query
+      capability: CAP-EXT-002
+      action: read
+      inputSchema: ExtensionGroupIdInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: extension_group_create
+      commandId: extension.group.create
+      kind: command
+      capability: CAP-EXT-002
+      action: create
+      inputSchema: ExtensionGroupCreateInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: extension_group_update
+      commandId: extension.group.update
+      kind: command
+      capability: CAP-EXT-002
+      action: update
+      inputSchema: ExtensionGroupUpdateInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: extension_group_delete
+      commandId: extension.group.delete
+      kind: command
+      capability: CAP-EXT-002
+      action: delete
+      inputSchema: ExtensionGroupDeleteInput
+      outputSchema: ExtensionGroupRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: profile_extension_group_set
+      commandId: profile.extension.group.set
+      kind: command
+      capability: CAP-EXT-002
+      action: update
+      inputSchema: ProfileExtensionGroupSetInput
+      outputSchema: ProfileRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: group_share_list
+      commandId: group.share.list
+      kind: query
+      capability: CAP-PROF-003
+      action: read
+      inputSchema: GroupIdInput
+      outputSchema: GroupShareGrantList
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: group_share_create
+      commandId: group.share.create
+      kind: command
+      capability: CAP-PROF-003
+      action: share
+      inputSchema: GroupShareCreateInput
+      outputSchema: GroupShareGrant
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: group_share_revoke
+      commandId: group.share.revoke
+      kind: command
+      capability: CAP-PROF-003
+      action: share
+      inputSchema: GroupShareRevokeInput
+      outputSchema: GroupShareGrant
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: profile_groups_replace
+      commandId: profile.groups.replace
+      kind: command
+      capability: CAP-PROF-003
+      action: update
+      inputSchema: ProfileGroupsReplaceInput
+      outputSchema: ProfileRecord
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: profile_proxy_assignment_get
+      commandId: profile.proxy.assignment.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ProfileProxyAssignmentGetInput
+      outputSchema: ProfileProxyAssignment
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: profile_proxy_assignment_set
+      commandId: profile.proxy.assignment.set
+      kind: command
+      capability: profile.update
+      action: update
+      inputSchema: ProfileProxyAssignmentSetInput
+      outputSchema: ProfileProxyAssignment
       auth: required
       audit: required
       idempotency: required
@@ -5214,6 +7038,57 @@ tauri:
         scope: canonical-resource-scope
         filesystem: rust-only
       retry: use-idempotency-key
+    - invoke: member_invitation_create
+      commandId: member.invitation.create
+      kind: command
+      capability: CAP-MEM-001
+      action: create
+      inputSchema: MemberInvitationCreateInput
+      outputSchema: MemberInvitationCreateReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: member_invitation_redeem
+      commandId: member.invitation.redeem
+      kind: command
+      capability: CAP-MEM-001
+      action: update
+      inputSchema: MemberInvitationRedeemInput
+      outputSchema: Member
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: member_invitation_revoke
+      commandId: member.invitation.revoke
+      kind: command
+      capability: CAP-MEM-001
+      action: manage
+      inputSchema: MemberInvitationIdInput
+      outputSchema: MemberInvitationRevocationReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
     - invoke: member_activate
       commandId: member.activate
       kind: command
@@ -5314,12 +7189,28 @@ tauri:
         scope: canonical-resource-scope
         filesystem: rust-only
       retry: use-idempotency-key
-    - invoke: grant_list
-      commandId: grant.list
+    - invoke: resource_lease_get
+      commandId: resource.lease.get
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ResourceIdInput
+      outputSchema: OptionalLeaseStatus
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: grant_list_page
+      commandId: grant.list.page
       kind: query
       capability: CAP-SHARE-001
       action: read
-      inputSchema: GrantListInput
+      inputSchema: GrantListPageInput
       outputSchema: GrantPage
       auth: required
       audit: required

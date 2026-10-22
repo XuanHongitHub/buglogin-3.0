@@ -3,6 +3,7 @@ import React from "react";
 import { type ExternalToast, toast as sonnerToast } from "sonner";
 import { UnifiedToast } from "@/components/custom-toast";
 import i18n from "@/i18n";
+import { formatError } from "./error-utils";
 
 interface BaseToastProps {
   id?: string;
@@ -26,6 +27,10 @@ interface SuccessToastProps extends BaseToastProps {
 
 interface ErrorToastProps extends BaseToastProps {
   type: "error";
+}
+
+interface InfoToastProps extends BaseToastProps {
+  type: "info";
 }
 
 interface DownloadToastProps extends BaseToastProps {
@@ -65,24 +70,42 @@ interface SyncProgressToastProps extends BaseToastProps {
 type ToastProps =
   | SuccessToastProps
   | ErrorToastProps
+  | InfoToastProps
   | DownloadToastProps
   | LoadingToastProps
   | VersionUpdateToastProps
   | SyncProgressToastProps;
 
+function cleanToastText(text: unknown): string {
+  if (text == null) return "";
+  const formatted = formatError(text);
+  if (formatted.includes("[object Object]")) {
+    return formatted.replace(/\[object Object\]/g, "Đã xảy ra lỗi");
+  }
+  return formatted;
+}
+
 export function showToast(props: ToastProps & { id?: string }) {
   const toastId = props.id ?? `toast-${props.type}-${Date.now()}`;
 
+  const sanitizedProps = {
+    ...props,
+    title: cleanToastText(props.title),
+    description: props.description
+      ? cleanToastText(props.description)
+      : undefined,
+  };
+
   let duration: number;
-  if (props.duration !== undefined) {
-    duration = props.duration;
+  if (sanitizedProps.duration !== undefined) {
+    duration = sanitizedProps.duration;
   } else {
-    switch (props.type) {
+    switch (sanitizedProps.type) {
       case "loading":
         duration = 10000;
         break;
       case "download":
-        if ("stage" in props && props.stage === "completed") {
+        if ("stage" in sanitizedProps && sanitizedProps.stage === "completed") {
           duration = 3000;
         } else {
           duration = Number.POSITIVE_INFINITY;
@@ -105,49 +128,19 @@ export function showToast(props: ToastProps & { id?: string }) {
     }
   }
 
-  if (props.type === "success") {
-    sonnerToast.custom(() => React.createElement(UnifiedToast, props), {
-      id: toastId,
-      duration,
-      dismissible: props.dismissible,
-      style: {
-        background: "transparent",
-        border: "none",
-        boxShadow: "none",
-        padding: 0,
-        zIndex: 10001,
-        pointerEvents: "auto",
-      },
-    });
-  } else if (props.type === "error") {
-    sonnerToast.custom(() => React.createElement(UnifiedToast, props), {
-      id: toastId,
-      duration,
-      dismissible: props.dismissible,
-      style: {
-        background: "transparent",
-        border: "none",
-        boxShadow: "none",
-        padding: 0,
-        zIndex: 10001,
-        pointerEvents: "auto",
-      },
-    });
-  } else {
-    sonnerToast.custom(() => React.createElement(UnifiedToast, props), {
-      id: toastId,
-      duration,
-      dismissible: props.dismissible,
-      style: {
-        background: "transparent",
-        border: "none",
-        boxShadow: "none",
-        padding: 0,
-        zIndex: 10001,
-        pointerEvents: "auto",
-      },
-    });
-  }
+  sonnerToast.custom(() => React.createElement(UnifiedToast, sanitizedProps), {
+    id: toastId,
+    duration,
+    dismissible: sanitizedProps.dismissible,
+    style: {
+      background: "transparent",
+      border: "none",
+      boxShadow: "none",
+      padding: 0,
+      zIndex: 10001,
+      pointerEvents: "auto",
+    },
+  });
 
   return toastId;
 }
@@ -169,13 +162,11 @@ export function showDownloadToast(
           ? i18n.t("toasts.loading.extracting", tParams)
           : i18n.t("toasts.loading.verifying", tParams);
 
-  // Don't show completion toast if suppressed (for auto-update scenarios)
   if (stage === "completed" && options?.suppressCompletionToast) {
     dismissToast(`download-${browserName.toLowerCase()}-${version}`);
     return;
   }
 
-  // Only show cancel button during active downloading, not for completed/extracting/verifying
   const showCancel = stage === "downloading";
 
   return showToast({
@@ -189,32 +180,38 @@ export function showDownloadToast(
 }
 
 export function showSuccessToast(
-  title: string,
+  title: unknown,
   options?: {
     id?: string;
-    description?: string;
+    description?: unknown;
     duration?: number;
   },
 ) {
   return showToast({
     type: "success",
-    title,
+    title: cleanToastText(title),
     ...options,
+    description: options?.description
+      ? cleanToastText(options.description)
+      : undefined,
   });
 }
 
 export function showErrorToast(
-  title: string,
+  title: unknown,
   options?: {
     id?: string;
-    description?: string;
+    description?: unknown;
     duration?: number;
   },
 ) {
   return showToast({
     type: "error",
-    title,
+    title: cleanToastText(title),
     ...options,
+    description: options?.description
+      ? cleanToastText(options.description)
+      : undefined,
   });
 }
 
@@ -269,8 +266,6 @@ export function showSyncProgressToast(
     duration: Number.POSITIVE_INFINITY,
     onCancel: () => {
       if (options?.profileId) {
-        // Fire-and-forget — backend flips the cancel flag for the in-flight
-        // upload/download loops to drain.
         void invoke("cancel_profile_sync", {
           profileId: options.profileId,
         }).catch((err: unknown) => {
@@ -281,29 +276,5 @@ export function showSyncProgressToast(
         dismissToast(options.id);
       }
     },
-  });
-}
-
-export function showUnifiedVersionUpdateToast(
-  title: string,
-  options?: {
-    id?: string;
-    description?: string;
-    progress?: {
-      current: number;
-      total: number;
-      found: number;
-      current_browser?: string;
-    };
-    duration?: number;
-    onCancel?: () => void;
-  },
-) {
-  return showToast({
-    type: "version-update",
-    title,
-    id: "unified-version-update",
-    duration: Number.POSITIVE_INFINITY, // Keep showing until completed
-    ...options,
   });
 }

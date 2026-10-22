@@ -7,7 +7,7 @@ import {
   type WorkspaceScope,
 } from "../../frontend/src/apps/web";
 
-export function WebRouteHost({ initialPath }: { initialPath: string }) {
+export function WebRouteHost({ initialPath }: { initialPath?: string }) {
   const api = useMemo(
     () =>
       createWebApiClient({

@@ -150,7 +150,7 @@ Priority: P0 launch-critical, P1 required operational breadth, P2 conditional/la
 | ACC-01 | Sign up | Create identity | P0 | Create account |
 | ACC-02 | Sign in | Start secure session | P0 | Sign in |
 | ACC-03 | MFA challenge | Prove second factor | P0 | Verify |
-| ACC-04 | Recovery | Recover account | P0 | Continue recovery |
+| ACC-04 | Recovery | Explain unavailable account recovery and direct user to administrator support | P0 | Contact administrator |
 | ACC-05 | Accept invitation | Join organization/workspace knowingly | P0 | Accept invite |
 | ACC-06 | Onboarding | Create/select organization and workspace | P0 | Continue |
 | ACC-07 | Account profile | Manage identity basics | P1 | Save changes |

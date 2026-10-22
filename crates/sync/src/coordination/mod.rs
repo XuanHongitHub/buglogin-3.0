@@ -1,3 +1,4 @@
+mod local_backend;
 mod protocol;
 mod redis_backend;
 
@@ -10,8 +11,32 @@ use buglogin_domain::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
+pub use local_backend::LocalCoordination;
 pub use redis_backend::{RedisCoordination, RedisCoordinationConfig};
+
+pub fn lease_release_idempotency_key(
+    scope: &CoordinationScope<'_>,
+    resource_id: &ResourceId,
+    owner_token: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(scope.workspace_id.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(scope.auth.actor_id().as_bytes());
+    digest.update([0]);
+    digest.update(resource_id.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(owner_token.as_bytes());
+    let encoded = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("lease-release-{encoded}")
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct CoordinationAuth {
@@ -25,9 +50,13 @@ impl CoordinationAuth {
         bearer_token: impl Into<String>,
     ) -> Result<Self, Problem> {
         let actor_id = actor_id.into();
-        let bearer_token = bearer_token.into();
-        protocol::validate_identifier("actorId", &actor_id)?;
+        let mut bearer_token = bearer_token.into();
+        if let Err(error) = protocol::validate_identifier("actorId", &actor_id) {
+            bearer_token.zeroize();
+            return Err(error);
+        }
         if bearer_token.is_empty() || bearer_token.len() > 4_096 {
+            bearer_token.zeroize();
             return Err(protocol::invalid("invalid_coordination_credential"));
         }
         Ok(Self {
@@ -40,6 +69,12 @@ impl CoordinationAuth {
     }
     pub fn bearer_token(&self) -> &str {
         &self.bearer_token
+    }
+}
+
+impl Drop for CoordinationAuth {
+    fn drop(&mut self) {
+        self.bearer_token.zeroize();
     }
 }
 
@@ -58,6 +93,7 @@ pub enum CoordinationOperation {
     LeaseAcquire,
     LeaseRenew,
     LeaseRelease,
+    LeaseRead,
     PresenceWrite,
     PresenceRead,
     EventPublish,
@@ -115,6 +151,17 @@ pub struct LeaseGrant {
     pub workspace_id: WorkspaceId,
     pub owner_id: String,
     pub owner_token: String,
+    pub fencing_token: u64,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseStatus {
+    pub resource_id: ResourceId,
+    pub workspace_id: WorkspaceId,
+    pub owner_id: String,
     pub fencing_token: u64,
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
@@ -201,52 +248,42 @@ pub struct StreamEvent {
 
 #[async_trait]
 pub trait CoordinationBackend: Send + Sync {
-    async fn readiness(&self) -> Result<(), Problem> {
-        Ok(())
-    }
+    async fn readiness(&self) -> Result<(), Problem>;
 
-    async fn acquire_lease(
-        &self,
-        scope: CoordinationScope<'_>,
-        resource_id: &ResourceId,
-        ttl: Duration,
-    ) -> Result<LeaseGrant, Problem>;
     async fn acquire_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         ttl: Duration,
-        _idempotency_key: &str,
-    ) -> Result<LeaseGrant, Problem> {
-        self.acquire_lease(scope, resource_id, ttl).await
-    }
-    async fn renew_lease(
+        idempotency_key: &str,
+    ) -> Result<LeaseGrant, Problem>;
+    async fn renew_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
         ttl: Duration,
+        idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem>;
-    async fn release_lease(
+    async fn release_lease_idempotent(
         &self,
         scope: CoordinationScope<'_>,
         resource_id: &ResourceId,
         owner_token: &str,
+        idempotency_key: &str,
     ) -> Result<(), Problem>;
+    async fn lease_status(
+        &self,
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+    ) -> Result<Option<LeaseStatus>, Problem>;
     async fn validate_write_authority(
         &self,
-        _scope: CoordinationScope<'_>,
-        _resource_id: &ResourceId,
-        _owner_token: &str,
-        _fencing_token: u64,
-    ) -> Result<(), Problem> {
-        Err(Problem::new(
-            "write_authority_validation_unsupported",
-            "Write authority validation is unsupported",
-            501,
-            "sync-coordination",
-        ))
-    }
+        scope: CoordinationScope<'_>,
+        resource_id: &ResourceId,
+        owner_token: &str,
+        fencing_token: u64,
+    ) -> Result<(), Problem>;
     async fn heartbeat_presence(
         &self,
         scope: CoordinationScope<'_>,

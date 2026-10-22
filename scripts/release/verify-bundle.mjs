@@ -13,7 +13,13 @@ if (process.argv[2] === "--help") {
   console.log(`[release-bundle] verified ${directory}`);
 }
 
-export async function verifyBundle(root, { requireUpdater: requireUpdaterMetadata = false } = {}) {
+export async function verifyBundle(
+  root,
+  {
+    requireUpdater: requireUpdaterMetadata = false,
+    trustedUpdaterPublicKeyBase64 = process.env.BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64,
+  } = {},
+) {
   const names = new Set(await readdir(root));
   for (const required of ["dist.spdx.json", "SHA256SUMS.txt", "provenance.json"]) {
     if (!names.has(required)) throw new Error(`[release-bundle] missing ${required}`);
@@ -36,7 +42,7 @@ export async function verifyBundle(root, { requireUpdater: requireUpdaterMetadat
   }
   if (updater || updaterSignature) {
     if (!updater || !updaterSignature) throw new Error("[release-bundle] updater manifest and detached signature must be paired");
-    await verifyUpdater(root, sums);
+    await verifyUpdater(root, sums, trustedUpdaterPublicKeyBase64?.trim());
   }
 
   const ignored = new Set(["SHA256SUMS.txt", "provenance.json", "updater-manifest.sig.json"]);
@@ -88,7 +94,7 @@ function verifyProvenance(value, sums) {
   }
 }
 
-async function verifyUpdater(root, sums) {
+async function verifyUpdater(root, sums, trustedUpdaterPublicKeyBase64) {
   const manifestBytes = await readFile(join(root, "updater-manifest.json"));
   const manifest = JSON.parse(manifestBytes);
   const detached = JSON.parse(await readFile(join(root, "updater-manifest.sig.json"), "utf8"));
@@ -102,6 +108,12 @@ async function verifyUpdater(root, sums) {
   const previousTargets = new Set(manifest.rollback.previousArtifacts.map((item) => `${item.platform}/${item.arch}`));
   if (currentTargets.size === 0 || currentTargets.size !== previousTargets.size || [...currentTargets].some((target) => !previousTargets.has(target))) throw new Error("[release-bundle] rollback target coverage is incomplete");
   if (detached.schema !== "buglogin.updater-signature.v1" || detached.algorithm !== "ed25519" || detached.manifestSha256 !== sha256(manifestBytes) || !detached.publicKeyBase64 || !detached.signatureBase64) throw new Error("[release-bundle] invalid updater signature envelope");
+  if (!trustedUpdaterPublicKeyBase64) {
+    throw new Error("[release-bundle] trusted updater public key is not configured");
+  }
+  if (detached.publicKeyBase64 !== trustedUpdaterPublicKeyBase64) {
+    throw new Error("[release-bundle] updater manifest was signed by an untrusted key");
+  }
   const publicKey = createPublicKey({ key: Buffer.from(detached.publicKeyBase64, "base64"), format: "der", type: "spki" });
   if (!verifySignature(null, manifestBytes, publicKey, Buffer.from(detached.signatureBase64, "base64"))) throw new Error("[release-bundle] updater manifest signature verification failed");
   if (sums.has("updater-manifest.json") && sums.get("updater-manifest.json") !== sha256(manifestBytes)) throw new Error("[release-bundle] updater manifest checksum mismatch");

@@ -4,12 +4,12 @@
 
 | ID | Role | Compatibility status |
 |---|---|---|
-| `wayfern` | Primary BugLogin runtime | Required launch runtime |
-| `bugox` | Legacy BugLogin adapter | Explicit capability matrix |
-| `bugium` | Legacy BugLogin adapter | Explicit capability matrix |
-| `bugmini` | Legacy BugLogin adapter | Explicit capability matrix |
-| `bugthor` | Legacy BugLogin adapter | Explicit capability matrix |
-| `bughelium` | Legacy BugLogin adapter | Explicit capability matrix |
+| `wayfern` | Primary BugLogin runtime | Selectable for new profiles; required baseline |
+| `bugmini` | Secondary BugLogin runtime | Selectable where a verified local binary is configured |
+| `bugox` | Legacy runtime | Preserve existing profiles; not selectable until an adapter is approved |
+| `bugium` | Legacy runtime | Preserve existing profiles; not selectable until an adapter is approved |
+| `bugthor` | Legacy runtime | Preserve existing profiles; not selectable until an adapter is approved |
+| `bughelium` | Legacy runtime | Preserve existing profiles; not selectable until an adapter is approved |
 
 ## Upstream aliases
 

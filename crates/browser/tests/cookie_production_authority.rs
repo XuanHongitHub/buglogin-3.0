@@ -223,6 +223,26 @@ fn authority() -> (CookieAuthority<FakeVault>, CookieScope, Lease, Principal) {
 }
 
 #[test]
+fn cookie_errors_map_to_shared_problem_codes_and_statuses() {
+    let invalid = CookieAuthorityError::InvalidStagedImportId.as_problem("cor_cookie_invalid");
+    assert_eq!(invalid.code, "invalid_staged_cookie_import_id");
+    assert_eq!(invalid.status, 400);
+    assert_eq!(invalid.correlation_id, "cor_cookie_invalid");
+
+    let conflict = CookieAuthorityError::GenerationMismatch {
+        expected: 2,
+        actual: 3,
+    }
+    .as_problem("cor_cookie_conflict");
+    assert_eq!(conflict.code, "cookie_generation_mismatch");
+    assert_eq!(conflict.status, 409);
+
+    let unavailable = CookieAuthorityError::Storage.as_problem("cor_cookie_storage");
+    assert_eq!(unavailable.code, "cookie_authority_storage_error");
+    assert_eq!(unavailable.status, 503);
+}
+
+#[test]
 fn staged_import_is_one_use_and_idempotent_replay_is_safe() {
     let (mut authority, target, current_lease, principal) = authority();
     let stage = authority
@@ -269,6 +289,7 @@ fn stale_generation_rejects_without_consuming_stage() {
     let first_stage = authority
         .stage_import(target.clone(), [cookie("sid", b"first")])
         .unwrap();
+    let first_key = IdempotencyKey::new("cookie-import-002").unwrap();
     authority
         .import(
             &first_stage,
@@ -277,8 +298,11 @@ fn stale_generation_rejects_without_consuming_stage() {
             10,
             &principal,
             &[],
-            IdempotencyKey::new("cookie-import-002").unwrap(),
+            first_key.clone(),
         )
+        .unwrap();
+    authority
+        .complete_materialization(&target, first_key.as_str())
         .unwrap();
 
     let second_stage = authority
@@ -382,6 +406,7 @@ fn copy_requires_both_profiles_stopped_and_destination_authority() {
     authority
         .set_current_lease(destination.clone(), destination_lease.clone())
         .unwrap();
+    let source_key = IdempotencyKey::new("cookie-import-009").unwrap();
     authority
         .stage_import(source.clone(), [cookie("sid", b"secret")])
         .map(|stage| {
@@ -393,10 +418,13 @@ fn copy_requires_both_profiles_stopped_and_destination_authority() {
                     10,
                     &principal,
                     &[],
-                    IdempotencyKey::new("cookie-import-009").unwrap(),
+                    source_key.clone(),
                 )
                 .unwrap();
         })
+        .unwrap();
+    authority
+        .complete_materialization(&source, source_key.as_str())
         .unwrap();
 
     authority.set_profile_state(source.clone(), ProfileRuntimeState::Running);
@@ -427,6 +455,7 @@ fn copy_advances_destination_cas_and_replays_without_duplicate_write() {
     let stage = authority
         .stage_import(source.clone(), [cookie("sid", b"secret")])
         .unwrap();
+    let source_key = IdempotencyKey::new("cookie-copy-source").unwrap();
     authority
         .import(
             &stage,
@@ -435,8 +464,11 @@ fn copy_advances_destination_cas_and_replays_without_duplicate_write() {
             10,
             &principal,
             &[],
-            IdempotencyKey::new("cookie-copy-source").unwrap(),
+            source_key.clone(),
         )
+        .unwrap();
+    authority
+        .complete_materialization(&source, source_key.as_str())
         .unwrap();
 
     let key = IdempotencyKey::new("cookie-copy-002").unwrap();
@@ -476,6 +508,9 @@ fn copy_advances_destination_cas_and_replays_without_duplicate_write() {
             .len(),
         1
     );
+    authority
+        .complete_materialization(&destination, "cookie-copy-002")
+        .unwrap();
 
     assert_eq!(
         authority.copy(
@@ -518,7 +553,7 @@ fn unknown_profile_state_and_invalid_staged_reference_fail_closed() {
 }
 
 #[test]
-fn authority_restart_restores_generation_and_replay_but_discards_staged_input() {
+fn authority_restart_restores_generation_replay_and_new_stage() {
     let root = temporary_path("restart");
     let vault = SharedVault::default();
     let target = scope("ws_1", "prf_1");
@@ -558,6 +593,10 @@ fn authority_restart_restores_generation_and_replay_but_discards_staged_input() 
                 .unwrap()
                 .replayed
         );
+        assert!(authority.has_pending_materialization_for_profile("prf_1"));
+        authority
+            .complete_materialization(&target, "cookie-restart-001")
+            .unwrap();
 
         let new_stage = authority
             .stage_import(target.clone(), [cookie("sid2", b"secret-2")])
@@ -583,7 +622,7 @@ fn authority_restart_restores_generation_and_replay_but_discards_staged_input() 
 }
 
 #[test]
-fn authority_restart_rejects_uncommitted_staged_import() {
+fn authority_restart_restores_uncommitted_staged_import() {
     let root = temporary_path("staged-restart");
     let vault = SharedVault::default();
     let target = scope("ws_1", "prf_1");
@@ -609,16 +648,19 @@ fn authority_restart_rejects_uncommitted_staged_import() {
             .set_current_lease(target.clone(), current_lease.clone())
             .unwrap();
         assert_eq!(
-            authority.import(
-                &stage,
-                0,
-                &current_lease,
-                10,
-                &principal,
-                &[],
-                IdempotencyKey::new("cookie-staged-restart-001").unwrap(),
-            ),
-            Err(CookieAuthorityError::StagedImportNotFound)
+            authority
+                .import(
+                    &stage,
+                    0,
+                    &current_lease,
+                    10,
+                    &principal,
+                    &[],
+                    IdempotencyKey::new("cookie-staged-restart-001").unwrap(),
+                )
+                .unwrap()
+                .generation,
+            1
         );
     }
 
@@ -640,7 +682,7 @@ fn cookie_authority_lock_rejects_second_open_and_releases_on_drop() {
 }
 
 #[test]
-fn authority_commit_and_wayfern_materialization_are_separate_transactions() {
+fn authority_commit_fences_mutations_until_wayfern_materialization() {
     let authority_root = temporary_path("wayfern-gap-authority");
     let profile_root = temporary_path("wayfern-gap-profile");
     let target = scope("ws_1", "prf_1");
@@ -668,6 +710,7 @@ fn authority_commit_and_wayfern_materialization_are_separate_transactions() {
         .unwrap();
 
     assert_eq!(committed.generation, 1);
+    assert!(authority.has_pending_materialization_for_profile("prf_1"));
     assert!(authority.list(&target, &principal, &[]).unwrap().cookies[0].value_present);
     assert_eq!(
         wayfern::materialize(
@@ -679,6 +722,8 @@ fn authority_commit_and_wayfern_materialization_are_separate_transactions() {
         Err(WayfernCookieError::PlaintextPersistenceForbidden)
     );
     assert!(!wayfern::database_path(&profile_root).exists());
+
+    create_supported_cookie_database(&profile_root);
 
     let second_stage = authority
         .stage_import(target.clone(), [cookie("sid-2", &[4, 5, 6, 7])])
@@ -715,11 +760,39 @@ fn authority_commit_and_wayfern_materialization_are_separate_transactions() {
             &[],
             IdempotencyKey::new("cookie-wayfern-gap-002").unwrap(),
         ),
-        Err(CookieAuthorityError::LeaseExpired)
+        Err(CookieAuthorityError::MaterializationPending)
     );
     assert_eq!(authority.generation(&target), 1);
     assert_eq!(wayfern::read_metadata(&profile_root).unwrap().len(), 1);
 
     fs::remove_dir_all(authority_root).unwrap();
     fs::remove_dir_all(profile_root).unwrap();
+}
+
+fn create_supported_cookie_database(profile_root: &std::path::Path) {
+    let path = wayfern::database_path(profile_root);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+             INSERT INTO meta(key, value) VALUES('version', '24');
+             CREATE TABLE cookies(
+                 creation_utc INTEGER NOT NULL, host_key TEXT NOT NULL,
+                 top_frame_site_key TEXT NOT NULL, name TEXT NOT NULL,
+                 value TEXT NOT NULL, encrypted_value BLOB NOT NULL,
+                 path TEXT NOT NULL, expires_utc INTEGER NOT NULL,
+                 is_secure INTEGER NOT NULL, is_httponly INTEGER NOT NULL,
+                 last_access_utc INTEGER NOT NULL, has_expires INTEGER NOT NULL,
+                 is_persistent INTEGER NOT NULL, priority INTEGER NOT NULL,
+                 samesite INTEGER NOT NULL, source_scheme INTEGER NOT NULL,
+                 source_port INTEGER NOT NULL, last_update_utc INTEGER NOT NULL,
+                 source_type INTEGER NOT NULL, has_cross_site_ancestor INTEGER NOT NULL
+             );
+             CREATE UNIQUE INDEX cookies_unique_index ON cookies(
+                 host_key, top_frame_site_key, has_cross_site_ancestor,
+                 name, path, source_scheme, source_port
+             );",
+        )
+        .unwrap();
 }

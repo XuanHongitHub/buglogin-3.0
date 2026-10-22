@@ -13,11 +13,13 @@ interface DownloadProgress {
   speed_bytes_per_sec: number;
   eta_seconds?: number | null;
   stage: string;
+  error?: string;
 }
 
 export type SetupPhase = "downloading" | "extracting" | "ready" | "error";
 
 export type SetupErrorStage =
+  | "catalog"
   | "downloading"
   | "extracting"
   | "verifying"
@@ -25,6 +27,8 @@ export type SetupErrorStage =
 
 export interface SetupError {
   stage: SetupErrorStage;
+  /** The backend's reason, coded or plain, when it sent one. */
+  detail?: string;
 }
 
 // The backend reports real extraction percentages for most archive formats
@@ -125,6 +129,9 @@ export function useBrowserSetup(browser: string, active: boolean) {
   // mid-flight extraction fallback can't re-arm and fight the readiness poll
   // (which would oscillate "ready" ↔ "Almost finished" forever).
   const doneRef = useRef(false);
+  const installStartedRef = useRef(false);
+  const installInFlightRef = useRef(false);
+  const startInstallRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     if (!active) {
@@ -145,6 +152,9 @@ export function useBrowserSetup(browser: string, active: boolean) {
       lastDownloadPercentRef.current = 0;
       lastStageRef.current = "downloading";
       doneRef.current = false;
+      installStartedRef.current = false;
+      installInFlightRef.current = false;
+      startInstallRef.current = null;
       return;
     }
     let alive = true;
@@ -156,6 +166,8 @@ export function useBrowserSetup(browser: string, active: boolean) {
     lastDownloadPercentRef.current = 0;
     lastStageRef.current = "downloading";
     doneRef.current = false;
+    installStartedRef.current = false;
+    installInFlightRef.current = false;
 
     const finishExtraction = () => {
       if (extractStartRef.current != null) {
@@ -163,6 +175,66 @@ export function useBrowserSetup(browser: string, active: boolean) {
         extractStartRef.current = null;
       }
     };
+
+    const startInstall = async () => {
+      if (!alive || installStartedRef.current || installInFlightRef.current) {
+        return;
+      }
+      installStartedRef.current = true;
+      installInFlightRef.current = true;
+      let failureStage: SetupErrorStage = "catalog";
+      try {
+        const catalog = await invoke<{
+          releases: Array<{ runtime: string; version: string }>;
+        }>("runtime_catalog_current_device_get", {
+          correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}`,
+        });
+        const version = catalog.releases
+          .filter((release) => release.runtime === browser)
+          .map((release) => release.version)
+          .sort((left, right) =>
+            right.localeCompare(left, undefined, { numeric: true }),
+          )[0];
+        if (!version) {
+          if (alive) {
+            doneRef.current = true;
+            setPhase("error");
+            setError({ stage: "catalog" });
+          }
+          return;
+        }
+        failureStage = "downloading";
+        await invoke("runtime_install", {
+          runtime: browser,
+          version,
+          correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}`,
+        });
+        if (alive) {
+          doneRef.current = true;
+          finishExtraction();
+          setPhase("ready");
+          setExtractionPercent(100);
+          setExtractionOvertime(false);
+          setError(null);
+        }
+      } catch (error) {
+        console.error("Failed to install the first browser runtime:", error);
+        if (alive) {
+          doneRef.current = true;
+          finishExtraction();
+          setPhase("error");
+          setError({
+            stage:
+              failureStage === "catalog"
+                ? "catalog"
+                : toErrorStage(lastStageRef.current),
+          });
+        }
+      } finally {
+        installInFlightRef.current = false;
+      }
+    };
+    startInstallRef.current = startInstall;
 
     const unlistenPromise = listen<DownloadProgress>(
       "download-progress",
@@ -216,7 +288,10 @@ export function useBrowserSetup(browser: string, active: boolean) {
             doneRef.current = true;
             finishExtraction();
             setPhase("error");
-            setError({ stage: toErrorStage(lastStageRef.current) });
+            setError({
+              stage: toErrorStage(lastStageRef.current),
+              detail: p.error,
+            });
             break;
           case "cancelled":
             // Treat a cancellation like an error so the dialog can offer retry.
@@ -231,22 +306,28 @@ export function useBrowserSetup(browser: string, active: boolean) {
       },
     );
 
-    // Authoritative completion signal: poll the registry. The "completed" event
-    // is only a fast-path — we never rely on it alone. This MUST be a recurring
-    // interval rather than a one-shot loop: independent firings mean a single
-    // invoke that stalls during heavy extraction can't kill detection, it keeps
-    // confirming readiness so retry() re-detects an already-downloaded browser
-    // without restarting the effect, and it covers a browser downloaded before
-    // this hook mounted. setPhase("ready") is idempotent, so re-confirming is
-    // free (React bails out when state is unchanged).
+    // Detect runtimes installed before this hook mounted or externally while it
+    // is open. Once this hook starts an install, its command result and progress
+    // events are authoritative; polling pauses so it cannot start a duplicate.
     let checkingReady = false;
     const checkReady = async () => {
-      if (!alive || checkingReady) return;
+      if (
+        !alive ||
+        checkingReady ||
+        doneRef.current ||
+        installStartedRef.current ||
+        installInFlightRef.current
+      ) {
+        return;
+      }
       checkingReady = true;
       try {
         const versions = await invoke<string[]>(
-          "get_downloaded_browser_versions",
-          { browserStr: browser },
+          "runtime_installed_versions_get",
+          {
+            runtime: browser,
+            correlationId: `cor-${crypto.randomUUID().replaceAll("-", "")}`,
+          },
         );
         if (alive && versions.length > 0) {
           doneRef.current = true;
@@ -255,9 +336,16 @@ export function useBrowserSetup(browser: string, active: boolean) {
           setExtractionPercent(100);
           setExtractionOvertime(false);
           setError(null);
+        } else if (alive && !installStartedRef.current) {
+          void startInstall();
         }
       } catch (err) {
         console.error("Failed to check browser download status:", err);
+        if (alive) {
+          doneRef.current = true;
+          setPhase("error");
+          setError({ stage: "other" });
+        }
       } finally {
         checkingReady = false;
       }
@@ -303,6 +391,7 @@ export function useBrowserSetup(browser: string, active: boolean) {
 
     return () => {
       alive = false;
+      startInstallRef.current = null;
       clearInterval(tick);
       clearInterval(readyPoll);
       void unlistenPromise.then((u) => {
@@ -312,10 +401,8 @@ export function useBrowserSetup(browser: string, active: boolean) {
   }, [browser, active]);
 
   const retry = useCallback(() => {
-    // Reset visible state and the bookkeeping refs, then kick off the download
-    // again. The effect's event listener and registry poll stay alive the whole
-    // time the dialog is open, so they pick up the fresh attempt — no need to
-    // restart the effect.
+    // Reuse the active progress listener and start a fresh catalog/install
+    // attempt without restarting the effect.
     setPhase("downloading");
     setDownloadPercent(0);
     setDownloadedBytes(0);
@@ -332,15 +419,8 @@ export function useBrowserSetup(browser: string, active: boolean) {
     lastDownloadPercentRef.current = 0;
     lastStageRef.current = "downloading";
     doneRef.current = false;
-    void (async () => {
-      try {
-        await invoke("ensure_active_browsers_downloaded");
-      } catch (err) {
-        console.error("Failed to re-trigger browser setup:", err);
-        setPhase("error");
-        setError({ stage: "other" });
-      }
-    })();
+    installStartedRef.current = false;
+    void startInstallRef.current?.();
   }, []);
 
   return {

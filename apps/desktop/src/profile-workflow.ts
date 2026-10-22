@@ -3,6 +3,8 @@ export function normalizedRequiredText(value: string) {
   return normalized || undefined;
 }
 
-export function usableRevision(revision: number | undefined): revision is number {
+export function usableRevision(
+  revision: number | undefined,
+): revision is number {
   return revision !== undefined && Number.isInteger(revision) && revision > 0;
 }

@@ -179,6 +179,7 @@ fn group_record(source_id: &str) -> NeutralGroupRecord {
         data: NeutralGroupData {
             name: "Sales".into(),
             appearance: None,
+            workspace_id: None,
         },
         extensions: Map::new(),
     }
@@ -197,6 +198,7 @@ fn proxy_record(source_id: &str) -> NeutralProxyRecord {
         created_at: Some("2026-07-20T00:00:00Z".into()),
         updated_at: Some("2026-07-20T00:01:00Z".into()),
         data: NeutralProxyData {
+            name: Some("Migration proxy".into()),
             protocol: "socks5".into(),
             host: "127.0.0.2".into(),
             port: 1080,

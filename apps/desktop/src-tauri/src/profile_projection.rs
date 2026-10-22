@@ -1,11 +1,13 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::clock::{checked_add_millis, unix_time_millis};
 use buglogin_domain::{errors::Problem, ids::ProfileId};
 use buglogin_storage::{
     blob::{checksum, read_verified, write_verified},
@@ -19,20 +21,24 @@ use buglogin_sync::{
         RecoveryKey, ResourceKeyEnvelope,
     },
     manifest::{
-        MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject, ManifestObjectReference,
-        ManifestPayloadEncryption, ManifestTombstone, PayloadEncryptionAlgorithm,
-        RESOURCE_KEY_ENVELOPE_KEY, SyncManifest,
+        MAX_CHUNKED_PROFILE_FILE_BYTES, MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency,
+        ManifestFileChunk, ManifestFileChunks, ManifestObject, ManifestObjectReference,
+        ManifestPayloadEncryption, ManifestTombstone, PROFILE_FILE_CHUNK_BYTES,
+        PayloadEncryptionAlgorithm, RESOURCE_KEY_ENVELOPE_KEY, SyncManifest,
+        is_ephemeral_profile_path,
     },
     payload::{PAYLOAD_SCHEMA_VERSION, PayloadDescriptor, PayloadObject},
 };
-use futures_util::{StreamExt, TryStreamExt, stream};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::remote_api::{RemoteApiClient, RemoteProxySyncSnapshot};
 
 const MARKER: &str = ".buglogin-projection.json";
+const ACTIVE_SESSION_MARKER: &str = ".buglogin-active-session.json";
+const SYNC_COMMIT_MARKER: &str = ".buglogin-sync-commit.json";
 const MAX_ENCRYPTED_OBJECT_BYTES: usize = MAX_PROFILE_SYNC_OBJECT_BYTES as usize;
-const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
 const MAX_PROFILE_PLAINTEXT_BYTES: u64 =
     MAX_PROFILE_SYNC_OBJECT_BYTES - AUTHENTICATED_CHUNK_OVERHEAD_BYTES as u64;
 
@@ -50,17 +56,451 @@ pub struct ProjectionReceipt {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotBlob {
+    pub key: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub checksum: String,
+}
+
+impl SnapshotBlob {
+    pub fn read_bytes(&self) -> Result<Vec<u8>, Problem> {
+        let bytes = fs::read(&self.path).map_err(|_| unavailable())?;
+        if bytes.len() as u64 != self.size || checksum(&bytes) != self.checksum {
+            return Err(problem(
+                "profile_snapshot_blob_corrupt",
+                "Staged profile snapshot object failed its checksum",
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
 #[derive(Clone)]
 pub struct ProfileProjection {
     root: PathBuf,
+    _root_lock: Arc<fs::File>,
 }
 
 impl ProfileProjection {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Problem> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|_| unavailable())?;
         let root = root.canonicalize().map_err(|_| unavailable())?;
-        Ok(Self { root })
+        let lock_path = confined_path(&root, Path::new(".projection.lock"))?;
+        let root_lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|_| unavailable())?;
+        root_lock.try_lock_exclusive().map_err(|error| {
+            if is_lock_contention(&error) {
+                Problem::new(
+                    "profile_projection_in_use",
+                    "Profile data is already open by another BugLogin process",
+                    409,
+                    "desktop-projection",
+                )
+            } else {
+                unavailable()
+            }
+        })?;
+        cleanup_abandoned_staging(&root)?;
+        Ok(Self {
+            root,
+            _root_lock: Arc::new(root_lock),
+        })
+    }
+
+    pub fn dirty_local_generation(
+        &self,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+    ) -> Result<Option<PathBuf>, Problem> {
+        let path = decrypted_generation_path(&self.root, profile_id, manifest)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        if verify_decrypted_generation(profile_id, manifest, &path).is_ok() {
+            Ok(None)
+        } else {
+            Ok(Some(path))
+        }
+    }
+
+    pub fn existing_local_generation(
+        &self,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+    ) -> Result<Option<PathBuf>, Problem> {
+        let path = decrypted_generation_path(&self.root, profile_id, manifest)?;
+        Ok(path.exists().then_some(path))
+    }
+
+    /// Stages a verified legacy browser tree as dirty local profile data for
+    /// the ordinary encrypted sync commit. The legacy bytes never become a
+    /// trusted projection generation or a server-readable manifest.
+    pub fn stage_legacy_profile_data(
+        &self,
+        profile_id: &ProfileId,
+        genesis: &SyncManifest,
+        source_root: &Path,
+    ) -> Result<PathBuf, Problem> {
+        genesis.validate()?;
+        if genesis.generation != 1
+            || genesis.parent_generation.is_some()
+            || genesis.payload_encryption.is_some()
+            || !genesis.objects.is_empty()
+            || !genesis.file_chunks.is_empty()
+        {
+            return Err(problem(
+                "migration_profile_genesis_required",
+                "Legacy profile data can only be staged against an empty genesis manifest",
+            ));
+        }
+        let source_metadata = fs::symlink_metadata(source_root).map_err(|_| {
+            problem(
+                "migration_profile_source_invalid",
+                "Legacy profile source directory is unavailable",
+            )
+        })?;
+        if !source_metadata.is_dir() || source_metadata.file_type().is_symlink() {
+            return Err(problem(
+                "migration_profile_source_invalid",
+                "Legacy profile source directory is invalid",
+            ));
+        }
+        let source_root = source_root.canonicalize().map_err(|_| {
+            problem(
+                "migration_profile_source_invalid",
+                "Legacy profile source directory is unavailable",
+            )
+        })?;
+        if source_root.starts_with(&self.root) {
+            return Err(problem(
+                "migration_profile_source_invalid",
+                "Legacy profile source directory is invalid",
+            ));
+        }
+        let mut files = Vec::new();
+        collect_file_paths(&source_root, &source_root, &mut files)?;
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        if files.is_empty() {
+            return Err(problem(
+                "migration_profile_source_empty",
+                "Legacy profile data is empty",
+            ));
+        }
+
+        let destination = decrypted_generation_path(&self.root, profile_id, genesis)?;
+        if destination.exists() {
+            if destination.join(MARKER).exists() {
+                return Err(problem(
+                    "migration_profile_already_staged",
+                    "A trusted profile generation already exists; preserve it before retrying migration",
+                ));
+            }
+            let mut existing_files = Vec::new();
+            collect_file_paths(&destination, &destination, &mut existing_files)?;
+            existing_files.sort_by(|left, right| left.0.cmp(&right.0));
+            if existing_files.len() != files.len() {
+                return Err(problem(
+                    "migration_profile_stage_conflict",
+                    "Existing staged profile data differs from the migration source",
+                ));
+            }
+            for (
+                (expected_path, expected_source, expected_size),
+                (actual_path, actual_source, actual_size),
+            ) in files.iter().zip(existing_files.iter())
+            {
+                if expected_path != actual_path || expected_size != actual_size {
+                    return Err(problem(
+                        "migration_profile_stage_conflict",
+                        "Existing staged profile data differs from the migration source",
+                    ));
+                }
+                if checksum_file(expected_source)? != checksum_file(actual_source)? {
+                    return Err(problem(
+                        "migration_profile_stage_conflict",
+                        "Existing staged profile data differs from the migration source",
+                    ));
+                }
+            }
+            return Ok(destination);
+        }
+        let profile_root = confined_path(&self.root, Path::new(profile_id.as_str()))?;
+        fs::create_dir_all(&profile_root).map_err(|_| unavailable())?;
+        let staging_root = profile_root.join("staging");
+        fs::create_dir_all(&staging_root).map_err(|_| unavailable())?;
+        let staging_relative = PathBuf::from(profile_id.as_str())
+            .join("staging")
+            .join(format!("legacy-import-{}", unique_suffix()));
+        let staging = confined_path(&self.root, &staging_relative)?;
+        fs::create_dir(&staging).map_err(|_| unavailable())?;
+        let stage_result = (|| {
+            for (relative, source, expected_size) in &files {
+                let source_metadata = fs::symlink_metadata(source).map_err(|_| unavailable())?;
+                if source_metadata.file_type().is_symlink()
+                    || !source_metadata.is_file()
+                    || source_metadata.len() != *expected_size
+                {
+                    return Err(problem(
+                        "migration_profile_source_changed",
+                        "Legacy profile data changed while it was being staged",
+                    ));
+                }
+                copy_profile_file_verified(source, &staging, relative, *expected_size)?;
+            }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|_| unavailable())?;
+            }
+            fs::rename(&staging, &destination).map_err(|_| unavailable())?;
+            Ok(destination.clone())
+        })();
+        if stage_result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        stage_result
+    }
+
+    pub fn active_session_recovery_path(
+        &self,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+    ) -> Result<Option<PathBuf>, Problem> {
+        let commit_relative = PathBuf::from(profile_id.as_str()).join(SYNC_COMMIT_MARKER);
+        let commit_path = confined_path(&self.root, &commit_relative)?;
+        let commit_bytes = match fs::read(&commit_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(unavailable()),
+        };
+        if let Some(bytes) = commit_bytes {
+            let marker: SyncCommitMarker = serde_json::from_slice(&bytes).map_err(|_| {
+                problem(
+                    "profile_sync_commit_marker_invalid",
+                    "The local sync commit record is invalid; local profile data has been preserved",
+                )
+            })?;
+            if marker.profile_id != *profile_id {
+                return Err(problem(
+                    "profile_sync_commit_marker_invalid",
+                    "The local sync commit record does not match this profile",
+                ));
+            }
+            if marker.target_generation <= marker.base_generation
+                || !valid_manifest_checksum(&marker.base_root_checksum)
+                || !valid_manifest_checksum(&marker.target_root_checksum)
+            {
+                return Err(problem(
+                    "profile_sync_commit_marker_invalid",
+                    "The local sync commit record contains invalid generation metadata",
+                ));
+            }
+            if manifest.generation == marker.target_generation
+                && manifest.root_checksum == marker.target_root_checksum
+            {
+                self.clear_active_session(profile_id)?;
+                return Ok(None);
+            }
+            if manifest.generation != marker.base_generation
+                || manifest.root_checksum != marker.base_root_checksum
+            {
+                return Err(problem(
+                    "profile_local_sync_conflict",
+                    "This profile changed on another device while local browser changes were pending. Local data is preserved; resolve the sync conflict before launching",
+                ));
+            }
+            let generation_path = decrypted_generation_path_parts(
+                &self.root,
+                profile_id,
+                marker.base_generation,
+                &marker.base_root_checksum,
+            )?;
+            if !generation_path.exists() {
+                return Err(problem(
+                    "profile_local_generation_missing",
+                    "A pending local profile sync was recorded, but its profile data is missing",
+                ));
+            }
+            if verify_decrypted_generation(profile_id, manifest, &generation_path).is_ok() {
+                self.clear_active_session(profile_id)?;
+                return Ok(None);
+            }
+            return Ok(Some(generation_path));
+        }
+        let relative = PathBuf::from(profile_id.as_str()).join(ACTIVE_SESSION_MARKER);
+        let marker_path = confined_path(&self.root, &relative)?;
+        let bytes = match fs::read(&marker_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(unavailable()),
+        };
+        let marker: ActiveSessionMarker = serde_json::from_slice(&bytes).map_err(|_| {
+            problem(
+                "profile_session_marker_invalid",
+                "The local profile session marker is invalid; preserve the profile data and contact support",
+            )
+        })?;
+        if marker.state != "active"
+            || marker.profile_id != *profile_id
+            || !valid_manifest_checksum(&marker.root_checksum)
+        {
+            return Err(problem(
+                "profile_session_marker_invalid",
+                "The local profile session marker does not match this profile",
+            ));
+        }
+        if marker.generation != manifest.generation
+            || marker.root_checksum != manifest.root_checksum
+        {
+            return Err(problem(
+                "profile_local_sync_conflict",
+                "This profile changed on another device while local browser changes were pending. Local data is preserved; resolve the sync conflict before launching",
+            ));
+        }
+        let generation_path = decrypted_generation_path(&self.root, profile_id, manifest)?;
+        if !generation_path.exists() {
+            return Err(problem(
+                "profile_local_generation_missing",
+                "A pending local profile session was recorded, but its profile data is missing",
+            ));
+        }
+        if verify_decrypted_generation(profile_id, manifest, &generation_path).is_ok() {
+            self.clear_active_session(profile_id)?;
+            Ok(None)
+        } else {
+            Ok(Some(generation_path))
+        }
+    }
+
+    pub fn begin_active_session(
+        &self,
+        profile_id: &ProfileId,
+        generation: u64,
+        root_checksum: &str,
+    ) -> Result<(), Problem> {
+        if !valid_manifest_checksum(root_checksum) {
+            return Err(problem(
+                "profile_session_marker_invalid",
+                "The active profile session has an invalid root checksum",
+            ));
+        }
+        let profile_root = confined_path(&self.root, Path::new(profile_id.as_str()))?;
+        fs::create_dir_all(&profile_root).map_err(|_| unavailable())?;
+        let relative = PathBuf::from(profile_id.as_str()).join(ACTIVE_SESSION_MARKER);
+        let marker_path = confined_path(&self.root, &relative)?;
+        if marker_path.exists() {
+            return Err(problem(
+                "profile_session_already_active",
+                "A local profile session is already marked active",
+            ));
+        }
+        let temporary_relative = PathBuf::from(profile_id.as_str())
+            .join(format!("{ACTIVE_SESSION_MARKER}.{}", unique_suffix()));
+        let temporary = confined_path(&self.root, &temporary_relative)?;
+        let marker = ActiveSessionMarker {
+            state: "active".to_owned(),
+            profile_id: profile_id.clone(),
+            generation,
+            root_checksum: root_checksum.to_owned(),
+        };
+        let bytes = serde_json::to_vec(&marker).map_err(|_| unavailable())?;
+        let write_result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| unavailable())?;
+            file.write_all(&bytes).map_err(|_| unavailable())?;
+            file.sync_all().map_err(|_| unavailable())?;
+            fs::rename(&temporary, &marker_path).map_err(|_| unavailable())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn clear_active_session(&self, profile_id: &ProfileId) -> Result<(), Problem> {
+        for name in [ACTIVE_SESSION_MARKER, SYNC_COMMIT_MARKER] {
+            let relative = PathBuf::from(profile_id.as_str()).join(name);
+            let marker_path = confined_path(&self.root, &relative)?;
+            match fs::remove_file(marker_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(unavailable()),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare_sync_commit(
+        &self,
+        profile_id: &ProfileId,
+        base_manifest: &SyncManifest,
+        target_manifest: &SyncManifest,
+    ) -> Result<(), Problem> {
+        let next_generation = base_manifest.generation.checked_add(1).ok_or_else(|| {
+            Problem::new(
+                "sync_generation_exhausted",
+                "Profile sync generation cannot be incremented",
+                409,
+                "desktop-projection",
+            )
+        })?;
+        if base_manifest.workspace_id != target_manifest.workspace_id
+            || base_manifest.resource_id != target_manifest.resource_id
+            || target_manifest.generation != next_generation
+            || !valid_manifest_checksum(&base_manifest.root_checksum)
+            || !valid_manifest_checksum(&target_manifest.root_checksum)
+        {
+            return Err(problem(
+                "profile_sync_commit_marker_invalid",
+                "The profile sync commit does not follow the active manifest generation",
+            ));
+        }
+        let profile_root = confined_path(&self.root, Path::new(profile_id.as_str()))?;
+        fs::create_dir_all(&profile_root).map_err(|_| unavailable())?;
+        let marker = SyncCommitMarker {
+            profile_id: profile_id.clone(),
+            base_generation: base_manifest.generation,
+            base_root_checksum: base_manifest.root_checksum.clone(),
+            target_generation: target_manifest.generation,
+            target_root_checksum: target_manifest.root_checksum.clone(),
+        };
+        let bytes = serde_json::to_vec(&marker).map_err(|_| unavailable())?;
+        let relative = PathBuf::from(profile_id.as_str()).join(SYNC_COMMIT_MARKER);
+        let marker_path = confined_path(&self.root, &relative)?;
+        let temporary_relative = PathBuf::from(profile_id.as_str())
+            .join(format!("{SYNC_COMMIT_MARKER}.{}", unique_suffix()));
+        let temporary = confined_path(&self.root, &temporary_relative)?;
+        let write_result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| unavailable())?;
+            file.write_all(&bytes).map_err(|_| unavailable())?;
+            file.sync_all().map_err(|_| unavailable())?;
+            // `rename` replaces the old marker atomically on the same filesystem.
+            // Removing it first creates a crash window where neither commit record exists.
+            fs::rename(&temporary, &marker_path).map_err(|_| unavailable())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub async fn hydrate_encrypted_with_proxy_credentials(
@@ -72,6 +512,53 @@ impl ProfileProjection {
         client_key: Option<&ClientKey>,
         recovery_key: Option<&RecoveryKey>,
         correlation_id: &str,
+    ) -> Result<(ProjectionReceipt, Vec<HydratedProxyCredential>), Problem> {
+        self.hydrate_encrypted_with_proxy_credentials_mode(
+            client,
+            auth,
+            profile_id,
+            manifest,
+            client_key,
+            recovery_key,
+            correlation_id,
+            false,
+        )
+        .await
+    }
+
+    pub async fn hydrate_encrypted_with_proxy_credentials_for_repair(
+        &self,
+        client: &RemoteApiClient,
+        auth: &CoordinationAuth,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+        client_key: Option<&ClientKey>,
+        recovery_key: Option<&RecoveryKey>,
+        correlation_id: &str,
+    ) -> Result<(ProjectionReceipt, Vec<HydratedProxyCredential>), Problem> {
+        self.hydrate_encrypted_with_proxy_credentials_mode(
+            client,
+            auth,
+            profile_id,
+            manifest,
+            client_key,
+            recovery_key,
+            correlation_id,
+            true,
+        )
+        .await
+    }
+
+    async fn hydrate_encrypted_with_proxy_credentials_mode(
+        &self,
+        client: &RemoteApiClient,
+        auth: &CoordinationAuth,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+        client_key: Option<&ClientKey>,
+        recovery_key: Option<&RecoveryKey>,
+        correlation_id: &str,
+        repair_stale_proxy: bool,
     ) -> Result<(ProjectionReceipt, Vec<HydratedProxyCredential>), Problem> {
         manifest.validate()?;
         if manifest.objects.is_empty() {
@@ -88,70 +575,68 @@ impl ProfileProjection {
         })?;
         let remote_descriptor = descriptor_from_manifest(manifest)?;
         let generation_path = decrypted_generation_path(&self.root, profile_id, manifest)?;
-        let cached_generation = generation_path.exists()
+        let generation_exists = generation_path.exists();
+        let cached_generation = generation_exists
             && verify_decrypted_generation(profile_id, manifest, &generation_path).is_ok();
+        if generation_exists && !cached_generation {
+            return Err(problem(
+                "profile_local_changes_recovery_required",
+                "This device has local profile data that differs from the last synced generation. Preserve the local profile data and retry synchronization before launching it again.",
+            ));
+        }
         let clear_metadata = proxy_metadata_keys(manifest);
         let proxy_envelopes = proxy_credential_keys(manifest);
-        let encrypted_objects = stream::iter(
-            remote_descriptor
-                .objects
-                .clone()
-                .into_iter()
-                .filter(|object| {
-                    should_download_manifest_object(
-                        cached_generation,
-                        &object.path,
-                        &clear_metadata,
-                        &proxy_envelopes,
-                    )
-                })
-                .map(|object| {
-                    let client = client.clone();
-                    let scope = CoordinationScope {
-                        workspace_id: &manifest.workspace_id,
-                        auth,
-                    };
-                    let resource_id = manifest.resource_id.clone();
-                    let path = object.path;
-                    let checksum = object.checksum;
-                    let generation = manifest.generation;
-                    let size = object.size;
-                    let correlation_id = correlation_id.to_owned();
-                    async move {
-                        let bytes = client
-                            .download_blob(
-                                scope,
-                                &resource_id,
-                                &path,
-                                generation,
-                                &checksum,
-                                size,
-                                &correlation_id,
-                            )
-                            .await?;
-                        Ok::<_, Problem>((path, bytes))
-                    }
-                }),
-        )
-        .buffer_unordered(MAX_CONCURRENT_BLOB_DOWNLOADS)
-        .try_collect::<Vec<_>>()
-        .await?;
-        let supplied: BTreeMap<_, _> = encrypted_objects.into_iter().collect();
-        let envelope_bytes = supplied.get(RESOURCE_KEY_ENVELOPE_KEY).ok_or_else(|| {
-            problem(
-                "resource_key_envelope_missing",
-                "Resource key envelope is missing",
+        for object in remote_descriptor
+            .objects
+            .iter()
+            .filter(|object| clear_metadata.contains(&object.path))
+        {
+            download_verified_manifest_object(
+                client,
+                &manifest.workspace_id,
+                auth,
+                &manifest.resource_id,
+                manifest.generation,
+                &object.path,
+                object.size,
+                &object.checksum,
+                correlation_id,
+                repair_stale_proxy,
             )
-        })?;
+            .await?;
+        }
+        let envelope_object = remote_descriptor
+            .objects
+            .iter()
+            .find(|object| object.path == RESOURCE_KEY_ENVELOPE_KEY)
+            .ok_or_else(|| {
+                problem(
+                    "resource_key_envelope_missing",
+                    "Resource key envelope is missing",
+                )
+            })?;
+        let envelope_bytes = download_verified_manifest_object(
+            client,
+            &manifest.workspace_id,
+            auth,
+            &manifest.resource_id,
+            manifest.generation,
+            &envelope_object.path,
+            envelope_object.size,
+            &envelope_object.checksum,
+            correlation_id,
+            repair_stale_proxy,
+        )
+        .await?;
         let envelope: ResourceKeyEnvelope =
-            serde_json::from_slice(envelope_bytes).map_err(|_| {
+            serde_json::from_slice(&envelope_bytes).map_err(|_| {
                 problem(
                     "resource_key_envelope_invalid",
                     "Resource key envelope is invalid",
                 )
             })?;
         if !matches_manifest_object(
-            &ManifestObject::new(RESOURCE_KEY_ENVELOPE_KEY, envelope_bytes)?,
+            &ManifestObject::new(RESOURCE_KEY_ENVELOPE_KEY, &envelope_bytes)?,
             &encryption.resource_key_envelope,
         ) {
             return Err(problem(
@@ -185,14 +670,21 @@ impl ProfileProjection {
         }
         let mut credentials = Vec::with_capacity(proxy_envelopes.len());
         for (proxy_id, revision, reference) in &proxy_envelopes {
-            let bytes = supplied.get(&reference.key).ok_or_else(|| {
-                problem(
-                    "proxy_credential_envelope_missing",
-                    "Proxy credential envelope is missing",
-                )
-            })?;
+            let bytes = download_verified_manifest_object(
+                client,
+                &manifest.workspace_id,
+                auth,
+                &manifest.resource_id,
+                manifest.generation,
+                &reference.key,
+                reference.size,
+                &reference.checksum,
+                correlation_id,
+                repair_stale_proxy,
+            )
+            .await?;
             if !matches_manifest_object(
-                &ManifestObject::new(reference.key.clone(), bytes)?,
+                &ManifestObject::new(reference.key.clone(), &bytes)?,
                 reference,
             ) {
                 return Err(problem(
@@ -201,7 +693,7 @@ impl ProfileProjection {
                 ));
             }
             let envelope: ProxyCredentialEnvelope =
-                serde_json::from_slice(bytes).map_err(|_| {
+                serde_json::from_slice(&bytes).map_err(|_| {
                     problem(
                         "proxy_credential_envelope_invalid",
                         "Proxy credential envelope is invalid",
@@ -226,47 +718,133 @@ impl ProfileProjection {
                 secret,
             });
         }
-        let mut profile_files = Vec::new();
-        if !cached_generation {
-            for object in &remote_descriptor.objects {
-                if object.path == RESOURCE_KEY_ENVELOPE_KEY
-                    || clear_metadata.contains(&object.path)
-                    || proxy_envelopes
-                        .iter()
-                        .any(|(_, _, reference)| reference.key == object.path)
-                {
-                    continue;
-                }
-                let bytes = supplied.get(&object.path).ok_or_else(|| {
-                    problem(
-                        "profile_projection_incomplete",
-                        "Profile projection is incomplete",
-                    )
-                })?;
-                let chunk = AuthenticatedChunk::decode(bytes)?;
-                let plaintext = match encryption.algorithm {
-                    PayloadEncryptionAlgorithm::Aes256GcmChunkV1 => chunk.decrypt(
-                        key,
-                        &profile_object_aad(
-                            &manifest.workspace_id,
-                            &manifest.resource_id,
-                            manifest.generation,
-                            &object.path,
-                        ),
-                    )?,
-                    PayloadEncryptionAlgorithm::Aes256GcmChunkV2 => chunk.decrypt(
-                        key,
-                        &profile_object_aad_v2(
-                            &manifest.workspace_id,
-                            &manifest.resource_id,
-                            &object.path,
-                        ),
-                    )?,
-                };
-                profile_files.push((object.path.clone(), plaintext));
-            }
+        if cached_generation {
+            return verify_decrypted_generation(profile_id, manifest, &generation_path)
+                .map(|receipt| (receipt, credentials));
         }
-        self.publish_decrypted(profile_id, manifest, profile_files)
+
+        let mut staging = DecryptedGenerationStaging::new(&self.root, profile_id, manifest)?;
+        let chunk_object_keys = manifest
+            .file_chunks
+            .iter()
+            .flat_map(|file| file.chunks.iter().map(|chunk| chunk.object.key.as_str()))
+            .collect::<std::collections::BTreeSet<_>>();
+        for object in &remote_descriptor.objects {
+            if should_download_manifest_object(&object.path, &clear_metadata, &proxy_envelopes)
+                || chunk_object_keys.contains(object.path.as_str())
+            {
+                continue;
+            }
+            let bytes = client
+                .download_blob(
+                    CoordinationScope {
+                        workspace_id: &manifest.workspace_id,
+                        auth,
+                    },
+                    &manifest.resource_id,
+                    &object.path,
+                    manifest.generation,
+                    &object.checksum,
+                    object.size,
+                    correlation_id,
+                )
+                .await?;
+            if bytes.len() as u64 != object.size || checksum(&bytes) != object.checksum {
+                return Err(problem(
+                    "profile_object_checksum_mismatch",
+                    "Profile object failed its ciphertext checksum",
+                ));
+            }
+            let chunk = AuthenticatedChunk::decode(&bytes)?;
+            let plaintext = match encryption.algorithm {
+                PayloadEncryptionAlgorithm::Aes256GcmChunkV1 => chunk.decrypt(
+                    key,
+                    &profile_object_aad(
+                        &manifest.workspace_id,
+                        &manifest.resource_id,
+                        manifest.generation,
+                        &object.path,
+                    ),
+                )?,
+                PayloadEncryptionAlgorithm::Aes256GcmChunkV2 => chunk.decrypt(
+                    key,
+                    &profile_object_aad_v2(
+                        &manifest.workspace_id,
+                        &manifest.resource_id,
+                        &object.path,
+                    ),
+                )?,
+            };
+            staging.write_object(&object.path, &plaintext)?;
+        }
+
+        for file in &manifest.file_chunks {
+            let (mut destination, _) = staging.create_file(&file.path)?;
+            let mut aggregate = Sha256::new();
+            let mut total_size = 0u64;
+            for (expected_index, chunk) in file.chunks.iter().enumerate() {
+                if chunk.index != expected_index as u64 {
+                    return Err(problem(
+                        "profile_file_chunks_invalid",
+                        "Chunked profile file sequence is invalid",
+                    ));
+                }
+                let encrypted = client
+                    .download_blob(
+                        CoordinationScope {
+                            workspace_id: &manifest.workspace_id,
+                            auth,
+                        },
+                        &manifest.resource_id,
+                        &chunk.object.key,
+                        manifest.generation,
+                        &chunk.object.checksum,
+                        chunk.object.size,
+                        correlation_id,
+                    )
+                    .await?;
+                if encrypted.len() as u64 != chunk.object.size
+                    || checksum(&encrypted) != chunk.object.checksum
+                {
+                    return Err(problem(
+                        "profile_file_chunk_checksum_mismatch",
+                        "A profile file chunk failed its ciphertext checksum",
+                    ));
+                }
+                let chunk_aad = profile_file_chunk_aad(
+                    &manifest.workspace_id,
+                    &manifest.resource_id,
+                    &file.path,
+                    chunk.index,
+                    &chunk.plaintext_checksum,
+                );
+                let plaintext_chunk =
+                    AuthenticatedChunk::decode(&encrypted)?.decrypt(key, &chunk_aad)?;
+                if plaintext_chunk.len() as u64 != chunk.plaintext_size
+                    || checksum(&plaintext_chunk) != chunk.plaintext_checksum
+                {
+                    return Err(problem(
+                        "profile_file_chunk_checksum_mismatch",
+                        "A profile file chunk failed authentication",
+                    ));
+                }
+                aggregate.update(&plaintext_chunk);
+                destination
+                    .write_all(&plaintext_chunk)
+                    .map_err(|_| unavailable())?;
+                total_size = total_size.saturating_add(plaintext_chunk.len() as u64);
+            }
+            let aggregate_checksum = format!("{:x}", aggregate.finalize());
+            if total_size != file.plaintext_size || aggregate_checksum != file.plaintext_checksum {
+                return Err(problem(
+                    "profile_file_checksum_mismatch",
+                    "A reconstructed profile file failed its checksum",
+                ));
+            }
+            staging.finish_file(&file.path, destination, total_size, aggregate_checksum)?;
+        }
+        staging
+            .publish(profile_id, manifest)
             .map(|receipt| (receipt, credentials))
     }
 
@@ -276,70 +854,19 @@ impl ProfileProjection {
         manifest: &SyncManifest,
         objects: Vec<(String, Vec<u8>)>,
     ) -> Result<ProjectionReceipt, Problem> {
-        let local_descriptor = PayloadDescriptor::new(
-            manifest.workspace_id.clone(),
-            manifest.resource_id.clone(),
-            manifest.generation,
-            objects
-                .iter()
-                .map(|(path, bytes)| PayloadObject::new(path.clone(), bytes))
-                .collect::<Result<Vec<_>, _>>()?,
-        )?;
-        let generation_path = decrypted_generation_path(&self.root, profile_id, manifest)?;
-        let profile_root = confined_path(&self.root, Path::new(profile_id.as_str()))?;
-        fs::create_dir_all(&profile_root).map_err(|_| unavailable())?;
-        if generation_path.exists() {
-            return verify_decrypted_generation(profile_id, manifest, &generation_path);
-        }
-        let staging_name = format!(
-            "staging/{}-{}-{}",
-            manifest.generation,
-            std::process::id(),
-            unique_suffix()
-        );
-        let staging_path = confined_path(&profile_root, Path::new(&staging_name))?;
-        fs::create_dir_all(&staging_path).map_err(|_| unavailable())?;
-        let supplied: BTreeMap<_, _> = objects.into_iter().collect();
-        if supplied.len() != local_descriptor.objects.len() {
+        let mut staging = DecryptedGenerationStaging::new(&self.root, profile_id, manifest)?;
+        let object_count = objects.len();
+        let objects_by_key: BTreeMap<_, _> = objects.into_iter().collect();
+        if objects_by_key.len() != object_count {
             return Err(problem(
                 "profile_projection_incomplete",
                 "Profile projection is incomplete",
             ));
         }
-        for object in &local_descriptor.objects {
-            let bytes = supplied.get(&object.path).ok_or_else(|| {
-                problem(
-                    "profile_projection_incomplete",
-                    "Profile projection is incomplete",
-                )
-            })?;
-            object.verify(bytes)?;
-            write_verified(
-                &staging_path,
-                Path::new(&object.path),
-                bytes,
-                &object.checksum,
-            )?;
+        for (path, bytes) in objects_by_key {
+            staging.write_object(&path, &bytes)?;
         }
-        let marker = EncryptedProjectionMarker {
-            state: "complete".to_owned(),
-            profile_id: profile_id.clone(),
-            generation: manifest.generation,
-            remote_root_checksum: manifest.root_checksum.clone(),
-            local_objects: local_descriptor.objects,
-        };
-        let marker_bytes = serde_json::to_vec(&marker).map_err(|_| unavailable())?;
-        write_verified(
-            &staging_path,
-            Path::new(MARKER),
-            &marker_bytes,
-            &checksum(&marker_bytes),
-        )?;
-        if let Some(parent) = generation_path.parent() {
-            fs::create_dir_all(parent).map_err(|_| unavailable())?;
-        }
-        fs::rename(&staging_path, &generation_path).map_err(|_| unavailable())?;
-        verify_decrypted_generation(profile_id, manifest, &generation_path)
+        staging.publish(profile_id, manifest)
     }
 
     fn publish(
@@ -425,10 +952,18 @@ impl ProfileProjection {
             .iter()
             .map(|(path, bytes)| PayloadObject::new(path.clone(), bytes))
             .collect::<Result<Vec<_>, _>>()?;
+        let next_generation = previous.generation.checked_add(1).ok_or_else(|| {
+            Problem::new(
+                "sync_generation_exhausted",
+                "Profile sync generation cannot be incremented",
+                409,
+                "desktop-projection",
+            )
+        })?;
         let descriptor = PayloadDescriptor::new(
             previous.workspace_id.clone(),
             previous.resource_id.clone(),
-            previous.generation + 1,
+            next_generation,
             objects,
         )?;
         let live: BTreeMap<_, _> = descriptor
@@ -436,10 +971,7 @@ impl ProfileProjection {
             .iter()
             .map(|object| (object.path.as_str(), object))
             .collect();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = unix_time_millis("profile_sync_snapshot")?;
         let mut tombstones = previous
             .tombstones
             .iter()
@@ -452,7 +984,7 @@ impl ProfileProjection {
                     object.key.clone(),
                     descriptor.generation,
                     now.max(1),
-                    now.saturating_add(30 * 24 * 60 * 60 * 1_000),
+                    checked_add_millis(now, 30 * 24 * 60 * 60 * 1_000, "profile_sync_snapshot")?,
                 )?);
             }
         }
@@ -479,6 +1011,7 @@ impl ProfileProjection {
             manifest.dependencies.push(ManifestDependency::Proxy {
                 proxy_id,
                 revision,
+                credential_version: None,
                 metadata_object: None,
                 credential_envelope_object: None,
             });
@@ -495,23 +1028,36 @@ impl ProfileProjection {
         proxy: Option<RemoteProxySyncSnapshot>,
         client_key: &ClientKey,
         recovery_key: &RecoveryKey,
-    ) -> Result<(PayloadDescriptor, Vec<(String, Vec<u8>)>, SyncManifest), Problem> {
-        let (_, plaintext_files, mut plaintext_manifest) = self.snapshot_with_proxy(
-            profile_path,
-            previous,
-            fencing_token,
-            proxy.clone().map(|mut proxy| {
-                proxy.credential = None;
-                proxy
-            }),
-        )?;
-        let proxy_credential = proxy.and_then(|proxy| {
-            proxy
-                .credential
-                .map(|secret| (proxy.proxy_id, proxy.revision, secret))
-        });
-        let clear_metadata = proxy_metadata_keys(&plaintext_manifest);
+    ) -> Result<(PayloadDescriptor, Vec<SnapshotBlob>, SyncManifest), Problem> {
+        let mut plaintext_files = Vec::new();
+        collect_file_paths(profile_path, profile_path, &mut plaintext_files)?;
+        let generation = previous.generation.checked_add(1).ok_or_else(unavailable)?;
+        let (proxy_dependency, proxy_credential) = match proxy {
+            Some(proxy) => {
+                let credential = proxy
+                    .credential
+                    .map(|secret| (proxy.proxy_id.clone(), proxy.revision, secret));
+                (
+                    Some((proxy.proxy_id, proxy.revision, proxy.credential_version)),
+                    credential,
+                )
+            }
+            None => (None, None),
+        };
+        let mut dependencies = proxy_dependency
+            .map(|(proxy_id, revision, credential_version)| {
+                vec![ManifestDependency::Proxy {
+                    proxy_id,
+                    revision,
+                    credential_version,
+                    metadata_object: None,
+                    credential_envelope_object: None,
+                }]
+            })
+            .unwrap_or_default();
         let mut files = Vec::with_capacity(plaintext_files.len() + 1);
+        let mut file_chunks = Vec::new();
+        let mut live_file_paths = std::collections::BTreeSet::new();
         let key_version = checksum(client_key.as_bytes());
         let previous_objects: BTreeMap<_, _> = previous
             .objects
@@ -529,10 +1075,190 @@ impl ProfileProjection {
             .as_bytes(),
         );
         let mut active_cache_files = std::collections::BTreeSet::new();
-        for (path, plaintext) in plaintext_files {
-            let bytes = if clear_metadata.contains(&path) {
-                plaintext
-            } else {
+        for (path, source_path, expected_size) in plaintext_files {
+            live_file_paths.insert(path.clone());
+            if expected_size > MAX_PROFILE_PLAINTEXT_BYTES {
+                let metadata_before = fs::metadata(&source_path).map_err(|_| unavailable())?;
+                validate_profile_file_size(metadata_before.len())?;
+                if metadata_before.len() != expected_size {
+                    return Err(profile_changed_during_snapshot());
+                }
+                let mut source = fs::File::open(&source_path).map_err(|_| unavailable())?;
+                let mut aggregate = Sha256::new();
+                let mut chunks = Vec::new();
+                let mut remaining = expected_size;
+                let mut index = 0usize;
+                while remaining > 0 {
+                    let chunk_len = remaining.min(PROFILE_FILE_CHUNK_BYTES) as usize;
+                    let mut plaintext_chunk = vec![0; chunk_len];
+                    source
+                        .read_exact(&mut plaintext_chunk)
+                        .map_err(|_| profile_changed_during_snapshot())?;
+                    aggregate.update(&plaintext_chunk);
+                    let (blob, chunk, source_generation) = stage_profile_file_chunk(
+                        &self.root,
+                        &cache_scope,
+                        &previous.workspace_id,
+                        &previous.resource_id,
+                        &path,
+                        index,
+                        &plaintext_chunk,
+                        client_key,
+                        &key_version,
+                        previous,
+                    )?;
+                    if let Some(source_generation) = source_generation {
+                        reused_sources.insert(blob.key.clone(), source_generation);
+                    }
+                    active_cache_files.insert(
+                        blob.path
+                            .file_name()
+                            .ok_or_else(unavailable)?
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                    files.push(blob);
+                    chunks.push(chunk);
+                    remaining -= chunk_len as u64;
+                    index += 1;
+                }
+                let mut trailing = [0u8; 1];
+                if source.read(&mut trailing).map_err(|_| unavailable())? != 0
+                    || fs::metadata(&source_path).map_err(|_| unavailable())?.len() != expected_size
+                {
+                    return Err(profile_changed_during_snapshot());
+                }
+                file_chunks.push(ManifestFileChunks {
+                    path,
+                    plaintext_size: expected_size,
+                    plaintext_checksum: format!("{:x}", aggregate.finalize()),
+                    chunks,
+                });
+                continue;
+            }
+            let plaintext = read_profile_file(&source_path)?;
+            if plaintext.len() as u64 != expected_size {
+                return Err(Problem::new(
+                    "profile_changed_during_snapshot",
+                    "Profile files changed while the sync snapshot was being prepared",
+                    409,
+                    "desktop-projection",
+                )
+                .retryable(true));
+            }
+            live_file_paths.insert(path.clone());
+            if (plaintext.len() as u64) > MAX_PROFILE_PLAINTEXT_BYTES {
+                let file_checksum = checksum(&plaintext);
+                let mut chunks = Vec::new();
+                for (index, plaintext_chunk) in plaintext
+                    .chunks(PROFILE_FILE_CHUNK_BYTES as usize)
+                    .enumerate()
+                {
+                    let plaintext_checksum = checksum(plaintext_chunk);
+                    let chunk_aad = profile_file_chunk_aad(
+                        &previous.workspace_id,
+                        &previous.resource_id,
+                        &path,
+                        index as u64,
+                        &plaintext_checksum,
+                    );
+                    let cache_identity = format!(
+                        "{}/{}/{}/{}/{}/{}",
+                        previous.workspace_id.as_str(),
+                        previous.resource_id.as_str(),
+                        key_version,
+                        path,
+                        index,
+                        plaintext_checksum
+                    );
+                    let cache_name = format!("{}.bin", checksum(cache_identity.as_bytes()));
+                    let cache_path =
+                        PathBuf::from(format!(".sync-cache/{cache_scope}/{cache_name}"));
+                    active_cache_files.insert(cache_name);
+                    let prior_chunk = previous
+                        .file_chunks
+                        .iter()
+                        .find(|file| file.path == path)
+                        .and_then(|file| file.chunks.get(index))
+                        .filter(|chunk| {
+                            chunk.index == index as u64
+                                && chunk.plaintext_size == plaintext_chunk.len() as u64
+                                && chunk.plaintext_checksum == plaintext_checksum
+                        });
+                    let cached = (|| {
+                        let cache_path = confined_path(&self.root, &cache_path).ok()?;
+                        let metadata = fs::metadata(&cache_path).ok()?;
+                        if metadata.len() > MAX_ENCRYPTED_OBJECT_BYTES as u64 {
+                            return None;
+                        }
+                        let cached = fs::read(cache_path).ok()?;
+                        let decrypted = AuthenticatedChunk::decode(&cached)
+                            .ok()?
+                            .decrypt(client_key, &chunk_aad)
+                            .ok()?;
+                        if decrypted != plaintext_chunk {
+                            return None;
+                        }
+                        let source_generation = prior_chunk
+                            .and_then(|chunk| previous_objects.get(chunk.object.key.as_str()))
+                            .filter(|object| {
+                                object.size == cached.len() as u64
+                                    && object.checksum == checksum(&cached)
+                            })
+                            .map(|object| object.source_generation.unwrap_or(previous.generation));
+                        Some((cached, source_generation))
+                    })();
+                    let (encrypted, source_generation) = match cached {
+                        Some((cached, source_generation)) => (cached, source_generation),
+                        None => {
+                            let encrypted = AuthenticatedChunk::encrypt(
+                                client_key,
+                                plaintext_chunk,
+                                &chunk_aad,
+                            )?
+                            .encoded();
+                            let cache_checksum = checksum(&encrypted);
+                            write_verified(&self.root, &cache_path, &encrypted, &cache_checksum)
+                                .map_err(|_| unavailable())?;
+                            (encrypted, None)
+                        }
+                    };
+                    let ciphertext_checksum = checksum(&encrypted);
+                    let object_key = format!(
+                        ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+                        checksum(path.as_bytes()),
+                        index,
+                        plaintext_checksum,
+                        ciphertext_checksum
+                    );
+                    let object = ManifestObject::new(object_key.clone(), &encrypted)?;
+                    if let Some(source_generation) = source_generation {
+                        reused_sources.insert(object_key.clone(), source_generation);
+                    }
+                    chunks.push(ManifestFileChunk {
+                        index: index as u64,
+                        plaintext_size: plaintext_chunk.len() as u64,
+                        plaintext_checksum,
+                        object: ManifestObjectReference::from(&object),
+                    });
+                    let cache_path =
+                        confined_path(&self.root, &cache_path).map_err(|_| unavailable())?;
+                    files.push(SnapshotBlob {
+                        key: object_key,
+                        path: cache_path,
+                        size: object.size,
+                        checksum: object.checksum,
+                    });
+                }
+                file_chunks.push(ManifestFileChunks {
+                    path,
+                    plaintext_size: plaintext.len() as u64,
+                    plaintext_checksum: file_checksum,
+                    chunks,
+                });
+                continue;
+            }
+            {
                 let plaintext_checksum = checksum(&plaintext);
                 let cache_identity = format!(
                     "{}/{}/{}/{}",
@@ -587,15 +1313,9 @@ impl ProfileProjection {
                             ),
                         )?
                         .encoded();
-                        if encrypted.len() <= MAX_ENCRYPTED_OBJECT_BYTES {
-                            let cache_checksum = checksum(&encrypted);
-                            let _ = write_verified(
-                                &self.root,
-                                &cache_path,
-                                &encrypted,
-                                &cache_checksum,
-                            );
-                        }
+                        let cache_checksum = checksum(&encrypted);
+                        write_verified(&self.root, &cache_path, &encrypted, &cache_checksum)
+                            .map_err(|_| unavailable())?;
                         (encrypted, None)
                     }
                 };
@@ -608,9 +1328,32 @@ impl ProfileProjection {
                         "A profile file exceeds the encrypted sync object limit",
                     ));
                 }
-                encrypted
-            };
-            files.push((path, bytes));
+                let cache_name = format!(
+                    "{}.bin",
+                    checksum(
+                        format!(
+                            "{}/{}/{}/{}",
+                            previous.workspace_id.as_str(),
+                            previous.resource_id.as_str(),
+                            key_version,
+                            path
+                        )
+                        .as_bytes()
+                    )
+                );
+                let cache_path = PathBuf::from(format!(".sync-cache/{cache_scope}/{cache_name}"));
+                let cached_path =
+                    confined_path(&self.root, &cache_path).map_err(|_| unavailable())?;
+                let encrypted_checksum = checksum(&encrypted);
+                write_verified(&self.root, &cache_path, &encrypted, &encrypted_checksum)
+                    .map_err(|_| unavailable())?;
+                files.push(SnapshotBlob {
+                    key: path.clone(),
+                    path: cached_path,
+                    size: encrypted.len() as u64,
+                    checksum: encrypted_checksum,
+                });
+            }
         }
         let envelope = ResourceKeyEnvelope::wrap(
             previous.workspace_id.clone(),
@@ -619,7 +1362,20 @@ impl ProfileProjection {
             recovery_key,
         )?;
         let envelope_bytes = serde_json::to_vec(&envelope).map_err(|_| unavailable())?;
-        files.push((RESOURCE_KEY_ENVELOPE_KEY.to_owned(), envelope_bytes));
+        files.push(stage_snapshot_metadata(
+            &self.root,
+            &cache_scope,
+            RESOURCE_KEY_ENVELOPE_KEY,
+            &envelope_bytes,
+        )?);
+        active_cache_files.insert(
+            files
+                .last()
+                .and_then(|blob| blob.path.file_name())
+                .ok_or_else(unavailable)?
+                .to_string_lossy()
+                .into_owned(),
+        );
 
         if let Some((proxy_id, revision, secret)) = proxy_credential {
             let proxy_envelope = ProxyCredentialEnvelope::seal(
@@ -637,8 +1393,21 @@ impl ProfileProjection {
                 proxy_id.as_str(),
                 revision
             );
-            files.push((proxy_envelope_key.clone(), proxy_envelope_bytes));
-            let dependency_matches = plaintext_manifest.dependencies.iter().any(|dependency| {
+            files.push(stage_snapshot_metadata(
+                &self.root,
+                &cache_scope,
+                &proxy_envelope_key,
+                &proxy_envelope_bytes,
+            )?);
+            active_cache_files.insert(
+                files
+                    .last()
+                    .and_then(|blob| blob.path.file_name())
+                    .ok_or_else(unavailable)?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            let dependency_matches = dependencies.iter().any(|dependency| {
                 matches!(dependency, ManifestDependency::Proxy {
                     proxy_id: dependency_id,
                     revision: dependency_revision,
@@ -651,19 +1420,22 @@ impl ProfileProjection {
                     "Proxy credential does not match the profile dependency",
                 ));
             }
-            let object = ManifestObject::new(proxy_envelope_key, &files.last().unwrap().1)?;
+            let staged_proxy_envelope = files.last().ok_or_else(unavailable)?;
+            let object = ManifestObject {
+                key: proxy_envelope_key,
+                size: staged_proxy_envelope.size,
+                checksum: staged_proxy_envelope.checksum.clone(),
+                source_generation: None,
+            };
             let Some(ManifestDependency::Proxy {
                 credential_envelope_object,
                 ..
-            }) = plaintext_manifest
-                .dependencies
-                .iter_mut()
-                .find(|dependency| {
-                    matches!(
-                        dependency,
-                        ManifestDependency::Proxy { proxy_id: id, .. } if id == &proxy_id
-                    )
-                })
+            }) = dependencies.iter_mut().find(|dependency| {
+                matches!(
+                    dependency,
+                    ManifestDependency::Proxy { proxy_id: id, .. } if id == &proxy_id
+                )
+            })
             else {
                 return Err(problem(
                     "proxy_dependency_missing",
@@ -675,49 +1447,109 @@ impl ProfileProjection {
 
         let objects = files
             .iter()
-            .map(|(path, bytes)| PayloadObject::new(path.clone(), bytes))
-            .collect::<Result<Vec<_>, _>>()?;
-        let descriptor = PayloadDescriptor::new(
+            .map(|blob| PayloadObject {
+                path: blob.key.clone(),
+                size: blob.size,
+                checksum: blob.checksum.clone(),
+            })
+            .collect::<Vec<_>>();
+        let descriptor = PayloadDescriptor::new_with_file_chunks(
             previous.workspace_id.clone(),
             previous.resource_id.clone(),
-            plaintext_manifest.generation,
+            generation,
             objects,
+            file_chunks.clone(),
         )?;
-        let mut manifest = SyncManifest::new_with_tombstones(
-            previous.workspace_id.clone(),
-            previous.resource_id.clone(),
-            fencing_token,
-            descriptor.generation,
-            Some(previous.generation),
-            &descriptor.canonical_root_bytes(),
-            descriptor
-                .objects
-                .iter()
-                .map(|object| ManifestObject {
-                    key: object.path.clone(),
-                    size: object.size,
-                    checksum: object.checksum.clone(),
-                    source_generation: None,
-                })
-                .collect(),
-            plaintext_manifest
-                .tombstones
-                .into_iter()
-                .filter(|tombstone| tombstone.key != RESOURCE_KEY_ENVELOPE_KEY)
-                .collect(),
-        )?;
-        manifest.dependencies = plaintext_manifest.dependencies;
-        let envelope_object = manifest
+        let live_object_keys = descriptor
             .objects
             .iter()
-            .find(|object| object.key == RESOURCE_KEY_ENVELOPE_KEY)
-            .ok_or_else(|| unavailable())?;
-        manifest.payload_encryption = Some(ManifestPayloadEncryption {
+            .map(|object| object.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let now = unix_time_millis("profile_sync_snapshot")?;
+        let mut tombstones = previous
+            .tombstones
+            .iter()
+            .filter(|tombstone| tombstone.retention_deadline_unix_ms > now)
+            .cloned()
+            .collect::<Vec<_>>();
+        for object in &previous.objects {
+            if !live_object_keys.contains(object.key.as_str())
+                && (!live_file_paths.contains(&object.key)
+                    || descriptor
+                        .file_chunks
+                        .iter()
+                        .any(|file| file.path == object.key))
+            {
+                tombstones.push(ManifestTombstone::new_object(
+                    object.key.clone(),
+                    generation,
+                    now.max(1),
+                    checked_add_millis(now, 30 * 24 * 60 * 60 * 1_000, "profile_sync_snapshot")?,
+                )?);
+            }
+        }
+        for file in &previous.file_chunks {
+            if !live_file_paths.contains(&file.path) {
+                tombstones.push(ManifestTombstone::new(
+                    file.path.clone(),
+                    generation,
+                    now.max(1),
+                    checked_add_millis(now, 30 * 24 * 60 * 60 * 1_000, "profile_sync_snapshot")?,
+                )?);
+            }
+        }
+        let envelope_object = descriptor
+            .objects
+            .iter()
+            .find(|object| object.path == RESOURCE_KEY_ENVELOPE_KEY)
+            .ok_or_else(unavailable)?;
+        let payload_encryption = ManifestPayloadEncryption {
             schema_version: 1,
             algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
             key_version: Some(key_version),
-            resource_key_envelope: ManifestObjectReference::from(envelope_object),
-        });
+            resource_key_envelope: ManifestObjectReference {
+                key: envelope_object.path.clone(),
+                size: envelope_object.size,
+                checksum: envelope_object.checksum.clone(),
+            },
+        };
+        let manifest_objects = descriptor
+            .objects
+            .iter()
+            .map(|object| ManifestObject {
+                key: object.path.clone(),
+                size: object.size,
+                checksum: object.checksum.clone(),
+                source_generation: None,
+            })
+            .collect::<Vec<_>>();
+        let mut manifest = if descriptor.file_chunks.is_empty() {
+            SyncManifest::new_with_tombstones(
+                previous.workspace_id.clone(),
+                previous.resource_id.clone(),
+                fencing_token,
+                descriptor.generation,
+                Some(previous.generation),
+                &descriptor.canonical_root_bytes(),
+                manifest_objects,
+                tombstones,
+            )?
+        } else {
+            SyncManifest::new_chunked_with_tombstones(
+                previous.workspace_id.clone(),
+                previous.resource_id.clone(),
+                fencing_token,
+                descriptor.generation,
+                Some(previous.generation),
+                &descriptor.canonical_root_bytes(),
+                manifest_objects,
+                tombstones,
+                payload_encryption.clone(),
+                descriptor.file_chunks.clone(),
+            )?
+        };
+        manifest.payload_encryption = Some(payload_encryption);
+        manifest.dependencies = dependencies;
         for object in &mut manifest.objects {
             object.source_generation = reused_sources.get(&object.key).copied();
         }
@@ -739,6 +1571,121 @@ impl ProfileProjection {
     }
 }
 
+struct DecryptedGenerationStaging {
+    staging_path: PathBuf,
+    generation_path: PathBuf,
+    local_objects: Vec<PayloadObject>,
+    published: bool,
+}
+
+impl DecryptedGenerationStaging {
+    fn new(root: &Path, profile_id: &ProfileId, manifest: &SyncManifest) -> Result<Self, Problem> {
+        let profile_root = confined_path(root, Path::new(profile_id.as_str()))?;
+        fs::create_dir_all(&profile_root).map_err(|_| unavailable())?;
+        let generation_path = decrypted_generation_path(root, profile_id, manifest)?;
+        let staging_name = format!(
+            "staging/{}-{}-{}",
+            manifest.generation,
+            std::process::id(),
+            unique_suffix()
+        );
+        let staging_path = confined_path(&profile_root, Path::new(&staging_name))?;
+        fs::create_dir_all(&staging_path).map_err(|_| unavailable())?;
+        Ok(Self {
+            staging_path,
+            generation_path,
+            local_objects: Vec::new(),
+            published: false,
+        })
+    }
+
+    fn write_object(&mut self, path: &str, bytes: &[u8]) -> Result<(), Problem> {
+        let object = PayloadObject::new(path.to_owned(), bytes)?;
+        write_verified(&self.staging_path, Path::new(path), bytes, &object.checksum)?;
+        self.local_objects.push(object);
+        Ok(())
+    }
+
+    fn create_file(&self, path: &str) -> Result<(fs::File, PathBuf), Problem> {
+        let destination = confined_path(&self.staging_path, Path::new(path))?;
+        let parent = destination.parent().ok_or_else(unavailable)?;
+        fs::create_dir_all(parent).map_err(|_| unavailable())?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(|_| unavailable())?;
+        Ok((file, destination))
+    }
+
+    fn finish_file(
+        &mut self,
+        path: &str,
+        file: fs::File,
+        size: u64,
+        checksum: String,
+    ) -> Result<(), Problem> {
+        file.sync_all().map_err(|_| unavailable())?;
+        let destination = confined_path(&self.staging_path, Path::new(path))?;
+        if fs::metadata(destination).map_err(|_| unavailable())?.len() != size {
+            return Err(problem(
+                "profile_file_size_invalid",
+                "Reconstructed profile file size is invalid",
+            ));
+        }
+        self.local_objects.push(PayloadObject {
+            path: path.to_owned(),
+            size,
+            checksum,
+        });
+        Ok(())
+    }
+
+    fn publish(
+        mut self,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+    ) -> Result<ProjectionReceipt, Problem> {
+        let descriptor = PayloadDescriptor::new(
+            manifest.workspace_id.clone(),
+            manifest.resource_id.clone(),
+            manifest.generation,
+            std::mem::take(&mut self.local_objects),
+        )?;
+        let marker = EncryptedProjectionMarker {
+            state: "complete".to_owned(),
+            profile_id: profile_id.clone(),
+            generation: manifest.generation,
+            remote_root_checksum: manifest.root_checksum.clone(),
+            local_objects: descriptor.objects,
+        };
+        let marker_bytes = serde_json::to_vec(&marker).map_err(|_| unavailable())?;
+        write_verified(
+            &self.staging_path,
+            Path::new(MARKER),
+            &marker_bytes,
+            &checksum(&marker_bytes),
+        )?;
+        if let Some(parent) = self.generation_path.parent() {
+            fs::create_dir_all(parent).map_err(|_| unavailable())?;
+        }
+        if self.generation_path.exists() {
+            return verify_decrypted_generation(profile_id, manifest, &self.generation_path);
+        }
+        fs::rename(&self.staging_path, &self.generation_path).map_err(|_| unavailable())?;
+        self.published = true;
+        verify_decrypted_generation(profile_id, manifest, &self.generation_path)
+    }
+}
+
+impl Drop for DecryptedGenerationStaging {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.staging_path);
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectionMarker {
@@ -746,6 +1693,25 @@ struct ProjectionMarker {
     profile_id: ProfileId,
     generation: u64,
     root_checksum: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActiveSessionMarker {
+    state: String,
+    profile_id: ProfileId,
+    generation: u64,
+    root_checksum: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncCommitMarker {
+    profile_id: ProfileId,
+    base_generation: u64,
+    base_root_checksum: String,
+    target_generation: u64,
+    target_root_checksum: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -787,8 +1753,7 @@ fn verify_decrypted_generation(
         ));
     }
     for object in &marker.local_objects {
-        let bytes = read_verified(generation_path, Path::new(&object.path), &object.checksum)?;
-        object.verify(&bytes)?;
+        verify_staged_file(generation_path, object)?;
     }
     Ok(ProjectionReceipt {
         profile_id: profile_id.clone(),
@@ -798,18 +1763,61 @@ fn verify_decrypted_generation(
     })
 }
 
+fn verify_staged_file(root: &Path, object: &PayloadObject) -> Result<(), Problem> {
+    let path = confined_path(root, Path::new(&object.path))?;
+    let metadata = fs::symlink_metadata(&path).map_err(|_| unavailable())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != object.size {
+        return Err(problem(
+            "profile_projection_file_invalid",
+            "Profile projection file failed verification",
+        ));
+    }
+    let mut file = fs::File::open(path).map_err(|_| unavailable())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|_| unavailable())?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    if format!("{:x}", digest.finalize()) != object.checksum {
+        return Err(problem(
+            "profile_projection_file_invalid",
+            "Profile projection file failed verification",
+        ));
+    }
+    Ok(())
+}
+
 fn decrypted_generation_path(
     root: &Path,
     profile_id: &ProfileId,
     manifest: &SyncManifest,
 ) -> Result<PathBuf, Problem> {
+    decrypted_generation_path_parts(
+        root,
+        profile_id,
+        manifest.generation,
+        &manifest.root_checksum,
+    )
+}
+
+fn decrypted_generation_path_parts(
+    root: &Path,
+    profile_id: &ProfileId,
+    generation: u64,
+    root_checksum: &str,
+) -> Result<PathBuf, Problem> {
     let relative = PathBuf::from(profile_id.as_str())
         .join("generations")
-        .join(format!(
-            "{}-{}",
-            manifest.generation, manifest.root_checksum
-        ));
+        .join(format!("{generation}-{root_checksum}"));
     confined_path(root, &relative)
+}
+
+fn valid_manifest_checksum(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn matches_manifest_object(object: &ManifestObject, reference: &ManifestObjectReference) -> bool {
@@ -835,6 +1843,46 @@ fn proxy_metadata_keys(manifest: &SyncManifest) -> std::collections::BTreeSet<St
         .collect()
 }
 
+async fn download_verified_manifest_object(
+    client: &RemoteApiClient,
+    workspace_id: &buglogin_domain::ids::WorkspaceId,
+    auth: &CoordinationAuth,
+    resource_id: &buglogin_domain::ids::ResourceId,
+    generation: u64,
+    key: &str,
+    size: u64,
+    checksum: &str,
+    correlation_id: &str,
+    repair_stale_proxy: bool,
+) -> Result<Vec<u8>, Problem> {
+    let scope = CoordinationScope { workspace_id, auth };
+    if repair_stale_proxy {
+        client
+            .download_blob_for_proxy_repair(
+                scope,
+                resource_id,
+                key,
+                generation,
+                checksum,
+                size,
+                correlation_id,
+            )
+            .await
+    } else {
+        client
+            .download_blob(
+                CoordinationScope { workspace_id, auth },
+                resource_id,
+                key,
+                generation,
+                checksum,
+                size,
+                correlation_id,
+            )
+            .await
+    }
+}
+
 fn proxy_credential_keys(
     manifest: &SyncManifest,
 ) -> Vec<(buglogin_domain::ids::ProxyId, u64, ManifestObjectReference)> {
@@ -857,13 +1905,11 @@ fn proxy_credential_keys(
 }
 
 fn should_download_manifest_object(
-    cached_generation: bool,
     path: &str,
     clear_metadata: &std::collections::BTreeSet<String>,
     proxy_envelopes: &[(buglogin_domain::ids::ProxyId, u64, ManifestObjectReference)],
 ) -> bool {
-    !cached_generation
-        || path == RESOURCE_KEY_ENVELOPE_KEY
+    path == RESOURCE_KEY_ENVELOPE_KEY
         || clear_metadata.contains(path)
         || proxy_envelopes
             .iter()
@@ -900,6 +1946,22 @@ fn profile_object_aad_v2(
     .into_bytes()
 }
 
+fn profile_file_chunk_aad(
+    workspace_id: &buglogin_domain::ids::WorkspaceId,
+    resource_id: &buglogin_domain::ids::ResourceId,
+    path: &str,
+    index: u64,
+    plaintext_checksum: &str,
+) -> Vec<u8> {
+    format!(
+        "buglogin/profile-file-chunk/v1/{}/{}/{}/{index:016x}/{plaintext_checksum}",
+        workspace_id.as_str(),
+        resource_id.as_str(),
+        path
+    )
+    .into_bytes()
+}
+
 fn descriptor_from_manifest(manifest: &SyncManifest) -> Result<PayloadDescriptor, Problem> {
     let descriptor = PayloadDescriptor {
         schema_version: PAYLOAD_SCHEMA_VERSION,
@@ -916,6 +1978,7 @@ fn descriptor_from_manifest(manifest: &SyncManifest) -> Result<PayloadDescriptor
                 checksum: object.checksum.clone(),
             })
             .collect(),
+        file_chunks: manifest.file_chunks.clone(),
     };
     descriptor.verify_manifest(manifest)?;
     Ok(descriptor)
@@ -968,6 +2031,17 @@ fn unique_suffix() -> u128 {
         .as_nanos()
 }
 
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(33) {
+        return true;
+    }
+    false
+}
+
 fn collect_files(
     root: &Path,
     current: &Path,
@@ -985,6 +2059,10 @@ fn collect_files(
             ));
         }
         if metadata.is_dir() {
+            let relative = path.strip_prefix(root).map_err(|_| unavailable())?;
+            if is_ephemeral_profile_directory(relative) {
+                continue;
+            }
             collect_files(root, &path, output)?;
             continue;
         }
@@ -999,13 +2077,227 @@ fn collect_files(
             .map_err(|_| unavailable())?
             .to_string_lossy()
             .replace('\\', "/");
-        if relative == MARKER {
+        if is_projection_control_file(&relative) {
             continue;
         }
         validate_profile_file_size(metadata.len())?;
         output.push((relative, read_profile_file(&path)?));
     }
     Ok(())
+}
+
+fn collect_file_paths(
+    root: &Path,
+    current: &Path,
+    output: &mut Vec<(String, PathBuf, u64)>,
+) -> Result<(), Problem> {
+    let entries = fs::read_dir(current).map_err(|_| unavailable())?;
+    for entry in entries {
+        let entry = entry.map_err(|_| unavailable())?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|_| unavailable())?;
+        if metadata.file_type().is_symlink() {
+            return Err(problem(
+                "profile_projection_symlink_rejected",
+                "Profile projection symlink is rejected",
+            ));
+        }
+        if metadata.is_dir() {
+            let relative = path.strip_prefix(root).map_err(|_| unavailable())?;
+            if is_ephemeral_profile_directory(relative) {
+                continue;
+            }
+            collect_file_paths(root, &path, output)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(problem(
+                "profile_projection_entry_invalid",
+                "Profile projection entry is invalid",
+            ));
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| unavailable())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_projection_control_file(&relative) {
+            continue;
+        }
+        validate_profile_file_size(metadata.len())?;
+        output.push((relative, path, metadata.len()));
+    }
+    Ok(())
+}
+
+fn is_ephemeral_profile_directory(path: &Path) -> bool {
+    path.components().any(|component| {
+        component.as_os_str().to_str().is_some_and(|name| {
+            name.eq_ignore_ascii_case("GPUCache") || is_ephemeral_profile_path(name)
+        })
+    })
+}
+
+fn is_projection_control_file(path: &str) -> bool {
+    !path.contains('/') && path.starts_with(".buglogin-")
+}
+
+fn cleanup_abandoned_staging(root: &Path) -> Result<(), Problem> {
+    let entries = fs::read_dir(root).map_err(|_| unavailable())?;
+    for entry in entries {
+        let entry = entry.map_err(|_| unavailable())?;
+        let profile_root = entry.path();
+        let file_type = entry.file_type().map_err(|_| unavailable())?;
+        if !file_type.is_dir()
+            || file_type.is_symlink()
+            || ProfileId::new(entry.file_name().to_string_lossy().as_ref()).is_err()
+        {
+            continue;
+        }
+        let staging_path = profile_root.join("staging");
+        let Ok(staging_type) = fs::symlink_metadata(&staging_path) else {
+            continue;
+        };
+        if staging_type.is_dir() && !staging_type.file_type().is_symlink() {
+            fs::remove_dir_all(staging_path).map_err(|_| unavailable())?;
+        }
+    }
+    Ok(())
+}
+
+fn stage_snapshot_metadata(
+    root: &Path,
+    cache_scope: &str,
+    key: &str,
+    bytes: &[u8],
+) -> Result<SnapshotBlob, Problem> {
+    let object_checksum = checksum(bytes);
+    let cache_name = format!(
+        "object-{}-{}.bin",
+        checksum(key.as_bytes()),
+        object_checksum
+    );
+    let relative_path = PathBuf::from(format!(".sync-cache/{cache_scope}/{cache_name}"));
+    let path = confined_path(root, &relative_path).map_err(|_| unavailable())?;
+    write_verified(root, &relative_path, bytes, &object_checksum).map_err(|_| unavailable())?;
+    Ok(SnapshotBlob {
+        key: key.to_owned(),
+        path,
+        size: bytes.len() as u64,
+        checksum: object_checksum,
+    })
+}
+
+fn stage_profile_file_chunk(
+    root: &Path,
+    cache_scope: &str,
+    workspace_id: &buglogin_domain::ids::WorkspaceId,
+    resource_id: &buglogin_domain::ids::ResourceId,
+    path: &str,
+    index: usize,
+    plaintext: &[u8],
+    client_key: &ClientKey,
+    key_version: &str,
+    previous: &SyncManifest,
+) -> Result<(SnapshotBlob, ManifestFileChunk, Option<u64>), Problem> {
+    let plaintext_checksum = checksum(plaintext);
+    let aad = profile_file_chunk_aad(
+        workspace_id,
+        resource_id,
+        path,
+        index as u64,
+        &plaintext_checksum,
+    );
+    let cache_identity = format!(
+        "{}/{}/{}/{}/{}/{}",
+        workspace_id.as_str(),
+        resource_id.as_str(),
+        key_version,
+        path,
+        index,
+        plaintext_checksum
+    );
+    let cache_name = format!("{}.bin", checksum(cache_identity.as_bytes()));
+    let cache_relative_path = PathBuf::from(format!(".sync-cache/{cache_scope}/{cache_name}"));
+    let cached = (|| {
+        let cache_path = confined_path(root, &cache_relative_path).ok()?;
+        let metadata = fs::metadata(&cache_path).ok()?;
+        if metadata.len() > MAX_ENCRYPTED_OBJECT_BYTES as u64 {
+            return None;
+        }
+        let bytes = fs::read(cache_path).ok()?;
+        let decoded = AuthenticatedChunk::decode(&bytes).ok()?;
+        if decoded.decrypt(client_key, &aad).ok()?.as_slice() != plaintext {
+            return None;
+        }
+        let prior_chunk = previous
+            .file_chunks
+            .iter()
+            .find(|file| file.path == path)
+            .and_then(|file| file.chunks.get(index))
+            .filter(|chunk| {
+                chunk.index == index as u64
+                    && chunk.plaintext_size == plaintext.len() as u64
+                    && chunk.plaintext_checksum == plaintext_checksum
+            });
+        let source_generation = prior_chunk
+            .and_then(|chunk| {
+                previous
+                    .objects
+                    .iter()
+                    .find(|object| object.key == chunk.object.key)
+            })
+            .filter(|object| {
+                object.size == bytes.len() as u64 && object.checksum == checksum(&bytes)
+            })
+            .map(|object| object.source_generation.unwrap_or(previous.generation));
+        Some((bytes, source_generation))
+    })();
+    let (encrypted, source_generation) = match cached {
+        Some((bytes, source_generation)) => (bytes, source_generation),
+        None => {
+            let bytes = AuthenticatedChunk::encrypt(client_key, plaintext, &aad)?.encoded();
+            let expected_checksum = checksum(&bytes);
+            write_verified(root, &cache_relative_path, &bytes, &expected_checksum)
+                .map_err(|_| unavailable())?;
+            (bytes, None)
+        }
+    };
+    let ciphertext_checksum = checksum(&encrypted);
+    let object_key = format!(
+        ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+        checksum(path.as_bytes()),
+        index,
+        plaintext_checksum,
+        ciphertext_checksum
+    );
+    let object = ManifestObject::new(object_key.clone(), &encrypted)?;
+    let cache_path = confined_path(root, &cache_relative_path).map_err(|_| unavailable())?;
+    Ok((
+        SnapshotBlob {
+            key: object_key,
+            path: cache_path,
+            size: object.size,
+            checksum: object.checksum.clone(),
+        },
+        ManifestFileChunk {
+            index: index as u64,
+            plaintext_size: plaintext.len() as u64,
+            plaintext_checksum,
+            object: ManifestObjectReference::from(&object),
+        },
+        source_generation,
+    ))
+}
+
+fn profile_changed_during_snapshot() -> Problem {
+    Problem::new(
+        "profile_changed_during_snapshot",
+        "Profile files changed while the sync snapshot was being prepared",
+        409,
+        "desktop-projection",
+    )
+    .retryable(true)
 }
 
 fn unavailable() -> Problem {
@@ -1016,10 +2308,10 @@ fn unavailable() -> Problem {
 }
 
 fn validate_profile_file_size(size: u64) -> Result<(), Problem> {
-    if size > MAX_PROFILE_PLAINTEXT_BYTES {
+    if size > MAX_CHUNKED_PROFILE_FILE_BYTES {
         return Err(Problem::new(
             "profile_object_too_large",
-            "A profile file exceeds the encrypted sync object limit",
+            "A profile file exceeds the chunked sync file limit",
             413,
             "desktop-projection",
         ));
@@ -1031,11 +2323,123 @@ fn read_profile_file(path: &Path) -> Result<Vec<u8>, Problem> {
     let file = fs::File::open(path).map_err(|_| unavailable())?;
     validate_profile_file_size(file.metadata().map_err(|_| unavailable())?.len())?;
     let mut bytes = Vec::new();
-    file.take(MAX_PROFILE_PLAINTEXT_BYTES + 1)
+    file.take(MAX_CHUNKED_PROFILE_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| unavailable())?;
     validate_profile_file_size(bytes.len() as u64)?;
     Ok(bytes)
+}
+
+fn checksum_file(path: &Path) -> Result<String, Problem> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| unavailable())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(problem(
+            "profile_projection_entry_invalid",
+            "Profile projection entry is invalid",
+        ));
+    }
+    validate_profile_file_size(metadata.len())?;
+    let mut file = fs::File::open(path).map_err(|_| unavailable())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(|_| unavailable())?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(unavailable)?;
+        validate_profile_file_size(total)?;
+        digest.update(&buffer[..read]);
+    }
+    if total != metadata.len() || file.metadata().map_err(|_| unavailable())?.len() != total {
+        return Err(problem(
+            "migration_profile_source_changed",
+            "Legacy profile data changed while it was being read",
+        ));
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn copy_profile_file_verified(
+    source: &Path,
+    destination_root: &Path,
+    relative: &str,
+    expected_size: u64,
+) -> Result<(), Problem> {
+    let source_metadata = fs::symlink_metadata(source).map_err(|_| unavailable())?;
+    if source_metadata.file_type().is_symlink()
+        || !source_metadata.is_file()
+        || source_metadata.len() != expected_size
+    {
+        return Err(problem(
+            "migration_profile_source_changed",
+            "Legacy profile data changed while it was being staged",
+        ));
+    }
+    validate_profile_file_size(expected_size)?;
+    let destination = confined_path(destination_root, Path::new(relative))?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|_| unavailable())?;
+    }
+    let mut input = fs::File::open(source).map_err(|_| unavailable())?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|_| unavailable())?;
+    let copy_result = (|| {
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            let read = input.read(&mut buffer).map_err(|_| unavailable())?;
+            if read == 0 {
+                break;
+            }
+            total = total.checked_add(read as u64).ok_or_else(unavailable)?;
+            if total > expected_size {
+                return Err(problem(
+                    "migration_profile_source_changed",
+                    "Legacy profile data changed while it was being staged",
+                ));
+            }
+            digest.update(&buffer[..read]);
+            output
+                .write_all(&buffer[..read])
+                .map_err(|_| unavailable())?;
+        }
+        if total != expected_size || input.metadata().map_err(|_| unavailable())?.len() != total {
+            return Err(problem(
+                "migration_profile_source_changed",
+                "Legacy profile data changed while it was being staged",
+            ));
+        }
+        output.sync_all().map_err(|_| unavailable())?;
+        Ok(format!("{:x}", digest.finalize()))
+    })();
+    let copied_checksum = match copy_result {
+        Ok(checksum) => checksum,
+        Err(error) => {
+            let _ = fs::remove_file(&destination);
+            return Err(error);
+        }
+    };
+    let source_checksum = match checksum_file(source) {
+        Ok(checksum) => checksum,
+        Err(error) => {
+            let _ = fs::remove_file(&destination);
+            return Err(error);
+        }
+    };
+    if source_checksum != copied_checksum {
+        let _ = fs::remove_file(&destination);
+        return Err(problem(
+            "migration_profile_source_changed",
+            "Legacy profile data changed while it was being staged",
+        ));
+    }
+    Ok(())
 }
 
 fn problem(code: &'static str, title: &'static str) -> Problem {
@@ -1044,14 +2448,245 @@ fn problem(code: &'static str, title: &'static str) -> Problem {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     use super::*;
+
+    #[test]
+    fn legacy_empty_genesis_manifest_is_hydratable() {
+        let workspace = WorkspaceId::new("ws_legacy_empty_genesis").unwrap();
+        let resource = ResourceId::new("res_legacy_empty_genesis").unwrap();
+        let manifest = SyncManifest::new(workspace, resource, 1, 1, None, b"", Vec::new()).unwrap();
+
+        let descriptor = descriptor_from_manifest(&manifest).unwrap();
+        descriptor.verify_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn profile_projection_excludes_browser_cache_but_keeps_persistent_state() {
+        for path in [
+            "Default/Cache",
+            "Default/Code Cache",
+            "Default/GPUCache",
+            "Default/Media Cache",
+            "Crashpad/pending",
+            "Default/Service Worker/ScriptCache",
+            "Crash Reports",
+        ] {
+            assert!(is_ephemeral_profile_directory(Path::new(path)));
+        }
+        for path in [
+            "Default/Cookies",
+            "Default/Network",
+            "Default/Local Storage",
+            "Default/IndexedDB",
+            "Default/Service Worker",
+            "Default/Extensions",
+        ] {
+            assert!(!is_ephemeral_profile_directory(Path::new(path)));
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-profile-filter-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(root.join("Default/Cache/subdir")).unwrap();
+        fs::create_dir_all(root.join("Default/Code Cache")).unwrap();
+        fs::create_dir_all(root.join("Default/Local Storage")).unwrap();
+        fs::write(root.join("Default/Cache/subdir/rebuildable.bin"), b"cache").unwrap();
+        fs::write(root.join("Default/Code Cache/compiled.bin"), b"compiled").unwrap();
+        fs::write(root.join("Default/Cookies"), b"session").unwrap();
+        fs::write(root.join("Default/Local Storage/data.bin"), b"persistent").unwrap();
+
+        let mut files = Vec::new();
+        collect_file_paths(&root, &root, &mut files).unwrap();
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            files.iter().map(|file| file.0.as_str()).collect::<Vec<_>>(),
+            vec!["Default/Cookies", "Default/Local Storage/data.bin"]
+        );
+
+        let mut snapshot = Vec::new();
+        collect_files(&root, &root, &mut snapshot).unwrap();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|file| file.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Default/Cookies", "Default/Local Storage/data.bin"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     use buglogin_domain::ids::{ProxyId, ResourceId, WorkspaceId};
     use buglogin_sync::coordination::CoordinationAuth;
     use buglogin_sync::crypto::{AuthenticatedChunk, ClientKey, RecoveryKey};
     use buglogin_sync::manifest::{ManifestObject, ManifestObjectReference};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn recovery_manifest(
+        workspace_id: &WorkspaceId,
+        resource_id: &ResourceId,
+        generation: u64,
+        parent_generation: Option<u64>,
+        bytes: &[u8],
+    ) -> SyncManifest {
+        let object = PayloadObject::new("Default/Cookies", bytes).unwrap();
+        let descriptor = PayloadDescriptor::new(
+            workspace_id.clone(),
+            resource_id.clone(),
+            generation,
+            vec![object.clone()],
+        )
+        .unwrap();
+        SyncManifest::new(
+            workspace_id.clone(),
+            resource_id.clone(),
+            generation,
+            generation,
+            parent_generation,
+            &descriptor.canonical_root_bytes(),
+            vec![ManifestObject::new(object.path, bytes).unwrap()],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn active_session_recovery_returns_modified_generation_without_deleting_it() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-active-recovery-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_active_recovery").unwrap();
+        let resource = ResourceId::new("res_active_recovery").unwrap();
+        let profile = ProfileId::new("prf_active_recovery").unwrap();
+        let manifest = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let receipt = projection
+            .publish_decrypted(
+                &profile,
+                &manifest,
+                vec![("Default/Cookies".to_owned(), b"base".to_vec())],
+            )
+            .unwrap();
+        projection
+            .begin_active_session(&profile, manifest.generation, &manifest.root_checksum)
+            .unwrap();
+        fs::write(receipt.path.join("Default/Cookies"), b"local dirty data").unwrap();
+
+        let recovered = projection
+            .active_session_recovery_path(&profile, &manifest)
+            .unwrap()
+            .expect("the interrupted session's local generation must be recovered");
+
+        assert_eq!(recovered, receipt.path);
+        assert_eq!(
+            fs::read(recovered.join("Default/Cookies")).unwrap(),
+            b"local dirty data"
+        );
+        assert!(recovered.join(MARKER).exists());
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sync_commit_recovery_preserves_base_on_remote_conflict_and_clears_committed_marker() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-commit-recovery-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_commit_recovery").unwrap();
+        let resource = ResourceId::new("res_commit_recovery").unwrap();
+        let profile = ProfileId::new("prf_commit_recovery").unwrap();
+        let base = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let target = recovery_manifest(&workspace, &resource, 2, Some(1), b"target");
+        let conflict = recovery_manifest(&workspace, &resource, 3, Some(2), b"other device");
+        let receipt = projection
+            .publish_decrypted(
+                &profile,
+                &base,
+                vec![("Default/Cookies".to_owned(), b"base".to_vec())],
+            )
+            .unwrap();
+        projection
+            .prepare_sync_commit(&profile, &base, &target)
+            .unwrap();
+
+        let recovery = projection
+            .active_session_recovery_path(&profile, &conflict)
+            .unwrap_err();
+        assert_eq!(recovery.code, "profile_local_sync_conflict");
+        assert_eq!(
+            fs::read(receipt.path.join("Default/Cookies")).unwrap(),
+            b"base"
+        );
+        assert!(receipt.path.join(MARKER).exists());
+
+        assert!(
+            projection
+                .active_session_recovery_path(&profile, &target)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !root
+                .join(profile.as_str())
+                .join(SYNC_COMMIT_MARKER)
+                .exists()
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sync_commit_recovery_clears_stale_marker_when_local_base_is_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-commit-unchanged-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_commit_unchanged").unwrap();
+        let resource = ResourceId::new("res_commit_unchanged").unwrap();
+        let profile = ProfileId::new("prf_commit_unchanged").unwrap();
+        let base = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let target = recovery_manifest(&workspace, &resource, 2, Some(1), b"target");
+        projection
+            .publish_decrypted(
+                &profile,
+                &base,
+                vec![("Default/Cookies".to_owned(), b"base".to_vec())],
+            )
+            .unwrap();
+        projection
+            .prepare_sync_commit(&profile, &base, &target)
+            .unwrap();
+
+        assert!(
+            projection
+                .active_session_recovery_path(&profile, &base)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !root
+                .join(profile.as_str())
+                .join(SYNC_COMMIT_MARKER)
+                .exists()
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn hydration_reuses_verified_generation_without_fetching_profile_blobs() {
@@ -1099,7 +2734,10 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let objects: BTreeMap<_, _> = encrypted_objects.into_iter().collect();
+        let objects: BTreeMap<_, _> = encrypted_objects
+            .into_iter()
+            .map(|blob| (blob.key.clone(), blob.read_bytes().unwrap()))
+            .collect();
         let server = tokio::spawn(async move {
             let mut paths = Vec::new();
             loop {
@@ -1187,41 +2825,32 @@ mod tests {
         )];
 
         assert!(!should_download_manifest_object(
-            true,
             "Default/Cookies",
             &metadata,
             &credentials,
         ));
         assert!(should_download_manifest_object(
-            true,
             RESOURCE_KEY_ENVELOPE_KEY,
             &metadata,
             &credentials,
         ));
         assert!(should_download_manifest_object(
-            true,
             metadata_key,
             &metadata,
             &credentials,
         ));
         assert!(should_download_manifest_object(
-            true,
             credential_key,
-            &metadata,
-            &credentials,
-        ));
-        assert!(should_download_manifest_object(
-            false,
-            "Default/Cookies",
             &metadata,
             &credentials,
         ));
     }
 
     #[test]
-    fn rejects_profile_file_size_that_would_exceed_encrypted_object_limit() {
+    fn allows_chunked_files_but_enforces_the_logical_file_limit() {
         assert!(validate_profile_file_size(MAX_PROFILE_PLAINTEXT_BYTES).is_ok());
-        let error = validate_profile_file_size(MAX_PROFILE_PLAINTEXT_BYTES + 1).unwrap_err();
+        assert!(validate_profile_file_size(MAX_PROFILE_PLAINTEXT_BYTES + 1).is_ok());
+        let error = validate_profile_file_size(MAX_CHUNKED_PROFILE_FILE_BYTES + 1).unwrap_err();
         assert_eq!(error.code, "profile_object_too_large");
         assert_eq!(error.status, 413);
     }
@@ -1327,6 +2956,42 @@ mod tests {
             "profile_projection_incomplete"
         );
         assert!(!root.join(profile.as_str()).join("generations").exists());
+
+        let staging = DecryptedGenerationStaging::new(&root, &profile, &manifest).unwrap();
+        let staging_path = staging.staging_path.clone();
+        let (mut incomplete_file, _) = staging.create_file("Default/Cookies").unwrap();
+        incomplete_file.write_all(b"partial file").unwrap();
+        drop(incomplete_file);
+        drop(staging);
+        assert!(!staging_path.exists());
+        assert!(!root.join(profile.as_str()).join("generations").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projection_root_lock_serializes_processes_and_open_cleans_crash_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-restart-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let stale_profile = ProfileId::new("prf_stale_staging").unwrap();
+        let stale_staging = root.join(stale_profile.as_str()).join("staging");
+        fs::create_dir_all(stale_staging.join("interrupted-generation")).unwrap();
+        fs::write(
+            stale_staging.join("interrupted-generation/Default-Cookies.part"),
+            b"partial ciphertext or plaintext must never be published",
+        )
+        .unwrap();
+
+        let first = ProfileProjection::open(&root).unwrap();
+        assert!(!stale_staging.exists());
+        let second = ProfileProjection::open(&root).err().unwrap();
+        assert_eq!(second.code, "profile_projection_in_use");
+        drop(first);
+
+        let reopened = ProfileProjection::open(&root).unwrap();
+        drop(reopened);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1407,6 +3072,7 @@ mod tests {
                 Some(RemoteProxySyncSnapshot {
                     proxy_id: proxy_id.clone(),
                     revision: 4,
+                    credential_version: None,
                     credential: None,
                 }),
             )
@@ -1418,6 +3084,7 @@ mod tests {
             revision,
             metadata_object,
             credential_envelope_object,
+            ..
         } = dependency;
         assert_eq!(manifest_proxy_id, &proxy_id);
         assert_eq!(*revision, 4);
@@ -1471,17 +3138,14 @@ mod tests {
 
         manifest.validate().unwrap();
         descriptor.verify_manifest(&manifest).unwrap();
-        let encrypted = files
-            .iter()
-            .find(|(path, _)| path == "Preferences")
-            .unwrap();
+        let encrypted = files.iter().find(|blob| blob.key == "Preferences").unwrap();
+        let encrypted_bytes = encrypted.read_bytes().unwrap();
         assert!(
-            !encrypted
-                .1
+            !encrypted_bytes
                 .windows(b"private-profile-data".len())
                 .any(|window| { window == b"private-profile-data" })
         );
-        let decrypted = AuthenticatedChunk::decode(&encrypted.1)
+        let decrypted = AuthenticatedChunk::decode(&encrypted_bytes)
             .unwrap()
             .decrypt(
                 &client_key,
@@ -1506,16 +3170,17 @@ mod tests {
             .resource_key_envelope;
         let envelope_bytes = files
             .iter()
-            .find(|(path, _)| path == RESOURCE_KEY_ENVELOPE_KEY)
+            .find(|blob| blob.key == RESOURCE_KEY_ENVELOPE_KEY)
             .unwrap();
-        assert_eq!(envelope_ref.checksum, checksum(&envelope_bytes.1));
+        let envelope_bytes = envelope_bytes.read_bytes().unwrap();
+        assert_eq!(envelope_ref.checksum, checksum(&envelope_bytes));
         assert!(
             manifest
                 .tombstones
                 .iter()
                 .all(|tombstone| tombstone.key != RESOURCE_KEY_ENVELOPE_KEY)
         );
-        let envelope: ResourceKeyEnvelope = serde_json::from_slice(&envelope_bytes.1).unwrap();
+        let envelope: ResourceKeyEnvelope = serde_json::from_slice(&envelope_bytes).unwrap();
         assert_eq!(
             envelope
                 .unwrap(&workspace, &resource, &recovery_key)
@@ -1548,11 +3213,9 @@ mod tests {
                 .checksum,
             reused.checksum
         );
-        assert!(
-            next_files.iter().any(|(path, bytes)| {
-                path == "Preferences" && checksum(bytes) == reused.checksum
-            })
-        );
+        assert!(next_files.iter().any(|blob| {
+            blob.key == "Preferences" && checksum(&blob.read_bytes().unwrap()) == reused.checksum
+        }));
         assert_eq!(
             next_manifest
                 .objects
@@ -1597,9 +3260,10 @@ mod tests {
         let (_, first_files, first_manifest) = snapshot();
         let first = first_files
             .iter()
-            .find(|(path, _)| path == "Preferences")
+            .find(|blob| blob.key == "Preferences")
             .unwrap();
-        let first_checksum = checksum(&first.1);
+        let first_bytes = first.read_bytes().unwrap();
+        let first_checksum = checksum(&first_bytes);
         assert_eq!(
             first_manifest
                 .objects
@@ -1613,9 +3277,10 @@ mod tests {
         let (_, retry_files, retry_manifest) = snapshot();
         let retry = retry_files
             .iter()
-            .find(|(path, _)| path == "Preferences")
+            .find(|blob| blob.key == "Preferences")
             .unwrap();
-        assert_eq!(checksum(&retry.1), first_checksum);
+        let retry_bytes = retry.read_bytes().unwrap();
+        assert_eq!(checksum(&retry_bytes), first_checksum);
         assert_eq!(
             retry_manifest
                 .objects
@@ -1626,7 +3291,7 @@ mod tests {
             None
         );
         assert_eq!(
-            AuthenticatedChunk::decode(&retry.1)
+            AuthenticatedChunk::decode(&retry_bytes)
                 .unwrap()
                 .decrypt(
                     &client_key,
@@ -1639,6 +3304,215 @@ mod tests {
                 .unwrap(),
             b"retry-me"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn large_profile_file_is_split_into_authenticated_four_mib_chunks() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-chunked-file-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_chunked_projection").unwrap();
+        let resource = ResourceId::new("res_chunked_projection").unwrap();
+        let profile_path = root.join("browser-profile");
+        fs::create_dir_all(profile_path.join("Default")).unwrap();
+        let plaintext = vec![0x5a; (MAX_PROFILE_PLAINTEXT_BYTES + 1) as usize];
+        fs::write(profile_path.join("Default/Cookies"), &plaintext).unwrap();
+        let previous = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            1,
+            1,
+            None,
+            b"",
+            Vec::new(),
+        )
+        .unwrap();
+        let client_key = ClientKey::from_bytes([0x37; 32]);
+        let recovery_key = RecoveryKey::from_bytes([0x48; 32]);
+        let (descriptor, objects, manifest) = projection
+            .snapshot_with_proxy_encryption(
+                &profile_path,
+                &previous,
+                2,
+                None,
+                &client_key,
+                &recovery_key,
+            )
+            .unwrap();
+
+        assert_eq!(manifest.schema_version, 3);
+        assert_eq!(manifest.file_chunks.len(), 1);
+        let file = &manifest.file_chunks[0];
+        assert_eq!(file.path, "Default/Cookies");
+        assert_eq!(file.plaintext_size, plaintext.len() as u64);
+        assert_eq!(file.plaintext_checksum, checksum(&plaintext));
+        assert!(file.chunks.len() > 1);
+        assert!(
+            file.chunks
+                .iter()
+                .all(|chunk| chunk.object.size <= MAX_PROFILE_SYNC_OBJECT_BYTES)
+        );
+        manifest.validate().unwrap();
+        descriptor.verify_manifest(&manifest).unwrap();
+
+        let mut restored = Vec::with_capacity(plaintext.len());
+        for chunk in &file.chunks {
+            let encrypted = objects
+                .iter()
+                .find(|blob| blob.key == chunk.object.key)
+                .unwrap()
+                .read_bytes()
+                .unwrap();
+            restored.extend_from_slice(
+                &AuthenticatedChunk::decode(&encrypted)
+                    .unwrap()
+                    .decrypt(
+                        &client_key,
+                        &profile_file_chunk_aad(
+                            &workspace,
+                            &resource,
+                            &file.path,
+                            chunk.index,
+                            &chunk.plaintext_checksum,
+                        ),
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(restored, plaintext);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote_objects: BTreeMap<_, _> = objects
+            .iter()
+            .map(|blob| (blob.key.clone(), blob.read_bytes().unwrap()))
+            .collect();
+        let interrupt_next_chunk = Arc::new(AtomicBool::new(false));
+        let server_interrupt_next_chunk = Arc::clone(&interrupt_next_chunk);
+        let corrupt_next_chunk = Arc::new(AtomicBool::new(false));
+        let server_corrupt_next_chunk = Arc::clone(&corrupt_next_chunk);
+        let server = tokio::spawn(async move {
+            let mut paths = Vec::new();
+            loop {
+                let accepted =
+                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+                let Ok(Ok((mut stream, _))) = accepted else {
+                    break;
+                };
+                let request = read_http_request(&mut stream).await;
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                let object_key = remote_objects
+                    .keys()
+                    .map(String::as_str)
+                    .find(|key| path.contains(&key.replace('/', "%2F")))
+                    .unwrap_or_else(|| panic!("unexpected blob request: {path}"));
+                let mut body = remote_objects.get(object_key).unwrap().clone();
+                if object_key.starts_with(".buglogin/file-chunks/")
+                    && server_interrupt_next_chunk.swap(false, Ordering::SeqCst)
+                {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    stream.write_all(&body[..body.len() / 2]).await.unwrap();
+                    paths.push(path);
+                    continue;
+                }
+                if object_key.starts_with(".buglogin/file-chunks/")
+                    && server_corrupt_next_chunk.swap(false, Ordering::SeqCst)
+                {
+                    body[0] ^= 1;
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+                paths.push(path);
+            }
+            paths
+        });
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        let auth = CoordinationAuth::new("desktop-chunk-test", "lease-token").unwrap();
+        interrupt_next_chunk.store(true, Ordering::SeqCst);
+        let retry_profile = ProfileId::new("prf_chunked_retry_hydration").unwrap();
+        let interrupted_result = projection
+            .hydrate_encrypted_with_proxy_credentials(
+                &client,
+                &auth,
+                &retry_profile,
+                &manifest,
+                Some(&client_key),
+                Some(&recovery_key),
+                "chunked-interrupted-hydration-test",
+            )
+            .await;
+        assert!(interrupted_result.is_err());
+        assert!(
+            !decrypted_generation_path(&root, &retry_profile, &manifest)
+                .unwrap()
+                .exists()
+        );
+        let retry_staging = root.join(retry_profile.as_str()).join("staging");
+        if retry_staging.exists() {
+            assert_eq!(fs::read_dir(&retry_staging).unwrap().count(), 0);
+        }
+        let (retry_receipt, _) = projection
+            .hydrate_encrypted_with_proxy_credentials(
+                &client,
+                &auth,
+                &retry_profile,
+                &manifest,
+                Some(&client_key),
+                Some(&recovery_key),
+                "chunked-hydration-retry-test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(retry_receipt.path.join("Default/Cookies")).unwrap(),
+            plaintext
+        );
+        corrupt_next_chunk.store(true, Ordering::SeqCst);
+        let corrupt_profile = ProfileId::new("prf_chunked_corrupt_hydration").unwrap();
+        let corrupt_result = projection
+            .hydrate_encrypted_with_proxy_credentials(
+                &client,
+                &auth,
+                &corrupt_profile,
+                &manifest,
+                Some(&client_key),
+                Some(&recovery_key),
+                "chunked-corrupt-hydration-test",
+            )
+            .await;
+        assert_eq!(
+            corrupt_result.err().unwrap().code,
+            "api_blob_integrity_failed"
+        );
+        assert!(
+            !decrypted_generation_path(&root, &corrupt_profile, &manifest)
+                .unwrap()
+                .exists()
+        );
+        let corrupt_staging = root.join(corrupt_profile.as_str()).join("staging");
+        if corrupt_staging.exists() {
+            assert_eq!(fs::read_dir(corrupt_staging).unwrap().count(), 0);
+        }
+        let requested = server.await.unwrap();
+        assert_eq!(requested.len(), manifest.objects.len() + 4);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1678,6 +3552,9 @@ mod tests {
                 Some(RemoteProxySyncSnapshot {
                     proxy_id: proxy_id.clone(),
                     revision: 5,
+                    credential_version: Some(
+                        buglogin_domain::ids::CredentialId::new("credential-version").unwrap(),
+                    ),
                     credential: Some(SecretValue::new(clear_secret.to_vec()).unwrap()),
                 }),
                 &client_key,
@@ -1696,13 +3573,15 @@ mod tests {
         };
         assert_eq!(manifest_proxy, &proxy_id);
         assert_eq!(*revision, 5);
-        let object = files
-            .iter()
-            .find(|(path, _)| path == &reference.key)
-            .unwrap();
-        assert_eq!(object.1.len() as u64, reference.size);
-        assert!(!object.1.windows(10).any(|window| window == b"proxy-pass"));
-        let envelope: ProxyCredentialEnvelope = serde_json::from_slice(&object.1).unwrap();
+        let object = files.iter().find(|blob| blob.key == reference.key).unwrap();
+        let object_bytes = object.read_bytes().unwrap();
+        assert_eq!(object_bytes.len() as u64, reference.size);
+        assert!(
+            !object_bytes
+                .windows(10)
+                .any(|window| window == b"proxy-pass")
+        );
+        let envelope: ProxyCredentialEnvelope = serde_json::from_slice(&object_bytes).unwrap();
         assert_eq!(
             envelope
                 .open(&workspace, &resource, &proxy_id, 5, &client_key)

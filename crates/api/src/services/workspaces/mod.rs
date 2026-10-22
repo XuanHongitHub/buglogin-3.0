@@ -118,7 +118,7 @@ impl WorkspaceService {
                 403,
             ));
         }
-        authorize(principal, grants, &workspace.id, Action::Create)?;
+        authorize_workspace_create(principal, grants, organization_id, &workspace.id)?;
         validate_name(&workspace.name)?;
         if self
             .organizations
@@ -210,6 +210,39 @@ impl WorkspaceService {
     ) -> Result<Workspace, Problem> {
         authorize(principal, grants, workspace_id, Action::Read)?;
         Ok(self.workspace_in(organization_id, workspace_id)?.clone())
+    }
+
+    pub fn get_workspace_record(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization_id: &OrganizationId,
+        workspace_id: &WorkspaceId,
+    ) -> Result<WorkspaceRecord, Problem> {
+        authorize(principal, grants, workspace_id, Action::Read)?;
+        let record = self
+            .organizations
+            .get(organization_id)
+            .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        let workspace = record
+            .workspaces
+            .get(workspace_id)
+            .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))?;
+        if workspace.organization_id != *organization_id {
+            return Err(problem(
+                "tenant_mismatch",
+                "Workspace belongs to another organization",
+                403,
+            ));
+        }
+        Ok(WorkspaceRecord {
+            workspace: workspace.clone(),
+            revision: record
+                .workspace_revisions
+                .get(workspace_id)
+                .copied()
+                .unwrap_or_else(initial_revision),
+        })
     }
 
     pub(crate) fn workspace_for_policy(
@@ -359,8 +392,14 @@ impl WorkspaceService {
     ) -> Result<Vec<Organization>, Problem> {
         let mut list = Vec::new();
         for record in self.organizations.values() {
-            if authorize_organization(principal, grants, &record.organization, Action::Read).is_ok()
-            {
+            let organization_readable =
+                authorize_organization(principal, grants, &record.organization, Action::Read)
+                    .is_ok();
+            let has_readable_workspace = record
+                .workspaces
+                .values()
+                .any(|workspace| authorize(principal, grants, &workspace.id, Action::Read).is_ok());
+            if organization_readable || has_readable_workspace {
                 list.push(record.organization.clone());
             }
         }
@@ -377,12 +416,16 @@ impl WorkspaceService {
             .organizations
             .get(organization_id)
             .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
-        authorize_organization(principal, grants, &record.organization, Action::Read)?;
+        let organization_readable =
+            authorize_organization(principal, grants, &record.organization, Action::Read).is_ok();
         let mut list = Vec::new();
         for ws in record.workspaces.values() {
             if authorize(principal, grants, &ws.id, Action::Read).is_ok() {
                 list.push(ws.clone());
             }
+        }
+        if !organization_readable && list.is_empty() {
+            return Err(problem("forbidden", "Organization access denied", 403));
         }
         Ok(list)
     }
@@ -416,6 +459,26 @@ fn authorize(
         &ResourceScope::workspace(workspace_id.clone()),
         grants,
     ) {
+        Ok(())
+    } else {
+        Err(problem("forbidden", "Workspace access denied", 403))
+    }
+}
+
+fn authorize_workspace_create(
+    principal: &Principal,
+    grants: &[Grant],
+    organization_id: &OrganizationId,
+    workspace_id: &WorkspaceId,
+) -> Result<(), Problem> {
+    let capability = Capability::new(CAPABILITY)
+        .map_err(|_| problem("invalid_capability", "Invalid capability", 500))?;
+    let scope = ResourceScope {
+        organization_id: Some(organization_id.clone()),
+        workspace_id: Some(workspace_id.clone()),
+        ..ResourceScope::default()
+    };
+    if is_allowed(principal, &capability, Action::Create, &scope, grants) {
         Ok(())
     } else {
         Err(problem("forbidden", "Workspace access denied", 403))
@@ -478,13 +541,13 @@ mod tests {
     use std::collections::BTreeSet;
 
     use buglogin_domain::{
-        ids::{AccountId, OrganizationId, WorkspaceId},
+        ids::{AccountId, GrantId, OrganizationId, WorkspaceId},
         organization::{Organization, OrganizationPolicy},
-        permissions::{Principal, Role},
+        permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, Role},
         workspace::{Workspace, WorkspacePolicy},
     };
 
-    use super::{OrganizationUpdate, WorkspaceService, WorkspaceUpdate};
+    use super::{CAPABILITY, OrganizationUpdate, WorkspaceService, WorkspaceUpdate};
 
     fn organization(id: &str, account_id: &str) -> Organization {
         Organization {
@@ -652,6 +715,154 @@ mod tests {
                 .unwrap_err()
                 .code,
             "tenant_mismatch"
+        );
+    }
+
+    #[test]
+    fn versioned_record_reads_return_current_revision_and_enforce_read_acl() {
+        let organization = organization("org-record", "account-record");
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let workspace = workspace("workspace-record", &organization.id);
+        service
+            .create_workspace(&platform_admin(), &[], &organization.id, workspace.clone())
+            .unwrap();
+
+        let org_record = service
+            .get_organization(&platform_admin(), &[], &organization.id)
+            .unwrap();
+        assert_eq!(org_record.revision, 1);
+        let workspace_record = service
+            .get_workspace_record(&platform_admin(), &[], &organization.id, &workspace.id)
+            .unwrap();
+        assert_eq!(workspace_record.revision, 1);
+
+        let mut renamed = workspace;
+        renamed.name = "Renamed".to_owned();
+        let renamed_id = renamed.id.clone();
+        service
+            .update_workspace(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                &renamed_id,
+                WorkspaceUpdate {
+                    workspace: renamed,
+                    expected_revision: workspace_record.revision,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .get_workspace_record(
+                    &platform_admin(),
+                    &[],
+                    &organization.id,
+                    &WorkspaceId::new("workspace-record").unwrap()
+                )
+                .unwrap()
+                .revision,
+            2
+        );
+        assert_eq!(
+            service
+                .get_workspace_record(
+                    &Principal::default(),
+                    &[],
+                    &organization.id,
+                    &WorkspaceId::new("workspace-record").unwrap()
+                )
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
+    }
+
+    #[test]
+    fn organization_scoped_workspace_grant_can_create_workspace() {
+        let organization = organization("org-create", "account-create");
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let principal = Principal {
+            account_id: Some(organization.account_id.clone()),
+            ..Principal::default()
+        };
+        let grants = [Grant {
+            id: GrantId::new("grant_org_workspace_create").unwrap(),
+            account_id: Some(organization.account_id.clone()),
+            member_id: None,
+            capability: Capability::new(CAPABILITY).unwrap(),
+            action: Action::Create,
+            scope: ResourceScope {
+                organization_id: Some(organization.id.clone()),
+                ..ResourceScope::default()
+            },
+            effect: Effect::Allow,
+        }];
+
+        service
+            .create_workspace(
+                &principal,
+                &grants,
+                &organization.id,
+                workspace("workspace-created-by-org-admin", &organization.id),
+            )
+            .unwrap();
+
+        assert_eq!(
+            service
+                .list_workspaces(&platform_admin(), &[], &organization.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn workspace_member_can_discover_only_organizations_and_workspaces_they_can_read() {
+        let organization = organization("org-member", "account-member");
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let assigned = workspace("workspace-assigned", &organization.id);
+        let unassigned = workspace("workspace-unassigned", &organization.id);
+        service
+            .create_workspace(&platform_admin(), &[], &organization.id, assigned.clone())
+            .unwrap();
+        service
+            .create_workspace(&platform_admin(), &[], &organization.id, unassigned)
+            .unwrap();
+        let principal = Principal {
+            account_id: Some(organization.account_id.clone()),
+            workspace_ids: BTreeSet::from([assigned.id.clone()]),
+            roles: BTreeSet::from([Role::WorkspaceMember]),
+            ..Principal::default()
+        };
+        let grants = [Grant {
+            id: GrantId::new("grant_member_workspace_read").unwrap(),
+            account_id: Some(organization.account_id.clone()),
+            member_id: None,
+            capability: Capability::new(CAPABILITY).unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(assigned.id.clone()),
+            effect: Effect::Allow,
+        }];
+
+        assert_eq!(
+            service.list_organizations(&principal, &grants).unwrap(),
+            vec![organization.clone()]
+        );
+        assert_eq!(
+            service
+                .list_workspaces(&principal, &grants, &organization.id)
+                .unwrap(),
+            vec![assigned]
+        );
+        assert_eq!(
+            service
+                .list_workspaces(&Principal::default(), &[], &organization.id)
+                .unwrap_err()
+                .code,
+            "forbidden"
         );
     }
 }

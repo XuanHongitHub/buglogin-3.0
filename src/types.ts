@@ -4,6 +4,7 @@ export interface ProxySettings {
   port: number;
   username?: string;
   password?: string;
+  rotation_url?: string;
 }
 
 export interface TableSortingSettings {
@@ -13,14 +14,24 @@ export interface TableSortingSettings {
 
 export interface BrowserProfile {
   id: string; // UUID of the profile
+  revision?: number;
   name: string;
   browser: string;
-  version: string;
+  version: string | null;
+  runtimeVersion?: string | null;
+  proxy?: { protocol?: string; host: string; port: number } | null;
   proxy_id?: string; // Reference to stored proxy
   vpn_id?: string; // Reference to stored VPN config
   launch_hook?: string;
   process_id?: number;
-  state?: "created" | "ready" | "launching" | "running" | "stopping" | "failed" | "recovering";
+  state?:
+    | "created"
+    | "ready"
+    | "launching"
+    | "running"
+    | "stopping"
+    | "failed"
+    | "recovering";
   last_launch?: number;
   release_type: string;
   wayfern_config?: WayfernConfig; // Wayfern configuration
@@ -42,6 +53,9 @@ export interface BrowserProfile {
    * profiles created before this field existed. */
   created_at?: number;
   dns_blocklist?: string;
+  dns_server?: string | null;
+  start_urls?: string[];
+  temporary?: boolean;
   password_protected?: boolean;
 }
 
@@ -59,6 +73,20 @@ export interface Extension {
   description?: string;
   author?: string;
   homepage_url?: string;
+  manifest_name?: string;
+  linked_path?: string | null;
+  source_kind: "archive" | "unpacked";
+}
+
+export interface FetchedExtension {
+  name: string | null;
+  version: string | null;
+  description: string | null;
+  author: string | null;
+  file_name: string;
+  file_data: string | null;
+  path: string | null;
+  source_url: string | null;
 }
 
 export interface ExtensionGroup {
@@ -71,7 +99,15 @@ export interface ExtensionGroup {
   last_sync?: number;
 }
 
-export type SyncMode = "Disabled" | "Regular" | "Encrypted";
+// BugLogin 3.0 API values. Legacy values stay accepted while older Donut
+// payloads are being projected, but the desktop must not write them back.
+export type SyncMode =
+  | "local"
+  | "managed"
+  | "disabled"
+  | "Disabled"
+  | "Regular"
+  | "Encrypted";
 
 export type SyncStatus = "Disabled" | "Syncing" | "Synced" | "Error";
 
@@ -126,7 +162,8 @@ export interface CloudUser {
 export interface ProfileLockInfo {
   profileId: string;
   lockedBy: string;
-  lockedByEmail: string;
+  lockedByEmail?: string;
+  ownerLabel?: string;
   lockedAt: string;
   expiresAt?: string;
 }
@@ -144,14 +181,23 @@ export interface ProfileSyncStatusEvent {
 export interface ProxyCheckResult {
   ip: string;
   city?: string;
+  region?: string;
   country?: string;
   country_code?: string;
+  latitude?: number;
+  longitude?: number;
+  zip?: string;
   timestamp: number;
   is_valid: boolean;
+  latency_ms?: number;
 }
 
 export function isSyncEnabled(profile: BrowserProfile): boolean {
-  return profile.sync_mode != null && profile.sync_mode !== "Disabled";
+  return (
+    profile.sync_mode === "managed" ||
+    profile.sync_mode === "Regular" ||
+    profile.sync_mode === "Encrypted"
+  );
 }
 
 export const CLOUD_PROXY_ID = "cloud-included-proxy";
@@ -169,6 +215,7 @@ export interface StoredProxy {
   geo_region?: string;
   geo_city?: string;
   geo_isp?: string;
+  rotation_url?: string | null;
 }
 
 export interface LocationItem {
@@ -179,6 +226,7 @@ export interface LocationItem {
 export interface ProfileGroup {
   id: string;
   name: string;
+  color?: string | null;
   sync_enabled?: boolean;
   last_sync?: number;
 }
@@ -187,6 +235,7 @@ export interface GroupWithCount {
   id: string;
   name: string;
   count: number;
+  profile_count?: number;
   sync_enabled?: boolean;
   last_sync?: number;
 }
@@ -276,11 +325,14 @@ export interface WayfernConfig {
   block_images?: boolean; // For compatibility with shared config form
   block_webrtc?: boolean;
   block_webgl?: boolean;
+  restore_session?: boolean;
+  launch_args?: string[];
   executable_path?: string;
   fingerprint?: string; // JSON string of the complete fingerprint config
   randomize_fingerprint_on_launch?: boolean; // Generate new fingerprint on every launch
   os?: WayfernOS; // Operating system for fingerprint generation
   geo_proxy_signature?: string; // Internal: routing the fingerprint's location was computed for
+  identity_overrides?: string | Record<string, unknown>;
 }
 
 // Wayfern fingerprint config - matches the C++ FingerprintData structure
@@ -481,8 +533,8 @@ export interface UnifiedCookie {
   is_secure: boolean;
   is_http_only: boolean;
   same_site: number;
-  creation_time: number;
-  last_accessed: number;
+  creation_time?: number;
+  last_accessed?: number;
 }
 
 export interface DomainCookies {
@@ -496,6 +548,46 @@ export interface CookieReadResult {
   browser_type: string;
   domains: DomainCookies[];
   total_count: number;
+}
+
+export type CookiePasteFormat = "json" | "netscape" | "nameValue";
+export type CookieWriteMode = "merge" | "replaceMatchingSites";
+
+export interface CookieIssue {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  source?: string | null;
+  params?: Record<string, string | number>;
+}
+
+export interface PastedCookiePreview {
+  domain: string;
+  name: string;
+  path: string;
+  expires: number;
+  isSecure: boolean;
+  isHttpOnly: boolean;
+  sameSite: number;
+}
+
+export interface CookieAnalysis {
+  cookies: PastedCookiePreview[];
+  issues: CookieIssue[];
+  format: CookiePasteFormat | null;
+  siteRequired: boolean;
+  expiredCount: number;
+  replaceDeleteCount: number | null;
+  clearsOnClose: boolean;
+  blockedBy?: unknown;
+}
+
+export interface CookiePasteImportResult {
+  added: number;
+  overwritten: number;
+  deleted: number;
+  skipped: number;
+  issues: CookieIssue[];
 }
 
 export interface SelectedCookie {
@@ -546,6 +638,7 @@ export interface ParsedProxyLine {
   port: number;
   username?: string;
   password?: string;
+  vless_uri?: string;
   original_line: string;
 }
 

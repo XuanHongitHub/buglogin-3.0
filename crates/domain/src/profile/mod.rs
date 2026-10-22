@@ -65,6 +65,38 @@ pub struct ProfileShareInput {
     pub member_id: MemberId,
     pub permission: ProfileSharePermission,
     pub expected_revision: u64,
+    #[serde(default)]
+    pub recipient_key_envelopes: Vec<ConfirmedProfileKeyShareEnvelope>,
+}
+
+/// Canonical wire record for a device-bound profile key envelope. Cryptographic
+/// sealing and opening remain in `buglogin-sync`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileKeyShareEnvelope {
+    pub schema_version: u8,
+    pub workspace_id: WorkspaceId,
+    pub resource_id: ResourceId,
+    pub recipient_device_id: String,
+    pub key_version: String,
+    pub encapped_key: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+}
+
+/// Envelope plus the key fingerprint explicitly reviewed by the sharing owner.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfirmedProfileKeyShareEnvelope {
+    pub envelope: ProfileKeyShareEnvelope,
+    pub confirmed_fingerprint: String,
+}
+
+/// New device-bound key envelopes to activate atomically with a profile key rotation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileKeyRotationEnvelopeUpdate {
+    pub member_id: MemberId,
+    pub recipient_key_envelopes: Vec<ConfirmedProfileKeyShareEnvelope>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -4,17 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --dir ../.. dev",
+    "dev": "vite --config vite.config.ts",
     "build": "vite build",
-
-    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts",
+    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts && node --experimental-strip-types src/profile-workflow.self-test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "tauri:dev": "tauri dev --config src-tauri/tauri.conf.json",
-    "tauri:build": "pnpm copy-migration-binary && tauri build --config src-tauri/tauri.conf.json",
+    "tauri:dev": "pnpm tauri:dev:local-api",
+    "tauri:dev:local-api": "node ../../scripts/tauri-dev-local-api.mjs",
+    "api:dev:local": "node ../../scripts/dev-local-api.mjs",
+    "tauri:build": "node ../../scripts/tauri-build.mjs",
     "copy-migration-binary": "node copy-migration-binary.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "~2.11.1",
+    "@tauri-apps/api": "~2.12.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
@@ -25,4 +26,3 @@
     "vite": "^7.0.0"
   }
 }
-

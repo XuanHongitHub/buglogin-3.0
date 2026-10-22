@@ -31,12 +31,18 @@ use buglogin_storage::{
 use serde_json::Value;
 use tower::ServiceExt;
 
+static PACKAGE_UPLOAD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct FailOnceRemoteChunkStore {
     inner: MemoryRemoteChunkStore,
     fail_next_put: bool,
 }
 
 impl RemoteChunkStore for FailOnceRemoteChunkStore {
+    fn readiness(&self) -> Result<(), Problem> {
+        self.inner.readiness()
+    }
+
     fn checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
         self.inner.checksum(object_key)
     }
@@ -216,6 +222,7 @@ fn activate_request(package_id: &str, token: &str, key: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn package_upload_retry_repairs_journaled_missing_blob() {
+    let _test_guard = PACKAGE_UPLOAD_TEST_LOCK.lock().await;
     let root = root().with_extension("retry-missing-blob");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -263,18 +270,67 @@ async fn package_upload_retry_repairs_journaled_missing_blob() {
         ))
         .await
         .unwrap();
-    assert_eq!(repaired.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(
-        &axum::body::to_bytes(repaired.into_body(), 16 * 1024)
+    let status = repaired.status();
+    let bytes = axum::body::to_bytes(repaired.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["replayed"], true);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn package_upload_accepts_files_above_axum_default_body_limit() {
+    let _test_guard = PACKAGE_UPLOAD_TEST_LOCK.lock().await;
+    let root = root().with_extension("large-file-limit");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let signing_key = [78_u8; 32];
+    let state = ApiState::new(ProfileService::new(LocalRepository::open(&root).unwrap()))
+        .with_migration_signing_key(SecretValue::new(signing_key.to_vec()).unwrap());
+    let token = state.issue_token("acct_package_large").unwrap();
+    state.grants.write().unwrap().push(Grant {
+        id: GrantId::from_str("grant_package_large").unwrap(),
+        account_id: Some(AccountId::from_str("acct_package_large").unwrap()),
+        member_id: None,
+        capability: Capability::new("migration.write").unwrap(),
+        action: Action::Execute,
+        scope: ResourceScope::global(),
+        effect: Effect::Allow,
+    });
+    let app = router(state);
+    let (package_id, _) = signed_package(&root.join("source"), &signing_key);
+    let bytes = vec![7_u8; 3 * 1024 * 1024];
+    let uploaded = app
+        .oneshot(upload_request(
+            &package_id,
+            "large.bin",
+            &token,
+            "package-file-upload-large-body",
+            &bytes,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    let receipt: Value = serde_json::from_slice(
+        &axum::body::to_bytes(uploaded.into_body(), 16 * 1024)
             .await
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(body["replayed"], true);
+    assert_eq!(receipt["size"], bytes.len());
     let _ = fs::remove_dir_all(root);
 }
+
 #[tokio::test]
 async fn signed_package_upload_is_cas_verified_replayable_and_immutable() {
+    let _test_guard = PACKAGE_UPLOAD_TEST_LOCK.lock().await;
     let root = root();
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -423,6 +479,7 @@ async fn signed_package_upload_is_cas_verified_replayable_and_immutable() {
 
 #[tokio::test]
 async fn package_verify_rejects_wrong_signing_key() {
+    let _test_guard = PACKAGE_UPLOAD_TEST_LOCK.lock().await;
     let root = root().with_extension("wrong-key");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();

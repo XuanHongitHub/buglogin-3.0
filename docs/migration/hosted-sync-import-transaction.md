@@ -27,6 +27,7 @@ Required fields:
 - `state`: `staging | finalizing | active | cleanup_pending | abandoned`
 - `createdObjects[]`: storage key, checksum, size
 - `resumedObjects[]`: storage key, checksum, size
+- `reservedObjects[]`: storage key, checksum, size for objects whose workspace quota is reserved by this attempt; absent in older journals
 - `destinationFencingToken`; never persist owner token or bearer token
 - `controlRevisionBefore`, `controlRevisionAfter`
 - `createdAt`, `updatedAt`, terminal/error code
@@ -43,13 +44,13 @@ No transition may move `active` backward. `cleanup_pending` means activation is 
 
 ## Import algorithm
 
-1. Authenticate `migration.write`; verify workspace/resource/profile-resource binding and effective ACL.
-2. Validate the complete `SyncExport`: schema, revision chain, scope, manifest checksum, exact blob set, sizes, checksums, tombstones.
-3. Claim durable idempotency using the full canonical request hash.
-4. Insert/replay the `staging` journal before object-store writes.
+1. Authenticate the request and validate the complete `SyncExport`: schema, revision chain, scope, manifest checksum, exact blob set, sizes, checksums, tombstones.
+2. Refresh the PostgreSQL-backed authorization snapshot and reauthenticate; verify `migration.write`, workspace/resource/profile-resource binding, effective ACL, and proxy dependencies.
+3. Acquire a PostgreSQL advisory lock derived from the canonical idempotency key, then claim durable idempotency using the full request hash. A concurrent copy of the same request receives `409 migration_sync_import_in_progress`; a later retry can resume the durable journal after the first request releases the lock.
+4. Insert/replay the `staging` journal, persist this attempt's `reservedObjects[]`, and atomically reserve their combined workspace quota before object-store writes. Older journals deserialize with an empty reservation list.
 5. Acquire destination Redis lease idempotently; retain owner token only in Rust memory.
-6. Read the current destination manifest from PostgreSQL-backed control state.
-7. Plan genesis/successor/replay; remap the destination fencing token.
+6. Refresh the control aggregate again while holding the mutation lock; reauthenticate the actor and recheck migration ACL, active binding, and proxy dependencies before any object-store write.
+7. Read the current destination manifest from PostgreSQL-backed control state and plan genesis/successor/replay; remap the destination fencing token. Because the export contains and verifies every manifest object's bytes, clear each source `sourceGeneration` when building the destination manifest: all objects are staged at the destination manifest generation. Source generation describes source-store placement only.
 8. Upload content-addressed blobs. Existing equal-checksum objects are resumed; collisions fail. Append created/resumed evidence durably.
 9. Verify every object through the remote adapter after upload.
 10. Mark journal `finalizing`.
@@ -58,6 +59,7 @@ No transition may move `active` backward. `cleanup_pending` means activation is 
    - rechecks current workspace/resource generation and canonical checksum;
    - writes the immutable target control aggregate containing the target manifest;
    - marks the journal `active`;
+   - removes quota reservations for objects promoted into that active manifest;
    - writes audit;
    - completes the durable idempotency receipt.
 12. Treat the PostgreSQL commit as the only linearization point.
@@ -81,12 +83,15 @@ If PostgreSQL commit returns a connection/unknown-outcome error:
 - GC selects only journal-created objects not referenced by any active/retained manifest.
 - GC rechecks checksum and reference set immediately before CAS delete.
 - Resumed/pre-existing objects are never journal-owned and never deleted by migration cleanup.
+- A cleanup transition releases the attempt's quota reservations after the journal state is durable; active manifests and other staging attempts keep their accounting.
 - Retention and two-pass confirmation are mandatory for production.
 
 ## Required acceptance tests
 
 - Fresh genesis; contiguous successor; idempotent replay.
+- Import reused objects with `sourceGeneration`; verify destination manifest references the destination generation and replay treats source placement as non-semantic.
 - Same key/different request conflict.
+- Same key/same request concurrent across API instances has one active journal writer; retry after the first request exits remains resumable.
 - Wrong base, stale generation, scope/binding/ACL denial.
 - Missing, extra, duplicate, tampered blob rejection before activation.
 - Source fencing token not reused.
@@ -104,4 +109,4 @@ If PostgreSQL commit returns a connection/unknown-outcome error:
 
 ## Release gate
 
-Keep `migration_sync_import_not_ready` until signed package ingress, the shared REST/MCP import service, PostgreSQL recovery worker, orphan GC, and all tests above pass against real PostgreSQL, Redis, and S3-compatible adapters. The direct JSON endpoint currently proves the transaction core only and is not production migration authorization.
+Signed package ingress and the shared REST/MCP package activation path are now implemented in source. Keep `migration_sync_import_not_ready` until the PostgreSQL recovery worker, orphan GC, process-loss/idempotency rehearsal, and all transaction cases above pass against real PostgreSQL, Redis, and S3-compatible adapters. Local tests prove the transaction core only; they do not provide hosted release evidence.

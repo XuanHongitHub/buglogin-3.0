@@ -37,7 +37,8 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     let admin = AccountId::from_str("acct_import_admin").unwrap();
     state.grants.write().unwrap().extend([
         allow(&admin, "grant_import", "migration.write", Action::Execute),
-        allow(&admin, "grant_account_list", "CAP-ID-001", Action::Read),
+        allow(&admin, "grant_account_list", "CAP-ADM-001", Action::Read),
+        allow(&admin, "grant_group_read", "CAP-PROF-003", Action::Read),
     ]);
     let profile_id = mapping.profile_resources[0].data.profile_id.clone();
     let base = json!({
@@ -90,7 +91,9 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
         "members": mapping.members,
         "resources": mapping.resources,
         "profileResources": mapping.profile_resources,
-        "grants": mapping.grants
+        "grants": mapping.grants,
+        "groups": mapping.groups,
+        "groupGrants": mapping.group_grants
     });
     let app = router(state.clone());
 
@@ -145,10 +148,17 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
         .oneshot(request(&token, "control-import-dry-0001", dry))
         .await
         .unwrap();
-    assert_eq!(dry_response.status(), StatusCode::OK);
+    let dry_status = dry_response.status();
     let dry_body = body(dry_response).await;
+    assert_eq!(
+        dry_status,
+        StatusCode::OK,
+        "unexpected dry-run response: {dry_body}"
+    );
     assert_eq!(dry_body["create"]["accounts"], 2);
     assert_eq!(dry_body["create"]["profileResources"], 1);
+    assert_eq!(dry_body["create"]["groups"], 1);
+    assert_eq!(dry_body["create"]["groupGrants"], 4);
     assert_eq!(account_count(app.clone(), &token).await, 2);
 
     let activated = app
@@ -162,35 +172,35 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     assert_eq!(activated_body["create"]["workspaces"], 1);
     assert_eq!(activated_body["create"]["profileResources"], 1);
     assert_eq!(activated_body["create"]["grants"], 2);
+    assert_eq!(activated_body["create"]["groups"], 1);
+    assert_eq!(activated_body["create"]["groupGrants"], 4);
     assert_eq!(account_count(app.clone(), &token).await, 4);
-    let member_token = state.issue_token(member_account_id).unwrap();
-    let member_read = app
+    let workspace_id = &mapping.workspaces[0].id;
+    let group_id = &mapping.groups[0].id;
+    let shares = app
         .clone()
         .oneshot(get(
-            &member_token,
-            &format!("/v1/profiles/{profile_id}"),
-            "control-import-member-read",
+            &token,
+            &format!("/v1/workspaces/{workspace_id}/groups/{group_id}/shares"),
+            "control-import-group-shares",
         ))
         .await
         .unwrap();
-    assert_eq!(member_read.status(), StatusCode::FORBIDDEN);
-    let member_update = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/v1/profiles/{profile_id}/archive"))
-                .header("authorization", format!("Bearer {member_token}"))
-                .header("x-correlation-id", "control-import-member-update")
-                .header("idempotency-key", "control-import-member-update-0001")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"revision":1}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(member_update.status(), StatusCode::FORBIDDEN);
-
+    assert_eq!(shares.status(), StatusCode::OK);
+    let shares = body(shares).await;
+    let shares = shares.as_array().unwrap();
+    assert_eq!(shares.len(), 4);
+    let revoked = shares
+        .iter()
+        .filter(|grant| !grant["revokedAt"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(revoked.len(), 2);
+    assert!(revoked.iter().all(|grant| grant["revision"] == 2));
+    assert!(
+        revoked
+            .iter()
+            .all(|grant| grant["revokedAt"] == "2025-02-01T00:00:00Z")
+    );
     let replay = app
         .clone()
         .oneshot(request(&token, "control-import-run-0002", base.clone()))
@@ -255,6 +265,37 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     assert_eq!(reactivated_body["state"], "active");
     assert_eq!(reactivated_body["replayed"], false);
     assert_eq!(account_count(app.clone(), &token).await, 4);
+
+    // Credential issuance advances the imported account revision. Exercise member
+    // permissions after rollback/reactivation so the rollback safety check above
+    // continues to cover an unchanged imported account.
+    let member_token = state.issue_token(member_account_id).unwrap();
+    let member_read = app
+        .clone()
+        .oneshot(get(
+            &member_token,
+            &format!("/v1/profiles/{profile_id}"),
+            "control-import-member-read",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(member_read.status(), StatusCode::FORBIDDEN);
+    let member_update = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/profiles/{profile_id}/archive"))
+                .header("authorization", format!("Bearer {member_token}"))
+                .header("x-correlation-id", "control-import-member-update")
+                .header("idempotency-key", "control-import-member-update-0001")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"revision":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(member_update.status(), StatusCode::FORBIDDEN);
 
     for (uri, idempotency, value) in [
         (
@@ -325,19 +366,6 @@ async fn control_import_dry_run_activates_replays_and_rejects_changed_package() 
     }
     assert_eq!(account_count(app.clone(), &token).await, 4);
 
-    let final_rollback = app
-        .oneshot(post(
-            &token,
-            "control-rollback-run-0003",
-            "/v1/migrations/control/rollback",
-            json!({
-                "packageId": "pkg-control-import",
-                "confirmation": "ROLLBACK_CONTROL_MIGRATION"
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(final_rollback.status(), StatusCode::OK);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -452,11 +480,35 @@ fn legacy_export() -> Vec<u8> {
             "accountState": "active", "platformRole": null, "accessSource": "direct",
             "createdAt": "2025-01-02T00:00:00Z"
         }],
+        "profiles": [{
+            "id": "prf_11111111111111111111111111111111",
+            "workspaceId": "workspace-a", "name": "Profile A", "runtime": "wayfern",
+            "runtimeVersion": "146.0.7680.177.4", "releaseType": "stable",
+            "proxyId": null, "vpnId": null, "groupId": null, "extensionGroupId": null,
+            "ephemeral": false, "createdAt": "2025-01-01T00:00:00Z",
+            "updatedAt": "2025-01-01T00:00:00Z", "tags": [], "note": null
+        }],
+        "groups": [{
+            "id": "group-a", "workspaceId": "workspace-a", "name": "Operations",
+            "color": "#3366ff", "syncEnabled": true, "lastSync": null,
+            "createdBy": "owner-a", "createdAt": "2025-01-01T00:00:00Z",
+            "updatedAt": "2025-01-01T00:00:00Z"
+        }],
         "shareGrants": [{
             "id": "share-a", "workspaceId": "workspace-a", "resourceType": "profile",
             "resourceId": "prf_11111111111111111111111111111111", "resourceName": "Profile A", "recipientEmail": "member@example.com",
             "accessMode": "run_sync_limited", "createdAt": "2025-01-03T00:00:00Z",
             "createdBy": "owner-a", "revokedAt": null
+        }, {
+            "id": "group-share-a", "workspaceId": "workspace-a", "resourceType": "group",
+            "resourceId": "group-a", "recipientEmail": "member@example.com",
+            "accessMode": "run_sync_limited", "createdAt": "2025-01-03T00:00:00Z",
+            "createdBy": "owner-a", "revokedAt": null
+        }, {
+            "id": "group-share-revoked", "workspaceId": "workspace-a", "resourceType": "group",
+            "resourceId": "group-a", "recipientEmail": "member@example.com",
+            "accessMode": "run_sync_limited", "createdAt": "2025-01-03T00:00:00Z",
+            "createdBy": "owner-a", "revokedAt": "2025-02-01T00:00:00Z"
         }]
     })).unwrap()
 }

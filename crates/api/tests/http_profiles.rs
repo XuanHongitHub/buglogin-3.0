@@ -6,6 +6,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use buglogin_api::http::{ApiState, router};
+use buglogin_api::services::profile_hosted::HostedProfileService;
 use buglogin_api::services::workspaces::WorkspaceService;
 use buglogin_browser::profile::ProfileService;
 use buglogin_domain::{
@@ -496,7 +497,6 @@ async fn canonical_profile_create_dto_is_server_normalized_and_idempotent() {
         "id": profile_id,
         "name": "Command DTO profile",
         "runtime": "wayfern",
-        "runtimeVersion": "152.0",
         "note": "Web form note"
     })
     .to_string();
@@ -520,6 +520,7 @@ async fn canonical_profile_create_dto_is_server_normalized_and_idempotent() {
     assert_eq!(created_body["value"]["id"], "prf_command_dto");
     assert_eq!(created_body["value"]["state"], "ready");
     assert_eq!(created_body["value"]["syncMode"], "local");
+    assert!(created_body["value"]["runtimeVersion"].is_null());
     assert_eq!(created_body["value"]["note"], "Web form note");
     assert_ne!(created_body["value"]["createdAt"], "");
 
@@ -555,7 +556,7 @@ async fn canonical_profile_create_dto_is_server_normalized_and_idempotent() {
 }
 
 #[tokio::test]
-async fn hosted_profile_delete_fails_closed_until_remote_quarantine_exists() {
+async fn hosted_profile_delete_moves_profile_to_recoverable_quarantine() {
     let account = AccountId::from_str("acct_hosted_delete").unwrap();
     let mut store = MemoryControlRecordStore::default();
     let account_value =
@@ -570,9 +571,20 @@ async fn hosted_profile_delete_fails_closed_until_remote_quarantine_exists() {
             value: &account_value,
         })
         .unwrap();
-    let state = ApiState::hosted_with_control_store(ProfileService::disabled(), store).unwrap();
-    let token = state.issue_token(account.as_str()).unwrap();
+    let mut hosted_profile = profile();
     let profile_id = ProfileId::from_str("prf_hosted_delete").unwrap();
+    hosted_profile.id = profile_id.clone();
+    hosted_profile.sync_mode = Some(SyncMode::Managed);
+    let state = ApiState::hosted_with_control_store(ProfileService::disabled(), store)
+        .unwrap()
+        .with_profile_resource(ProfileResource {
+            profile_id: profile_id.clone(),
+            resource_id: buglogin_domain::ids::ResourceId::from_str("res_hosted_delete").unwrap(),
+            workspace_id: WorkspaceId::from_str("ws_hosted_delete").unwrap(),
+            archive_state: buglogin_domain::profile::ProfileArchiveState::Active,
+        })
+        .with_profile_record(hosted_profile);
+    let token = state.issue_token(account.as_str()).unwrap();
     state.grants.write().unwrap().push(Grant {
         id: GrantId::from_str("grant_hosted_profile_delete").unwrap(),
         account_id: Some(account),
@@ -587,22 +599,24 @@ async fn hosted_profile_delete_fails_closed_until_remote_quarantine_exists() {
     });
 
     let response = router(state)
-        .oneshot(request(
+        .oneshot(lifecycle_request(
             "DELETE",
             "/v1/profiles/prf_hosted_delete",
             &token,
+            "hosted-profile-delete-0001",
             Some(json!({"revision": 1, "confirmation": "QUARANTINE_PROFILE_DATA"}).to_string()),
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = serde_json::from_slice(
         &axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(body["code"], "hosted_profile_delete_not_ready");
+    assert_eq!(body["deleted"], true);
+    assert_eq!(body["recoverable"], true);
 }
 
 #[tokio::test]
@@ -654,6 +668,7 @@ async fn profile_clone_and_share_routes_validate_path_identity() {
     assert_eq!(share.status(), StatusCode::BAD_REQUEST);
 
     let revoke = app
+        .clone()
         .oneshot(request(
             "DELETE",
             "/v1/profiles/prf_source/shares/mem_one",
@@ -671,6 +686,45 @@ async fn profile_clone_and_share_routes_validate_path_identity() {
         .await
         .unwrap();
     assert_eq!(revoke.status(), StatusCode::BAD_REQUEST);
+
+    let unknown_share = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/profiles/prf_unknown_share/shares",
+            &token,
+            Some(
+                json!({
+                    "profileId": "prf_unknown_share",
+                    "memberId": "mem_one",
+                    "permission": "read",
+                    "expectedRevision": 1
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown_share.status(), StatusCode::FORBIDDEN);
+
+    let unknown_revoke = app
+        .oneshot(request(
+            "DELETE",
+            "/v1/profiles/prf_unknown_share/shares/mem_one",
+            &token,
+            Some(
+                json!({
+                    "profileId": "prf_unknown_share",
+                    "memberId": "mem_one",
+                    "permission": "read",
+                    "expectedRevision": 1
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown_revoke.status(), StatusCode::FORBIDDEN);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -812,6 +866,23 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
     managed.id = profile_id.clone();
     managed.sync_mode = Some(SyncMode::Managed);
     managed.proxy_id = Some(ProxyId::from_str("proxy_missing").unwrap());
+    let stale_plan =
+        HostedProfileService::prepare_provision(managed.clone(), workspace.clone()).unwrap();
+    let provision_principal = Principal {
+        account_id: Some(account.clone()),
+        workspace_ids: BTreeSet::from([workspace.clone()]),
+        ..Principal::default()
+    };
+    let provision_grants = state.grants.read().unwrap().clone();
+    let stale_proxy = HostedProfileService::provision(
+        &state,
+        &provision_principal,
+        &provision_grants,
+        &stale_plan,
+    )
+    .err()
+    .expect("provision must reject a proxy removed after request planning");
+    assert_eq!(stale_proxy.code, "proxy_not_found");
     let mut missing_create = lifecycle_request(
         "POST",
         "/v1/profiles",
@@ -922,6 +993,49 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
     .unwrap();
     assert_eq!(pending_body, staged_body);
 
+    // Choosing the active proxy again cancels/replaces the pending clear,
+    // instead of leaving a stale assignment that will apply on next sync.
+    let cancel_pending = app
+        .clone()
+        .oneshot(lifecycle_request(
+            "PUT",
+            &assignment_path,
+            &token,
+            "managed-proxy-assignment-cancel-01",
+            Some(
+                json!({
+                    "workspaceId": workspace.as_str(),
+                    "profileId": profile_id.as_str(),
+                    "expectedProfileRevision": 1,
+                    "proxyId": "proxy_managed_1"
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel_pending.status(), StatusCode::OK);
+    let cancel_body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(cancel_pending.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cancel_body["proxyId"], "proxy_managed_1");
+    let pending_after_cancel = app
+        .clone()
+        .oneshot(request("GET", &assignment_path, &token, None))
+        .await
+        .unwrap();
+    assert_eq!(pending_after_cancel.status(), StatusCode::OK);
+    let pending_after_cancel: Value = serde_json::from_slice(
+        &axum::body::to_bytes(pending_after_cancel.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pending_after_cancel["proxyId"], "proxy_managed_1");
+
     let active_profile = app
         .clone()
         .oneshot(request(
@@ -1027,8 +1141,8 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
     let mut manifest_request = request("GET", &manifest_path, &token, None);
     manifest_request
         .headers_mut()
-        .insert("x-buglogin-actor-id", "desktop-provision".parse().unwrap());
-    let manifest_response = app.oneshot(manifest_request).await.unwrap();
+        .insert("x-buglogin-actor-id", account.as_str().parse().unwrap());
+    let manifest_response = app.clone().oneshot(manifest_request).await.unwrap();
     assert_eq!(manifest_response.status(), StatusCode::OK);
     let manifest: serde_json::Value = serde_json::from_slice(
         &axum::body::to_bytes(manifest_response.into_body(), usize::MAX)
@@ -1038,6 +1152,76 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
     .unwrap();
     assert_eq!(manifest["generation"], 1);
     assert_eq!(manifest["objects"], serde_json::json!([]));
+
+    let update_path = format!(
+        "/v1/workspaces/{}/profiles/{}",
+        workspace.as_str(),
+        profile_id.as_str()
+    );
+    let updated = app
+        .clone()
+        .oneshot(lifecycle_request(
+            "PUT",
+            &update_path,
+            &token,
+            "managed-profile-metadata-update-01",
+            Some(
+                json!({
+                    "workspaceId": workspace.as_str(),
+                    "profileId": profile_id.as_str(),
+                    "expectedRevision": 1,
+                    "name": "Managed provision updated",
+                    "note": null,
+                    "tags": []
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::CONFLICT);
+    let update_problem: Value = serde_json::from_slice(
+        &axum::body::to_bytes(updated.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(update_problem["code"], "profile_proxy_assignment_pending");
+
+    let stale_assignment = app
+        .clone()
+        .oneshot(request("GET", &assignment_path, &token, None))
+        .await
+        .unwrap();
+    assert_eq!(stale_assignment.status(), StatusCode::OK);
+    let stale_assignment: Value = serde_json::from_slice(
+        &axum::body::to_bytes(stale_assignment.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stale_assignment["expectedProfileRevision"], 1);
+
+    let mut restaged_assignment = assignment_input;
+    restaged_assignment["expectedProfileRevision"] = json!(1);
+    let restaged = app
+        .oneshot(lifecycle_request(
+            "PUT",
+            &assignment_path,
+            &token,
+            "managed-proxy-assignment-restage-02",
+            Some(restaged_assignment.to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(restaged.status(), StatusCode::OK);
+    let restaged: Value = serde_json::from_slice(
+        &axum::body::to_bytes(restaged.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restaged["expectedProfileRevision"], 1);
 }
 
 #[tokio::test]
@@ -1083,13 +1267,38 @@ async fn profile_lifecycle_keeps_operation_and_state_fail_closed_without_runtime
         ))
         .await
         .unwrap();
-    assert_eq!(launch.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(launch.status(), StatusCode::CONFLICT);
     let body = axum::body::to_bytes(launch.into_body(), usize::MAX)
         .await
         .unwrap();
-    let operation: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem["code"], "conflict");
+    let replay = app
+        .clone()
+        .oneshot(lifecycle_request(
+            "POST",
+            "/v1/profiles/prf_http_1/launch",
+            &token,
+            "lifecycle-launch-0001",
+            Some(
+                json!({
+                    "profilesRoot": root.join("profiles"),
+                    "extraArgs": []
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::ACCEPTED);
+    let operation: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(replay.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(operation["status"], "failed");
-    assert_eq!(operation["error"]["code"], "runtime_not_approved");
+    assert_eq!(operation["error"]["code"], "profile_not_launchable");
     assert!(state.lifecycles.read().unwrap().is_empty());
     assert_eq!(
         state

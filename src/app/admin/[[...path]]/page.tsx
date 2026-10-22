@@ -16,7 +16,15 @@ export function generateStaticParams() {
   return [[], ...routes.map((route) => [route])].map((path) => ({ path }));
 }
 
-export default async function AdminRoute({ params }: { params: Promise<{ path?: string[] }> }) {
+export default async function AdminRoute({
+  params,
+}: {
+  params: Promise<{ path?: string[] }>;
+}) {
   const { path = [] } = await params;
-  return <WebRouteHost initialPath={path.length ? `/admin/${path.join("/")}` : "/admin"} />;
+  return (
+    <WebRouteHost
+      initialPath={path.length ? `/admin/${path.join("/")}` : "/admin"}
+    />
+  );
 }

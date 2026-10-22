@@ -1,4 +1,8 @@
-use buglogin_domain::{account::AccountIdentity, errors::Problem, ids::AccountId};
+use buglogin_domain::{
+    account::{AccountIdentity, canonical_email, canonical_username},
+    errors::Problem,
+    ids::AccountId,
+};
 use buglogin_storage::control::{
     ControlAuditEntry, ControlPut, ExecuteControlCommand, HttpResponse,
 };
@@ -30,9 +34,25 @@ impl IdentityPersistence {
     }
 
     pub fn load(&self, account_id: &AccountId) -> Result<Option<AccountIdentity>, Problem> {
-        self.store
+        let identity: Option<AccountIdentity> = self
+            .store
             .load(TENANT, IDENTITY, account_id.as_str())
-            .map_err(map_corrupt)
+            .map_err(map_corrupt)?;
+        let Some(identity) = identity else {
+            return Ok(None);
+        };
+        if identity.account_id != *account_id
+            || identity.revision == 0
+            || canonical_username(&identity.username)
+                .map(|canonical| canonical != identity.canonical_username)
+                .unwrap_or(true)
+            || canonical_email(&identity.email)
+                .map(|canonical| canonical != identity.canonical_email)
+                .unwrap_or(true)
+        {
+            return Err(corrupt());
+        }
+        Ok(Some(identity))
     }
 
     pub fn find_by_username(&self, canonical: &str) -> Result<Option<AccountIdentity>, Problem> {
@@ -44,6 +64,7 @@ impl IdentityPersistence {
     }
 
     pub fn create(&self, identity: &AccountIdentity) -> Result<AccountIdentity, Problem> {
+        validate_identity_for_write(identity)?;
         if let Some(existing) = self.load(&identity.account_id)? {
             return if existing == *identity {
                 Ok(existing)
@@ -117,6 +138,39 @@ impl IdentityPersistence {
         }
     }
 
+    pub(crate) fn prepare_create_puts(
+        &self,
+        identity: &AccountIdentity,
+    ) -> Result<Vec<ControlPut>, Problem> {
+        validate_identity_for_write(identity)?;
+        if self.load(&identity.account_id)?.is_some() {
+            return Err(identity_exists());
+        }
+        self.assert_available(
+            USERNAME_INDEX,
+            &identity.canonical_username,
+            "username_taken",
+        )?;
+        self.assert_available(EMAIL_INDEX, &identity.canonical_email, "email_taken")?;
+        Ok(vec![
+            put(IDENTITY, identity.account_id.as_str(), identity)?,
+            put(
+                USERNAME_INDEX,
+                &index_id(&identity.canonical_username),
+                &IdentityIndex {
+                    account_id: identity.account_id.clone(),
+                },
+            )?,
+            put(
+                EMAIL_INDEX,
+                &index_id(&identity.canonical_email),
+                &IdentityIndex {
+                    account_id: identity.account_id.clone(),
+                },
+            )?,
+        ])
+    }
+
     fn find(&self, record_type: &str, canonical: &str) -> Result<Option<AccountIdentity>, Problem> {
         let Some(index) = self
             .store
@@ -125,7 +179,16 @@ impl IdentityPersistence {
         else {
             return Ok(None);
         };
-        self.load(&index.account_id)?.map(Some).ok_or_else(corrupt)
+        let identity = self.load(&index.account_id)?.ok_or_else(corrupt)?;
+        let indexed_value = match record_type {
+            USERNAME_INDEX => &identity.canonical_username,
+            EMAIL_INDEX => &identity.canonical_email,
+            _ => return Err(corrupt()),
+        };
+        if indexed_value != canonical {
+            return Err(corrupt());
+        }
+        Ok(Some(identity))
     }
 
     fn assert_available(
@@ -134,12 +197,7 @@ impl IdentityPersistence {
         canonical: &str,
         code: &'static str,
     ) -> Result<(), Problem> {
-        if self
-            .store
-            .load::<IdentityIndex>(TENANT, record_type, &index_id(canonical))
-            .map_err(map_corrupt)?
-            .is_some()
-        {
+        if self.find(record_type, canonical)?.is_some() {
             return Err(Problem::new(
                 code,
                 "Identity is already in use",
@@ -159,6 +217,23 @@ fn put<T: Serialize>(record_type: &str, record_id: &str, value: &T) -> Result<Co
         expected_revision: Some(0),
         value: serde_json::to_value(value).map_err(|_| corrupt())?,
     })
+}
+
+fn validate_identity_for_write(identity: &AccountIdentity) -> Result<(), Problem> {
+    if identity.revision == 0
+        || identity.username.trim() != identity.username.as_str()
+        || identity.email.trim() != identity.email.as_str()
+        || canonical_username(&identity.username)? != identity.canonical_username
+        || canonical_email(&identity.email)? != identity.canonical_email
+    {
+        return Err(Problem::new(
+            "account_identity_invalid",
+            "Account identity fields are inconsistent",
+            400,
+            "identity",
+        ));
+    }
+    Ok(())
 }
 
 fn index_id(canonical: &str) -> String {
@@ -269,6 +344,70 @@ mod tests {
         assert!(
             persistence
                 .load(&AccountId::new("acct_three").unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_index_that_points_to_identity_with_different_canonical_value() {
+        let store = ControlPersistence::new(MemoryControlRecordStore::default());
+        let persisted = identity("acct_owner", "real-owner", "owner@example.com");
+        store
+            .execute(ExecuteControlCommand {
+                tenant_id: TENANT.into(),
+                command_id: "identity.test.seed-corrupt-index".into(),
+                idempotency_key: "identity.test.seed-corrupt-index".into(),
+                expected_revisions: Default::default(),
+                puts: vec![
+                    put(IDENTITY, persisted.account_id.as_str(), &persisted).unwrap(),
+                    put(
+                        USERNAME_INDEX,
+                        &index_id("owner"),
+                        &IdentityIndex {
+                            account_id: persisted.account_id.clone(),
+                        },
+                    )
+                    .unwrap(),
+                ],
+                deletes: vec![],
+                audit: ControlAuditEntry {
+                    tenant_id: TENANT.into(),
+                    command_id: "identity.test.seed-corrupt-index".into(),
+                    actor_id: "test".into(),
+                    allowed: true,
+                    detail: json!({}),
+                },
+                response: HttpResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: Value::Null,
+                },
+            })
+            .unwrap();
+
+        let persistence = IdentityPersistence::new(store);
+        assert_eq!(
+            persistence.find_by_username("owner").unwrap_err().code,
+            "identity_record_corrupt"
+        );
+    }
+
+    #[test]
+    fn rejects_inconsistent_identity_before_writing_any_records() {
+        let persistence =
+            IdentityPersistence::new(ControlPersistence::new(MemoryControlRecordStore::default()));
+        let mut invalid = identity("acct_invalid_identity", "owner", "owner@example.com");
+        invalid.canonical_email = "attacker@example.com".into();
+
+        assert_eq!(
+            persistence.create(&invalid).unwrap_err().code,
+            "account_identity_invalid"
+        );
+        assert!(persistence.load(&invalid.account_id).unwrap().is_none());
+        assert!(
+            persistence
+                .find_by_email("attacker@example.com")
                 .unwrap()
                 .is_none()
         );

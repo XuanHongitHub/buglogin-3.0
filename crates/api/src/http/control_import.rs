@@ -7,12 +7,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use buglogin_domain::{
-    account::{Account, AccountStatus},
+    account::{Account, AccountIdentity, AccountStatus, canonical_email},
     entities::{Profile, ProfileState, Runtime, SyncMode},
     errors::Problem,
-    grant::ResourceGrant,
+    grant::{GroupShareGrant, ResourceGrant},
     ids::{
-        AccountId, GrantId, MemberId, OrganizationId, ProfileId, ResourceId, TeamId, WorkspaceId,
+        AccountId, GrantId, GroupId, MemberId, OrganizationId, ProfileId, ResourceId, TeamId,
+        WorkspaceId,
     },
     member::{Member, MemberRole, MemberStatus},
     organization::{Organization, OrganizationPolicy},
@@ -23,14 +24,17 @@ use buglogin_domain::{
     workspace::{Workspace, WorkspacePolicy},
 };
 use buglogin_migration::legacy::{
-    NeutralAccountRecord, NeutralGrantRecord, NeutralMemberRecord, NeutralOrganizationRecord,
-    NeutralProfileRecord, NeutralProfileResourceRecord, NeutralResourceRecord, NeutralTeamRecord,
-    NeutralWorkspaceRecord, legacy_runtime_fingerprint,
+    EncryptedLegacyCredentials, LegacyScryptCredential, NeutralAccountRecord, NeutralGrantRecord,
+    NeutralGroupRecord, NeutralGroupShareGrantRecord, NeutralMemberRecord,
+    NeutralOrganizationRecord, NeutralProfileRecord, NeutralProfileResourceRecord,
+    NeutralResourceRecord, NeutralTeamRecord, NeutralWorkspaceRecord, ProfileDataClassification,
+    decrypt_package_credentials, legacy_runtime_fingerprint,
 };
 use buglogin_migration::package::{NeutralPackage, NeutralPackageManifest};
 use buglogin_storage::control::{
     ControlAuditEntry, ControlDelete, ControlPut, ExecuteControlCommand, HttpResponse,
 };
+use buglogin_sync::{export::SyncExport, manifest::SyncManifest, payload::PayloadDescriptor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -38,12 +42,12 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
     ApiState, CONTROL_STATE_ID, CONTROL_STATE_TYPE, CONTROL_TENANT, ControlAggregate, authenticate,
-    authorize_capability, grants, problem, response,
+    authorize_capability, control, grants, problem, response,
 };
 
 const JOURNAL_TYPE: &str = "migration_import";
 const COMMAND: &str = "migration.control.import";
-const MEMBERSHIP_CAPABILITIES: [&str; 15] = [
+pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 15] = [
     "CAP-WS-001",
     "CAP-TEAM-001",
     "CAP-MEM-001",
@@ -94,6 +98,16 @@ pub(super) struct ControlImportInput {
     profile_resources: Vec<NeutralProfileResourceRecord>,
     #[serde(default)]
     grants: Vec<NeutralGrantRecord>,
+    #[serde(default)]
+    groups: Vec<NeutralGroupRecord>,
+    #[serde(default)]
+    group_grants: Vec<NeutralGroupShareGrantRecord>,
+    #[serde(skip)]
+    legacy_credentials: Vec<LegacyScryptCredential>,
+    #[serde(skip)]
+    require_legacy_identity_import: bool,
+    #[serde(default, skip_deserializing)]
+    legacy_credentials_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,6 +122,8 @@ struct Counts {
     resources: usize,
     profile_resources: usize,
     grants: usize,
+    groups: usize,
+    group_grants: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -141,14 +157,25 @@ struct Journal {
     after_sha256: String,
     before: Value,
     created_accounts: BTreeMap<String, String>,
+    #[serde(default)]
+    created_identity_records: Vec<CreatedIdentityRecord>,
     create: Counts,
     reuse: Counts,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatedIdentityRecord {
+    record_type: String,
+    record_id: String,
+    sha256: String,
 }
 
 struct Prepared {
     before: ControlAggregate,
     aggregate: ControlAggregate,
     account_puts: Vec<ControlPut>,
+    identity_puts: Vec<ControlPut>,
     plan: Plan,
     before_sha256: String,
     after_sha256: String,
@@ -174,24 +201,13 @@ pub(super) async fn import_control(
             422,
         ))
     })?;
+    let expected_grants = grants(&state)?;
     authorize_capability(
         &principal,
-        &grants(&state)?,
+        &expected_grants,
         "migration.write",
         Action::Execute,
     )?;
-    let actor_id = principal
-        .account_id
-        .as_ref()
-        .ok_or_else(|| {
-            response(problem(
-                "authentication_required",
-                "Authentication required",
-                401,
-            ))
-        })?
-        .as_str()
-        .to_owned();
     let idempotency_key = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
@@ -205,58 +221,74 @@ pub(super) async fn import_control(
         })?;
     validate_package_id(&input.package_id).map_err(response)?;
     let package_sha256 = package_checksum(&input).map_err(response)?;
-    let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
-        .write_owned()
-        .await;
-    let _mutation = state.control_mutation.lock().map_err(|_| {
-        response(problem(
-            "control_unavailable",
-            "Control state unavailable",
-            503,
-        ))
-    })?;
-
-    let journal_revision = if let Some((journal, revision)) = state
-        .control_persistence
-        .load_versioned::<Journal>(CONTROL_TENANT, JOURNAL_TYPE, &input.package_id)
-        .map_err(response)?
-    {
-        if journal.package_sha256 != package_sha256 {
-            return Err(response(collision("migration package")));
-        }
-        if journal.state != "rolled_back" {
-            return Ok((
-                StatusCode::OK,
-                Json(Receipt {
-                    package_id: journal.package_id,
-                    package_sha256: journal.package_sha256,
-                    state: journal.state,
-                    replayed: true,
-                    create: journal.create,
-                    reuse: journal.reuse,
-                }),
-            )
-                .into_response());
-        }
-        revision
-    } else {
-        0
-    };
-
-    let prepared = prepare(&state, &input, package_sha256).map_err(response)?;
-    if input.dry_run {
-        return Ok((StatusCode::OK, Json(prepared.plan)).into_response());
-    }
-    activate(
+    control::with_authorization_snapshot(
         &state,
-        &input,
-        idempotency_key,
-        actor_id,
-        journal_revision,
-        prepared,
+        &headers,
+        &principal,
+        &expected_grants,
+        |current_principal, current_grants, _| {
+            authorize_capability(
+                current_principal,
+                current_grants,
+                "migration.write",
+                Action::Execute,
+            )?;
+            let actor_id = current_principal
+                .account_id
+                .as_ref()
+                .ok_or_else(|| {
+                    response(problem(
+                        "authentication_required",
+                        "Authentication required",
+                        401,
+                    ))
+                })?
+                .as_str()
+                .to_owned();
+            let journal_revision = if let Some((journal, revision)) = state
+                .control_persistence
+                .load_versioned::<Journal>(CONTROL_TENANT, JOURNAL_TYPE, &input.package_id)
+                .map_err(response)?
+            {
+                if journal.package_sha256 != package_sha256 {
+                    return Err(response(collision("migration package")));
+                }
+                if journal.state != "rolled_back" {
+                    return Ok((
+                        StatusCode::OK,
+                        Json(Receipt {
+                            package_id: journal.package_id,
+                            package_sha256: journal.package_sha256,
+                            state: journal.state,
+                            replayed: true,
+                            create: journal.create,
+                            reuse: journal.reuse,
+                        }),
+                    )
+                        .into_response());
+                }
+                revision
+            } else {
+                0
+            };
+
+            let prepared = prepare(&state, &input, package_sha256, None).map_err(response)?;
+            if input.dry_run {
+                return Ok((StatusCode::OK, Json(prepared.plan)).into_response());
+            }
+            activate(
+                &state,
+                &input,
+                idempotency_key,
+                actor_id,
+                journal_revision,
+                prepared,
+            )
+            .map(|receipt| (StatusCode::OK, Json(receipt)).into_response())
+            .map_err(response)
+        },
     )
-    .map(|receipt| (StatusCode::OK, Json(receipt)).into_response())
-    .map_err(response)
+    .await
 }
 
 pub(super) fn import_package(
@@ -275,9 +307,105 @@ pub(super) fn import_orchestrated_package(
     package: &NeutralPackage,
     idempotency_key: &str,
 ) -> Result<Option<Receipt>, Problem> {
-    let Some(input) = package_input(package)? else {
+    import_orchestrated_package_with_lock(state, principal, package, idempotency_key, None)
+}
+
+pub(super) fn import_orchestrated_package_with_lock(
+    state: &ApiState,
+    principal: &Principal,
+    package: &NeutralPackage,
+    idempotency_key: &str,
+    package_lock: Option<&ControlImportPackageLock<'_>>,
+) -> Result<Option<Receipt>, Problem> {
+    let Some(input) = control_input_from_package(state, package)? else {
         return Ok(None);
     };
+    let sync_manifest_to_import = package
+        .file("sync/export.json")
+        .map(|bytes| {
+            let export = serde_json::from_slice::<SyncExport>(bytes)
+                .map_err(|_| invalid("migration sync export"))?;
+            export.validate_metadata()?;
+            Ok::<_, Problem>((
+                export.workspace_id.as_str().to_owned(),
+                export.resource_id.as_str().to_owned(),
+            ))
+        })
+        .transpose()?;
+    import_control_input(
+        state,
+        principal,
+        idempotency_key,
+        input,
+        false,
+        package_lock,
+        sync_manifest_to_import,
+    )
+    .map(Some)
+}
+
+pub(super) fn import_initial_operator_package(
+    state: &ApiState,
+    package: &NeutralPackage,
+) -> Result<Receipt, Problem> {
+    reject_unorchestrated_sync_package(package)?;
+    let input = control_input_from_package(state, package)?
+        .ok_or_else(|| invalid("initial migration control package"))?;
+    require_password_capable_platform_admin(&input)?;
+    let principal = Principal {
+        account_id: Some(
+            AccountId::new("production-migration-operator")
+                .map_err(|_| invalid("migration operator"))?,
+        ),
+        ..Principal::default()
+    };
+    let idempotency_key = format!("initial-operator-{}", input.package_id);
+    import_control_input(state, &principal, &idempotency_key, input, true, None, None)
+}
+
+fn control_input_from_package(
+    state: &ApiState,
+    package: &NeutralPackage,
+) -> Result<Option<ControlImportInput>, Problem> {
+    let migration_key = if package
+        .file(buglogin_migration::legacy_account_credentials::PACKAGE_PATH)
+        .is_some()
+    {
+        Some(
+            state
+                .migration_key
+                .read()
+                .map_err(|_| {
+                    problem(
+                        "migration_key_unavailable",
+                        "Migration key unavailable",
+                        503,
+                    )
+                })?
+                .clone()
+                .ok_or_else(|| {
+                    problem(
+                        "migration_key_unavailable",
+                        "Migration key unavailable",
+                        503,
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    package_input(package, migration_key.as_ref())
+}
+
+fn import_control_input(
+    state: &ApiState,
+    principal: &Principal,
+    idempotency_key: &str,
+    input: ControlImportInput,
+    initial_operator: bool,
+    package_lock: Option<&ControlImportPackageLock<'_>>,
+    sync_manifest_to_import: Option<(String, String)>,
+) -> Result<Receipt, Problem> {
     let actor_id = principal
         .account_id
         .as_ref()
@@ -286,6 +414,11 @@ pub(super) fn import_orchestrated_package(
         .to_owned();
     validate_package_id(&input.package_id)?;
     let package_sha256 = package_checksum(&input)?;
+    let _owned_package_lock = match package_lock {
+        Some(lock) if lock.matches(&input.package_id) => None,
+        Some(_) => return Err(invalid("migration package lock")),
+        None => Some(ControlImportPackageLock::acquire(state, &input.package_id)?),
+    };
     let _mutation = state
         .control_mutation
         .lock()
@@ -298,20 +431,23 @@ pub(super) fn import_orchestrated_package(
             return Err(collision("migration package"));
         }
         if journal.state != "rolled_back" {
-            return Ok(Some(Receipt {
+            return Ok(Receipt {
                 package_id: journal.package_id,
                 package_sha256: journal.package_sha256,
                 state: journal.state,
                 replayed: true,
                 create: journal.create,
                 reuse: journal.reuse,
-            }));
+            });
         }
         revision
     } else {
         0
     };
-    let prepared = prepare(state, &input, package_sha256)?;
+    if initial_operator {
+        ensure_initial_target_empty(state, &input.package_id)?;
+    }
+    let prepared = prepare(state, &input, package_sha256, sync_manifest_to_import)?;
     activate(
         state,
         &input,
@@ -320,7 +456,74 @@ pub(super) fn import_orchestrated_package(
         journal_revision,
         prepared,
     )
-    .map(Some)
+}
+
+fn require_password_capable_platform_admin(input: &ControlImportInput) -> Result<(), Problem> {
+    let credentials = input
+        .legacy_credentials
+        .iter()
+        .map(|credential| credential.source_user_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let accounts = account_models(input)?;
+    let has_login_admin = accounts.iter().any(|(account_id, (account, is_admin))| {
+        if !is_admin
+            || account.status != AccountStatus::Active
+            || !credentials.contains(account_id.as_str())
+        {
+            return false;
+        }
+        input
+            .accounts
+            .iter()
+            .find(|record| record.id == *account_id)
+            .and_then(|record| record.extensions.get("legacyAuthProvider"))
+            .and_then(Value::as_str)
+            .is_some_and(|provider| matches!(provider, "password" | "password_google"))
+    });
+    if has_login_admin {
+        Ok(())
+    } else {
+        Err(problem(
+            "migration_initial_admin_missing",
+            "Initial migration package needs a password-capable platform administrator",
+            422,
+        ))
+    }
+}
+
+fn ensure_initial_target_empty(state: &ApiState, package_id: &str) -> Result<(), Problem> {
+    let accounts = state
+        .control_persistence
+        .list::<Account>(CONTROL_TENANT, "account")?;
+    let identities = state
+        .control_persistence
+        .list::<AccountIdentity>("identity", "account_identity")?;
+    let passwords = state
+        .control_persistence
+        .list::<Value>("identity", "account_password")?;
+    let other_journals = state
+        .control_persistence
+        .list::<Journal>(CONTROL_TENANT, JOURNAL_TYPE)?
+        .into_iter()
+        .any(|journal| journal.package_id != package_id);
+    let aggregate = state.control_aggregate()?;
+    let aggregate_value = serde_json::to_value(&aggregate).map_err(|_| invalid("control state"))?;
+    let empty_value = serde_json::to_value(ControlAggregate::default())
+        .map_err(|_| invalid("empty control state"))?;
+    if accounts.is_empty()
+        && identities.is_empty()
+        && passwords.is_empty()
+        && !other_journals
+        && aggregate_value == empty_value
+    {
+        Ok(())
+    } else {
+        Err(problem(
+            "migration_initial_target_not_empty",
+            "Initial migration can only run on an empty BugLogin 3 control database",
+            409,
+        ))
+    }
 }
 
 fn reject_unorchestrated_sync_package(package: &NeutralPackage) -> Result<(), Problem> {
@@ -334,8 +537,11 @@ fn reject_unorchestrated_sync_package(package: &NeutralPackage) -> Result<(), Pr
     Ok(())
 }
 
-fn package_input(package: &NeutralPackage) -> Result<Option<ControlImportInput>, Problem> {
-    const FILES: [&str; 9] = [
+fn package_input(
+    package: &NeutralPackage,
+    migration_key: Option<&buglogin_migration::MigrationKey>,
+) -> Result<Option<ControlImportInput>, Problem> {
+    const FILES: [&str; 11] = [
         "entities/profiles.jsonl",
         "entities/accounts.jsonl",
         "entities/organizations.jsonl",
@@ -345,6 +551,8 @@ fn package_input(package: &NeutralPackage) -> Result<Option<ControlImportInput>,
         "entities/resources.jsonl",
         "entities/profile-resources.jsonl",
         "entities/grants.jsonl",
+        "entities/groups.jsonl",
+        "entities/group-grants.jsonl",
     ];
     if FILES.iter().all(|path| package.file(path).is_none()) {
         return Ok(None);
@@ -355,6 +563,18 @@ fn package_input(package: &NeutralPackage) -> Result<Option<ControlImportInput>,
             .ok_or_else(|| invalid("migration manifest"))?,
     )
     .map_err(|_| invalid("migration manifest"))?;
+    let encrypted_credentials = package
+        .file(buglogin_migration::legacy_account_credentials::PACKAGE_PATH)
+        .map(serde_json::from_slice::<EncryptedLegacyCredentials>)
+        .transpose()
+        .map_err(|_| invalid("encrypted legacy credentials"))?;
+    let legacy_credentials = match encrypted_credentials.as_ref() {
+        Some(encrypted) => decrypt_package_credentials(
+            encrypted,
+            migration_key.ok_or_else(|| invalid("migration credential key"))?,
+        )?,
+        None => Vec::new(),
+    };
     Ok(Some(ControlImportInput {
         package_id: manifest.package_id,
         dry_run: false,
@@ -367,6 +587,13 @@ fn package_input(package: &NeutralPackage) -> Result<Option<ControlImportInput>,
         resources: package_records(package, FILES[6])?,
         profile_resources: package_records(package, FILES[7])?,
         grants: package_records(package, FILES[8])?,
+        groups: package_records_optional(package, FILES[9])?,
+        group_grants: package_records_optional(package, FILES[10])?,
+        legacy_credentials_sha256: encrypted_credentials
+            .as_ref()
+            .map(|credentials| credentials.ciphertext_sha256.clone()),
+        legacy_credentials,
+        require_legacy_identity_import: true,
     }))
 }
 
@@ -382,6 +609,16 @@ fn package_records<T: for<'de> Deserialize<'de>>(
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice(line).map_err(|_| invalid("control-plane record")))
         .collect()
+}
+
+fn package_records_optional<T: for<'de> Deserialize<'de>>(
+    package: &NeutralPackage,
+    path: &str,
+) -> Result<Vec<T>, Problem> {
+    match package.file(path) {
+        Some(_) => package_records(package, path),
+        None => Ok(Vec::new()),
+    }
 }
 
 fn activate(
@@ -401,6 +638,17 @@ fn activate(
             Ok((put.record_id.clone(), value_checksum(&account)?))
         })
         .collect::<Result<BTreeMap<_, _>, Problem>>()?;
+    let created_identity_records = prepared
+        .identity_puts
+        .iter()
+        .map(|put| {
+            Ok(CreatedIdentityRecord {
+                record_type: put.record_type.clone(),
+                record_id: put.record_id.clone(),
+                sha256: value_checksum(&put.value)?,
+            })
+        })
+        .collect::<Result<Vec<_>, Problem>>()?;
     let receipt = Receipt {
         package_id: prepared.plan.package_id.clone(),
         package_sha256: prepared.plan.package_sha256.clone(),
@@ -418,6 +666,7 @@ fn activate(
         after_sha256: prepared.after_sha256,
         before: serde_json::to_value(&prepared.before).map_err(|_| invalid("control state"))?,
         created_accounts,
+        created_identity_records,
         create: receipt.create.clone(),
         reuse: receipt.reuse.clone(),
     };
@@ -426,6 +675,7 @@ fn activate(
         .read()
         .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
     let mut puts = prepared.account_puts;
+    puts.extend(prepared.identity_puts);
     puts.push(ControlPut {
         tenant_id: CONTROL_TENANT.into(),
         record_type: CONTROL_STATE_TYPE.into(),
@@ -514,6 +764,7 @@ pub(super) async fn rollback_control(
     input: Result<Json<ControlRollbackInput>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
+    let expected_grants = grants(&state)?;
     let Json(input) = input.map_err(|_| {
         response(problem(
             "invalid_input",
@@ -523,7 +774,7 @@ pub(super) async fn rollback_control(
     })?;
     authorize_capability(
         &principal,
-        &grants(&state)?,
+        &expected_grants,
         "migration.write",
         Action::Execute,
     )?;
@@ -546,31 +797,69 @@ pub(super) async fn rollback_control(
                 400,
             ))
         })?;
-    let actor_id = principal
-        .account_id
-        .as_ref()
-        .expect("authenticated account")
-        .as_str()
-        .to_owned();
-    let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
-        .write_owned()
-        .await;
-    let receipt = rollback_package_control(&state, &input.package_id, idempotency_key, &actor_id)
-        .map_err(response)?;
-    Ok((StatusCode::OK, Json(receipt)).into_response())
+    let _package_lock =
+        ControlImportPackageLock::acquire(&state, &input.package_id).map_err(response)?;
+    control::with_authorization_snapshot(
+        &state,
+        &headers,
+        &principal,
+        &expected_grants,
+        |current_principal, current_grants, _| {
+            authorize_capability(
+                current_principal,
+                current_grants,
+                "migration.write",
+                Action::Execute,
+            )?;
+            let actor_id = current_principal
+                .account_id
+                .as_ref()
+                .ok_or_else(|| {
+                    response(problem(
+                        "authentication_required",
+                        "Authentication required",
+                        401,
+                    ))
+                })?
+                .as_str();
+            let receipt = rollback_package_control_locked(
+                &state,
+                &input.package_id,
+                idempotency_key,
+                actor_id,
+            )
+            .map_err(response)?;
+            Ok((StatusCode::OK, Json(receipt)).into_response())
+        },
+    )
+    .await
 }
 
-pub(super) fn rollback_package_control(
+pub(super) fn rollback_package_control_with_lock(
+    state: &ApiState,
+    package_id: &str,
+    idempotency_key: &str,
+    actor_id: &str,
+    package_lock: &ControlImportPackageLock<'_>,
+) -> Result<Receipt, Problem> {
+    validate_package_id(package_id)?;
+    if !package_lock.matches(package_id) {
+        return Err(invalid("migration package lock"));
+    }
+    let _mutation = state
+        .control_mutation
+        .lock()
+        .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+    rollback_package_control_locked(state, package_id, idempotency_key, actor_id)
+}
+
+fn rollback_package_control_locked(
     state: &ApiState,
     package_id: &str,
     idempotency_key: &str,
     actor_id: &str,
 ) -> Result<Receipt, Problem> {
     validate_package_id(package_id)?;
-    let _mutation = state
-        .control_mutation
-        .lock()
-        .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
     let (mut journal, journal_revision) = state
         .control_persistence
         .load_versioned::<Journal>(CONTROL_TENANT, JOURNAL_TYPE, package_id)?
@@ -625,6 +914,31 @@ pub(super) fn rollback_package_control(
             tenant_id: CONTROL_TENANT.into(),
             record_type: "account".into(),
             record_id: account_id.clone(),
+            expected_revision: Some(revision),
+        });
+    }
+    for created in &journal.created_identity_records {
+        let (value, revision) = state
+            .control_persistence
+            .load_versioned::<Value>("identity", &created.record_type, &created.record_id)?
+            .ok_or_else(|| {
+                problem(
+                    "migration_control_import_changed",
+                    "Imported identity record changed",
+                    409,
+                )
+            })?;
+        if value_checksum(&value)? != created.sha256 {
+            return Err(problem(
+                "migration_control_import_changed",
+                "Imported identity record changed",
+                409,
+            ));
+        }
+        deletes.push(ControlDelete {
+            tenant_id: "identity".into(),
+            record_type: created.record_type.clone(),
+            record_id: created.record_id.clone(),
             expected_revision: Some(revision),
         });
     }
@@ -711,6 +1025,7 @@ fn prepare(
     state: &ApiState,
     input: &ControlImportInput,
     package_sha256: String,
+    sync_manifest_to_import: Option<(String, String)>,
 ) -> Result<Prepared, Problem> {
     validate_graph(input)?;
     let before = state.control_aggregate()?;
@@ -719,7 +1034,20 @@ fn prepare(
     let mut create = empty_counts();
     let mut reuse = empty_counts();
     let mut account_puts = Vec::new();
+    let mut identity_puts = Vec::new();
     let accounts = account_models(input)?;
+    let credentials = input
+        .legacy_credentials
+        .iter()
+        .map(|credential| (credential.source_user_id.as_str(), credential))
+        .collect::<BTreeMap<_, _>>();
+    if credentials.len() != input.legacy_credentials.len()
+        || credentials
+            .keys()
+            .any(|account_id| !accounts.contains_key(*account_id))
+    {
+        return Err(invalid("legacy account credential references"));
+    }
 
     for (account, platform_admin) in accounts.values() {
         match state.account_persistence.load_versioned(&account.id)? {
@@ -740,6 +1068,75 @@ fn prepare(
         }
     }
 
+    if input.require_legacy_identity_import {
+        for (account, _) in accounts.values() {
+            let source = input
+                .accounts
+                .iter()
+                .find(|record| record.id == account.id.as_str())
+                .ok_or_else(|| invalid("account identity mapping"))?;
+            let email = source
+                .extensions
+                .get("legacyEmail")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("legacy account email"))?;
+            let canonical_legacy_email =
+                canonical_email(email).map_err(|_| invalid("legacy account email"))?;
+            let auth_provider = source
+                .extensions
+                .get("legacyAuthProvider")
+                .and_then(Value::as_str);
+            let credential = credentials.get(account.id.as_str());
+            match auth_provider {
+                Some("password" | "password_google") if credential.is_none() => {
+                    return Err(invalid("legacy password credential missing"));
+                }
+                Some("google") if credential.is_some() => {
+                    return Err(invalid("google-only account has a password credential"));
+                }
+                Some("password" | "password_google" | "google") | None if credential.is_some() => {
+                    if auth_provider.is_none() {
+                        return Err(invalid("legacy credential provider missing"));
+                    }
+                }
+                _ => {}
+            }
+            if let Some(existing) = state.identity_persistence.load(&account.id)? {
+                if existing.canonical_email != canonical_legacy_email {
+                    return Err(collision("account identity"));
+                }
+                if state.credentials.password_version(&account.id)?.is_none() {
+                    if let Some(credential) = credential {
+                        identity_puts.push(state.credentials.prepare_legacy_scrypt_put(
+                            &account.id,
+                            &credential.salt,
+                            &credential.hash,
+                            0,
+                        )?);
+                    }
+                }
+                continue;
+            }
+            let username = legacy_username(account.id.as_str());
+            let identity = AccountIdentity::new(
+                account.id.clone(),
+                username,
+                email,
+                account.created_at.clone(),
+            )?
+            .verify(1, account.updated_at.clone())?;
+            identity_puts.extend(state.identity_persistence.prepare_create_puts(&identity)?);
+            if let Some(credential) = credential {
+                identity_puts.push(state.credentials.prepare_legacy_scrypt_put(
+                    &account.id,
+                    &credential.salt,
+                    &credential.hash,
+                    0,
+                )?);
+            }
+        }
+    }
+
     merge_profiles(input, &mut value, &mut create, &mut reuse)?;
     merge_workspaces(input, &accounts, &mut value, &mut create, &mut reuse)?;
     merge_members(input, &mut value, &mut create, &mut reuse)?;
@@ -747,14 +1144,51 @@ fn prepare(
     merge_resources(input, &mut value, &mut create, &mut reuse)?;
     merge_profile_resources(input, &mut value, &mut create, &mut reuse)?;
     merge_resource_grants(input, &mut value, &mut create, &mut reuse)?;
+    merge_group_shares(input, &mut value, &mut create, &mut reuse)?;
+    mark_managed_group_share_resources_pending(&before, &mut value)?;
     materialize_membership_grants(input, &accounts, &mut value)?;
 
-    let aggregate = serde_json::from_value(value).map_err(|_| invalid("control aggregate"))?;
+    let mut aggregate: ControlAggregate =
+        serde_json::from_value(value).map_err(|_| invalid("control aggregate"))?;
+    for binding in &input.profile_resources {
+        if sync_manifest_to_import
+            .as_ref()
+            .is_some_and(|(workspace_id, resource_id)| {
+                workspace_id == &binding.data.workspace_id
+                    && resource_id == &binding.data.resource_id
+            })
+        {
+            continue;
+        }
+        if binding.data.archive_state != "active" {
+            continue;
+        }
+        let workspace_id = WorkspaceId::from_str(&binding.data.workspace_id)
+            .map_err(|_| invalid("profile resource workspace"))?;
+        let resource_id = ResourceId::from_str(&binding.data.resource_id)
+            .map_err(|_| invalid("profile resource ID"))?;
+        let manifest_key = format!("{}:{}", workspace_id.as_str(), resource_id.as_str());
+        if !aggregate.sync_manifests.contains_key(&manifest_key) {
+            let empty_payload =
+                PayloadDescriptor::new(workspace_id.clone(), resource_id.clone(), 1, Vec::new())?;
+            let genesis = SyncManifest::new(
+                workspace_id,
+                resource_id,
+                1,
+                1,
+                None,
+                &empty_payload.canonical_root_bytes(),
+                Vec::new(),
+            )?;
+            aggregate.sync_manifests.insert(manifest_key, genesis);
+        }
+    }
     let after_sha256 = value_checksum(&aggregate)?;
     Ok(Prepared {
         before,
         aggregate,
         account_puts,
+        identity_puts,
         plan: Plan {
             package_id: input.package_id.clone(),
             package_sha256,
@@ -805,6 +1239,110 @@ fn account_models(
         .collect()
 }
 
+fn legacy_username(account_id: &str) -> String {
+    format!("legacy-{}", &hex_digest(account_id.as_bytes())[..32])
+}
+
+fn migrated_profile_runtime(legacy_runtime: &str) -> Runtime {
+    match legacy_runtime.trim().to_ascii_lowercase().as_str() {
+        "wayfern" => Runtime::Wayfern,
+        "bugmini" => Runtime::Bugmini,
+        _ => Runtime::Preserved,
+    }
+}
+
+fn merge_group_shares(
+    input: &ControlImportInput,
+    aggregate: &mut Value,
+    create: &mut Counts,
+    reuse: &mut Counts,
+) -> Result<(), Problem> {
+    use crate::services::groups::{GroupRecord, GroupService};
+    use buglogin_domain::{
+        entities::Group,
+        grant::GroupShareGrant,
+        ids::{GrantId, MemberId},
+    };
+
+    let mut service: GroupService = serde_json::from_value(
+        aggregate
+            .get("groups")
+            .cloned()
+            .ok_or_else(|| invalid("groups"))?,
+    )
+    .map_err(|_| invalid("groups"))?;
+    let groups = input
+        .groups
+        .iter()
+        .filter(|record| record.data.workspace_id.is_some())
+        .map(|record| {
+            require_record(&record.schema, "buglogin.group/1", record.revision)?;
+            let workspace_id = record
+                .data
+                .workspace_id
+                .as_deref()
+                .ok_or_else(|| invalid("group workspace"))?;
+            let revision = u64::from(record.revision);
+            Ok(GroupRecord {
+                group: Group {
+                    id: GroupId::from_str(&record.id).map_err(|_| invalid("group ID"))?,
+                    name: record.data.name.clone(),
+                    appearance: record.data.appearance.clone(),
+                    created_at: optional_timestamp(
+                        record.created_at.as_deref(),
+                        "group createdAt",
+                    )?
+                    .unwrap_or_else(|| "1970-01-01T00:00:00Z".into()),
+                    updated_at: optional_timestamp(
+                        record.updated_at.as_deref(),
+                        "group updatedAt",
+                    )?
+                    .unwrap_or_else(|| "1970-01-01T00:00:00Z".into()),
+                },
+                workspace_id: WorkspaceId::from_str(workspace_id)
+                    .map_err(|_| invalid("group workspace"))?,
+                revision,
+            })
+        })
+        .collect::<Result<Vec<_>, Problem>>()?;
+    let group_grants = input
+        .group_grants
+        .iter()
+        .map(|record| {
+            require_versioned_record(&record.schema, "buglogin.group-grant/1", record.revision)?;
+            let revoked_at =
+                optional_timestamp(record.data.revoked_at.as_deref(), "group grant revokedAt")?;
+            Ok(GroupShareGrant {
+                id: GrantId::from_str(&record.id).map_err(|_| invalid("group grant ID"))?,
+                workspace_id: WorkspaceId::from_str(&record.data.workspace_id)
+                    .map_err(|_| invalid("group grant workspace"))?,
+                group_id: GroupId::from_str(&record.data.group_id)
+                    .map_err(|_| invalid("group grant group"))?,
+                member_id: MemberId::from_str(&record.data.member_id)
+                    .map_err(|_| invalid("group grant member"))?,
+                action: serde_json::from_value(json!(record.data.action))
+                    .map_err(|_| invalid("group grant action"))?,
+                effect: serde_json::from_value(json!(record.data.effect))
+                    .map_err(|_| invalid("group grant effect"))?,
+                revision: u64::from(record.revision),
+                created_at: required_timestamp(
+                    record.created_at.as_deref(),
+                    "group grant createdAt",
+                )?,
+                revoked_at,
+            })
+        })
+        .collect::<Result<Vec<_>, Problem>>()?;
+    let (created_groups, reused_groups, created_grants, reused_grants) =
+        service.import_records(groups, group_grants)?;
+    create.groups += created_groups;
+    reuse.groups += reused_groups;
+    create.group_grants += created_grants;
+    reuse.group_grants += reused_grants;
+    aggregate["groups"] = serde_json::to_value(service).map_err(|_| invalid("groups"))?;
+    Ok(())
+}
+
 fn merge_profiles(
     input: &ControlImportInput,
     aggregate: &mut Value,
@@ -820,29 +1358,57 @@ fn merge_profiles(
     for record in &input.profiles {
         require_record(&record.schema, "buglogin.profile/1", record.revision)?;
         validate_name(&record.data.name, "profile name")?;
+        let legacy_runtime = record
+            .extensions
+            .get("legacy_runtime")
+            .and_then(Value::as_str)
+            .unwrap_or(&record.data.runtime);
+        let runtime = migrated_profile_runtime(legacy_runtime);
+        let preserve_runtime = runtime == Runtime::Preserved;
+        let preserve_profile_data = record.data.migration_class == "preserve-only"
+            || record.data.source_data_object.disposition.classification
+                == ProfileDataClassification::Excluded;
+        let runtime_config = if preserve_runtime {
+            Some(json!({
+                "migration": {
+                    "disposition": "preserve-only",
+                    "legacyRuntime": legacy_runtime,
+                    "legacyRuntimeConfig": record.data.legacy_runtime_config.clone()
+                }
+            }))
+        } else {
+            crate::services::profile_creation::ProfileCreationService::validate_legacy_profile_data(
+                &runtime,
+                record.data.legacy_runtime_config.as_ref(),
+                None,
+            )?;
+            record.data.legacy_runtime_config.clone()
+        };
         let id = ProfileId::from_str(&record.id).map_err(|_| invalid("profile ID"))?;
         let created_at = optional_timestamp(record.created_at.as_deref(), "profile createdAt")?
             .unwrap_or_else(|| "1970-01-01T00:00:00Z".into());
         let updated_at = optional_timestamp(record.updated_at.as_deref(), "profile updatedAt")?
             .unwrap_or_else(|| created_at.clone());
-        let runtime = match record.data.runtime.as_str() {
-            "wayfern" => Runtime::Wayfern,
-            "bugox" => Runtime::Bugox,
-            "bugium" => Runtime::Bugium,
-            "bugmini" => Runtime::Bugmini,
-            "bugthor" => Runtime::Bugthor,
-            "bughelium" => Runtime::Bughelium,
-            _ => return Err(invalid("profile runtime")),
-        };
         let profile = Profile {
             id,
             name: record.data.name.clone(),
             runtime,
             runtime_version: record.data.runtime_version.clone(),
-            runtime_config: record.data.legacy_runtime_config.clone(),
-            state: ProfileState::Ready,
+            runtime_config,
+            state: if managed_profiles.contains(record.id.as_str())
+                || preserve_runtime
+                || preserve_profile_data
+            {
+                ProfileState::Created
+            } else {
+                ProfileState::Ready
+            },
             archived: false,
-            fingerprint: legacy_runtime_fingerprint(record.data.legacy_runtime_config.as_ref())?,
+            fingerprint: if preserve_runtime {
+                None
+            } else {
+                legacy_runtime_fingerprint(record.data.legacy_runtime_config.as_ref())?
+            },
             note: record.data.note.clone(),
             proxy_id: record
                 .data
@@ -1054,6 +1620,16 @@ fn merge_members(
             &mut reuse.members,
             "member",
         )?;
+    }
+    let mut active_memberships = BTreeSet::new();
+    for value in members.values() {
+        let member: Member =
+            serde_json::from_value(value.clone()).map_err(|_| invalid("member collection"))?;
+        if member.status == MemberStatus::Active
+            && !active_memberships.insert((member.account_id, member.workspace_id))
+        {
+            return Err(invalid("duplicate active account workspace membership"));
+        }
     }
     Ok(())
 }
@@ -1444,6 +2020,25 @@ fn validate_graph(input: &ControlImportInput) -> Result<(), Problem> {
         input.grants.iter().map(|record| record.id.as_str()),
         "grant",
     )?;
+    let group_workspaces = input
+        .groups
+        .iter()
+        .filter_map(|group| {
+            group
+                .data
+                .workspace_id
+                .as_deref()
+                .map(|workspace| (group.id.as_str(), workspace))
+        })
+        .collect::<BTreeMap<_, _>>();
+    unique_ids(
+        input.groups.iter().map(|record| record.id.as_str()),
+        "group",
+    )?;
+    unique_ids(
+        input.group_grants.iter().map(|record| record.id.as_str()),
+        "group grant",
+    )?;
     for organization in &input.organizations {
         if !accounts.contains(organization.data.account_id.as_str()) {
             return Err(invalid("organization account reference"));
@@ -1525,7 +2120,227 @@ fn validate_graph(input: &ControlImportInput) -> Result<(), Problem> {
             return Err(invalid("grant reference"));
         }
     }
+    for grant in &input.group_grants {
+        if !workspaces.contains(grant.data.workspace_id.as_str())
+            || !members.contains(grant.data.member_id.as_str())
+            || member_workspaces
+                .get(grant.data.member_id.as_str())
+                .copied()
+                != Some(grant.data.workspace_id.as_str())
+            || group_workspaces.get(grant.data.group_id.as_str()).copied()
+                != Some(grant.data.workspace_id.as_str())
+        {
+            return Err(invalid("group grant reference"));
+        }
+    }
+    for profile in &input.profiles {
+        if profile
+            .data
+            .group_id
+            .as_deref()
+            .is_some_and(|group_id| !group_workspaces.contains_key(group_id))
+        {
+            return Err(invalid("profile group reference"));
+        }
+    }
     Ok(())
+}
+
+fn mark_managed_group_share_resources_pending(
+    before: &ControlAggregate,
+    aggregate: &mut Value,
+) -> Result<(), Problem> {
+    let after_groups: crate::services::groups::GroupService = serde_json::from_value(
+        aggregate
+            .get("groups")
+            .cloned()
+            .ok_or_else(|| invalid("groups"))?,
+    )
+    .map_err(|_| invalid("groups"))?;
+    let after_profiles: BTreeMap<ProfileId, buglogin_storage::local::Versioned<Profile>> =
+        serde_json::from_value(
+            aggregate
+                .get("profiles")
+                .cloned()
+                .ok_or_else(|| invalid("profiles"))?,
+        )
+        .map_err(|_| invalid("profiles"))?;
+    let after_bindings: BTreeMap<ProfileId, ProfileResource> = serde_json::from_value(
+        aggregate
+            .get("profile_resources")
+            .cloned()
+            .ok_or_else(|| invalid("profile resources"))?,
+    )
+    .map_err(|_| invalid("profile resources"))?;
+    let sync_manifests: BTreeMap<String, SyncManifest> = serde_json::from_value(
+        aggregate
+            .get("sync_manifests")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    )
+    .map_err(|_| invalid("sync manifests"))?;
+
+    let before_grants = before.groups.all_share_grants().collect::<Vec<_>>();
+    let after_grants = after_groups.all_share_grants().collect::<Vec<_>>();
+    let changed_group_grants = changed_group_share_key_rotation_groups(
+        before_grants.iter().copied(),
+        after_grants.iter().copied(),
+    );
+    let all_key_rotation_groups =
+        group_share_key_rotation_groups(before_grants.iter().chain(after_grants.iter()).copied());
+
+    let assignments = after_profiles.iter().map(|(profile_id, profile)| {
+        (
+            profile_id.as_str(),
+            profile
+                .value
+                .group_ids
+                .iter()
+                .map(|group_id| (profile_id.as_str(), Some(group_id.as_str())))
+                .collect::<Vec<_>>(),
+        )
+    });
+    let assigned_groups = assignments.flat_map(|(_, group_ids)| group_ids);
+    let resource_bindings = after_bindings.values().map(|binding| {
+        (
+            binding.profile_id.as_str(),
+            binding.workspace_id.as_str(),
+            binding.resource_id.as_str(),
+        )
+    });
+    let mut keys = pending_group_share_resource_keys(
+        changed_group_grants
+            .iter()
+            .map(|(workspace_id, group_id)| (workspace_id.as_str(), group_id.as_str())),
+        assigned_groups,
+        resource_bindings,
+    );
+
+    let profile_ids = before
+        .profiles
+        .keys()
+        .chain(after_profiles.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for profile_id in profile_ids {
+        let previous_groups = before
+            .profiles
+            .get(&profile_id)
+            .map(|profile| &profile.value.group_ids);
+        let current_groups = after_profiles
+            .get(&profile_id)
+            .map(|profile| &profile.value.group_ids);
+        if previous_groups == current_groups {
+            continue;
+        }
+        let Some(binding) = after_bindings.get(&profile_id) else {
+            continue;
+        };
+        let workspace_id = binding.workspace_id.as_str();
+        let mut groups = previous_groups
+            .into_iter()
+            .flat_map(|groups| groups.iter())
+            .chain(current_groups.into_iter().flat_map(|groups| groups.iter()));
+        if groups.any(|group_id| {
+            all_key_rotation_groups
+                .contains(&(workspace_id.to_owned(), group_id.as_str().to_owned()))
+        }) {
+            keys.insert(format!("{}:{}", workspace_id, binding.resource_id.as_str()));
+        }
+    }
+    keys.retain(|key| {
+        sync_manifests
+            .get(key)
+            .is_some_and(|manifest| manifest.payload_encryption.is_some())
+    });
+    let mut pending: BTreeSet<String> = serde_json::from_value(
+        aggregate
+            .get("resource_key_rotation_pending")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|_| invalid("pending profile key rotations"))?;
+
+    pending.extend(keys);
+    aggregate["resource_key_rotation_pending"] =
+        serde_json::to_value(pending).map_err(|_| invalid("pending profile key rotations"))?;
+    Ok(())
+}
+
+fn requires_group_share_key_rotation(action: buglogin_domain::permissions::Action) -> bool {
+    matches!(
+        action,
+        buglogin_domain::permissions::Action::Read | buglogin_domain::permissions::Action::Execute
+    )
+}
+
+fn changed_group_share_key_rotation_groups<'a>(
+    before: impl Iterator<Item = &'a GroupShareGrant>,
+    after: impl Iterator<Item = &'a GroupShareGrant>,
+) -> BTreeSet<(String, String)> {
+    let before = before
+        .map(|grant| (grant.id.clone(), grant))
+        .collect::<BTreeMap<_, _>>();
+    let after = after
+        .map(|grant| (grant.id.clone(), grant))
+        .collect::<BTreeMap<_, _>>();
+    let grant_ids = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    grant_ids
+        .iter()
+        .filter_map(|grant_id| {
+            let previous = before.get(grant_id).copied();
+            let current = after.get(grant_id).copied();
+            (previous != current).then_some([previous, current])
+        })
+        .flat_map(|grants| grants.into_iter().flatten())
+        .filter(|grant| requires_group_share_key_rotation(grant.action))
+        .map(|grant| {
+            (
+                grant.workspace_id.as_str().to_owned(),
+                grant.group_id.as_str().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn group_share_key_rotation_groups<'a>(
+    grants: impl Iterator<Item = &'a GroupShareGrant>,
+) -> BTreeSet<(String, String)> {
+    grants
+        .filter(|grant| requires_group_share_key_rotation(grant.action))
+        .map(|grant| {
+            (
+                grant.workspace_id.as_str().to_owned(),
+                grant.group_id.as_str().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn pending_group_share_resource_keys<'a>(
+    key_rotation_groups: impl Iterator<Item = (&'a str, &'a str)>,
+    assigned_profiles: impl Iterator<Item = (&'a str, Option<&'a str>)>,
+    bindings: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
+) -> BTreeSet<String> {
+    let key_rotation_groups = key_rotation_groups.collect::<BTreeSet<_>>();
+    let assigned_groups = assigned_profiles
+        .filter_map(|(profile_id, group_id)| group_id.map(|group_id| (profile_id, group_id)))
+        .collect::<BTreeSet<_>>();
+    bindings
+        .filter_map(|(profile_id, workspace_id, resource_id)| {
+            key_rotation_groups
+                .iter()
+                .any(|(grant_workspace_id, grant_group_id)| {
+                    *grant_workspace_id == workspace_id
+                        && assigned_groups.contains(&(profile_id, *grant_group_id))
+                })
+                .then(|| format!("{workspace_id}:{resource_id}"))
+        })
+        .collect()
 }
 
 fn unique_ids<'a>(
@@ -1552,6 +2367,8 @@ fn empty_counts() -> Counts {
         resources: 0,
         profile_resources: 0,
         grants: 0,
+        groups: 0,
+        group_grants: 0,
     }
 }
 
@@ -1607,6 +2424,14 @@ fn require_record(schema: &str, expected: &str, revision: u32) -> Result<(), Pro
         Ok(())
     } else {
         Err(invalid("record schema"))
+    }
+}
+
+fn require_versioned_record(schema: &str, expected: &str, revision: u32) -> Result<(), Problem> {
+    if schema == expected && revision > 0 {
+        Ok(())
+    } else {
+        Err(invalid("record schema or revision"))
     }
 }
 
@@ -1746,6 +2571,46 @@ fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+pub(super) struct ControlImportPackageLock<'a> {
+    state: &'a ApiState,
+    lock_id: i64,
+}
+
+impl<'a> ControlImportPackageLock<'a> {
+    pub(super) fn acquire(state: &'a ApiState, package_id: &str) -> Result<Self, Problem> {
+        let lock_id = control_import_lock_id(package_id);
+        if !state.control_persistence.try_advisory_lock(lock_id)? {
+            return Err(problem(
+                "migration_control_import_in_progress",
+                "Control import or rollback for this package is already in progress",
+                409,
+            ));
+        }
+        Ok(Self { state, lock_id })
+    }
+
+    fn matches(&self, package_id: &str) -> bool {
+        self.lock_id == control_import_lock_id(package_id)
+    }
+}
+
+fn control_import_lock_id(package_id: &str) -> i64 {
+    let digest =
+        Sha256::digest(format!("buglogin.control-import-package-lock.v1:{package_id}").as_bytes());
+    let mut lock_bytes = [0_u8; 8];
+    lock_bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(lock_bytes)
+}
+
+impl Drop for ControlImportPackageLock<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .state
+            .control_persistence
+            .release_advisory_lock(self.lock_id);
+    }
+}
+
 fn invalid(field: &str) -> Problem {
     problem(
         "migration_control_import_invalid",
@@ -1766,11 +2631,21 @@ fn collision(entity: &str) -> Problem {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
+    use buglogin_domain::{
+        entities::Runtime,
+        grant::GroupShareGrant,
+        ids::{GrantId, GroupId, MemberId, WorkspaceId},
+        permissions::{Action, Effect},
+    };
     use buglogin_migration::package::NeutralPackage;
 
-    use super::reject_unorchestrated_sync_package;
+    use super::{
+        changed_group_share_key_rotation_groups, control_import_lock_id, migrated_profile_runtime,
+        pending_group_share_resource_keys, reject_unorchestrated_sync_package,
+        requires_group_share_key_rotation,
+    };
 
     #[test]
     fn sync_package_never_reports_false_control_import_success() {
@@ -1783,6 +2658,126 @@ mod tests {
                 .unwrap_err()
                 .code,
             "migration_sync_import_not_ready"
+        );
+    }
+
+    #[test]
+    fn control_import_lock_ids_are_stable_and_package_scoped() {
+        assert_eq!(
+            control_import_lock_id("package-a"),
+            control_import_lock_id("package-a")
+        );
+        assert_ne!(
+            control_import_lock_id("package-a"),
+            control_import_lock_id("package-b")
+        );
+    }
+
+    fn group_grant(action: Action, effect: Effect, revoked_at: Option<&str>) -> GroupShareGrant {
+        GroupShareGrant {
+            id: GrantId::from_str("grant-1").unwrap(),
+            workspace_id: WorkspaceId::from_str("workspace-1").unwrap(),
+            group_id: GroupId::from_str("group-1").unwrap(),
+            member_id: MemberId::from_str("member-1").unwrap(),
+            action,
+            effect,
+            revision: 1,
+            created_at: "2026-10-14T00:00:00Z".to_owned(),
+            revoked_at: revoked_at.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn managed_group_import_marks_only_resources_requiring_key_rotation() {
+        let grants = [
+            group_grant(Action::Read, Effect::Allow, None),
+            group_grant(Action::Execute, Effect::Allow, None),
+            group_grant(Action::Read, Effect::Deny, None),
+            group_grant(Action::Read, Effect::Allow, Some("2026-10-14T00:00:00Z")),
+            group_grant(Action::Update, Effect::Allow, None),
+        ];
+        let active = grants
+            .iter()
+            .filter(|grant| requires_group_share_key_rotation(grant.action))
+            .map(|grant| (grant.workspace_id.as_str(), grant.group_id.as_str()));
+        let keys = pending_group_share_resource_keys(
+            active,
+            [
+                ("profile-1", Some("group-1")),
+                ("profile-2", Some("group-2")),
+                ("profile-local", None),
+            ]
+            .into_iter(),
+            [
+                ("profile-1", "workspace-1", "resource-1"),
+                ("profile-2", "workspace-1", "resource-2"),
+                ("profile-local", "workspace-1", "resource-local"),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(keys, BTreeSet::from(["workspace-1:resource-1".to_owned()]));
+    }
+
+    #[test]
+    fn managed_group_import_preserves_multiple_group_assignments() {
+        let grant = group_grant(Action::Read, Effect::Allow, None);
+        let keys = pending_group_share_resource_keys(
+            [(grant.workspace_id.as_str(), grant.group_id.as_str())].into_iter(),
+            [
+                ("profile-1", Some("other-group")),
+                ("profile-1", Some("group-1")),
+            ]
+            .into_iter(),
+            [("profile-1", "workspace-1", "resource-1")].into_iter(),
+        );
+
+        assert_eq!(keys, BTreeSet::from(["workspace-1:resource-1".to_owned()]));
+    }
+
+    #[test]
+    fn group_import_rotation_fence_includes_denied_and_revoked_read_grants() {
+        for grant in [
+            group_grant(Action::Read, Effect::Deny, None),
+            group_grant(Action::Read, Effect::Allow, Some("2026-10-14T00:00:00Z")),
+        ] {
+            assert!(requires_group_share_key_rotation(grant.action));
+            let keys = pending_group_share_resource_keys(
+                [(grant.workspace_id.as_str(), grant.group_id.as_str())].into_iter(),
+                [("profile-1", Some("group-1"))].into_iter(),
+                [("profile-1", "workspace-1", "resource-1")].into_iter(),
+            );
+
+            assert_eq!(keys, BTreeSet::from(["workspace-1:resource-1".to_owned()]));
+        }
+    }
+
+    #[test]
+    fn unchanged_reimported_group_grant_does_not_reopen_rotation_fence() {
+        let grant = group_grant(Action::Read, Effect::Allow, None);
+        assert!(
+            changed_group_share_key_rotation_groups([&grant].into_iter(), [&grant].into_iter(),)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn changed_read_grant_fences_the_group_when_revoked() {
+        let active = group_grant(Action::Read, Effect::Allow, None);
+        let revoked = group_grant(Action::Read, Effect::Allow, Some("2026-10-15T00:00:00Z"));
+        assert_eq!(
+            changed_group_share_key_rotation_groups([&active].into_iter(), [&revoked].into_iter(),),
+            BTreeSet::from([("workspace-1".to_owned(), "group-1".to_owned())]),
+        );
+    }
+
+    #[test]
+    fn unsupported_legacy_runtimes_map_to_non_launchable_preserved_runtime() {
+        assert_eq!(migrated_profile_runtime("Wayfern"), Runtime::Wayfern);
+        assert_eq!(migrated_profile_runtime("bugmini"), Runtime::Bugmini);
+        assert_eq!(migrated_profile_runtime("cloak"), Runtime::Preserved);
+        assert_eq!(
+            migrated_profile_runtime("unknown-browser"),
+            Runtime::Preserved
         );
     }
 }

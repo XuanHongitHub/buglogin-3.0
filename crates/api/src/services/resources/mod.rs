@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, Bound};
 
 use buglogin_domain::{
     errors::Problem,
@@ -20,6 +20,12 @@ pub struct ResourceService {
 }
 
 impl ResourceService {
+    pub(crate) fn purge_resource(&mut self, resource_id: &ResourceId) {
+        self.grants
+            .retain(|_, grant| &grant.resource_id != resource_id);
+        self.resources.remove(resource_id);
+    }
+
     pub fn register(
         &mut self,
         principal: &Principal,
@@ -72,6 +78,38 @@ impl ResourceService {
             .cloned()
             .collect();
         Ok(items)
+    }
+
+    pub fn list_page(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        workspace: &WorkspaceId,
+        after: Option<&ResourceId>,
+        limit: usize,
+    ) -> Result<(Vec<Resource>, Option<ResourceId>), Problem> {
+        if !(1..=100).contains(&limit) {
+            return Err(problem(
+                "invalid_page_limit",
+                "Page limit must be between 1 and 100",
+                400,
+            ));
+        }
+        authorize_resource(principal, grants, workspace, None, Action::Read)?;
+        let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut rows = self
+            .resources
+            .range((lower, Bound::Unbounded))
+            .filter(|(_, resource)| &resource.workspace_id == workspace)
+            .map(|(_, resource)| resource);
+        let items = rows.by_ref().take(limit).cloned().collect::<Vec<_>>();
+        let has_more = rows.next().is_some();
+        let next_cursor = if has_more {
+            items.last().map(|resource| resource.id.clone())
+        } else {
+            None
+        };
+        Ok((items, next_cursor))
     }
 
     pub fn grant(
@@ -140,6 +178,42 @@ impl ResourceService {
             .collect())
     }
 
+    pub fn list_grants_page(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        workspace: &WorkspaceId,
+        resource: Option<&ResourceId>,
+        member: Option<&MemberId>,
+        after: Option<&GrantId>,
+        limit: usize,
+    ) -> Result<(Vec<ResourceGrant>, Option<GrantId>), Problem> {
+        if !(1..=100).contains(&limit) {
+            return Err(problem(
+                "invalid_page_limit",
+                "Page limit must be between 1 and 100",
+                400,
+            ));
+        }
+        authorize_sharing(principal, grants, workspace, resource, Action::Read)?;
+        let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut rows = self
+            .grants
+            .range((lower, Bound::Unbounded))
+            .filter(|(_, grant)| &grant.workspace_id == workspace)
+            .filter(|(_, grant)| resource.is_none_or(|id| &grant.resource_id == id))
+            .filter(|(_, grant)| member.is_none_or(|id| &grant.member_id == id))
+            .map(|(_, grant)| grant);
+        let items = rows.by_ref().take(limit).cloned().collect::<Vec<_>>();
+        let has_more = rows.next().is_some();
+        let next_cursor = if has_more {
+            items.last().map(|grant| grant.id.clone())
+        } else {
+            None
+        };
+        Ok((items, next_cursor))
+    }
+
     pub fn revoke(
         &mut self,
         principal: &Principal,
@@ -167,6 +241,36 @@ impl ResourceService {
                 && &grant.member_id == member
                 && grant.effect == Effect::Allow
         })
+    }
+
+    pub fn has_active_profile_shares(
+        &self,
+        resource: &ResourceId,
+        workspace: &WorkspaceId,
+    ) -> bool {
+        self.grants.values().any(|grant| {
+            &grant.resource_id == resource
+                && &grant.workspace_id == workspace
+                && grant.effect == Effect::Allow
+                && matches!(grant.action, Action::Read | Action::Execute)
+        })
+    }
+
+    pub fn active_profile_share_members(
+        &self,
+        resource: &ResourceId,
+        workspace: &WorkspaceId,
+    ) -> BTreeSet<MemberId> {
+        self.grants
+            .values()
+            .filter(|grant| {
+                &grant.resource_id == resource
+                    && &grant.workspace_id == workspace
+                    && grant.effect == Effect::Allow
+                    && matches!(grant.action, Action::Read | Action::Execute)
+            })
+            .map(|grant| grant.member_id.clone())
+            .collect()
     }
 
     pub fn exists_in_workspace(&self, resource: &ResourceId, workspace: &WorkspaceId) -> bool {
@@ -209,6 +313,25 @@ impl ResourceService {
             return false;
         }
         matching.any(|grant| grant.effect == Effect::Allow)
+    }
+
+    pub fn is_denied_in_workspace(
+        &self,
+        resource: &ResourceId,
+        workspace: &WorkspaceId,
+        member: &MemberId,
+        action: Action,
+    ) -> bool {
+        self.resources
+            .get(resource)
+            .is_some_and(|value| &value.workspace_id == workspace)
+            && self.grants.values().any(|grant| {
+                &grant.workspace_id == workspace
+                    && &grant.resource_id == resource
+                    && &grant.member_id == member
+                    && grant.action == action
+                    && grant.effect == Effect::Deny
+            })
     }
 }
 
@@ -389,6 +512,34 @@ mod tests {
     }
 
     #[test]
+    fn resource_pages_are_bounded_ordered_and_workspace_scoped() {
+        let (service, workspace_id, _, _) = service_with_grants();
+        let principal = principal("acct_one", &workspace_id);
+        let grants = [acl(
+            "acct_one",
+            "acl_resource_page",
+            RESOURCE_CAPABILITY,
+            Action::Read,
+            &workspace_id,
+            None,
+        )];
+
+        let (first, cursor) = service
+            .list_page(&principal, &grants, &workspace_id, None, 1)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id.as_str(), "res_one");
+        assert_eq!(cursor.as_ref().map(ResourceId::as_str), Some("res_one"));
+
+        let (second, next_cursor) = service
+            .list_page(&principal, &grants, &workspace_id, cursor.as_ref(), 1)
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id.as_str(), "res_two");
+        assert!(next_cursor.is_none());
+    }
+
+    #[test]
     fn sharing_operations_require_sharing_capability() {
         let (service, workspace_id, _, _) = service_with_grants();
         let principal = principal("acct_one", &workspace_id);
@@ -486,6 +637,54 @@ mod tests {
 
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|grant| grant.workspace_id == workspace_id));
+    }
+
+    #[test]
+    fn grant_pages_are_bounded_filtered_and_continue_by_id() {
+        let (service, workspace_id, resource_id, member_id) = service_with_grants();
+        let principal = principal("acct_one", &workspace_id);
+        let grants = [acl(
+            "acct_one",
+            "acl_share_page_read",
+            SHARING_CAPABILITY,
+            Action::Read,
+            &workspace_id,
+            None,
+        )];
+        let (first, cursor) = service
+            .list_grants_page(&principal, &grants, &workspace_id, None, None, None, 1)
+            .unwrap();
+        assert_eq!(first[0].id.as_str(), "grant_one");
+        assert_eq!(cursor.as_ref().map(GrantId::as_str), Some("grant_one"));
+
+        let (second, next_cursor) = service
+            .list_grants_page(
+                &principal,
+                &grants,
+                &workspace_id,
+                None,
+                None,
+                cursor.as_ref(),
+                1,
+            )
+            .unwrap();
+        assert_eq!(second[0].id.as_str(), "grant_two");
+        assert!(next_cursor.is_none());
+
+        let (filtered, filtered_cursor) = service
+            .list_grants_page(
+                &principal,
+                &grants,
+                &workspace_id,
+                Some(&resource_id),
+                Some(&member_id),
+                None,
+                100,
+            )
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id.as_str(), "grant_one");
+        assert!(filtered_cursor.is_none());
     }
 
     #[test]

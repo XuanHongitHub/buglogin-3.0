@@ -6,8 +6,25 @@ use crate::profile::{BrowserProfile, ProfileManager};
 use crate::proxy_manager::PROXY_MANAGER;
 use crate::wayfern_manager::{WayfernConfig, WayfernManager};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static PROFILE_LAUNCH_LOCKS: LazyLock<
+  tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+async fn lock_profile_launch(profile_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+  let lock = {
+    let mut locks = PROFILE_LAUNCH_LOCKS.lock().await;
+    locks
+      .entry(profile_id.to_string())
+      .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+      .clone()
+  };
+  lock.lock_owned().await
+}
 
 pub struct BrowserRunner {
   pub profile_manager: &'static ProfileManager,
@@ -1196,6 +1213,7 @@ pub async fn launch_browser_profile_impl(
   headless: bool,
   force_new: bool,
 ) -> Result<BrowserProfile, String> {
+  let _profile_launch_guard = lock_profile_launch(&profile.id.to_string()).await;
   log::info!(
     "Launch request received for profile: {} (ID: {})",
     profile.name,
@@ -1210,6 +1228,17 @@ pub async fn launch_browser_profile_impl(
     ));
   }
 
+  let browser_runner = BrowserRunner::instance();
+  if force_new {
+    let already_running = browser_runner
+      .check_browser_status(app_handle.clone(), &profile)
+      .await
+      .map_err(|e| format!("Failed to check browser status before launch: {e}"))?;
+    if already_running {
+      return Err(serde_json::json!({ "code": "PROFILE_RUNNING" }).to_string());
+    }
+  }
+
   // Team lock check: if profile is sync-enabled and user is on a team, acquire lock
   crate::team_lock::acquire_team_lock_if_needed(&profile).await?;
 
@@ -1221,8 +1250,6 @@ pub async fn launch_browser_profile_impl(
       scheduler.queue_profile_sync(pid).await;
     }
   }
-
-  let browser_runner = BrowserRunner::instance();
 
   // Resolve the most up-to-date profile from disk by ID to avoid using stale proxy_id/browser state
   let profile_for_launch = match browser_runner
@@ -1326,6 +1353,7 @@ pub async fn kill_browser_profile(
   app_handle: tauri::AppHandle,
   profile: BrowserProfile,
 ) -> Result<(), String> {
+  let _profile_launch_guard = lock_profile_launch(&profile.id.to_string()).await;
   log::info!(
     "Kill request received for profile: {} (ID: {})",
     profile.name,
@@ -1433,6 +1461,7 @@ pub async fn open_url_with_profile(
   profile_id: String,
   url: String,
 ) -> Result<(), String> {
+  let _profile_launch_guard = lock_profile_launch(&profile_id).await;
   let browser_runner = BrowserRunner::instance();
   browser_runner
     .open_url_with_profile(app_handle, profile_id, url)
@@ -1442,4 +1471,35 @@ pub async fn open_url_with_profile(
 // Global singleton instance
 lazy_static::lazy_static! {
   static ref BROWSER_RUNNER: BrowserRunner = BrowserRunner::new();
+}
+
+#[cfg(test)]
+mod profile_launch_lock_tests {
+  use super::lock_profile_launch;
+  use std::time::Duration;
+
+  #[tokio::test]
+  async fn serializes_the_same_profile_without_blocking_other_profiles() {
+    let profile = format!("launch-lock-{}", uuid::Uuid::new_v4());
+    let other_profile = format!("launch-lock-{}", uuid::Uuid::new_v4());
+    let first = lock_profile_launch(&profile).await;
+
+    assert!(
+      tokio::time::timeout(Duration::from_millis(100), lock_profile_launch(&other_profile))
+        .await
+        .is_ok()
+    );
+    assert!(
+      tokio::time::timeout(Duration::from_millis(100), lock_profile_launch(&profile))
+        .await
+        .is_err()
+    );
+
+    drop(first);
+    assert!(
+      tokio::time::timeout(Duration::from_millis(100), lock_profile_launch(&profile))
+        .await
+        .is_ok()
+    );
+  }
 }

@@ -1,4 +1,7 @@
-use std::sync::Mutex;
+use std::{
+    fs::{self, File, OpenOptions},
+    sync::Mutex,
+};
 
 use buglogin_domain::{
     errors::Problem,
@@ -8,9 +11,11 @@ use buglogin_storage::{
     secrets::{OsVault, SecretError, SecretKey, SecretValue},
     vault::NativeVault,
 };
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 const NAMESPACE: &str = "buglogin-proxy";
+const PENDING_NAMESPACE: &str = "buglogin-proxy-mutation";
 
 pub struct ProxyCredentialVault {
     vault: Mutex<Box<dyn OsVault + Send>>,
@@ -96,6 +101,126 @@ impl ProxyCredentialVault {
             Err(error) => Err(vault_problem(error, correlation_id)),
         }
     }
+
+    pub fn load_pending(
+        &self,
+        workspace_id: &WorkspaceId,
+        proxy_id: &ProxyId,
+        correlation_id: &str,
+    ) -> Result<Option<SecretValue>, Problem> {
+        let key = pending_key(workspace_id, proxy_id, correlation_id)?;
+        match self
+            .vault
+            .lock()
+            .map_err(|_| unavailable(correlation_id))?
+            .read(&key)
+        {
+            Ok((value, _)) => Ok(Some(value)),
+            Err(SecretError::NotFound) => Ok(None),
+            Err(error) => Err(vault_problem(error, correlation_id)),
+        }
+    }
+
+    pub fn store_pending(
+        &self,
+        workspace_id: &WorkspaceId,
+        proxy_id: &ProxyId,
+        bytes: Vec<u8>,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let key = pending_key(workspace_id, proxy_id, correlation_id)?;
+        let value =
+            SecretValue::new(bytes).map_err(|error| vault_problem(error, correlation_id))?;
+        let mut vault = self.vault.lock().map_err(|_| unavailable(correlation_id))?;
+        match vault.read(&key) {
+            Ok(_) => Err(Problem::new(
+                "proxy_mutation_pending",
+                "Another proxy change must be recovered before this change can be saved",
+                409,
+                correlation_id,
+            )),
+            Err(SecretError::NotFound) => vault.create(&key, value).map(|_| ()).map_err(|error| {
+                match error {
+                    SecretError::VersionConflict => Problem::new(
+                        "proxy_mutation_pending",
+                        "Another proxy change must be recovered before this change can be saved",
+                        409,
+                        correlation_id,
+                    ),
+                    error => vault_problem(error, correlation_id),
+                }
+            }),
+            Err(error) => Err(vault_problem(error, correlation_id)),
+        }
+    }
+
+    pub fn remove_pending(
+        &self,
+        workspace_id: &WorkspaceId,
+        proxy_id: &ProxyId,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let key = pending_key(workspace_id, proxy_id, correlation_id)?;
+        let mut vault = self.vault.lock().map_err(|_| unavailable(correlation_id))?;
+        match vault.read(&key) {
+            Ok((_, version)) => vault
+                .remove(&key, version)
+                .map_err(|error| vault_problem(error, correlation_id)),
+            Err(SecretError::NotFound) => Ok(()),
+            Err(error) => Err(vault_problem(error, correlation_id)),
+        }
+    }
+
+    pub fn acquire_mutation_lock(
+        &self,
+        workspace_id: &WorkspaceId,
+        proxy_id: &ProxyId,
+        correlation_id: &str,
+    ) -> Result<File, Problem> {
+        let root = std::env::temp_dir().join("buglogin-proxy-mutation-locks");
+        fs::create_dir_all(&root).map_err(|_| unavailable(correlation_id))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                .map_err(|_| unavailable(correlation_id))?;
+        }
+        let scoped_id = format!("{}\0{}", workspace_id.as_str(), proxy_id.as_str());
+        let digest = Sha256::digest(scoped_id.as_bytes());
+        let lock_path = root.join(format!("proxy-{:x}.lock", digest));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|_| unavailable(correlation_id))?;
+        file.try_lock_exclusive().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Problem::new(
+                    "proxy_mutation_in_progress",
+                    "Another BugLogin process is saving or recovering this proxy",
+                    409,
+                    correlation_id,
+                )
+                .retryable(true)
+            } else {
+                unavailable(correlation_id)
+            }
+        })?;
+        Ok(file)
+    }
+}
+
+fn pending_key(
+    workspace_id: &WorkspaceId,
+    proxy_id: &ProxyId,
+    correlation_id: &str,
+) -> Result<SecretKey, Problem> {
+    let scoped_id = format!("{}\0{}", workspace_id.as_str(), proxy_id.as_str());
+    let digest = Sha256::digest(scoped_id.as_bytes());
+    SecretKey::new(PENDING_NAMESPACE, format!("proxy-mutation-{:x}", digest))
+        .map_err(|error| vault_problem(error, correlation_id))
 }
 
 fn credential_key(

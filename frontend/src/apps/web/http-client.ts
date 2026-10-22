@@ -16,14 +16,12 @@ import {
   type ApiTokenCreateInput,
   type ApiTokenSummary,
   type AuditEventPage,
-  type GrantCreateInput,
   type GrantRevocationReceipt,
   type GrantSummary,
   type Group,
   type GroupCreateInput,
   type GroupDeleteInput,
   type GroupRecord,
-  type GroupRecordList,
   type GroupUpdateInput,
   type JsonValue,
   type LaunchInput,
@@ -57,7 +55,6 @@ import {
   type ResourceSummary,
   type Runtime,
   type SyncMode,
-  type TeamDeleteInput,
   type TeamRecord,
   type TeamSummary,
   type VersionedProfile,
@@ -79,7 +76,7 @@ export type WebApiClientOptions = {
   correlationId?: () => string;
 };
 
-type Health = { status: "ok"; service?: string; contractVersion?: string };
+type Readiness = { status: "ready"; service: string };
 type RequestOptions = {
   allowEmpty?: boolean;
   body?: unknown;
@@ -214,17 +211,58 @@ export function createWebApiClient(options: WebApiClientOptions): WebApiClient {
       request(`${workspaceBase}/teams`, { signal }, (value) =>
         parseArray(value, (item) => parseTeamRecord(item)?.team),
       ),
-      request(`${workspaceBase}/members`, { signal }, (value) =>
-        parseArray(value, parseMember),
-      ),
-      request(`${workspaceBase}/resources`, { signal }, (value) =>
-        parseArray(value, parseResource),
-      ),
+      fetchAllPages(`${workspaceBase}/members/page`, signal, parseMember),
+      fetchAllPages(`${workspaceBase}/resources/page`, signal, parseResource),
       request(`${workspaceBase}/grants`, { signal }, (value) =>
         parseArray(value, parseGrant),
       ),
     ]);
     return { workspace, teams, members, resources, grants };
+  }
+
+  async function fetchAllPages<T>(
+    path: string,
+    signal: AbortSignal,
+    parseItem: (value: unknown) => T | undefined,
+  ): Promise<T[]> {
+    const items: T[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const query = new URLSearchParams({ limit: "100" });
+      if (cursor !== null) query.set("cursor", cursor);
+      const page = await request(
+        `${path}?${query.toString()}`,
+        { signal },
+        (value) => {
+          if (!isRecord(value) || !Array.isArray(value.items)) return undefined;
+          const parsedItems = parseArray(value.items, parseItem);
+          const nextCursor = value.nextCursor;
+          if (!parsedItems) return undefined;
+          if (nextCursor === null)
+            return { items: parsedItems, nextCursor: null };
+          if (typeof nextCursor === "string" && nextCursor.length > 0)
+            return { items: parsedItems, nextCursor };
+          return undefined;
+        },
+      );
+      items.push(...page.items);
+      cursor = page.nextCursor;
+      if (cursor !== null) {
+        if (cursor.length > 512 || seenCursors.has(cursor))
+          throw new WebApiError({
+            type: "about:blank",
+            title: "Invalid page cursor",
+            status: 502,
+            code: "api_page_cursor_invalid",
+            retryable: false,
+            correlationId: nextCorrelationId(),
+            fields: {},
+          });
+        seenCursors.add(cursor);
+      }
+    } while (cursor !== null);
+    return items;
   }
 
   return {
@@ -257,15 +295,15 @@ export function createWebApiClient(options: WebApiClientOptions): WebApiClient {
         request(
           "/v1/auth/api-tokens",
           { body: input, method: "POST", signal },
-          (value) =>
-            isRecord(value) &&
-            typeof value.token === "string" &&
-            parseApiToken(value.tokenRecord)
-              ? {
-                  token: value.token,
-                  tokenRecord: parseApiToken(value.tokenRecord)!,
-                }
-              : undefined,
+          (value) => {
+            if (!isRecord(value) || typeof value.token !== "string") {
+              return undefined;
+            }
+            const tokenRecord = parseApiToken(value.tokenRecord);
+            return tokenRecord
+              ? { token: value.token, tokenRecord }
+              : undefined;
+          },
         ),
       revokeApiToken: (tokenId: string, signal: AbortSignal) =>
         request(
@@ -322,23 +360,27 @@ export function createWebApiClient(options: WebApiClientOptions): WebApiClient {
       logout: (signal: AbortSignal) =>
         request(
           "/v1/auth/logout",
-          { allowEmpty: true, method: "POST", signal },
+          {
+            allowEmpty: true,
+            idempotencyKey: `auth-logout-${globalThis.crypto.randomUUID()}`,
+            method: "POST",
+            signal,
+          },
           () => undefined,
         ) as Promise<void>,
     },
     reads: {
       async publicSummary(signal) {
-        const health = await request("/v1/health", { signal }, parseHealth);
-        const source =
-          health.service ??
-          (health.contractVersion
-            ? `BugLogin API contract ${health.contractVersion}`
-            : "BugLogin API");
+        const readiness = await request(
+          "/v1/readyz",
+          { signal },
+          parseReadiness,
+        );
         return {
           release: null,
           status: {
             label: "Operational",
-            detail: `${source} reports healthy.`,
+            detail: `${readiness.service} reports ready.`,
           },
         } satisfies PublicSummary;
       },
@@ -683,22 +725,16 @@ function workspacePath(scope: WorkspaceScope): string {
   return `/v1/organizations/${encodeURIComponent(scope.organizationId)}/workspaces/${encodeURIComponent(scope.workspaceId)}`;
 }
 
-function parseHealth(value: unknown): Health | undefined {
-  if (!isRecord(value) || value.status !== "ok") return undefined;
-  if (value.service !== undefined && typeof value.service !== "string")
-    return undefined;
+function parseReadiness(value: unknown): Readiness | undefined {
   if (
-    value.contractVersion !== undefined &&
-    typeof value.contractVersion !== "string"
-  )
+    !isRecord(value) ||
+    value.status !== "ready" ||
+    typeof value.service !== "string" ||
+    value.service.trim().length === 0
+  ) {
     return undefined;
-  return {
-    status: "ok",
-    ...(typeof value.service === "string" ? { service: value.service } : {}),
-    ...(typeof value.contractVersion === "string"
-      ? { contractVersion: value.contractVersion }
-      : {}),
-  };
+  }
+  return { status: "ready", service: value.service };
 }
 
 function parseAccount(value: unknown): AccountSummary | undefined {
@@ -1311,10 +1347,9 @@ function parseProxyParseReport(value: unknown): ProxyParseReport | undefined {
   const rows = Array.isArray(value.rows)
     ? value.rows.map(parseProxyParseRow)
     : undefined;
-  return rows &&
-    rows.every(
-      (row): row is ProxyParseReport["rows"][number] => row !== undefined,
-    )
+  return rows?.every(
+    (row): row is ProxyParseReport["rows"][number] => row !== undefined,
+  )
     ? {
         validCount: value.validCount,
         invalidCount: value.invalidCount,

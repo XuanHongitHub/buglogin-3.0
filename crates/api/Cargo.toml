@@ -5,6 +5,7 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+
 [dependencies]
 axum = "0.8"
 futures-util = "0.3"
@@ -21,11 +22,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 getrandom = "0.3"
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+hkdf = "0.12"
+rpassword = "7.4"
+scrypt = "0.11"
+subtle = "2.6"
 time = { version = "0.3.54", features = ["formatting"] }
 url = "2"
 tokio = { version = "1.53", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7", features = ["io", "io-util"] }
 jsonschema = { version = "0.56.0", default-features = false }
+zeroize = { version = "1.8", features = ["derive"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -36,3 +42,23 @@ workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "buglogin-bootstrap"
+path = "src/bin/buglogin-bootstrap.rs"
+
+[[bin]]
+name = "buglogin-admin-password-reset"
+path = "src/bin/buglogin-admin-password-reset.rs"
+
+[[bin]]
+name = "buglogin-dev-bootstrap"
+path = "src/bin/buglogin-dev-bootstrap.rs"
+
+[[bin]]
+name = "buglogin-dev-admin-create"
+path = "src/bin/buglogin-dev-admin-create.rs"
+
+[[bin]]
+name = "buglogin-dev-seed-multitenant"
+path = "src/bin/buglogin-dev-seed-multitenant.rs"

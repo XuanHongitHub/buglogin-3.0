@@ -7,7 +7,7 @@ use buglogin_domain::{
 use buglogin_storage::blob::checksum;
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::SyncManifest;
+use crate::manifest::{ManifestFileChunks, SyncManifest};
 
 pub const PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
@@ -62,6 +62,8 @@ pub struct PayloadDescriptor {
     pub generation: u64,
     pub root_checksum: String,
     pub objects: Vec<PayloadObject>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_chunks: Vec<ManifestFileChunks>,
 }
 
 impl PayloadDescriptor {
@@ -69,9 +71,20 @@ impl PayloadDescriptor {
         workspace_id: WorkspaceId,
         resource_id: ResourceId,
         generation: u64,
+        objects: Vec<PayloadObject>,
+    ) -> Result<Self, Problem> {
+        Self::new_with_file_chunks(workspace_id, resource_id, generation, objects, Vec::new())
+    }
+
+    pub fn new_with_file_chunks(
+        workspace_id: WorkspaceId,
+        resource_id: ResourceId,
+        generation: u64,
         mut objects: Vec<PayloadObject>,
+        mut file_chunks: Vec<ManifestFileChunks>,
     ) -> Result<Self, Problem> {
         objects.sort_by(|left, right| left.path.cmp(&right.path));
+        file_chunks.sort_by(|left, right| left.path.cmp(&right.path));
         let mut descriptor = Self {
             schema_version: PAYLOAD_SCHEMA_VERSION,
             workspace_id,
@@ -79,6 +92,7 @@ impl PayloadDescriptor {
             generation,
             root_checksum: String::new(),
             objects,
+            file_chunks,
         };
         descriptor.validate_without_root()?;
         descriptor.root_checksum = checksum(&descriptor.canonical_root_bytes());
@@ -87,8 +101,16 @@ impl PayloadDescriptor {
 
     pub fn validate(&self) -> Result<(), Problem> {
         self.validate_without_root()?;
+        let canonical_root_matches = checksum(&self.canonical_root_bytes()) == self.root_checksum;
+        // Profiles created before payload descriptors were introduced use SHA-256(empty)
+        // for their generation-1, zero-object manifest. Keep that immutable genesis
+        // readable so those profiles can still be launched and then synced forward.
+        let legacy_empty_genesis_matches = self.generation == 1
+            && self.objects.is_empty()
+            && self.file_chunks.is_empty()
+            && checksum(&[]) == self.root_checksum;
         if !valid_checksum(&self.root_checksum)
-            || checksum(&self.canonical_root_bytes()) != self.root_checksum
+            || (!canonical_root_matches && !legacy_empty_genesis_matches)
         {
             return Err(problem(
                 "payload_root_checksum_mismatch",
@@ -112,6 +134,25 @@ impl PayloadDescriptor {
             bytes.extend_from_slice(&object.size.to_be_bytes());
             bytes.extend_from_slice(object.checksum.as_bytes());
         }
+        if !self.file_chunks.is_empty() {
+            bytes.extend_from_slice(b"buglogin-payload-file-chunks-v1\0");
+            let mut files = self.file_chunks.clone();
+            files.sort_by(|left, right| left.path.cmp(&right.path));
+            for file in files {
+                append_text(&mut bytes, &file.path);
+                bytes.extend_from_slice(&file.plaintext_size.to_be_bytes());
+                append_text(&mut bytes, &file.plaintext_checksum);
+                bytes.extend_from_slice(&(file.chunks.len() as u64).to_be_bytes());
+                for chunk in file.chunks {
+                    bytes.extend_from_slice(&chunk.index.to_be_bytes());
+                    bytes.extend_from_slice(&chunk.plaintext_size.to_be_bytes());
+                    append_text(&mut bytes, &chunk.plaintext_checksum);
+                    append_text(&mut bytes, &chunk.object.key);
+                    bytes.extend_from_slice(&chunk.object.size.to_be_bytes());
+                    append_text(&mut bytes, &chunk.object.checksum);
+                }
+            }
+        }
         bytes
     }
 
@@ -122,6 +163,7 @@ impl PayloadDescriptor {
             || self.generation != manifest.generation
             || self.root_checksum != manifest.root_checksum
             || self.objects.len() != manifest.objects.len()
+            || self.file_chunks != manifest.file_chunks
         {
             return Err(problem(
                 "payload_manifest_mismatch",
@@ -169,8 +211,24 @@ impl PayloadDescriptor {
             }
             previous = Some(&object.path);
         }
+        let mut previous_file_path: Option<&str> = None;
+        for file in &self.file_chunks {
+            validate_path(&file.path)?;
+            if previous_file_path.is_some_and(|previous| previous >= file.path.as_str()) {
+                return Err(problem(
+                    "payload_file_chunks_order_invalid",
+                    "Payload file chunk mappings must be unique and ordered",
+                ));
+            }
+            previous_file_path = Some(&file.path);
+        }
         Ok(())
     }
+}
+
+fn append_text(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(value.as_bytes());
 }
 
 fn validate_path(path: &str) -> Result<(), Problem> {

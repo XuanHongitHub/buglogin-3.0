@@ -1,0 +1,20 @@
+# Native API Staging Deployment Plan
+
+Spec: `docs/superpowers/specs/2026-10-18-native-api-staging-deploy-design.md`.
+
+- [x] Inspect the actual 3.0 systemd unit, API executable path, environment-file paths, service state, and current public routes using read-only checks.
+- [x] Add artifact packaging plus a Windows-hosted release wrapper and Linux systemd activation helper scoped only to BugLogin 3.0; wrapper refuses dirty or unpushed source and validates Linux ELF and manifest hashes.
+- [x] Add a pinned GitHub Actions Linux artifact workflow that builds only a pushed commit reachable from `main`, creates SHA-256 provenance metadata, and attests all deployment inputs; local packaging verifies those attestations with GitHub CLI.
+- [x] Require a clean, pushed source commit and matching Linux API/admin-reset artifacts; verify the OpenAPI artifact matches the same checkout.
+- [x] Preserve checksummed API/operator rollback artifacts and restore them automatically if local readiness or contract verification fails. Keep a per-deployment receipt and active marker so a later public-verification failure can request rollback of only that deployment; refuse if a newer deployment is active. Script source is unexecuted.
+- [x] Require the signed runtime catalog for production readiness and reject deployment receipts with a missing or unavailable catalog. Local API readiness remains independent for CRUD development.
+- [ ] Run script-level dry-run and failure-path checks after implementation freeze; then use the documented staging deployment process.
+- [ ] Record deployed commit, hashes, readiness, OpenAPI parity, and runtime-catalog availability. Do not cut over the 1.0 hostname from this plan.
+
+Read-only evidence (2026-10-18): service `buglogin3-api` is active at `/opt/buglogin3/buglogin-api`, loads four BugLogin-specific env files, and currently runs binary SHA-256 `88b0121acda5ae7cf39ed789794e724dcee4ef9879476f5f1eafac719cbf0277`. The reset CLI is absent. The host is Ubuntu 24.04 x86-64 with glibc 2.39, matching the workflow's `ubuntu-24.04` native build target. Public readiness/OpenAPI/login return HTTP 200, while `/v1/runtime/catalog` returns 404 and the deployed OpenAPI omits that path. No production state was changed.
+
+Read-only public recheck (2026-10-18): requests must include `X-Correlation-ID`; without it, all three API routes return `correlation_required` (400). With a valid correlation ID, `/v1/readyz` returns 200 and `{"status":"ready","service":"buglogin-api"}`, but the `X-BugLogin-Runtime-Catalog` response header is absent. `/v1/openapi.yaml` returns 200 with SHA-256 `5763cf4f5ae35ff892a254a8c87d7936180d64d1d24a1aef4573a7cca21b5673` (94 paths / 100 operations), while this checkout is `106537754a469d582234d4b7cd64f72fe422fe07adfb8eebac9ae30792c5d196` (95 paths / 101 operations); the only missing operation is `runtime.catalog.get`. `/v1/runtime/catalog` returns 404. The release verifier was updated to send a correlation ID and now correctly rejects this live state because the runtime-catalog readiness header is missing. No production state was changed.
+
+Read-only public recheck (2026-10-19): `api3.buglogin.com/v1/readyz` still returns 200, but `/v1/runtime/catalog` returns 404 and the readiness response still has no `X-BugLogin-Runtime-Catalog` header. The served `/v1/openapi.yaml` is 151,476 bytes, SHA-256 `5763cf4f5ae35ff892a254a8c87d7936180d64d1d24a1aef4573a7cca21b5673` (94 paths / 119 operations); the worktree is 160,353 bytes, SHA-256 `b0cfdb6a3db55fc75afac1becf367ed23b56ddca3e45ecc8ddd1f3e714af77a6` (96 paths / 121 operations). No operation exists only in the live contract; the local-only routes are `POST /v1/auth/desktop/login` and `GET /v1/runtime/catalog`. This confirms the currently deployed API does not advertise the direct desktop email/password login route now exercised locally. No authenticated request, mutation, or deployment was made. The staging deployment gate remains open.
+
+Verification remains deferred to the single consolidated pass requested by the owner.
