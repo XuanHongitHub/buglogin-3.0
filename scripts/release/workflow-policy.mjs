@@ -2,10 +2,12 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export async function verifyReleaseWorkflows(root = resolve(import.meta.dirname, "../..")) {
-  const release = await readFile(resolve(root, ".github/workflows/release.yml"), "utf8");
-  const signing = await readFile(resolve(root, ".github/workflows/signing.yml"), "utf8");
-  const platform = await readFile(resolve(root, ".github/workflows/platform-workspace.yml"), "utf8");
-  const promotion = await readFile(resolve(root, ".github/workflows/promote-stable.yml"), "utf8");
+  const readWorkflow = async (path) =>
+    (await readFile(resolve(root, path), "utf8")).replace(/\r\n/g, "\n");
+  const release = await readWorkflow(".github/workflows/release.yml");
+  const signing = await readWorkflow(".github/workflows/signing.yml");
+  const platform = await readWorkflow(".github/workflows/platform-workspace.yml");
+  const promotion = await readWorkflow(".github/workflows/promote-stable.yml");
   verifyReleaseText(release);
   verifySigningText(signing);
   verifyPlatformText(platform);
