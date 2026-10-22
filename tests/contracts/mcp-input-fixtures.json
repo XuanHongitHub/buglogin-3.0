@@ -1,5 +1,10 @@
 {
   "Empty": {},
+  "AccountStatusUpdateCommandInput": {
+    "accountId": "acc_fixture_001",
+    "status": "suspended",
+    "expectedRevision": 1
+  },
   "GroupListInput": { "workspaceId": "ws_fixture_001" },
   "GroupIdInput": {
     "workspaceId": "ws_fixture_001",
