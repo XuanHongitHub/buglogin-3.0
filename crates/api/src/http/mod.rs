@@ -8884,20 +8884,27 @@ async fn get_operation(
     state.refresh_control_aggregate().map_err(response)?;
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
-    let operation = state
-        .operations
-        .read()
-        .map_err(|_| {
-            response(problem(
-                "operation_unavailable",
-                "Operation service unavailable",
-                503,
-            ))
-        })?
-        .get(&principal, &grants, &id)
-        .map_err(response)?
-        .clone();
-    Ok(Json(operation))
+    let read_operation = || {
+        state
+            .operations
+            .read()
+            .map_err(|_| {
+                response(problem(
+                    "operation_unavailable",
+                    "Operation service unavailable",
+                    503,
+                ))
+            })?
+            .get(&principal, &grants, &id)
+            .map_err(response)
+            .cloned()
+    };
+    let operation = read_operation()?;
+    if operation.status.is_terminal() {
+        return Ok(Json(operation));
+    }
+    control::expire_overdue_dispatch(&state, &id, request_now(&headers)?)?;
+    Ok(Json(read_operation()?))
 }
 
 #[derive(Deserialize)]

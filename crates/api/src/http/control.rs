@@ -653,14 +653,11 @@ async fn runtime_dispatch_inbox(
         ));
     }
     let current_grants = grants(&state)?;
+    let now = super::request_now(&headers)?;
+    expire_overdue_device_dispatches(&state, &tenant_ids, &device_id, now)?;
     let jobs = state
         .runtime_dispatch
-        .inbox(
-            &tenant_ids,
-            &device_id,
-            &account_id,
-            super::request_now(&headers)?,
-        )
+        .inbox(&tenant_ids, &device_id, &account_id, now)
         .map_err(response_problem)?;
     let mut items = Vec::with_capacity(jobs.len());
     for job in jobs {
@@ -772,7 +769,160 @@ async fn enqueue_runtime_dispatch(
             None,
         )
         .map_err(response_problem)?;
+    record_dispatch_operation(&state, &job)?;
     Ok((StatusCode::ACCEPTED, Json(json!({"job": job}))))
+}
+
+/// The job's operationId is what web/MCP callers poll, so it must exist as a
+/// real operation that follows the job to completed/failed.
+fn record_dispatch_operation(
+    state: &ApiState,
+    job: &crate::services::runtime_dispatch::RuntimeDispatchJob,
+) -> Result<(), Response> {
+    let replay = state
+        .operations
+        .read()
+        .map_err(|_| service_unavailable("operations"))?
+        .find(&job.operation_id)
+        .is_some();
+    if replay {
+        return Ok(());
+    }
+    let scope = ResourceScope {
+        account_id: AccountId::from_str(&job.requested_by).ok(),
+        workspace_id: WorkspaceId::from_str(&job.workspace_id).ok(),
+        profile_id: ProfileId::from_str(&job.profile_id).ok(),
+        ..ResourceScope::default()
+    };
+    state
+        .mutate_operation(
+            &job.operation_id,
+            &job.command_id,
+            "started",
+            &job.requested_by,
+            |operations| {
+                operations.insert(crate::services::operations::Operation::queued(
+                    &job.operation_id,
+                    &job.command_id,
+                    scope,
+                )?)?;
+                operations.transition(
+                    &job.operation_id,
+                    crate::services::operations::OperationStatus::Running,
+                    Some(0.1),
+                    None,
+                    None,
+                )?;
+                Ok(())
+            },
+        )
+        .map_err(response_problem)?;
+    Ok(())
+}
+
+fn finish_dispatch_operation(
+    state: &ApiState,
+    job: &crate::services::runtime_dispatch::RuntimeDispatchJob,
+    result: Result<serde_json::Value, buglogin_domain::errors::Problem>,
+) {
+    let already_terminal = state.operations.read().is_ok_and(|operations| {
+        operations
+            .find(&job.operation_id)
+            .is_none_or(|operation| operation.status.is_terminal())
+    });
+    if already_terminal {
+        return;
+    }
+    let (status, value, error) = match result {
+        Ok(value) => (
+            crate::services::operations::OperationStatus::Completed,
+            Some(value),
+            None,
+        ),
+        Err(problem) => (
+            crate::services::operations::OperationStatus::Failed,
+            None,
+            Some(problem),
+        ),
+    };
+    let progress =
+        (status == crate::services::operations::OperationStatus::Completed).then_some(1.0);
+    let _ = state.mutate_operation(
+        &job.operation_id,
+        &job.command_id,
+        "finished",
+        &job.requested_by,
+        |operations| {
+            operations.transition(&job.operation_id, status, progress, value, error)?;
+            Ok(())
+        },
+    );
+}
+
+fn expired_dispatch_problem() -> buglogin_domain::errors::Problem {
+    buglogin_domain::errors::Problem::new(
+        "runtime_job_expired",
+        "The desktop device did not finish the runtime command in time",
+        409,
+        "runtime-dispatch",
+    )
+}
+
+/// Called when a dispatch operation is read: an offline or stuck device must not leave
+/// the requester polling a "running" operation forever.
+pub(crate) fn expire_overdue_dispatch(
+    state: &ApiState,
+    operation_id: &str,
+    now: u64,
+) -> Result<(), Response> {
+    let Some(job_id) = crate::services::runtime_dispatch::job_id_for_operation(operation_id) else {
+        return Ok(());
+    };
+    let workspace_id = {
+        let operations = state
+            .operations
+            .read()
+            .map_err(|_| service_unavailable("operations"))?;
+        let Some(operation) = operations.find(operation_id) else {
+            return Ok(());
+        };
+        if operation.status.is_terminal()
+            || !matches!(
+                operation.command_id.as_str(),
+                "profile.launch" | "profile.stop"
+            )
+        {
+            return Ok(());
+        }
+        let Some(workspace_id) = operation.scope.workspace_id.clone() else {
+            return Ok(());
+        };
+        workspace_id
+    };
+    if let Some(job) = state
+        .runtime_dispatch
+        .expire_if_overdue(workspace_id.as_str(), &job_id, now)
+        .map_err(response_problem)?
+    {
+        finish_dispatch_operation(state, &job, Err(expired_dispatch_problem()));
+    }
+    Ok(())
+}
+
+fn expire_overdue_device_dispatches(
+    state: &ApiState,
+    tenant_ids: &[String],
+    device_id: &str,
+    now: u64,
+) -> Result<(), Response> {
+    for job in state
+        .runtime_dispatch
+        .expire_overdue_for_device(tenant_ids, device_id, now)
+        .map_err(response_problem)?
+    {
+        finish_dispatch_operation(state, &job, Err(expired_dispatch_problem()));
+    }
+    Ok(())
 }
 
 async fn claim_runtime_dispatch(
@@ -851,6 +1001,7 @@ async fn complete_runtime_dispatch(
         .runtime_dispatch
         .complete(&workspace_id, &job_id, &device_id, &account_id, value)
         .map_err(response_problem)?;
+    finish_dispatch_operation(&state, &job, Ok(job.result.clone().unwrap_or_default()));
     Ok(Json(json!({"job": job})))
 }
 
@@ -885,6 +1036,16 @@ async fn fail_runtime_dispatch(
             &input.failure_code,
         )
         .map_err(response_problem)?;
+    finish_dispatch_operation(
+        &state,
+        &job,
+        Err(buglogin_domain::errors::Problem::new(
+            &input.failure_code,
+            "Runtime command failed on the desktop device",
+            409,
+            "runtime-dispatch",
+        )),
+    );
     Ok(Json(json!({"job": job})))
 }
 
@@ -7115,6 +7276,97 @@ mod tests {
         PayloadEncryptionAlgorithm,
     };
     use tower::ServiceExt;
+
+    fn expiring_dispatch(
+        state: &ApiState,
+        device_id: &str,
+        key: &str,
+    ) -> crate::services::runtime_dispatch::RuntimeDispatchJob {
+        let job = state
+            .runtime_dispatch
+            .enqueue(
+                crate::services::runtime_dispatch::EnqueueRuntimeDispatch {
+                    command_id: "profile.launch".into(),
+                    workspace_id: "ws_dispatch_expiry".into(),
+                    device_id: device_id.into(),
+                    profile_id: "prf_dispatch_expiry".into(),
+                    requested_by: "acct_dispatch_expiry".into(),
+                    idempotency_key: key.into(),
+                    now: 100,
+                    expires_at: 200,
+                    input: serde_json::json!({"headless": false}),
+                },
+                None,
+            )
+            .unwrap();
+        super::record_dispatch_operation(state, &job).unwrap();
+        job
+    }
+
+    fn operation_status(
+        state: &ApiState,
+        operation_id: &str,
+    ) -> (crate::services::operations::OperationStatus, Option<String>) {
+        let operations = state.operations.read().unwrap();
+        let operation = operations.find(operation_id).unwrap();
+        (
+            operation.status,
+            operation.error.as_ref().map(|error| error.code.clone()),
+        )
+    }
+
+    #[test]
+    fn polling_an_overdue_dispatch_operation_reports_it_expired() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let job = expiring_dispatch(&state, "device_dispatch_expiry", "dispatch-expiry-key-1");
+
+        super::expire_overdue_dispatch(&state, &job.operation_id, 199).unwrap();
+        assert_eq!(
+            operation_status(&state, &job.operation_id).0,
+            crate::services::operations::OperationStatus::Running
+        );
+
+        super::expire_overdue_dispatch(&state, &job.operation_id, 200).unwrap();
+        assert_eq!(
+            operation_status(&state, &job.operation_id),
+            (
+                crate::services::operations::OperationStatus::Failed,
+                Some("runtime_job_expired".into())
+            )
+        );
+    }
+
+    #[test]
+    fn device_inbox_poll_expires_its_overdue_dispatches() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let mine = expiring_dispatch(&state, "device_dispatch_expiry", "dispatch-expiry-key-2");
+        let other = expiring_dispatch(&state, "device_dispatch_other", "dispatch-expiry-key-3");
+
+        super::expire_overdue_device_dispatches(
+            &state,
+            &["ws_dispatch_expiry".into()],
+            "device_dispatch_expiry",
+            200,
+        )
+        .unwrap();
+
+        assert_eq!(
+            operation_status(&state, &mine.operation_id).1.as_deref(),
+            Some("runtime_job_expired")
+        );
+        assert_eq!(
+            operation_status(&state, &other.operation_id).0,
+            crate::services::operations::OperationStatus::Running
+        );
+    }
 
     #[test]
     fn resource_lease_authority_tracks_key_rotation_state() {
