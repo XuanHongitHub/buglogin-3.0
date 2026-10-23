@@ -1,0 +1,83 @@
+name: BugLogin Native Linux API Artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buglogin-native-api-artifact-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Require a pushed commit on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - uses: ./.github/actions/setup-buglogin
+        with:
+          install-node-dependencies: false
+      - name: Verify desktop login contract
+        run: cargo test --locked -p buglogin-api --test http_auth desktop_login_issues_device_bound_tokens_and_rejects_bad_credentials_generically
+      - name: Build native API and password reset operator
+        run: cargo build --locked --release -p buglogin-api --bin buglogin-api --bin buglogin-admin-password-reset
+      - name: Assemble provenance manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$HOST_TRIPLE" = "x86_64-unknown-linux-gnu"
+          mkdir -p dist/native-api
+          install -m 0755 target/release/buglogin-api dist/native-api/buglogin-api
+          install -m 0755 target/release/buglogin-admin-password-reset dist/native-api/buglogin-admin-password-reset
+          install -m 0644 crates/api/openapi/openapi-v1.yaml dist/native-api/openapi-v1.yaml
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("dist/native-api")
+          def sha(name):
+              return hashlib.sha256((root / name).read_bytes()).hexdigest()
+
+          manifest = {
+              "commit": os.environ["GITHUB_SHA"],
+              "target": "x86_64-unknown-linux-gnu",
+              "artifacts": {
+                  "bugloginApiSha256": sha("buglogin-api"),
+                  "adminPasswordResetSha256": sha("buglogin-admin-password-reset"),
+                  "openApiSha256": sha("openapi-v1.yaml"),
+              },
+          }
+          (root / "release-manifest.json").write_text(
+              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
+        with:
+          subject-path: dist/native-api/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buglogin-native-api-${{ github.sha }}
+          path: dist/native-api
+          if-no-files-found: error
+          retention-days: 14
