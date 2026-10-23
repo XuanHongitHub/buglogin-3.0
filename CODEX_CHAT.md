@@ -367,3 +367,54 @@
   - Test desktop `stale_running_projection_does_not_block_local_start_but_local_process_does` pass; build/test output ở `E:\buglogin-target`.
   - API key dùng cho probe đã tự thu hồi; manifest các profile thật chưa kiểm tra được vì key cũ thiếu `CAP-NET-001:read`.
   - Desktop đang mở bằng executable cũ nên chưa nạp bản sửa Start; lần build exe trực tiếp bị Windows khóa file. Cần restart app sau khi người dùng đóng cửa sổ để nạp code mới.
+
+---
+
+## Phiên 13: Dọn nhãn thương hiệu runtime còn lộ trong UI
+- **Thời gian**: 2026-10-22
+- **Người thực hiện**: Codex
+- **Phạm vi**:
+  - File sửa: `src/i18n/locales/en.json`, `src/i18n/locales/vi.json`, `src/components/wayfern-config-dialog.tsx`, `src/components/org-management-view.tsx`, `src/lib/themes.ts`, `src/lib/api-examples.ts`.
+  - Chuẩn hóa giá trị dịch Anh/Việt đang hiển thị Donut/Wayfern thành BugLogin, Chromium hoặc mô tả trung tính; giữ nguyên translation keys, runtime identifiers và tên biến môi trường tương thích.
+  - Đổi nhãn cấu hình browser, nhãn Chromium Core, tên theme hiển thị và tiêu đề/mô tả trong ví dụ API.
+  - Xác nhận source không đặt homepage/start URL Donut khi tạo profile; launch adapter hiện lọc URL positional và thêm `chrome://newtab/`. Không xóa dữ liệu browser hiện có.
+- **Kết quả xác minh**:
+  - Desktop typecheck pass; locale JSON parse pass; `git diff --check` pass.
+  - `pnpm exec biome check` không pass do formatter báo toàn bộ file TS/TSX cần đổi line endings/format; không auto-format để tránh churn ngoài phạm vi.
+  - `cargo check --locked -p buglogin-desktop-app` pass trong `E:\buglogin-target\brand-audit` (6m58s; có warnings dead code/unused hiện hữu).
+  - Chưa có fresh Wayfern launch evidence; không khẳng định trang New Tab/shortcut đã sạch. URL legal terms của nhà cung cấp, upstream/source documentation và MCP/API/server identifiers được giữ vì là attribution hoặc compatibility surface.
+
+---
+
+## Phiên 14: Rút ngắn xác minh profile lock và đồng bộ màu profile
+- **Thời gian**: 2026-10-22
+- **Phạm vi**:
+  - Profile có lease/runtime chưa xác minh được retry riêng mỗi 2,5 giây; khi app focus, online trở lại hoặc thao tác Start/Stop kết thúc thì hỏi trạng thái lại ngay. Có khóa request để tránh các lần poll chồng lấn.
+  - Runtime lease browser giảm từ TTL 120 giây / heartbeat 30 giây xuống 60 giây / 15 giây. Lease của sync/import giữ nguyên. Lock chưa xác minh hiện icon khóa màu cảnh báo ngay trên nút Run.
+  - Màu trong chi tiết profile và màu Wayfern launch cùng đọc một giá trị: màu local đã chọn nếu hợp lệ, nếu không thì dùng màu xác định từ profile ID.
+- **Xác minh**:
+  - Rust test `profile_taskbar_colors_are_vivid_and_deterministic_per_profile` pass trong `E:\buglogin-target`.
+  - `rustfmt --check` cho các file Rust tác động, Biome parse/check cho hai file TS tác động và `git diff --check` pass.
+  - `pnpm exec tsc --noEmit` vẫn thất bại bởi các lỗi type sẵn có ở Cookie Bot, Bookmark, pre-launch, sync-config, synchronizer và trash; không báo lỗi mới ở `use-team-locks.ts` hoặc `profile-data-table.tsx`.
+  - Chưa xác minh tương tác trên cửa sổ desktop đang chạy; desktop process hiện không mở. Lease 120 giây đã cấp trước thay đổi vẫn giữ hạn cũ cho đến khi hết hạn.
+
+---
+
+## Phiên 15: Kiểm tra giới hạn maximize của cửa sổ desktop
+- **Thời gian**: 2026-10-22
+- **Người thực hiện**: Codex subagent `responsive_maximize`
+- **Phạm vi**:
+  - Đối chiếu cấu hình Tauri đang dùng, đường maximize và layout shell desktop theo UI authority/IA.
+  - `apps/desktop/src-tauri/tauri.conf.json` khai báo kích thước mở ban đầu 1440×900 và kích thước tối thiểu 960×640; không khai báo `maxWidth`/`maxHeight`.
+  - Nút maximize gọi `getCurrentWindow().toggleMaximize()`; shell desktop dùng `h-dvh`, `flex-1`, `min-w-0` và không thấy `max-width` giới hạn toàn trang.
+  - Kiểm tra thêm form fingerprint Wayfern: profile mới nhận `screen_max_width/height` từ `window.screen.width/height`; không có nút Maximize hay hardcoded cap trong đường nhập này. Các giá trị là fingerprint của browser profile, không phải kích thước cửa sổ BugLogin.
+  - Tìm thấy bảng Profiles đặt `width` bằng tổng độ rộng cột đã lưu khi có tùy chỉnh; đây là cap nội dung khả kiến khi workspace rộng hơn.
+- **Thay đổi**:
+  - Lần kiểm tra ban đầu hiểu nhầm phản ánh là bảng nội dung không lấp đầy màn hình; thay đổi `width: 100%` trong `src/components/profile-data-table.tsx` đã được gỡ vì không liên quan đến maximize native của Windows. Các thay đổi lock-status có trước trong file được giữ nguyên.
+  - Sau khi người dùng xác nhận đang nói nút maximize Windows, bỏ `minWidth: 960` và `minHeight: 640` khỏi `apps/desktop/src-tauri/tauri.conf.json`. Kích thước khởi tạo 1440×900 vẫn giữ; không đặt max size, để Windows tính kích thước maximize theo work area của monitor hiện tại.
+- **Kết luận**:
+  - Không có cấu hình giới hạn kích thước tối đa; native maximize được Windows tính theo work area. Các giới hạn tối thiểu cũ có thể cản cửa sổ co vừa những màn hình/work area nhỏ hơn, nên đã bỏ.
+  - Không có tiến trình BugLogin đang mở tại lần xác minh cuối, nên chưa có lần maximize live sau khi nạp config mới.
+- **Xác minh**:
+  - Đọc cấu hình Tauri, handler maximize và window shell. Parse lại `tauri.conf.json` thành công; xác nhận không còn `minWidth`/`minHeight`/`maxWidth`/`maxHeight`.
+  - `git diff --check` pass. Chưa build/restart desktop hoặc kiểm tra hình ảnh maximize live; cần khởi động lại app để nạp cấu hình native đã đổi.

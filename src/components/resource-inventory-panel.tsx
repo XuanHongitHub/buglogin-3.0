@@ -22,6 +22,7 @@ import type {
   ResourceGrant,
   Workspace,
 } from "../../apps/desktop/src/contracts";
+import { replaceGroupsForProfiles } from "../../apps/desktop/src/profile-group-bulk";
 import {
   appendResourceCursorPage,
   RESOURCE_INVENTORY_PAGE_SIZE,
@@ -49,6 +50,14 @@ export function ResourceInventoryPanel() {
   ]);
   const [pageIndex, setPageIndex] = useState(0);
   const [selected, setSelected] = useState<Resource | null>(null);
+  const [selectedResourceIds, setSelectedResourceIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [bulkGroupId, setBulkGroupId] = useState("__none__");
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  const [isBulkUpdating, setIsBulkUpdating] = useState(false);
+  const [bulkResult, setBulkResult] = useState<string | null>(null);
+  const [bulkErrors, setBulkErrors] = useState<string[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<ProfileRecord | null>(
     null,
   );
@@ -158,6 +167,10 @@ export function ResourceInventoryPanel() {
   useEffect(() => {
     setPageStack([{ cursor: undefined }]);
     setPageIndex(0);
+    setSelectedResourceIds(new Set());
+    setBulkConfirmOpen(false);
+    setBulkResult(null);
+    setBulkErrors([]);
     detailRequestRef.current += 1;
     setSelected(null);
     setResources([]);
@@ -217,6 +230,9 @@ export function ResourceInventoryPanel() {
       setHasNextPage(false);
       return;
     }
+    setSelectedResourceIds(new Set());
+    setBulkConfirmOpen(false);
+    setBulkResult(null);
     const request = ++requestRef.current;
     setIsLoading(true);
     try {
@@ -241,6 +257,9 @@ export function ResourceInventoryPanel() {
   const goPrevious = async () => {
     if (pageIndex === 0) return;
     const previous = pageIndex - 1;
+    setSelectedResourceIds(new Set());
+    setBulkConfirmOpen(false);
+    setBulkResult(null);
     setPageIndex(previous);
     await loadPage(workspaceId, previous, pageStack, activeFilters);
   };
@@ -358,9 +377,76 @@ export function ResourceInventoryPanel() {
   };
 
   const visibleResources = resources;
+  const selectableProfiles = visibleResources.filter(
+    (resource) => resource.kind === "profile",
+  );
+  const selectedProfiles = selectableProfiles.filter((resource) =>
+    selectedResourceIds.has(resource.id),
+  );
+
+  const toggleResourceSelection = (resourceId: string) => {
+    setSelectedResourceIds((current) => {
+      const next = new Set(current);
+      if (next.has(resourceId)) next.delete(resourceId);
+      else next.add(resourceId);
+      return next;
+    });
+    setBulkConfirmOpen(false);
+    setBulkResult(null);
+  };
+
+  const togglePageProfileSelection = () => {
+    const allSelected =
+      selectableProfiles.length > 0 &&
+      selectableProfiles.every((resource) =>
+        selectedResourceIds.has(resource.id),
+      );
+    setSelectedResourceIds((current) => {
+      const next = new Set(current);
+      for (const resource of selectableProfiles) {
+        if (allSelected) next.delete(resource.id);
+        else next.add(resource.id);
+      }
+      return next;
+    });
+    setBulkConfirmOpen(false);
+    setBulkResult(null);
+  };
+
+  const applyBulkGroups = async () => {
+    if (!workspaceId || selectedProfiles.length === 0) return;
+    setIsBulkUpdating(true);
+    const groupIds = bulkGroupId === "__none__" ? [] : [bulkGroupId];
+    setBulkErrors([]);
+    const result = await replaceGroupsForProfiles({
+      api: desktopApi,
+      workspaceId,
+      profiles: selectedProfiles.map((resource) => ({
+        id: resource.id,
+        name: resource.displayName || "Chưa đặt tên",
+      })),
+      groupIds,
+    });
+    const failedIds = new Set(
+      result.failures.map((failure) => failure.profileId),
+    );
+    setSelectedResourceIds(failedIds);
+    setBulkErrors(
+      result.failures.map((failure) => `${failure.name}: ${failure.error}`),
+    );
+    setBulkResult(
+      `Đã cập nhật ${result.succeededIds.length}/${selectedProfiles.length} profile. ${failedIds.size > 0 ? `${failedIds.size} profile lỗi vẫn được chọn để thử lại.` : ""}`,
+    );
+    setBulkConfirmOpen(false);
+    setIsBulkUpdating(false);
+    await loadPage(workspaceId, pageIndex, pageStack, activeFilters);
+  };
 
   const selectedWorkspace = workspaces.find(
     (workspace) => workspace.id === workspaceId,
+  );
+  const hasActiveFilters = Boolean(
+    activeFilters.search || activeFilters.kind || activeFilters.state,
   );
   const grantableMembers = useMemo(
     () =>
@@ -457,7 +543,102 @@ export function ResourceInventoryPanel() {
           </SelectContent>
         </Select>
         <Badge variant="outline">{resources.length} kết quả trong trang</Badge>
+        {hasActiveFilters ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setSearch("");
+              setKind("all");
+              setState("all");
+            }}
+          >
+            Xóa bộ lọc
+          </Button>
+        ) : null}
       </div>
+
+      {selectableProfiles.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3">
+          <span className="text-xs text-muted-foreground">
+            Đã chọn {selectedProfiles.length} profile trong trang này
+          </span>
+          <Select
+            value={bulkGroupId}
+            onValueChange={(value) => {
+              setBulkGroupId(value);
+              setBulkConfirmOpen(false);
+              setBulkResult(null);
+            }}
+            disabled={isBulkUpdating || isLoadingGroups || Boolean(groupsError)}
+          >
+            <SelectTrigger className="h-8 w-52 text-xs" aria-label="Nhóm đích">
+              <SelectValue placeholder="Nhóm đích" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">No Group</SelectItem>
+              {groups.map((group) => (
+                <SelectItem key={group.group.id} value={group.group.id}>
+                  {group.group.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={selectedProfiles.length === 0 || isBulkUpdating}
+            onClick={() => {
+              setBulkResult(null);
+              setBulkErrors([]);
+              setBulkConfirmOpen(true);
+            }}
+          >
+            Gán group cho profile đã chọn
+          </Button>
+          {bulkConfirmOpen && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-xs">
+              <span>
+                Thay toàn bộ group của {selectedProfiles.length} profile thành{" "}
+                {bulkGroupId === "__none__"
+                  ? "No Group"
+                  : (groups.find((group) => group.group.id === bulkGroupId)
+                      ?.group.name ?? "group đã chọn")}
+                ? Chỉ áp dụng cho trang hiện tại.
+              </span>
+              <Button
+                size="sm"
+                disabled={isBulkUpdating}
+                onClick={() => void applyBulkGroups()}
+              >
+                {isBulkUpdating ? "Đang cập nhật…" : "Xác nhận"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={isBulkUpdating}
+                onClick={() => setBulkConfirmOpen(false)}
+              >
+                Hủy
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+      {bulkResult && (
+        <div
+          role={bulkErrors.length > 0 ? "alert" : "status"}
+          className={`rounded-md border p-3 text-xs ${bulkErrors.length > 0 ? "border-destructive/30 text-destructive" : "border-border text-muted-foreground"}`}
+        >
+          <p>{bulkResult}</p>
+          {bulkErrors.map((error) => (
+            <p key={error} className="mt-1">
+              {error}
+            </p>
+          ))}
+        </div>
+      )}
 
       {loadError && (
         <div
@@ -487,6 +668,19 @@ export function ResourceInventoryPanel() {
         <table className="w-full border-collapse text-left text-sm">
           <thead className="sticky top-0 z-10 border-b bg-muted/70 text-xs text-muted-foreground">
             <tr>
+              <th className="w-9 p-2.5">
+                <Checkbox
+                  checked={
+                    selectableProfiles.length > 0 &&
+                    selectableProfiles.every((resource) =>
+                      selectedResourceIds.has(resource.id),
+                    )
+                  }
+                  onCheckedChange={togglePageProfileSelection}
+                  disabled={selectableProfiles.length === 0 || isBulkUpdating}
+                  aria-label="Chọn tất cả profile trong trang hiện tại"
+                />
+              </th>
               <th className="p-2.5">Tài nguyên</th>
               <th className="p-2.5">Loại</th>
               <th className="p-2.5">Trạng thái</th>
@@ -503,6 +697,14 @@ export function ResourceInventoryPanel() {
                     : "hover:bg-accent/30"
                 }
               >
+                <td className="p-2">
+                  <Checkbox
+                    checked={selectedResourceIds.has(resource.id)}
+                    onCheckedChange={() => toggleResourceSelection(resource.id)}
+                    disabled={resource.kind !== "profile" || isBulkUpdating}
+                    aria-label={`Chọn profile ${resource.displayName || "chưa đặt tên"}`}
+                  />
+                </td>
                 <td className="p-2">
                   <button
                     type="button"
@@ -533,24 +735,28 @@ export function ResourceInventoryPanel() {
               </tr>
             ))}
             {!isLoading &&
-              resources.length > 0 &&
-              visibleResources.length === 0 && (
+              !loadError &&
+              workspaceId &&
+              resources.length === 0 &&
+              hasActiveFilters && (
                 <tr>
                   <td
-                    colSpan={4}
+                    colSpan={5}
                     className="p-8 text-center text-muted-foreground"
                   >
-                    Không có tài nguyên khớp bộ lọc trong trang này.
+                    Không có tài nguyên khớp bộ lọc. Hãy đổi điều kiện tìm kiếm
+                    hoặc xóa bộ lọc.
                   </td>
                 </tr>
               )}
             {!isLoading &&
               resources.length === 0 &&
               !loadError &&
-              workspaceId && (
+              workspaceId &&
+              !hasActiveFilters && (
                 <tr>
                   <td
-                    colSpan={4}
+                    colSpan={5}
                     className="p-8 text-center text-muted-foreground"
                   >
                     Workspace này chưa có tài nguyên.
@@ -560,7 +766,7 @@ export function ResourceInventoryPanel() {
             {isLoading && resources.length === 0 && (
               <tr>
                 <td
-                  colSpan={4}
+                  colSpan={5}
                   role="status"
                   className="p-8 text-center text-muted-foreground"
                 >

@@ -14,7 +14,8 @@ Status: implementation reference approved by the product owner on 2026-10-23 (AS
 
 ```text
 Resources  [Workspace v]
-Search this page ...  [Type v] [State v]  Refresh
+Search resources ...  [Type v] [State v]  Refresh
+Selected: n profiles on this page  [Target group v]  [Assign group]
 -----------------------------------------------------
 Resource name | Type | State | Access summary
 ... one API page only ...
@@ -27,9 +28,11 @@ Access: direct grants (action/effect), source and effective summary
 ```
 
 - Use the existing Donut-compatible shell, compact controls, semantic tokens and table patterns.
-- Search and type/state filters apply to the currently loaded page until server-side filters are part of the API contract; label this scope clearly.
+- Search and type/state filters are applied by the API before cursor pagination; the UI resets pagination when any filter changes.
+- Selection is limited to profile rows on the loaded cursor page. Bulk group replacement previews the count and target, requires confirmation, and reports succeeded/failed profiles individually. Failed profiles remain selected for retry; it never implies selection of all matching results.
+- Group replacement changes the complete group set for each selected profile. `No Group` is a valid target and clears all group memberships.
 - Next/previous follows opaque server cursors. Never fetch all pages to paint the initial screen.
-- A resource move, group change, delete, or bulk mutation is not implied by this inventory screen.
+- A cross-workspace move or resource delete is not implied by this inventory screen.
 
 ## States
 

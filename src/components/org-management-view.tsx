@@ -49,11 +49,17 @@ import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
 
 const desktopApi = createTauriDesktopApi();
 
-export type HierarchicalRole = "owner" | "admin" | "operator" | "member";
+export type HierarchicalRole =
+  | "owner"
+  | "admin"
+  | "lead"
+  | "operator"
+  | "member";
 
 export const ROLE_RANKS: Record<string, number> = {
   owner: 4,
   admin: 3,
+  lead: 2,
   operator: 1,
   member: 0,
 };
@@ -107,10 +113,12 @@ export function OrgManagementCenter({
     id: string;
     email: string;
     role: HierarchicalRole;
+    workspaceRoles: Record<string, HierarchicalRole>;
   }>({
     id: "",
     email: "",
     role: "member",
+    workspaceRoles: {},
   });
   const [isLoading, setIsLoading] = useState(true);
   const [searchEmployeeQuery, setSearchEmployeeQuery] = useState("");
@@ -124,13 +132,6 @@ export function OrgManagementCenter({
     null,
   );
 
-  // Security Policies State (Default Auto-Logout to 0 / Disabled)
-  const [require2FA, setRequire2FA] = useState(true);
-  const [autoLogoutMinutes, setAutoLogoutMinutes] = useState(0);
-  const [blockRawCookieForOperators, setBlockRawCookieForOperators] =
-    useState(true);
-  const [mandatoryAuditLog, setMandatoryAuditLog] = useState(true);
-
   // Form states for Submodals
   const [orgBillingEmail] = useState("Chưa có dữ liệu billing");
   const [orgName, setOrgName] = useState("Đang tải tổ chức…");
@@ -143,7 +144,6 @@ export function OrgManagementCenter({
     offlineEntitled: boolean;
   }>({ maxWorkspaces: 0, offlineEntitled: false });
 
-  // Delete workspace verification
   const [deleteConfirmationName, setDeleteConfirmationName] = useState("");
   const [deleteHandleProfilesAction, setDeleteHandleProfilesAction] = useState<
     "archive" | "purge"
@@ -222,10 +222,12 @@ export function OrgManagementCenter({
 
   const manageableEmployees = useMemo(() => {
     return employees.filter((emp) => {
+      const actorRole = currentUser.workspaceRoles[emp.workspaceId];
+      if (!actorRole) return false;
       const empRank = ROLE_RANKS[emp.role] ?? 0;
       const isSelf =
         emp.id === currentUser.id || emp.email === currentUser.email;
-      return !isSelf && empRank < (ROLE_RANKS[currentUser.role] ?? 4);
+      return !isSelf && empRank < ROLE_RANKS[actorRole];
     });
   }, [employees, currentUser]);
 
@@ -259,7 +261,7 @@ export function OrgManagementCenter({
           desktopApi.updateMemberRole({
             workspaceId: member.workspaceId,
             memberId: member.id,
-            role: newRole as "owner" | "admin" | "operator" | "member",
+            role: newRole as HierarchicalRole,
           }),
         ),
       );
@@ -417,15 +419,22 @@ export function OrgManagementCenter({
             };
           }),
       );
-      const ownMembership = memberPages
+      const ownMemberships = memberPages
         .flatMap(({ page }) => page.items)
-        .find((member) => member.accountId === userId);
+        .filter(
+          (member) => member.accountId === userId && member.status === "active",
+        );
+      const workspaceRoles = Object.fromEntries(
+        ownMemberships.map((member) => [member.workspaceId, member.role]),
+      ) as Record<string, HierarchicalRole>;
+      const ownMembership = ownMemberships[0];
       setWorkspaces(loadedWorkspaces);
       setEmployees(loadedMembers);
       setCurrentUser({
         id: userId,
         email: userEmail,
         role: (ownMembership?.role as HierarchicalRole) ?? "member",
+        workspaceRoles,
       });
       setOrgName(
         primaryOrg?.name ??
@@ -523,11 +532,6 @@ export function OrgManagementCenter({
     }
   };
 
-  const handleDeleteWorkspace = () =>
-    showErrorToast(
-      "Xóa workspace chưa có API; không có dữ liệu nào bị thay đổi.",
-    );
-
   const handleSaveWorkspaceEdit = async () => {
     if (!editWsModal) return;
     try {
@@ -551,6 +555,11 @@ export function OrgManagementCenter({
       showErrorToast(String(error));
     }
   };
+
+  const handleDeleteWorkspace = () =>
+    showErrorToast(
+      "Xóa workspace chưa có API; không có dữ liệu nào bị thay đổi.",
+    );
 
   const handleSaveOrganization = async () => {
     if (!orgId) return showErrorToast("Không có tổ chức để cập nhật.");
@@ -897,7 +906,11 @@ export function OrgManagementCenter({
                   </tr>
                 ) : (
                   filteredEmployees.map((emp) => {
-                    const currentUserRank = ROLE_RANKS[currentUser.role] ?? 4;
+                    const actorRole =
+                      currentUser.workspaceRoles[emp.workspaceId];
+                    const currentUserRank = actorRole
+                      ? ROLE_RANKS[actorRole]
+                      : -1;
                     const memberRank = ROLE_RANKS[emp.role] ?? 0;
                     const isSelf =
                       emp.accountId === currentUser.id ||
@@ -942,6 +955,14 @@ export function OrgManagementCenter({
                             >
                               <LuShield className="size-3" />
                               <span>Workspace Admin</span>
+                            </Badge>
+                          )}
+                          {emp.role === "lead" && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] font-semibold"
+                            >
+                              Lead
                             </Badge>
                           )}
                           {emp.role === "operator" && (
@@ -991,14 +1012,16 @@ export function OrgManagementCenter({
                             <span className="text-[11px] text-muted-foreground italic">
                               (Tài khoản hiện tại)
                             </span>
-                          ) : isHigherOrEqual ? (
+                          ) : !actorRole || isHigherOrEqual ? (
                             <Badge
                               variant="outline"
                               className="text-[10px] text-muted-foreground border-border/80 font-normal"
                             >
-                              {t("members.protectedRole", {
-                                defaultValue: "Vai trò được bảo vệ",
-                              })}
+                              {!actorRole
+                                ? "Ngoài phạm vi quản lý"
+                                : t("members.protectedRole", {
+                                    defaultValue: "Vai trò được bảo vệ",
+                                  })}
                             </Badge>
                           ) : (
                             <div className="flex items-center justify-end gap-1.5">
@@ -1073,6 +1096,9 @@ export function OrgManagementCenter({
                   <SelectContent>
                     <SelectItem value="admin" className="text-xs">
                       Admin
+                    </SelectItem>
+                    <SelectItem value="lead" className="text-xs">
+                      Lead
                     </SelectItem>
                     <SelectItem value="operator" className="text-xs">
                       Operator
@@ -1298,147 +1324,6 @@ export function OrgManagementCenter({
           nào.
         </div>
       )}
-      {false && activeTab === "security" && (
-        <div className="space-y-4">
-          <div className="rounded-lg border border-border/70 bg-card p-4 space-y-3">
-            <div className="font-semibold text-foreground text-xs flex items-center gap-2">
-              <LuShieldCheck className="size-4 text-primary" />
-              <span>
-                CHÍNH SÁCH BẢO MẬT BẮT BUỘC TOÀN CÔNG TY (Mục 13.2 & 14.6)
-              </span>
-            </div>
-
-            <div className="space-y-2.5 text-xs">
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-border/50 hover:bg-muted/20 cursor-pointer">
-                <Checkbox
-                  aria-label="Bắt buộc xác thực 2 bước (2FA) đối với Admin & Manager"
-                  checked={require2FA}
-                  onCheckedChange={(checked) => setRequire2FA(checked === true)}
-                />
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Bắt buộc xác thực 2 bước (2FA) đối với Admin & Manager
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Ngăn chặn chiếm đoạt tài khoản quản trị khi lộ mật khẩu máy
-                    trạm.
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-2.5 rounded-lg border border-border/50 bg-background">
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Tự động đăng xuất tài khoản khi không tương tác
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Mặc định tắt: Phiên làm việc được duy trì liên tục khi làm
-                    việc, chỉ kết thúc khi đăng xuất thủ công hoặc bị quản trị
-                    viên thu hồi.
-                  </div>
-                </div>
-                <Select
-                  value={String(autoLogoutMinutes)}
-                  onValueChange={(v) => setAutoLogoutMinutes(Number(v))}
-                >
-                  <SelectTrigger className="h-8 w-48 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="0" className="text-xs">
-                      Tắt (Duy trì phiên liên tục)
-                    </SelectItem>
-                    <SelectItem value="15" className="text-xs">
-                      15 phút
-                    </SelectItem>
-                    <SelectItem value="30" className="text-xs">
-                      30 phút
-                    </SelectItem>
-                    <SelectItem value="60" className="text-xs">
-                      60 phút (1 giờ)
-                    </SelectItem>
-                    <SelectItem value="120" className="text-xs">
-                      120 phút (2 giờ)
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-border/50 hover:bg-muted/20 cursor-pointer">
-                <Checkbox
-                  aria-label="Chặn toàn bộ hành vi xuất Cookie thô đối với vai trò Operator"
-                  checked={blockRawCookieForOperators}
-                  onCheckedChange={(checked) =>
-                    setBlockRawCookieForOperators(checked === true)
-                  }
-                />
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Chặn toàn bộ hành vi xuất Cookie thô đối với vai trò
-                    Operator (DLP Enforced)
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Nhân viên chỉ có thể mở trình duyệt đã đăng nhập sẵn; không
-                    thể copy cookie ra file văn bản mang đi.
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-border/50 hover:bg-muted/20 cursor-pointer">
-                <Checkbox
-                  aria-label="Ghi nhận Audit log cho mọi thao tác"
-                  checked={mandatoryAuditLog}
-                  onCheckedChange={(checked) =>
-                    setMandatoryAuditLog(checked === true)
-                  }
-                />
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Ghi nhận nhật ký Audit đầy đủ cho mọi thao tác mở trình
-                    duyệt và thay đổi proxy
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Lưu trữ bất biến mã checksum SHA-256 đối soát khi phát hiện
-                    gian lận.
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Danger Zone: Transfer Ownership (Mục 14.7) */}
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <div>
-                <h5 className="font-bold text-destructive flex items-center gap-1.5 text-xs">
-                  <LuCrown className="size-4" />
-                  <span>
-                    KHU VỰC CHUYỂN GIAO QUYỀN LỰC CAO NHẤT (TRANSFER OWNERSHIP)
-                  </span>
-                </h5>
-                <p className="text-[11px] text-muted-foreground mt-0.5">
-                  Chuyển quyền OWNER của {orgName} cho một nhân sự khác trong
-                  ban điều hành.
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                onClick={() =>
-                  showErrorToast(
-                    "API chuyển quyền sở hữu tổ chức chưa được hỗ trợ.",
-                  )
-                }
-                className="h-8 text-xs cursor-pointer font-medium"
-              >
-                Chuyển Nhượng Quyền Sở Hữu...
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 7. Tab 4: Billing & Tier Info */}
       {activeTab === "billing" && (
         <div className="rounded-lg border border-border p-4 text-sm text-muted-foreground">

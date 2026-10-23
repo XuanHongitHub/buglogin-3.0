@@ -541,8 +541,13 @@ export function AccountManagementPanel() {
             <SelectItem value="disabled">Đã vô hiệu hóa</SelectItem>
           </SelectContent>
         </Select>
-        <Badge variant="outline" className="h-9 gap-2 px-3 text-xs">
-          <LuUsers className="size-3.5" /> {records.length}
+        <Badge
+          variant="outline"
+          className="h-9 gap-2 px-3 text-xs"
+          aria-label={`${visibleRecords.length} kết quả trên ${records.length} tài khoản`}
+        >
+          <LuUsers className="size-3.5" /> {visibleRecords.length} /{" "}
+          {records.length}
         </Badge>
       </div>
 
@@ -569,10 +574,25 @@ export function AccountManagementPanel() {
             </Button>
           </div>
         ) : visibleRecords.length === 0 ? (
-          <div className="p-8 text-center text-sm text-muted-foreground">
-            {records.length === 0
-              ? "Chưa có account."
-              : "Không có kết quả phù hợp."}
+          <div className="flex flex-col items-center gap-2 p-8 text-center">
+            <p className="text-sm text-muted-foreground">
+              {records.length === 0
+                ? "Chưa có account."
+                : "Không có kết quả phù hợp với bộ lọc hiện tại."}
+            </p>
+            {records.length > 0 ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setSearch("");
+                  setStatusFilter("all");
+                }}
+              >
+                Xóa bộ lọc
+              </Button>
+            ) : null}
           </div>
         ) : (
           <table className="w-full border-collapse text-left text-sm">

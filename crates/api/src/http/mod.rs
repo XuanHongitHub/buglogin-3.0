@@ -5470,54 +5470,29 @@ impl ApiAuthorizationAuthority {
                 )
             })?
             .clone();
-        const CAPABILITIES: [&str; 15] = control_import::MEMBERSHIP_CAPABILITIES;
-        const ALL: [Action; 7] = [
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Delete,
-            Action::Execute,
-            Action::Share,
-            Action::Manage,
-        ];
-        const OPERATE: [Action; 5] = [
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Execute,
-            Action::Share,
-        ];
-        const USE: [Action; 2] = [Action::Read, Action::Execute];
         for member in members {
             if materialized.contains(&member.id) {
                 continue;
             }
-            let actions: &[Action] = match member.role {
-                MemberRole::Owner | MemberRole::Admin => &ALL,
-                MemberRole::Operator => &OPERATE,
-                MemberRole::Member => &USE,
-            };
-            for capability_name in CAPABILITIES {
-                let capability = Capability::new(capability_name).map_err(|_| {
+            for (capability_name, action) in control_import::role_default_pairs(&member.role) {
+                let capability = Capability::new(capability_name.clone()).map_err(|_| {
                     Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
                 })?;
-                for action in actions {
-                    grants.push(Grant {
-                        id: GrantId::new(format!(
-                            "membership:{}:{capability_name}:{action:?}",
-                            member.id.as_str()
-                        ))
-                        .map_err(|_| {
-                            Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
-                        })?,
-                        account_id: Some(member.account_id.clone()),
-                        member_id: None,
-                        capability: capability.clone(),
-                        action: *action,
-                        scope: ResourceScope::workspace(member.workspace_id.clone()),
-                        effect: Effect::Allow,
-                    });
-                }
+                grants.push(Grant {
+                    id: GrantId::new(format!(
+                        "membership:{}:{capability_name}:{action:?}",
+                        member.id.as_str()
+                    ))
+                    .map_err(|_| {
+                        Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
+                    })?,
+                    account_id: Some(member.account_id.clone()),
+                    member_id: None,
+                    capability,
+                    action,
+                    scope: ResourceScope::workspace(member.workspace_id.clone()),
+                    effect: Effect::Allow,
+                });
             }
         }
         Ok(grants)

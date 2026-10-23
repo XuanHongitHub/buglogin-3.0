@@ -23,7 +23,6 @@ import {
   LuUserCheck,
   LuUserPlus,
   LuUsers,
-  LuZap,
 } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
 import { Badge } from "@/components/ui/badge";
@@ -50,6 +49,7 @@ import { getActiveUserEmail } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
+import { analyzeBulkInvitationEmails } from "../../apps/desktop/src/member-invitation-input";
 import type {
   Member,
   MemberRole,
@@ -69,7 +69,7 @@ const desktopApi = createTauriDesktopApi();
 export const ROLE_RANKS: Record<string, number> = {
   owner: 4,
   admin: 3,
-  manager: 2,
+  lead: 2,
   operator: 1,
   member: 0,
 };
@@ -130,6 +130,11 @@ export function MemberManagementDialog({
   // Bulk Provision Modal state
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkEmailsText, setBulkEmailsText] = useState("");
+  const [bulkInputError, setBulkInputError] = useState<string | null>(null);
+  const bulkEmailAnalysis = useMemo(
+    () => analyzeBulkInvitationEmails(bulkEmailsText),
+    [bulkEmailsText],
+  );
   const [bulkRole, setBulkRole] = useState<MemberRole>("operator");
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{
@@ -144,10 +149,14 @@ export function MemberManagementDialog({
     error?: string;
   }> | null>(null);
   const [bulkCopiedAll, setBulkCopiedAll] = useState(false);
+  const bulkSuccessCount =
+    bulkResults?.filter((result) => result.status === "success").length ?? 0;
+  const bulkFailureCount =
+    bulkResults?.filter((result) => result.status === "error").length ?? 0;
 
   const currentUserRank = ROLE_RANKS[currentUser.role] ?? 0;
   const assignableRoles: MemberRole[] = (
-    ["admin", "operator", "member"] as MemberRole[]
+    ["admin", "lead", "operator", "member"] as MemberRole[]
   ).filter((r) => (ROLE_RANKS[r] ?? 0) < currentUserRank);
 
   // Resolve workspace if needed
@@ -293,7 +302,6 @@ export function MemberManagementDialog({
           defaultValue: "Đã tạo lời mời thành viên thành công",
         }),
       );
-      void loadMembers();
     } catch (err) {
       console.error("Failed to invite member:", err);
       showErrorToast(err instanceof Error ? err.message : JSON.stringify(err));
@@ -505,15 +513,26 @@ export function MemberManagementDialog({
   };
 
   const handleCreateBulkInvitations = async () => {
-    const rawList = bulkEmailsText
-      .split(/[\n,;]+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-
-    if (rawList.length === 0 || !workspaceId) return;
+    setBulkInputError(null);
+    if (!workspaceId || bulkEmailAnalysis.entryCount === 0) return;
+    if (
+      bulkEmailAnalysis.invalid.length > 0 ||
+      bulkEmailAnalysis.duplicates.length > 0 ||
+      bulkEmailAnalysis.exceedsLimit
+    ) {
+      const reasons = [
+        bulkEmailAnalysis.invalid.length > 0 &&
+          `${bulkEmailAnalysis.invalid.length} email không hợp lệ`,
+        bulkEmailAnalysis.duplicates.length > 0 &&
+          `${bulkEmailAnalysis.duplicates.length} email bị trùng`,
+        bulkEmailAnalysis.exceedsLimit && "tối đa 100 email mỗi lần",
+      ].filter(Boolean);
+      setBulkInputError(`Chưa tạo lời mời: ${reasons.join("; ")}.`);
+      return;
+    }
 
     setIsBulkProcessing(true);
-    setBulkProgress({ current: 0, total: rawList.length });
+    setBulkProgress({ current: 0, total: bulkEmailAnalysis.emails.length });
     const results: Array<{
       email: string;
       inviteCode?: string;
@@ -522,9 +541,12 @@ export function MemberManagementDialog({
       error?: string;
     }> = [];
 
-    for (let i = 0; i < rawList.length; i++) {
-      const email = rawList[i];
-      setBulkProgress({ current: i + 1, total: rawList.length });
+    for (let i = 0; i < bulkEmailAnalysis.emails.length; i++) {
+      const email = bulkEmailAnalysis.emails[i];
+      setBulkProgress({
+        current: i + 1,
+        total: bulkEmailAnalysis.emails.length,
+      });
 
       try {
         const invitation = await desktopApi.createMemberInvitation({
@@ -548,7 +570,6 @@ export function MemberManagementDialog({
 
     setBulkResults(results);
     setIsBulkProcessing(false);
-    void loadMembers();
   };
 
   const handleCopyBulkResults = async () => {
@@ -575,8 +596,8 @@ export function MemberManagementDialog({
     const rows = bulkResults.map((r) => {
       return `"${r.email}","${r.inviteCode || ""}","${r.deepLink || ""}","${bulkRole}","${r.status}"`;
     });
-    const csvContent = `data:text/csv;charset=utf-8,\uFEFF${[header, ...rows].join("\n")}`;
-    const encodedUri = encodeURI(csvContent);
+    const csvContent = [header, ...rows].join("\n");
+    const encodedUri = `data:text/csv;charset=utf-8,%EF%BB%BF${encodeURIComponent(csvContent)}`;
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
     link.setAttribute(
@@ -745,6 +766,9 @@ export function MemberManagementDialog({
                     <SelectItem value="admin" className="text-xs">
                       Admin
                     </SelectItem>
+                    <SelectItem value="lead" className="text-xs">
+                      Lead — quản lý thành viên và đội nhóm cấp thấp hơn
+                    </SelectItem>
                     <SelectItem value="operator" className="text-xs">
                       Operator
                     </SelectItem>
@@ -760,23 +784,8 @@ export function MemberManagementDialog({
                   size="sm"
                   variant="outline"
                   onClick={() => {
-                    setInviteEmail("");
-                    setInviteRole(assignableRoles[0] || "operator");
-                    setGeneratedInvite(null);
-                    setInviteModalOpen(true);
-                  }}
-                  disabled={currentUserRank <= 1}
-                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-                >
-                  <LuZap className="size-3.5 text-primary" />
-                  <span>Mời thành viên</span>
-                </Button>
-
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
                     setBulkEmailsText("");
+                    setBulkInputError(null);
                     setBulkRole(assignableRoles[0] || "operator");
                     setBulkResults(null);
                     setBulkModalOpen(true);
@@ -787,7 +796,7 @@ export function MemberManagementDialog({
                   <LuUsers className="size-3.5 text-primary" />
                   <span>
                     {t("members.bulkProvisionButton", {
-                      defaultValue: "Tạo Hàng Loạt",
+                      defaultValue: "Mời hàng loạt",
                     })}
                   </span>
                 </Button>
@@ -1218,6 +1227,10 @@ export function MemberManagementDialog({
                 defaultValue:
                   "Tạo liên kết hoặc mã mời để gửi trực tiếp cho thành viên tham gia.",
               })}
+              <span className="mt-1 block">
+                Chỉ người có account đang hoạt động và email đã xác minh mới
+                dùng được mã mời. Luồng này không tạo account hoặc mật khẩu.
+              </span>
             </DialogDescription>
           </DialogHeader>
 
@@ -1252,15 +1265,17 @@ export function MemberManagementDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="admin" className="text-xs">
-                      Admin — Toàn quyền quản trị profile và nhóm
-                    </SelectItem>
-                    <SelectItem value="operator" className="text-xs">
-                      Operator — Mở profile, che dữ liệu nhạy cảm
-                    </SelectItem>
-                    <SelectItem value="member" className="text-xs">
-                      Member — Chỉ chạy profile thuộc nhóm được chỉ định
-                    </SelectItem>
+                    {assignableRoles.map((role) => (
+                      <SelectItem key={role} value={role} className="text-xs">
+                        {role === "admin"
+                          ? "Admin — quản trị workspace"
+                          : role === "lead"
+                            ? "Lead — quản lý member và team cấp thấp hơn"
+                            : role === "operator"
+                              ? "Operator — tạo/cập nhật và chạy tài nguyên được cấp"
+                              : "Member — đọc và chạy tài nguyên được cấp"}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -1394,6 +1409,10 @@ export function MemberManagementDialog({
                 defaultValue:
                   "Nhập danh sách email để tạo lời mời dùng một lần.",
               })}
+              <span className="mt-1 block">
+                Người nhận phải có account BugLogin đang hoạt động với email đã
+                xác minh; thao tác này không tạo account hay mật khẩu.
+              </span>
             </DialogDescription>
           </DialogHeader>
 
@@ -1409,7 +1428,10 @@ export function MemberManagementDialog({
                 <textarea
                   rows={5}
                   value={bulkEmailsText}
-                  onChange={(e) => setBulkEmailsText(e.target.value)}
+                  onChange={(e) => {
+                    setBulkEmailsText(e.target.value);
+                    setBulkInputError(null);
+                  }}
                   placeholder={t("members.bulkModal.emailsPlaceholder", {
                     defaultValue:
                       "staff01@alphamedia.vn\nstaff02@alphamedia.vn\nstaff03@alphamedia.vn",
@@ -1418,16 +1440,14 @@ export function MemberManagementDialog({
                   disabled={isBulkProcessing}
                 />
                 <span className="text-[11px] text-muted-foreground">
-                  Số lượng phát hiện:{" "}
-                  <strong>
-                    {
-                      bulkEmailsText
-                        .split(/[\n,;]+/)
-                        .map((s) => s.trim())
-                        .filter((s) => s.length > 0).length
-                    }
-                  </strong>{" "}
-                  email
+                  {bulkEmailAnalysis.emails.length} hợp lệ ·{" "}
+                  {bulkEmailAnalysis.invalid.length} không hợp lệ ·{" "}
+                  {bulkEmailAnalysis.duplicates.length} trùng · tối đa 100
+                  {bulkInputError && (
+                    <span role="alert" className="block text-destructive">
+                      {bulkInputError}
+                    </span>
+                  )}
                 </span>
               </div>
 
@@ -1513,24 +1533,13 @@ export function MemberManagementDialog({
                   size="sm"
                   isLoading={isBulkProcessing}
                   onClick={() => void handleCreateBulkInvitations()}
-                  disabled={
-                    bulkEmailsText
-                      .split(/[\n,;]+/)
-                      .map((s) => s.trim())
-                      .filter((s) => s.length > 0).length === 0
-                  }
+                  disabled={bulkEmailAnalysis.entryCount === 0}
                   className="h-8 text-xs font-medium cursor-pointer"
                 >
                   {t("members.bulkModal.startButton", {
-                    count: bulkEmailsText
-                      .split(/[\n,;]+/)
-                      .map((s) => s.trim())
-                      .filter((s) => s.length > 0).length,
+                    count: bulkEmailAnalysis.emails.length,
                     defaultValue: `Tạo ${
-                      bulkEmailsText
-                        .split(/[\n,;]+/)
-                        .map((s) => s.trim())
-                        .filter((s) => s.length > 0).length
+                      bulkEmailAnalysis.emails.length
                     } lời mời`,
                   })}
                 </LoadingButton>
@@ -1538,21 +1547,34 @@ export function MemberManagementDialog({
             </div>
           ) : (
             <div className="space-y-4 py-2 text-xs">
-              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-1 text-emerald-600 dark:text-emerald-400">
+              <div
+                role="status"
+                className={cn(
+                  "rounded-lg border p-3 space-y-1",
+                  bulkFailureCount === 0
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                    : bulkSuccessCount > 0
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                      : "border-destructive/30 bg-destructive/10 text-destructive",
+                )}
+              >
                 <div className="font-semibold flex items-center gap-1.5">
-                  <LuCheck className="size-4" />
+                  {bulkFailureCount === 0 ? (
+                    <LuCheck className="size-4" />
+                  ) : (
+                    <LuInfo className="size-4" />
+                  )}
                   <span>
-                    {t("members.bulkModal.summaryTitle", {
-                      defaultValue: "Kết quả mời thành viên",
-                    })}
+                    {bulkFailureCount === 0
+                      ? "Đã tạo đủ lời mời"
+                      : bulkSuccessCount > 0
+                        ? "Đã tạo một phần lời mời"
+                        : "Không tạo được lời mời"}
                   </span>
                 </div>
                 <p className="text-[11px] opacity-90">
-                  {t("members.bulkModal.successCount", {
-                    count: bulkResults.filter((r) => r.status === "success")
-                      .length,
-                    defaultValue: `Đã tạo thành công ${bulkResults.filter((r) => r.status === "success").length} lời mời`,
-                  })}
+                  {bulkSuccessCount} thành công · {bulkFailureCount} thất bại.
+                  Mã mời chỉ hiển thị một lần; kiểm tra lỗi trước khi gửi lại.
                 </p>
               </div>
 
@@ -1566,8 +1588,11 @@ export function MemberManagementDialog({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/60">
-                    {bulkResults.map((res, idx) => (
-                      <tr key={idx} className="hover:bg-muted/20">
+                    {bulkResults.map((res) => (
+                      <tr
+                        key={res.email.toLocaleLowerCase("en-US")}
+                        className="hover:bg-muted/20"
+                      >
                         <td className="py-1.5 px-3 font-mono text-[11px]">
                           {res.email}
                         </td>
@@ -1622,7 +1647,7 @@ export function MemberManagementDialog({
                             defaultValue: "Đã chép",
                           })
                         : t("members.bulkModal.copyCredentials", {
-                            defaultValue: "Sao chép toàn bộ",
+                            defaultValue: "Sao chép mã mời",
                           })}
                     </span>
                   </Button>

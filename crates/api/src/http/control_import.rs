@@ -1932,26 +1932,44 @@ fn permission_grant(
     })
 }
 
-fn role_default_pairs(role: &MemberRole) -> BTreeSet<(String, Action)> {
-    let actions: &[Action] = match role {
-        MemberRole::Owner | MemberRole::Admin => &ALL_ACTIONS,
-        MemberRole::Operator => &[
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Execute,
-            Action::Share,
-        ],
-        MemberRole::Member => &[Action::Read, Action::Execute],
-    };
-    MEMBERSHIP_CAPABILITIES
-        .iter()
-        .flat_map(|capability| {
+pub(super) fn role_default_pairs(role: &MemberRole) -> BTreeSet<(String, Action)> {
+    const OPERATE: [Action; 5] = [
+        Action::Read,
+        Action::Create,
+        Action::Update,
+        Action::Execute,
+        Action::Share,
+    ];
+    const USE: [Action; 2] = [Action::Read, Action::Execute];
+    let mut defaults = BTreeSet::new();
+    for capability in MEMBERSHIP_CAPABILITIES {
+        let actions: &[Action] = match role {
+            MemberRole::Owner | MemberRole::Admin => &ALL_ACTIONS,
+            MemberRole::Lead => match capability {
+                "CAP-WS-001" | "CAP-AUD-001" | "events.read" | "operation.read"
+                | "profile.read" => &[Action::Read],
+                "CAP-MEM-001" => &[Action::Read, Action::Create, Action::Manage],
+                "CAP-TEAM-001" => &[Action::Read, Action::Create, Action::Update, Action::Manage],
+                _ => &OPERATE,
+            },
+            MemberRole::Operator => match capability {
+                "CAP-WS-001" | "CAP-MEM-001" | "CAP-TEAM-001" | "CAP-AUD-001" | "events.read"
+                | "operation.read" | "profile.read" => &[Action::Read],
+                _ => &OPERATE,
+            },
+            MemberRole::Member => match capability {
+                "CAP-WS-001" | "CAP-MEM-001" | "CAP-TEAM-001" | "CAP-AUD-001" | "events.read"
+                | "operation.read" | "profile.read" => &[Action::Read],
+                _ => &USE,
+            },
+        };
+        defaults.extend(
             actions
                 .iter()
-                .map(|action| ((*capability).to_owned(), *action))
-        })
-        .collect()
+                .map(|action| (capability.to_owned(), *action)),
+        );
+    }
+    defaults
 }
 
 fn legacy_action_pair(value: &str) -> Result<(String, Action), Problem> {
@@ -2462,6 +2480,7 @@ fn parse_member_role(value: &str) -> Result<MemberRole, Problem> {
     match value {
         "owner" => Ok(MemberRole::Owner),
         "admin" => Ok(MemberRole::Admin),
+        "lead" => Ok(MemberRole::Lead),
         "operator" => Ok(MemberRole::Operator),
         "member" => Ok(MemberRole::Member),
         _ => Err(invalid("member role")),
@@ -2637,6 +2656,7 @@ mod tests {
         entities::Runtime,
         grant::GroupShareGrant,
         ids::{GrantId, GroupId, MemberId, WorkspaceId},
+        member::MemberRole,
         permissions::{Action, Effect},
     };
     use buglogin_migration::package::NeutralPackage;
@@ -2644,7 +2664,7 @@ mod tests {
     use super::{
         changed_group_share_key_rotation_groups, control_import_lock_id, migrated_profile_runtime,
         pending_group_share_resource_keys, reject_unorchestrated_sync_package,
-        requires_group_share_key_rotation,
+        requires_group_share_key_rotation, role_default_pairs,
     };
 
     #[test]
@@ -2659,6 +2679,22 @@ mod tests {
                 .code,
             "migration_sync_import_not_ready"
         );
+    }
+
+    #[test]
+    fn lead_defaults_are_workspace_scoped_and_cannot_delete_or_manage_policy() {
+        let defaults = role_default_pairs(&MemberRole::Lead);
+        assert!(defaults.contains(&("CAP-MEM-001".into(), Action::Manage)));
+        assert!(defaults.contains(&("CAP-MEM-001".into(), Action::Create)));
+        assert!(defaults.contains(&("CAP-TEAM-001".into(), Action::Manage)));
+        assert!(defaults.contains(&("CAP-PROF-001".into(), Action::Update)));
+        assert!(!defaults.contains(&("CAP-MEM-001".into(), Action::Delete)));
+        assert!(!defaults.contains(&("CAP-WS-001".into(), Action::Manage)));
+        assert!(!defaults.contains(&("CAP-WS-001".into(), Action::Update)));
+        assert!(!defaults.contains(&("CAP-ADM-001".into(), Action::Create)));
+        let operator = role_default_pairs(&MemberRole::Operator);
+        assert!(!operator.contains(&("CAP-WS-001".into(), Action::Update)));
+        assert!(!operator.contains(&("CAP-MEM-001".into(), Action::Create)));
     }
 
     #[test]

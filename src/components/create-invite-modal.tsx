@@ -259,6 +259,10 @@ export function CreateInviteModal({
                   defaultValue:
                     "Tạo liên kết và mã mời thành viên tham gia workspace",
                 })}
+                <span className="mt-1 block">
+                  Người nhận cần account BugLogin đang hoạt động với email đã
+                  xác minh. Lời mời không tạo account hay mật khẩu.
+                </span>
               </DialogDescription>
             </div>
           </div>
@@ -322,7 +326,7 @@ export function CreateInviteModal({
               <Label className="text-xs font-medium text-foreground">
                 {t("invites.roleLabel", { defaultValue: "Vai trò" })}
               </Label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 {[
                   {
                     id: "admin" as MemberRole,
@@ -332,10 +336,15 @@ export function CreateInviteModal({
                     }),
                   },
                   {
-                    id: "manager" as MemberRole,
-                    label: t("roles.manager", { defaultValue: "Trưởng nhóm" }),
-                    desc: t("roles.managerDesc", {
-                      defaultValue: "Phân bổ & giám sát hồ sơ",
+                    id: "lead" as MemberRole,
+                    label: "Lead",
+                    desc: "Quản lý thành viên, đội nhóm và tài nguyên cấp thấp hơn",
+                  },
+                  {
+                    id: "member" as MemberRole,
+                    label: t("roles.member", { defaultValue: "Thành viên" }),
+                    desc: t("roles.memberDesc", {
+                      defaultValue: "Quyền theo phân công và grant được cấp",
                     }),
                   },
                   {

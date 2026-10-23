@@ -295,12 +295,19 @@ test("release verifier rejects legacy desktop artifact paths", async () => {
     () =>
       verifySigningText(
         signing.replace(
-          "target/$env:TARGET/release/buglogin-desktop-app.exe",
+          'Join-Path $releaseRoot \'buglogin-desktop-app.exe\'',
           "src-tauri/target/$env:TARGET/release/donutbrowser.exe",
         ),
       ),
     /missing|forbidden/,
   );
+});
+
+test("signing artifact lookups use the configured Cargo target directory on both OSes", async () => {
+  const { signing } = await verifyReleaseWorkflows();
+  assert.match(signing, /Join-Path \$env:CARGO_TARGET_DIR "\$env:TARGET\\release"/);
+  assert.match(signing, /BUNDLE_ROOT="\$CARGO_TARGET_DIR\/\$TARGET\/release\/bundle"/);
+  assert.doesNotMatch(signing, /target\/\$env:TARGET|target\/\$TARGET|mapfile|readarray/);
 });
 
 test("evidence generators emit SBOM, hashes, and lock-bound provenance", async () => {

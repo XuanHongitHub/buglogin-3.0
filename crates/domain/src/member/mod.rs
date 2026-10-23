@@ -13,6 +13,7 @@ pub enum MemberStatus {
 pub enum MemberRole {
     Owner,
     Admin,
+    Lead,
     Operator,
     Member,
 }

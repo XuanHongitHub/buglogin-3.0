@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, Bound};
 
 use buglogin_domain::{
     errors::Problem,
-    ids::{AccountId, MemberId, WorkspaceId},
+    ids::{AccountId, MemberId, TeamId, WorkspaceId},
     member::{Member, MemberRole, MemberStatus},
     permissions::{Action, Capability, Grant, Principal, ResourceScope, is_allowed},
 };
@@ -410,7 +410,45 @@ impl MemberService {
     }
 
     pub fn can_manage(role: MemberRole) -> bool {
-        matches!(role, MemberRole::Owner | MemberRole::Admin)
+        matches!(
+            role,
+            MemberRole::Owner | MemberRole::Admin | MemberRole::Lead
+        )
+    }
+
+    pub(super) fn team_assignment_members(&self, workspace_id: &WorkspaceId) -> Vec<Member> {
+        self.members
+            .values()
+            .filter(|member| &member.workspace_id == workspace_id)
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn replace_team_ids(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        workspace_id: &WorkspaceId,
+        assignments: &BTreeMap<MemberId, Option<TeamId>>,
+    ) -> Result<(), Problem> {
+        authorize(principal, grants, workspace_id, Action::Manage)?;
+
+        for member_id in assignments.keys() {
+            let member = self
+                .members
+                .get(member_id)
+                .filter(|member| &member.workspace_id == workspace_id)
+                .ok_or_else(|| problem("member_not_found", "Member not found", 404))?;
+            self.ensure_actor_can_manage_role(principal, workspace_id, &member.role)?;
+        }
+
+        for (member_id, team_id) in assignments {
+            self.members
+                .get_mut(member_id)
+                .expect("team assignment target was validated")
+                .team_id = team_id.clone();
+        }
+        Ok(())
     }
 }
 
@@ -439,8 +477,9 @@ fn role_rank(role: &MemberRole) -> u8 {
     match role {
         MemberRole::Member => 0,
         MemberRole::Operator => 1,
-        MemberRole::Admin => 2,
-        MemberRole::Owner => 3,
+        MemberRole::Lead => 2,
+        MemberRole::Admin => 3,
+        MemberRole::Owner => 4,
     }
 }
 
@@ -454,7 +493,7 @@ mod tests {
     use buglogin_domain::{
         ids::{AccountId, MemberId, WorkspaceId},
         member::{Member, MemberRole, MemberStatus},
-        permissions::{Principal, Role},
+        permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, Role},
     };
     use std::collections::BTreeSet;
 
@@ -530,5 +569,97 @@ mod tests {
             .unwrap();
         assert_eq!(unchanged.status, MemberStatus::Invited);
         assert_eq!(unchanged.role, MemberRole::Member);
+    }
+
+    #[test]
+    fn lead_manages_subordinate_roles_but_cannot_assign_admin_or_owner() {
+        let workspace = WorkspaceId::new("ws_lead_scope").unwrap();
+        let lead_account = AccountId::new("acct_lead_scope").unwrap();
+        let lead_id = MemberId::new("mem_lead_scope").unwrap();
+        let target_id = MemberId::new("mem_target_scope").unwrap();
+        let platform_admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        let mut members = MemberService::default();
+        let lead = Member {
+            id: lead_id,
+            account_id: lead_account.clone(),
+            workspace_id: workspace.clone(),
+            team_id: None,
+            role: MemberRole::Lead,
+            status: MemberStatus::Invited,
+            invite_expires_at: Some(100),
+        };
+        let target = Member {
+            id: target_id.clone(),
+            account_id: AccountId::new("acct_target_scope").unwrap(),
+            workspace_id: workspace.clone(),
+            team_id: None,
+            role: MemberRole::Member,
+            status: MemberStatus::Invited,
+            invite_expires_at: Some(100),
+        };
+        members.invite(&platform_admin, &[], lead, 1).unwrap();
+        members.invite(&platform_admin, &[], target, 1).unwrap();
+        members
+            .activate(
+                &platform_admin,
+                &[],
+                &workspace,
+                &MemberId::new("mem_lead_scope").unwrap(),
+                2,
+            )
+            .unwrap();
+        members
+            .activate(&platform_admin, &[], &workspace, &target_id, 2)
+            .unwrap();
+
+        let lead_principal = Principal {
+            account_id: Some(lead_account),
+            workspace_ids: BTreeSet::from([workspace.clone()]),
+            ..Principal::default()
+        };
+        let manage_members = Grant {
+            id: buglogin_domain::ids::GrantId::new("grant_lead_member_manage").unwrap(),
+            account_id: None,
+            member_id: None,
+            capability: Capability::new("CAP-MEM-001").unwrap(),
+            action: Action::Manage,
+            scope: ResourceScope::workspace(workspace.clone()),
+            effect: Effect::Allow,
+        };
+        assert!(MemberService::can_manage(MemberRole::Lead));
+        members
+            .set_role(
+                &lead_principal,
+                std::slice::from_ref(&manage_members),
+                &workspace,
+                &target_id,
+                MemberRole::Operator,
+            )
+            .unwrap();
+        assert_eq!(
+            members
+                .get_in_workspace(&platform_admin, &[], &target_id, &workspace)
+                .unwrap()
+                .role,
+            MemberRole::Operator
+        );
+        for forbidden_role in [MemberRole::Admin, MemberRole::Owner] {
+            assert_eq!(
+                members
+                    .set_role(
+                        &lead_principal,
+                        &[manage_members.clone()],
+                        &workspace,
+                        &target_id,
+                        forbidden_role,
+                    )
+                    .unwrap_err()
+                    .code,
+                "role_escalation"
+            );
+        }
     }
 }
