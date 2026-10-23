@@ -2122,6 +2122,14 @@ impl RemoteApiClient {
                     path.push_str("&cursor=");
                     path.push_str(&urlencoding(&cursor));
                 }
+                for key in ["search", "kind", "state"] {
+                    if let Some(value) = payload.get(key).and_then(Value::as_str) {
+                        path.push('&');
+                        path.push_str(key);
+                        path.push('=');
+                        path.push_str(&urlencoding(value));
+                    }
+                }
                 self.get::<Value>(&path, correlation).await?
             },
             "resource_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"resourceId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/resources/{id}"),correlation).await? },

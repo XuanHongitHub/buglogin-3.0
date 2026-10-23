@@ -5,7 +5,7 @@
 3. [ ] Complete account-to-membership-to-role invite flow using existing authenticated APIs; keep identity creation separate from scoped access.
 4. [ ] Design and implement versioned delegated-role/account APIs for organization, workspace, and team scope, including role capability ceilings and audit.
 5. [~] Implement scalable resource inventory, group/profile assignment, access detail, and guarded bulk operations using real backend pagination and state.
-6. [ ] Verify API ACL/revision/audit, frontend typecheck/tests, contract parity, accessibility, visual/interaction evidence, and Windows/macOS acceptance.
+6. [~] Verify API ACL/revision/audit, frontend typecheck/tests, contract parity, accessibility, visual/interaction evidence, and Windows/macOS acceptance.
 
 ## Verification record
 
@@ -20,4 +20,8 @@
 - `pnpm --dir apps/desktop build` passes after making the shared public-entry TSX imports explicit and emits assets under `G:\buglogin-target\desktop-dist`; existing sourcemap, `use client`, mixed dynamic-import, and large-chunk warnings remain.
 - Replaced the hard-coded fake pending invitation card in `PendingInvitesDialog` with an explicit state because there is no invitation inbox/list API.
 - Added `ResourceInventoryPanel` with workspace selection, bounded 50-row cursor pagination, current-page filters, refresh, detail, and direct-grant inspection; added its approved ASCII reference at `docs/design/references/DES-ADM-02-resource-inventory.md`. The existing API does not expose team-inherited grant provenance, resource moves, or bulk resource mutations; the screen says so explicitly.
-- Still required before this packet is complete: delegated account provisioning/membership assignment, Lead/custom role contract and Rust/MCP authorization, resource assignment/move and guarded bulk operations, tests for partial bulk failure/scope enforcement, visual/interaction evidence, and Windows/macOS install/update smoke. No release promotion is authorized by this implementation pass.
+- Added opt-in member identity projection to both REST member list responses. Identity fields are included only for callers authorized for `CAP-MEM-001:manage` in that workspace; read-only callers receive the same membership rows without username/email. The invitation lifecycle HTTP test now asserts both paths.
+- Resource detail supports editing profile group membership through the existing revision-checked endpoint, including clearing all memberships (`groupIds: []`) for No Group. It also supports direct member grants/revocation when the caller has the existing share-management authority; the API remains the authorization source.
+- Reconciled existing BugLab SSO REST operations with the canonical command registry and corrected the account-list contract assertion to reflect its paginated admin DTO. `pnpm test:contract` passes (35 checks, capability/command drift checks included).
+- Latest verification: invitation/member-identity API test passes; desktop self-tests pass; desktop TypeScript check passes; Biome passes after import organization; `cargo fmt --all -- --check` passes; desktop Vite build passes to `G:\buglogin-target\desktop-dist`. Build retains existing sourcemap/`use client`, mixed import, and large-chunk warnings. `git diff --check` passes.
+- Remaining blockers are architectural, not hidden UI: no scoped pending-account + credential/verification flow for non-platform admins; no first-class Lead/custom-role capability model or MCP parity; no profile transfer API across workspace/org; no guarded resource bulk assignment. Need screenshot/interaction/accessibility evidence before approving the UI. No release promotion or production-ready claim.

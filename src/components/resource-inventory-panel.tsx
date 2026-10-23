@@ -33,6 +33,8 @@ import type {
   Member,
   ProfileRecord,
   Resource,
+  ResourceKind,
+  ResourceState,
 } from "../../frontend/src/generated/command-registry";
 
 const desktopApi = createTauriDesktopApi();
@@ -78,6 +80,14 @@ export function ResourceInventoryPanel() {
   );
   const requestRef = useRef(0);
   const detailRequestRef = useRef(0);
+  const activeFilters = useMemo(
+    () => ({
+      search: search.trim() || undefined,
+      kind: kind === "all" ? undefined : (kind as ResourceKind),
+      state: state === "all" ? undefined : (state as ResourceState),
+    }),
+    [search, kind, state],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -112,7 +122,12 @@ export function ResourceInventoryPanel() {
   }, []);
 
   const loadPage = useCallback(
-    async (id: string, index: number, stack: ResourceCursorPage[]) => {
+    async (
+      id: string,
+      index: number,
+      stack: ResourceCursorPage[],
+      filters = activeFilters,
+    ) => {
       const request = ++requestRef.current;
       if (!id) {
         setResources([]);
@@ -123,7 +138,7 @@ export function ResourceInventoryPanel() {
       setIsLoading(true);
       try {
         const page = await desktopApi.listResources(
-          resourceListPageInput(id, stack[index]?.cursor),
+          resourceListPageInput(id, stack[index]?.cursor, filters),
         );
         if (request !== requestRef.current) return;
         setResources(page.items);
@@ -137,7 +152,7 @@ export function ResourceInventoryPanel() {
         if (request === requestRef.current) setIsLoading(false);
       }
     },
-    [],
+    [activeFilters],
   );
 
   useEffect(() => {
@@ -148,12 +163,16 @@ export function ResourceInventoryPanel() {
     setResources([]);
     setLoadError(null);
     setHasNextPage(false);
-    setSearch("");
-    void loadPage(workspaceId, 0, [{ cursor: undefined }]);
+    const firstPage = [{ cursor: undefined }];
+    const timer = setTimeout(
+      () => void loadPage(workspaceId, 0, firstPage, activeFilters),
+      250,
+    );
     return () => {
+      clearTimeout(timer);
       requestRef.current += 1;
     };
-  }, [workspaceId, loadPage]);
+  }, [workspaceId, activeFilters, loadPage]);
 
   useEffect(() => {
     let disposed = false;
@@ -180,7 +199,8 @@ export function ResourceInventoryPanel() {
     };
   }, [workspaceId]);
 
-  const refresh = () => void loadPage(workspaceId, pageIndex, pageStack);
+  const refresh = () =>
+    void loadPage(workspaceId, pageIndex, pageStack, activeFilters);
 
   const goNext = async () => {
     const current = pageStack[pageIndex];
@@ -201,7 +221,7 @@ export function ResourceInventoryPanel() {
     setIsLoading(true);
     try {
       const page = await desktopApi.listResources(
-        resourceListPageInput(workspaceId, currentNextCursor),
+        resourceListPageInput(workspaceId, currentNextCursor, activeFilters),
       );
       if (request !== requestRef.current) return;
       setPageStack(nextStack);
@@ -222,7 +242,7 @@ export function ResourceInventoryPanel() {
     if (pageIndex === 0) return;
     const previous = pageIndex - 1;
     setPageIndex(previous);
-    await loadPage(workspaceId, previous, pageStack);
+    await loadPage(workspaceId, previous, pageStack, activeFilters);
   };
 
   const openDetail = async (resource: Resource) => {
@@ -281,7 +301,7 @@ export function ResourceInventoryPanel() {
           ? { ...current, displayName: updated.name }
           : current,
       );
-      void loadPage(workspaceId, pageIndex, pageStack);
+      void loadPage(workspaceId, pageIndex, pageStack, activeFilters);
     } catch (error) {
       setGroupsError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -337,15 +357,7 @@ export function ResourceInventoryPanel() {
     }
   };
 
-  const visibleResources = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase();
-    return resources.filter(
-      (resource) =>
-        (kind === "all" || resource.kind === kind) &&
-        (state === "all" || resource.state === state) &&
-        (!query || resource.displayName.toLocaleLowerCase().includes(query)),
-    );
-  }, [resources, search, kind, state]);
+  const visibleResources = resources;
 
   const selectedWorkspace = workspaces.find(
     (workspace) => workspace.id === workspaceId,
@@ -407,9 +419,9 @@ export function ResourceInventoryPanel() {
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Tìm trong trang hiện tại…"
+          placeholder="Tìm toàn bộ tài nguyên…"
           className="h-9 min-w-52 flex-1"
-          aria-label="Tìm trong trang hiện tại"
+          aria-label="Tìm toàn bộ tài nguyên"
         />
         <Select value={kind} onValueChange={setKind}>
           <SelectTrigger className="h-9 w-40">
@@ -444,9 +456,7 @@ export function ResourceInventoryPanel() {
             ))}
           </SelectContent>
         </Select>
-        <Badge variant="outline">
-          {visibleResources.length} / {resources.length} trong trang
-        </Badge>
+        <Badge variant="outline">{resources.length} kết quả trong trang</Badge>
       </div>
 
       {loadError && (

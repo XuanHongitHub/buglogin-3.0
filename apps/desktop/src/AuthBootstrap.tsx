@@ -176,11 +176,14 @@ export function AuthBootstrap({
       const states = callback.searchParams.getAll("state");
       const tokens = callback.searchParams.getAll("token");
       if (states.length !== 1 || tokens.length !== 1) return;
+      const state = states[0];
+      const token = tokens[0];
+      if (!state || !token) return;
       callbackInFlight.current = true;
       setBusy(true);
       setProblem(undefined);
       try {
-        setStatus(await api.completeBugLabSso(states[0]!, tokens[0]!));
+        setStatus(await api.completeBugLabSso(state, token));
       } catch (error) {
         setProblem(normalizeProblem(error));
       } finally {

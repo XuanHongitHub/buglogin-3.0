@@ -1103,6 +1103,9 @@ paths:
       parameters:
         - { name: cursor, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+        - { name: search, in: query, required: false, schema: { type: string, maxLength: 128 } }
+        - { name: kind, in: query, required: false, schema: { $ref: '#/components/schemas/ResourceKind' } }
+        - { name: state, in: query, required: false, schema: { $ref: '#/components/schemas/ResourceState' } }
       responses:
         "200":
           description: Resource page
@@ -1432,7 +1435,7 @@ components:
     ResourceState: { enum: [active, archived, locked] }
     Resource: { type: object, required: [id, workspaceId, kind, state, displayName], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, kind: { $ref: '#/components/schemas/ResourceKind' }, state: { $ref: '#/components/schemas/ResourceState' }, displayName: { type: string, minLength: 1, maxLength: 200 } }, additionalProperties: false }
     ResourceIdInput: { type: object, required: [workspaceId, resourceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
-    ResourceListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, cursor: { type: [string, "null"], minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }, limit: { type: [integer, "null"], minimum: 1, maximum: 100 } }, additionalProperties: false }
+    ResourceListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, cursor: { type: [string, "null"], minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }, limit: { type: [integer, "null"], minimum: 1, maximum: 100 }, search: { type: [string, "null"], maxLength: 128 }, kind: { oneOf: [{ $ref: '#/components/schemas/ResourceKind' }, { type: "null" }] }, state: { oneOf: [{ $ref: '#/components/schemas/ResourceState' }, { type: "null" }] } }, additionalProperties: false }
     ResourcePage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Resource' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
     ResourceRegisterInput: { type: object, required: [resource], properties: { resource: { $ref: '#/components/schemas/Resource' } }, additionalProperties: false }
     Action: { type: string, enum: [read, create, update, delete, execute, share, manage] }

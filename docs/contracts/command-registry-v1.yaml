@@ -496,6 +496,28 @@ commands:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     preconditions: [cryptographic-device-code-issuance]
+  - id: auth.sso.buglab.start
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: BugLabSsoStartInput
+    output: BugLabSsoStartResponse
+    audit: required
+    idempotency: required
+    preconditions: [configured-provider, device-bound-state, system-browser]
+  - id: auth.sso.buglab.complete
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: BugLabSsoCompleteInput
+    output: DeviceAuthTokenResponse
+    audit: required
+    idempotency: required
+    preconditions: [single-use-state, device-bound-session, server-side-token-exchange]
   - id: auth.login
     kind: command
     capability: CAP-ID-001

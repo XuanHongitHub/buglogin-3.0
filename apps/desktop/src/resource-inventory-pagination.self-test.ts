@@ -28,5 +28,19 @@ assert.deepEqual(resourceListPageInput("workspace-a", "cursor-a"), {
   limit: RESOURCE_INVENTORY_PAGE_SIZE,
   cursor: "cursor-a",
 });
+assert.deepEqual(
+  resourceListPageInput("workspace-a", undefined, {
+    search: "proxy",
+    kind: "proxy",
+    state: "active",
+  }),
+  {
+    workspaceId: "workspace-a",
+    limit: RESOURCE_INVENTORY_PAGE_SIZE,
+    search: "proxy",
+    kind: "proxy",
+    state: "active",
+  },
+);
 
 console.log("Resource inventory pagination self-test passed");

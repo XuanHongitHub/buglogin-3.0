@@ -25,7 +25,7 @@ use buglogin_domain::{
         ProfileArchiveState, ProfileCloneInput, ProfileKeyRotationEnvelopeUpdate, ProfileResource,
         ProfileShareInput, ProfileShareRevokeInput,
     },
-    resource::Resource,
+    resource::{Resource, ResourceKind, ResourceState},
     team::Team,
     workspace::{OfflineEntitlement, Workspace, WorkspaceUsage},
 };
@@ -499,6 +499,16 @@ struct ProxyPageView {
 struct CollectionPageQuery {
     cursor: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResourcePageQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+    search: Option<String>,
+    kind: Option<ResourceKind>,
+    state: Option<ResourceState>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3929,7 +3939,7 @@ async fn list_resources(
 async fn list_resources_page(
     State(state): State<ApiState>,
     Path(workspace_id): Path<String>,
-    Query(query): Query<CollectionPageQuery>,
+    Query(query): Query<ResourcePageQuery>,
     headers: HeaderMap,
 ) -> Result<Json<CollectionPageView<Resource>>, Response> {
     let principal = authenticate(&state, &headers)?;
@@ -3942,11 +3952,33 @@ async fn list_resources_page(
         .transpose()
         .map_err(|_| bad_id("cursor"))?;
     let limit = collection_page_limit(query.limit)?;
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if search.is_some_and(|value| value.chars().count() > 128) {
+        return Err(problem_response(
+            "invalid_resource_search",
+            "Resource search is limited to 128 characters",
+            400,
+            correlation(&headers),
+        ));
+    }
     let (items, next_cursor) = state
         .resources
         .read()
         .map_err(|_| service_unavailable("resource"))?
-        .list_page(&principal, &grants, &workspace_id, cursor.as_ref(), limit)
+        .list_page_filtered(
+            &principal,
+            &grants,
+            &workspace_id,
+            cursor.as_ref(),
+            limit,
+            search,
+            query.kind.as_ref(),
+            query.state.as_ref(),
+        )
         .map_err(response_problem)?;
     Ok(Json(CollectionPageView {
         items,

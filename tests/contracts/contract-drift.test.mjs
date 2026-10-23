@@ -626,7 +626,7 @@ test("account, workspace policy, binding, and grant endpoints expose wire schema
   const paths = runtimeOpenApi.paths;
   const responseSchema = operation => operation.responses["200"].content["application/json"].schema;
   assert.deepEqual(responseSchema(paths["/v1/account"].get), { $ref: "#/components/schemas/AccountView" });
-  assert.equal(responseSchema(paths["/v1/accounts"].get).items.$ref, "#/components/schemas/Account");
+  assert.equal(responseSchema(paths["/v1/accounts"].get).$ref, "#/components/schemas/AccountAdminPage");
   const status = paths["/v1/accounts/{accountId}/status"].put;
   assert.equal(status.requestBody.content["application/json"].schema.$ref, "#/components/schemas/AccountStatusUpdateInput");
   assert.equal(responseSchema(status).$ref, "#/components/schemas/Account");
@@ -639,6 +639,17 @@ test("account, workspace policy, binding, and grant endpoints expose wire schema
   assert.equal(responseSchema(paths["/v1/organizations/{organizationId}/workspaces/{workspaceId}/offline-entitlement"].get).$ref, "#/components/schemas/OfflineEntitlement");
   assert.equal(responseSchema(paths["/v1/workspaces/{workspaceId}/grants"].get).items.$ref, "#/components/schemas/Grant");
   assert.deepEqual(canonicalOpenApi, runtimeOpenApi, "runtime OpenAPI must mirror its contract copy");
+});
+
+test("resource inventory filters are part of the bounded server-side page contract", () => {
+  const operation = runtimeOpenApi.paths["/v1/workspaces/{workspaceId}/resources/page"].get;
+  const queryNames = operation.parameters
+    .filter(parameter => parameter.in === "query")
+    .map(parameter => parameter.name);
+  assert.deepEqual(queryNames, ["cursor", "limit", "search", "kind", "state"]);
+  assert.equal(runtimeOpenApi.components.schemas.ResourceListInput.properties.search.maxLength, 128);
+  assert.equal(runtimeOpenApi.components.schemas.ResourceListInput.properties.kind.oneOf[0].$ref, "#/components/schemas/ResourceKind");
+  assert.equal(runtimeOpenApi.components.schemas.ResourceListInput.properties.state.oneOf[0].$ref, "#/components/schemas/ResourceState");
 });
 
 test("Rust HTTP routes have OpenAPI methods or an explicit deferred inventory", async () => {
