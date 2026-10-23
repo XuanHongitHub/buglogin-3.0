@@ -23,7 +23,7 @@ jobs:
       release_ref: ${{ steps.release.outputs.release_ref }}
       release_sha: ${{ steps.release.outputs.release_sha }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.release_ref }}
           persist-credentials: false
@@ -81,11 +81,11 @@ jobs:
       S3_ENDPOINT: https://sgp1.digitaloceanspaces.com
       S3_PUBLIC_BASE_URL: https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.validate.outputs.release_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: buglogin-${{ needs.validate.outputs.release_ref }}-*-signed
           path: incoming
