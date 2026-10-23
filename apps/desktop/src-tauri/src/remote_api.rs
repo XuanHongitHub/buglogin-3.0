@@ -7,7 +7,7 @@ use std::{
 
 use crate::clock::unix_time_seconds;
 use crate::profile_runtime::DesktopSyncBackend;
-use crate::runtime_config::{is_production_api_host, url_authority_has_userinfo};
+use crate::runtime_config::url_authority_has_userinfo;
 use buglogin_api::services::connected_cookie_jobs::{
     ConnectedCookieFailureCode, ConnectedCookieJob, ConnectedCookieReceipt,
 };
