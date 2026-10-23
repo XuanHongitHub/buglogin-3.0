@@ -43,7 +43,7 @@ pub struct StopPolicy {
 impl Default for StopPolicy {
     fn default() -> Self {
         Self {
-            graceful_timeout: Duration::from_secs(3),
+            graceful_timeout: Duration::from_secs(8),
             poll_interval: Duration::from_millis(50),
         }
     }
@@ -129,26 +129,6 @@ pub struct MacOsProcessGroup {
     stop_policy: StopPolicy,
 }
 
-impl MacOsProcessGroup {
-    fn wait_for_exit(&mut self, timeout: Duration) -> Result<bool, Problem> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if self
-                .helper
-                .try_wait()
-                .map_err(|_| status_failed())?
-                .is_some()
-            {
-                return Ok(true);
-            }
-            if Instant::now() >= deadline {
-                return Ok(false);
-            }
-            thread::sleep(self.stop_policy.poll_interval);
-        }
-    }
-}
-
 impl OwnedProcessTree for MacOsProcessGroup {
     fn identity(&self) -> &ProcessTreeIdentity {
         &self.identity
@@ -167,14 +147,32 @@ impl OwnedProcessTree for MacOsProcessGroup {
     }
 
     fn stop(&mut self) -> Result<(), Problem> {
-        if inspect_process(&self.identity) != ProcessTreeStatus::Running {
-            return Err(identity_unverified());
-        }
-        signal_group(self.identity.tree_id, "TERM")?;
-        if self.wait_for_exit(self.stop_policy.graceful_timeout)? {
+        if self
+            .helper
+            .try_wait()
+            .map_err(|_| status_failed())?
+            .is_some()
+        {
             return Ok(());
         }
-        signal_group(self.identity.tree_id, "KILL")?;
+        match inspect_process(&self.identity) {
+            // The browser already exited (window closed, crash): only its
+            // helpers and the group supervisor are left to reap.
+            ProcessTreeStatus::Exited => {}
+            ProcessTreeStatus::Running => {
+                // TERM only the browser so it can flush profile state; a group
+                // TERM would also trigger the supervisor's 2 s kill timer.
+                signal_process(self.identity.root.pid, "TERM")?;
+                let deadline = Instant::now() + self.stop_policy.graceful_timeout;
+                while Instant::now() < deadline
+                    && inspect_process(&self.identity) == ProcessTreeStatus::Running
+                {
+                    thread::sleep(self.stop_policy.poll_interval);
+                }
+            }
+            ProcessTreeStatus::Unknown => return Err(identity_unverified()),
+        }
+        let _ = signal_group(self.identity.tree_id, "KILL");
         self.helper.wait().map_err(|_| stop_failed())?;
         Ok(())
     }
@@ -241,9 +239,23 @@ fn process_executable(pid: u32) -> Option<PathBuf> {
         .and_then(|path| path.canonicalize().ok())
 }
 
+fn signal_process(pid: u32, signal: &str) -> Result<(), Problem> {
+    let status = Command::new("/bin/kill")
+        .args([format!("-{signal}"), pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| stop_failed())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(stop_failed())
+    }
+}
+
 fn signal_group(pgid: u32, signal: &str) -> Result<(), Problem> {
     let status = Command::new("/bin/kill")
         .args([format!("-{signal}"), format!("-{pgid}")])
+        .stderr(Stdio::null())
         .status()
         .map_err(|_| stop_failed())?;
     if status.success() {
