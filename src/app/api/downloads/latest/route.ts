@@ -3,26 +3,80 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const FEED_URL =
-  "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json";
+const CATALOG_BASE =
+  "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3";
 const ARTIFACT_HOST = "mavelnut-login.sgp1.digitaloceanspaces.com";
 const ARTIFACT_PREFIX = "/releases/desktop/v3/artifacts/";
 
 type Feed = {
   version?: unknown;
-  downloads?: Record<string, unknown>;
+  platforms?: Record<string, unknown>;
 };
 
-function artifactUrl(value: unknown): string | null {
-  if (typeof value !== "string") return null;
+type Release = { feed: Feed; channel: "stable" | "rc" };
+
+async function loadRelease(): Promise<Release | null> {
+  for (const channel of ["stable", "rc"] as const) {
+    try {
+      const response = await fetch(
+        `${CATALOG_BASE}/${channel}/downloads.json`,
+        {
+          cache: "no-store",
+          headers: { accept: "application/json", "cache-control": "no-cache" },
+          signal: AbortSignal.timeout(8000),
+        },
+      );
+      if (!response.ok) continue;
+      const contentLength = Number(response.headers.get("content-length") ?? 0);
+      if (contentLength > 1024 * 1024) continue;
+      const body = await response.text();
+      if (body.length > 1024 * 1024) continue;
+      const feed = JSON.parse(body) as Feed;
+      if (
+        typeof feed.version === "string" &&
+        /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(feed.version) &&
+        installerUrl(feed.platforms?.windows, feed.version, "windows") &&
+        installerUrl(feed.platforms?.macos, feed.version, "macos")
+      ) {
+        return { feed, channel };
+      }
+    } catch {
+      // Try the next published channel; availability is validated below.
+    }
+  }
+  return null;
+}
+
+function installerUrl(
+  value: unknown,
+  version: string,
+  platform: "windows" | "macos",
+): string | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as { filename?: unknown; url?: unknown };
+  if (typeof item.filename !== "string" || typeof item.url !== "string")
+    return null;
   try {
-    const url = new URL(value);
+    const url = new URL(item.url);
+    const pathParts = url.pathname.startsWith(ARTIFACT_PREFIX)
+      ? url.pathname.slice(ARTIFACT_PREFIX.length).split("/")
+      : [];
+    const expectedFilename =
+      platform === "windows"
+        ? item.filename === `BugLogin_${version}_x64-setup.exe`
+        : item.filename === `BugLogin_${version}_aarch64.dmg`;
     if (
       url.protocol !== "https:" ||
       url.hostname !== ARTIFACT_HOST ||
       url.username ||
       url.password ||
-      !url.pathname.startsWith(ARTIFACT_PREFIX)
+      url.search ||
+      url.hash ||
+      pathParts.length !== 3 ||
+      pathParts[0] !== `v${version}` ||
+      !/^\d+$/.test(pathParts[1]) ||
+      decodeURIComponent(pathParts[2]) !== item.filename ||
+      !expectedFilename
     )
       return null;
     return url.toString();
@@ -32,31 +86,8 @@ function artifactUrl(value: unknown): string | null {
 }
 
 export async function GET(request: Request) {
-  let feed: Feed;
-  try {
-    const response = await fetch(FEED_URL, {
-      cache: "no-store",
-      headers: { accept: "application/json", "cache-control": "no-cache" },
-      signal: AbortSignal.timeout(8000),
-    });
-    const contentLength = Number(response.headers.get("content-length") ?? 0);
-    if (contentLength > 1024 * 1024) {
-      return NextResponse.json(
-        { error: "invalid_release_manifest" },
-        { status: 502 },
-      );
-    }
-    if (!response.ok) {
-      return NextResponse.json(
-        { error: "release_unavailable" },
-        {
-          status: response.status === 404 ? 404 : 503,
-          headers: { "Cache-Control": "no-store" },
-        },
-      );
-    }
-    feed = (await response.json()) as Feed;
-  } catch {
+  const release = await loadRelease();
+  if (!release) {
     return NextResponse.json(
       { error: "release_unavailable" },
       {
@@ -65,11 +96,9 @@ export async function GET(request: Request) {
       },
     );
   }
+  const { feed, channel } = release;
 
-  if (
-    typeof feed.version !== "string" ||
-    !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(feed.version)
-  ) {
+  if (typeof feed.version !== "string") {
     return NextResponse.json(
       { error: "invalid_release_manifest" },
       { status: 502 },
@@ -77,12 +106,8 @@ export async function GET(request: Request) {
   }
 
   const platforms = {
-    windows: artifactUrl(
-      (feed.downloads?.windows as { url?: unknown } | undefined)?.url,
-    ),
-    macos: artifactUrl(
-      (feed.downloads?.macos as { url?: unknown } | undefined)?.url,
-    ),
+    windows: installerUrl(feed.platforms?.windows, feed.version, "windows"),
+    macos: installerUrl(feed.platforms?.macos, feed.version, "macos"),
   };
   const platform = new URL(request.url).searchParams.get("platform");
   if (platform !== null) {
@@ -104,6 +129,7 @@ export async function GET(request: Request) {
   return NextResponse.json(
     {
       version: feed.version,
+      channel,
       platforms: {
         windows: platforms.windows ? { url: platforms.windows } : null,
         macos: platforms.macos ? { url: platforms.macos } : null,
