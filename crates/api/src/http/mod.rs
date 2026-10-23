@@ -113,7 +113,8 @@ use crate::{
 #[cfg(test)]
 use buglogin_storage::control::ControlIdempotencyClaimToken;
 use buglogin_storage::control::{
-    ControlAuditEntry, ControlPut, ControlRecordKey, ExecuteControlCommand, HttpResponse,
+    ControlAuditEntry, ControlDelete, ControlPut, ControlRecordKey, ExecuteControlCommand,
+    HttpResponse,
 };
 use serde_json::json;
 use zeroize::Zeroize;
@@ -1356,6 +1357,242 @@ impl ApiState {
             .collect::<Result<Vec<_>, _>>()?;
         admins.sort_by(|left, right| left.account_id.cmp(&right.account_id));
         Ok(admins)
+    }
+
+    pub fn operator_cleanup_production_data_preserving_admin(
+        &self,
+        account_id: &AccountId,
+        apply: bool,
+    ) -> Result<serde_json::Value, Problem> {
+        if self.local_account_provisioning {
+            return Err(problem(
+                "hosted_identity_required",
+                "Production data cleanup requires hosted identity storage",
+                409,
+            ));
+        }
+        let _mutation = self
+            .control_mutation
+            .lock()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        let (current, revision) = self
+            .control_persistence
+            .load_versioned::<ControlAggregate>(
+                CONTROL_TENANT,
+                CONTROL_STATE_TYPE,
+                CONTROL_STATE_ID,
+            )?
+            .ok_or_else(|| {
+                problem(
+                    "control_state_unavailable",
+                    "Control state unavailable",
+                    503,
+                )
+            })?;
+        if !current.platform_admin_accounts.contains(account_id)
+            || self.account_persistence.load(account_id)?.is_none()
+            || self.identity_persistence.load(account_id)?.is_none()
+        {
+            return Err(problem(
+                "active_admin_identity_required",
+                "Target must be an existing platform administrator with an identity",
+                409,
+            ));
+        }
+
+        let current_value = serde_json::to_value(&current).map_err(|_| {
+            problem(
+                "control_serialization_failed",
+                "Control state serialization failed",
+                500,
+            )
+        })?;
+        let mut next: serde_json::Value = serde_json::to_value(ControlAggregate::default())
+            .map_err(|_| {
+                problem(
+                    "control_serialization_failed",
+                    "Control state serialization failed",
+                    500,
+                )
+            })?;
+        next["platform_admin_accounts"] = serde_json::json!([account_id.as_str()]);
+
+        let source_orgs = current_value
+            .pointer("/workspaces/organizations")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| problem("control_state_corrupt", "Workspace state is invalid", 500))?;
+        let retained_orgs = source_orgs
+            .iter()
+            .filter(|(_, org)| {
+                org.pointer("/organization/accountId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(account_id.as_str())
+            })
+            .map(|(id, org)| (id.clone(), org.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        if retained_orgs.is_empty() {
+            return Err(problem(
+                "admin_workspace_missing",
+                "Platform administrator has no owned organization",
+                409,
+            ));
+        }
+        let retained_org_count = retained_orgs.len();
+        let retained_workspace_ids = retained_orgs
+            .values()
+            .filter_map(|org| org.get("workspaces").and_then(serde_json::Value::as_object))
+            .flat_map(|workspaces| workspaces.keys().cloned())
+            .collect::<BTreeSet<_>>();
+        if retained_workspace_ids.is_empty() {
+            return Err(problem(
+                "admin_workspace_missing",
+                "Platform administrator has no owned workspace",
+                409,
+            ));
+        }
+        next["workspaces"]["organizations"] = serde_json::Value::Object(retained_orgs);
+
+        let source_members = current_value
+            .pointer("/members/members")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| problem("control_state_corrupt", "Membership state is invalid", 500))?;
+        let retained_members = source_members
+            .iter()
+            .filter(|(_, member)| {
+                member.get("accountId").and_then(serde_json::Value::as_str)
+                    == Some(account_id.as_str())
+                    && member
+                        .get("workspaceId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| retained_workspace_ids.contains(id))
+            })
+            .map(|(id, member)| (id.clone(), member.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        if retained_members.is_empty() {
+            return Err(problem(
+                "admin_membership_missing",
+                "Platform administrator has no membership in the retained workspace",
+                409,
+            ));
+        }
+        let retained_member_count = retained_members.len();
+        next["members"]["members"] = serde_json::Value::Object(retained_members);
+        let next_aggregate: ControlAggregate = serde_json::from_value(next).map_err(|_| {
+            problem(
+                "control_state_corrupt",
+                "Retained admin state is invalid",
+                500,
+            )
+        })?;
+
+        let mut deletes = Vec::<ControlDelete>::new();
+        let mut counts = BTreeMap::<String, usize>::new();
+        let record_sets = [
+            ("control", "account", Some("record_id")),
+            ("identity", "account_identity", Some("record_id")),
+            ("identity", "account_identity_email", Some("account_id")),
+            ("identity", "account_identity_username", Some("account_id")),
+            ("identity", "account_password", Some("record_id")),
+            ("identity", "session", None),
+            ("identity", "session_family", None),
+            ("identity", "device_refresh", None),
+        ];
+        for (tenant, record_type, keep_rule) in record_sets {
+            for (id, value, record_revision) in self
+                .control_persistence
+                .list_versioned::<serde_json::Value>(tenant, record_type)?
+            {
+                let belongs_to_admin = match keep_rule {
+                    Some("record_id") => id == account_id.as_str(),
+                    Some("account_id") => {
+                        value.get("accountId").and_then(serde_json::Value::as_str)
+                            == Some(account_id.as_str())
+                    }
+                    _ => false,
+                };
+                if !belongs_to_admin {
+                    deletes.push(ControlDelete {
+                        tenant_id: tenant.into(),
+                        record_type: record_type.into(),
+                        record_id: id,
+                        expected_revision: Some(record_revision),
+                    });
+                    *counts.entry(format!("{tenant}/{record_type}")).or_default() += 1;
+                }
+            }
+        }
+        for (id, _value, record_revision) in self
+            .control_persistence
+            .list_versioned::<serde_json::Value>(CONTROL_TENANT, "migration_import")?
+        {
+            deletes.push(ControlDelete {
+                tenant_id: CONTROL_TENANT.into(),
+                record_type: "migration_import".into(),
+                record_id: id,
+                expected_revision: Some(record_revision),
+            });
+            *counts.entry("control/migration_import".into()).or_default() += 1;
+        }
+        // Keep only the control aggregate's platform admin and owner workspace graph.
+        let source_member_count = source_members.len();
+        let aggregate_removed = serde_json::json!({
+            "organizations": source_orgs.len().saturating_sub(retained_org_count),
+            "members": source_member_count.saturating_sub(retained_member_count),
+            "profiles": current_value.pointer("/profiles").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
+            "profileResources": current_value.pointer("/profile_resources").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
+            "syncManifests": current_value.pointer("/sync_manifests").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
+            "grants": current_value.get("grants").and_then(serde_json::Value::as_array).map_or(0, Vec::len),
+            "groups": current_value.pointer("/groups/groups").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
+            "teams": current_value.pointer("/teams/teams").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
+        });
+        let planned = serde_json::json!({
+            "applied": apply,
+            "accountId": account_id,
+            "organizationsRetained": retained_org_count,
+            "workspacesRetained": retained_workspace_ids.len(),
+            "membersRetained": next_aggregate.members.active_for_account(account_id).len(),
+            "aggregateRecordsCleared": aggregate_removed,
+            "recordsDeleted": counts,
+            "sessionsRevoked": true,
+        });
+        if !apply {
+            return Ok(planned);
+        }
+
+        let command = ExecuteControlCommand {
+            tenant_id: CONTROL_TENANT.into(),
+            command_id: "production.database.cleanup_preserve_platform_admin".into(),
+            idempotency_key: format!("production-cleanup-{}-rev-{revision}", account_id.as_str()),
+            expected_revisions: Default::default(),
+            puts: vec![ControlPut {
+                tenant_id: CONTROL_TENANT.into(),
+                record_type: CONTROL_STATE_TYPE.into(),
+                record_id: CONTROL_STATE_ID.into(),
+                expected_revision: Some(revision),
+                value: serde_json::to_value(&next_aggregate).map_err(|_| {
+                    problem(
+                        "control_serialization_failed",
+                        "Control state serialization failed",
+                        500,
+                    )
+                })?,
+            }],
+            deletes,
+            audit: ControlAuditEntry {
+                tenant_id: CONTROL_TENANT.into(),
+                command_id: "production.database.cleanup_preserve_platform_admin".into(),
+                actor_id: account_id.as_str().into(),
+                allowed: true,
+                detail: planned.clone(),
+            },
+            response: HttpResponse {
+                status: 200,
+                headers: Default::default(),
+                body: planned.clone(),
+            },
+        };
+        self.control_persistence.execute(command)?;
+        Ok(planned)
     }
 
     pub fn grants(&self) -> Result<Vec<Grant>, Problem> {

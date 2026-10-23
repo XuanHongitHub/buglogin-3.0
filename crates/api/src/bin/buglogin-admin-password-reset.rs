@@ -32,6 +32,23 @@ fn run() -> Result<(), String> {
         );
         return Ok(());
     }
+    if options.contains_key("cleanup-plan") || options.contains_key("cleanup-apply") {
+        let account_id =
+            AccountId::new(required(&options, "account-id")?).map_err(|_| "invalid_account_id")?;
+        let apply = options.contains_key("cleanup-apply");
+        if apply && required(&options, "confirm-account-id")? != account_id.as_str() {
+            return Err("account_id_confirmation_mismatch".into());
+        }
+        let report = state
+            .operator_cleanup_production_data_preserving_admin(&account_id, apply)
+            .map_err(|error| error.code)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|_| "cleanup_report_serialization_failed")?
+        );
+        return Ok(());
+    }
     let account_id =
         AccountId::new(required(&options, "account-id")?).map_err(|_| "invalid_account_id")?;
     let confirmed_id = AccountId::new(required(&options, "confirm-account-id")?)
@@ -87,17 +104,28 @@ fn parse_options(
             println!(
                 "Usage: buglogin-admin-password-reset --account-id ID --confirm-account-id ID\n\
                  Or: buglogin-admin-password-reset --list-platform-admins\n\
+                 Or: buglogin-admin-password-reset --cleanup-plan --account-id ID\n\
+                 Or: buglogin-admin-password-reset --cleanup-apply --account-id ID --confirm-account-id ID\n\
                  Requires BUGLOGIN_ENV=production and hosted database settings.\n\
-                 The list mode prints admin IDs, optional usernames/emails, status, and identity availability only.\n\
-                 The reset mode requests the new password twice through a hidden terminal prompt."
+                 List mode prints admin metadata only. Reset mode prompts for a new password twice.\n\
+                 Cleanup plan is read-only. Cleanup apply preserves one platform-admin account and its owner workspace, deletes imported tenant/business records, and revokes all sessions."
             );
             process::exit(0);
         }
         if argument == "--list-platform-admins" {
             if !options.is_empty() || args.peek().is_some() {
-                return Err("list_mode_cannot_be_combined".into());
+                return Err("mode_cannot_be_combined".into());
             }
-            options.insert("list-platform-admins".to_owned(), "true".to_owned());
+            let mode = argument.trim_start_matches('-').to_owned();
+            options.insert(mode, "true".to_owned());
+            continue;
+        }
+        if matches!(argument.as_str(), "--cleanup-plan" | "--cleanup-apply") {
+            if !options.is_empty() {
+                return Err("mode_cannot_be_combined".into());
+            }
+            let mode = argument.trim_start_matches('-').to_owned();
+            options.insert(mode, "true".to_owned());
             continue;
         }
         let Some(name) = argument.strip_prefix("--") else {
@@ -111,11 +139,29 @@ fn parse_options(
             return Err("invalid_option_value");
         }
     }
+    let mode_count = ["list-platform-admins", "cleanup-plan", "cleanup-apply"]
+        .iter()
+        .filter(|mode| options.contains_key(**mode))
+        .count();
+    if mode_count > 1 {
+        return Err("mode_cannot_be_combined");
+    }
     if options.contains_key("list-platform-admins") {
+        if options.len() != 1 {
+            return Err("list_mode_cannot_be_combined");
+        }
         return Ok(options);
     }
     required(&options, "account-id")?;
-    required(&options, "confirm-account-id")?;
+    if options.contains_key("cleanup-plan") {
+        if options.contains_key("confirm-account-id") {
+            return Err("confirmation_only_valid_for_apply");
+        }
+    } else if options.contains_key("cleanup-apply") {
+        required(&options, "confirm-account-id")?;
+    } else {
+        required(&options, "confirm-account-id")?;
+    }
     Ok(options)
 }
 
@@ -132,7 +178,7 @@ fn required<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_environment;
+    use super::{parse_options, validate_environment};
 
     #[test]
     fn reset_requires_production_hosted_environment() {
@@ -144,6 +190,42 @@ mod tests {
         assert_eq!(
             validate_environment(Some("production"), true).unwrap_err(),
             "local_data_root_forbidden"
+        );
+    }
+
+    #[test]
+    fn cleanup_modes_require_explicit_account_and_apply_confirmation() {
+        let plan = parse_options(
+            ["--cleanup-plan", "--account-id", "acct_a"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(plan.contains_key("cleanup-plan"));
+        assert_eq!(
+            parse_options(
+                ["--cleanup-apply", "--account-id", "acct_a"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .unwrap_err(),
+            "required_option_missing"
+        );
+        assert_eq!(
+            parse_options(
+                [
+                    "--cleanup-plan",
+                    "--cleanup-apply",
+                    "--account-id",
+                    "acct_a",
+                    "--confirm-account-id",
+                    "acct_a"
+                ]
+                .into_iter()
+                .map(str::to_owned)
+            )
+            .unwrap_err(),
+            "mode_cannot_be_combined"
         );
     }
 }
