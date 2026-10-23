@@ -33,7 +33,7 @@ PY
 
 unit_path=$(systemctl show "$unit" -p FragmentPath --value)
 exec_path=$(systemctl show "$unit" -p ExecStart --value)
-[[ "$unit_path" == /etc/systemd/system/buglogin3-web.service && "$exec_path" == *"/opt/buglogin3-web/current/server.js" ]] || { echo "systemd unit is outside BugLogin 3 web target" >&2; exit 26; }
+[[ "$unit_path" == /etc/systemd/system/buglogin3-web.service && "$exec_path" == *"/opt/buglogin3-web/current/server.js"* ]] || { echo "systemd unit is outside BugLogin 3 web target" >&2; exit 26; }
 [[ "$(systemctl is-active "$unit")" == active ]] || { echo "BugLogin 3 web service is not active" >&2; exit 27; }
 
 install -d -o root -g buglogin3web -m 0750 "$releases"

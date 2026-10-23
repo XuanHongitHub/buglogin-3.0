@@ -57,8 +57,6 @@ a{color:inherit}
 .btn i{font-size:1.2em}
 .btn-ghost{--bg:transparent;box-shadow:inset 0 0 0 1px rgba(232,237,245,.3)}
 .btn-ghost:hover{--bg:rgba(232,237,245,.08)}
-.btn.is-unavailable,.alt-dl.is-unavailable{opacity:.58;cursor:not-allowed}
-.download-status{margin:2px 0 0;color:var(--on-ink-muted);font-size:13px;text-align:center}
 
 /* ---------- Nav ---------- */
 .nav{position:fixed;inset:0 0 auto 0;z-index:50;border-bottom:1px solid transparent;transition:background-color .3s ease,border-color .3s ease}
@@ -305,14 +303,13 @@ a{color:inherit}
           <i class="fa-brands fa-apple" aria-hidden="true"></i>
           <span>Dùng macOS? Tải bản cho Mac</span>
         </a>
-        <p class="download-status" id="download-status" role="status">Đang kiểm tra gói tải mới nhất…</p>
       </div>
 
       <div class="readout-wrap" aria-hidden="true">
-        <p class="readout-cap"><span class="pulse"></span>Ví dụ thông số trong một hồ sơ</p>
+        <p class="readout-cap"><span class="pulse"></span>Vân tay của hồ sơ vừa tạo</p>
         <dl class="readout" id="readout">
-          <div><dt>Hồ sơ mẫu</dt><dd data-k="id">MẪU-0217</dd></div>
-          <div><dt>Canvas</dt><dd data-k="canvas">demo-a3f91c07</dd></div>
+          <div><dt>Hồ sơ</dt><dd data-k="id">BL-0217</dd></div>
+          <div><dt>Canvas</dt><dd data-k="canvas">a3f91c07</dd></div>
           <div><dt>WebGL</dt><dd data-k="webgl">Intel UHD Graphics 630</dd></div>
           <div><dt>Múi giờ</dt><dd data-k="tz">America/Chicago</dd></div>
           <div><dt>Proxy</dt><dd data-k="proxy">Dallas, US</dd></div>
@@ -604,75 +601,64 @@ a{color:inherit}
 
 <script>
 (() => {
-  /* ---------- Fetch latest verified desktop release ---------- */
+  /* ---------- Link tải được phân giải từ catalog release hiện hành ---------- */
   const plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
   const isMac = /mac/i.test(plat) && !/iphone|ipad/i.test(navigator.userAgent);
   const OS = {
-    windows: { api: 'windows', icon: 'fa-windows', label: 'Tải BugLogin cho Windows', alt: 'Dùng Windows? Tải bản cho Windows' },
-    mac:     { api: 'macos', icon: 'fa-apple', label: 'Tải BugLogin cho macOS', alt: 'Dùng macOS? Tải bản cho Mac' }
+    windows: { platform: 'windows', icon: 'fa-windows', label: 'Tải BugLogin cho Windows', alt: 'Dùng Windows? Tải bản cho Windows' },
+    mac:     { platform: 'macos', icon: 'fa-apple', label: 'Tải BugLogin cho macOS', alt: 'Dùng macOS? Tải bản cho Mac' }
   };
-  const mainKey = isMac ? 'mac' : 'windows';
-  const otherKey = isMac ? 'windows' : 'mac';
-  const main = OS[mainKey];
-  const other = OS[otherKey];
+  const main = isMac ? OS.mac : OS.windows;
+  const other = isMac ? OS.windows : OS.mac;
   const primary = document.getElementById('dl-primary');
   const alt = document.getElementById('dl-alt');
-  const status = document.getElementById('download-status');
   primary.querySelector('i').className = 'fa-brands ' + main.icon;
   primary.querySelector('span').textContent = main.label;
   alt.querySelector('i').className = 'fa-brands ' + other.icon;
   alt.querySelector('span').textContent = other.alt;
-  let release = null;
-  let request = null;
-  let disposed = false;
-  const assignDownload = (anchor, key) => {
-    const platform = OS[key];
-    const available = Boolean(release && release.platforms && release.platforms[platform.api]);
-    anchor.href = available ? '/api/downloads/latest?platform=' + platform.api : '#';
-    anchor.classList.toggle('is-unavailable', !available);
-    anchor.setAttribute('aria-disabled', String(!available));
-    anchor.tabIndex = available ? 0 : -1;
+
+  const links = Array.from(document.querySelectorAll('[data-dl]'));
+  links.push(alt);
+  const setAvailable = (platform, available) => {
+    links.filter(a => a === alt ? platform === other.platform : (a.dataset.dl === 'auto' ? platform === main.platform : (a.dataset.dl === 'mac' ? platform === 'macos' : a.dataset.dl === platform)))
+      .forEach(a => {
+        const selected = a === alt ? other.platform : (a.dataset.dl === 'auto' ? main.platform : (a.dataset.dl === 'mac' ? 'macos' : a.dataset.dl));
+        if (selected !== platform) return;
+        a.href = available ? `/api/downloads/latest?platform=${platform}` : '#';
+        a.setAttribute('aria-disabled', String(!available));
+        a.tabIndex = available ? 0 : -1;
+        a.title = available ? '' : 'Bản tải xuống hiện chưa khả dụng.';
+        a.style.pointerEvents = available ? '' : 'none';
+        a.style.opacity = available ? '' : '.55';
+        a.onclick = available ? null : event => event.preventDefault();
+      });
   };
-  const assignAllDownloads = () => {
-    document.querySelectorAll('[data-dl]').forEach(anchor => {
-      const value = anchor.dataset.dl;
-      const key = value === 'auto' ? mainKey : (value === 'macos' ? 'mac' : value);
-      if (OS[key]) assignDownload(anchor, key);
-    });
-    assignDownload(alt, otherKey);
-  };
-  const refreshRelease = async () => {
-    if (request) request.abort();
-    request = new AbortController();
+
+  const refreshDownloads = async () => {
     try {
-      const response = await fetch('/api/downloads/latest', { cache: 'no-store', signal: request.signal });
-      if (!response.ok) throw new Error('release unavailable');
-      const candidate = await response.json();
-      if (!candidate || typeof candidate.version !== 'string' || !candidate.platforms) throw new Error('invalid release manifest');
-      if (disposed) return;
-      release = candidate;
-      assignAllDownloads();
-      const hasAnyRelease = Boolean(release.platforms.windows || release.platforms.macos);
-      status.textContent = hasAnyRelease
-        ? (release.platforms[main.api] ? 'BugLogin v' + release.version : 'Chưa có gói ổn định cho hệ điều hành này.')
-        : 'Chưa có gói tải ổn định. Vui lòng quay lại sau.';
-    } catch (error) {
-      if (disposed || (error && error.name === 'AbortError')) return;
-      release = null;
-      assignAllDownloads();
-      status.textContent = 'Chưa thể tải danh mục phát hành. Vui lòng thử lại sau.';
+      const response = await fetch('/api/downloads/latest', { cache: 'no-store', headers: { accept: 'application/json' } });
+      if (!response.ok) throw new Error('release_catalog_unavailable');
+      const catalog = await response.json();
+      setAvailable('windows', typeof catalog.platforms?.windows?.url === 'string');
+      setAvailable('macos', typeof catalog.platforms?.macos?.url === 'string');
+    } catch {
+      setAvailable('windows', false);
+      setAvailable('macos', false);
     }
   };
-  document.addEventListener('click', event => {
-    const anchor = event.target.closest('a[aria-disabled="true"]');
-    if (anchor) event.preventDefault();
+
+  links.forEach(a => {
+    const platform = a === alt ? other.platform : (a.dataset.dl === 'auto' ? main.platform : (a.dataset.dl === 'mac' ? 'macos' : a.dataset.dl));
+    a.href = `/api/downloads/latest?platform=${platform}`;
+    a.setAttribute('aria-disabled', 'true');
+    a.tabIndex = -1;
   });
-  assignAllDownloads();
-  void refreshRelease();
-  const refreshWhenVisible = () => { if (!document.hidden) void refreshRelease(); };
-  const refreshInterval = window.setInterval(() => void refreshRelease(), 5 * 60 * 1000);
-  window.addEventListener('focus', refreshWhenVisible);
-  document.addEventListener('visibilitychange', refreshWhenVisible);
+  setAvailable('windows', false);
+  setAvailable('macos', false);
+  void refreshDownloads();
+  window.setInterval(() => void refreshDownloads(), 5 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshDownloads(); });
+  window.addEventListener('focus', () => void refreshDownloads());
   document.getElementById('year').textContent = new Date().getFullYear();
 
   /* ---------- Thanh điều hướng ---------- */
@@ -680,13 +666,6 @@ a{color:inherit}
   const onScroll = () => nav.classList.toggle('solid', window.scrollY > 24);
   window.addEventListener('scroll', onScroll, { passive: true });
   onScroll();
-  window.addEventListener('pagehide', () => {
-    disposed = true;
-    if (request) request.abort();
-    window.clearInterval(refreshInterval);
-    window.removeEventListener('focus', refreshWhenVisible);
-    document.removeEventListener('visibilitychange', refreshWhenVisible);
-  }, { once: true });
 })();
 
 /* ===== Hero: vân tay vẽ bằng canvas, mỗi lượt quét tạo một hồ sơ mới ===== */
@@ -756,7 +735,7 @@ a{color:inherit}
   let baseCx = 0, baseCy = 0, offX = 0, offY = 0, tgtX = 0, tgtY = 0;
   let stepPx = 8, slowFrames = 0, skip = 1, frame = 0;
   let A = makeId(), B = null;
-  let phase = 'idle', phaseStart = 0, ys = -1e4, intro = false;
+  let phase = 'idle', phaseStart = 0, ys = -1e4, intro = false, readoutY = 0, readoutFired = true;
   const IDLE = 3400, SCAN = 2600, BLEND = 150, BAND = 72;
 
   let px = 0, py = 0, curW = 0;
@@ -874,6 +853,11 @@ a{color:inherit}
     gridA = new Float32Array(gw * gh * 2);
     gridB = new Float32Array(gw * gh * 2);
     cx = baseCx + offX; cy = baseCy + offY;
+    const ro = document.getElementById('readout');
+    if (ro) {
+      const rr = ro.getBoundingClientRect();
+      readoutY = rr.top - r.top + rr.height / 2;
+    }
     parts.length = 0;
     for (let k = 0; k < 22; k++) parts.push(newPart());
   }
@@ -955,6 +939,43 @@ a{color:inherit}
     }
   }
 
+  /* Bảng thông số: hiệu ứng giải mã ký tự */
+  const GPUS = ['Intel UHD Graphics 630', 'NVIDIA GeForce RTX 3060', 'AMD Radeon RX 6600', 'Apple M2', 'Intel Iris Xe Graphics', 'NVIDIA GeForce GTX 1660', 'AMD Radeon Vega 8', 'Apple M3'];
+  const LOCS = [['America/New_York','New York, US'],['America/Chicago','Dallas, US'],['America/Los_Angeles','Los Angeles, US'],['America/Denver','Denver, US'],['America/Phoenix','Phoenix, US'],['America/New_York','Atlanta, US'],['America/Chicago','Houston, US'],['America/Los_Angeles','Seattle, US']];
+  let profileNo = 217;
+  const CH = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const hex = n => Array.from({ length: n }, () => '0123456789abcdef'[Math.random() * 16 | 0]).join('');
+  const pick = a => a[Math.random() * a.length | 0];
+  const dd = {};
+  document.querySelectorAll('#readout dd').forEach(el => dd[el.dataset.k] = el);
+
+  function scramble(el, text) {
+    if (!el) return;
+    if (reduceMQ.matches) { el.textContent = text; return; }
+    const t0 = performance.now(), dur = 620, len = text.length;
+    el.classList.add('hot');
+    const step = now => {
+      const p = Math.min(1, (now - t0) / dur);
+      let out = '';
+      for (let k = 0; k < len; k++) {
+        const c = text[k];
+        out += (c === ' ' || c === '/' || c === ',' || c === '-' || p >= 0.15 + 0.85 * k / len) ? c : CH[Math.random() * CH.length | 0];
+      }
+      el.textContent = out;
+      if (p < 1) requestAnimationFrame(step); else el.classList.remove('hot');
+    };
+    requestAnimationFrame(step);
+  }
+  function nextReadout() {
+    profileNo++;
+    const loc = pick(LOCS);
+    scramble(dd.id, 'BL-' + String(profileNo).padStart(4, '0'));
+    scramble(dd.canvas, hex(8));
+    scramble(dd.webgl, pick(GPUS));
+    scramble(dd.tz, loc[0]);
+    scramble(dd.proxy, loc[1]);
+  }
+
   /* Vòng lặp */
   let running = false, visible = true, raf = 0;
   function tick(now) {
@@ -970,12 +991,13 @@ a{color:inherit}
 
     const el = now - phaseStart;
     if (phase === 'idle' && el > IDLE) {
-      phase = 'scan'; phaseStart = now; B = makeId();
+      phase = 'scan'; phaseStart = now; B = makeId(); readoutFired = false;
     }
     if (phase === 'scan') {
       const p = Math.min(1, (now - phaseStart) / SCAN);
       const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
       ys = -BLEND + e * (H + 2 * BLEND);
+      if (!readoutFired && ys > readoutY) { readoutFired = true; nextReadout(); }
       if (p >= 1) { A = B; B = null; phase = 'idle'; phaseStart = now; ys = -1e4; intro = false; }
     }
 
@@ -1008,7 +1030,7 @@ a{color:inherit}
       return;
     }
     /* Mở màn: tia quét đầu tiên "in" vân tay xuống trang */
-    B = A; intro = true; phase = 'scan';
+    B = A; intro = true; phase = 'scan'; readoutFired = false;
     phaseStart = performance.now() - 120;
     start();
   }
