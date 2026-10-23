@@ -244,9 +244,10 @@ jobs:
           spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
           mkdir -p dist-release
           cp "$DMG_PATH" dist-release/
-          mapfile -t updater_files < <(find "$RELEASE_DIR/bundle" -type f \( -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) -print)
-          [[ "${#updater_files[@]}" -eq 2 ]] || { echo 'Expected one signed app updater archive and its .sig file'; exit 1; }
-          cp "${updater_files[@]}" dist-release/
+          UPDATER_ARCHIVE="$RELEASE_DIR/bundle/macos/BugLogin.app.tar.gz"
+          UPDATER_SIGNATURE="$UPDATER_ARCHIVE.sig"
+          [[ -f "$UPDATER_ARCHIVE" && -f "$UPDATER_SIGNATURE" ]] || { echo 'Expected one signed app updater archive and its .sig file'; exit 1; }
+          cp "$UPDATER_ARCHIVE" "$UPDATER_SIGNATURE" dist-release/
       - name: Generate SBOM, hashes, provenance
         shell: bash
         run: |

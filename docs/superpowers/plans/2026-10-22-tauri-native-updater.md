@@ -58,6 +58,12 @@ Status: **active; release blocked pending API parity, native platform artifacts,
 - [ ] Run focused release policy/Cargo helper checks, build a Windows installer, install and launch it, and verify the BugLogin UI rather than a directory listing.
 - [ ] Record a new immutable version/tag and workflow run. Do not promote stable; macOS notarization, OS update smoke, and Packet C/D gates remain release blockers.
 
+## macOS signing workflow Bash compatibility — 2026-10-23
+
+- Run `39898547063` signed the macOS app and DMG, received Apple notarization status `Accepted`, and successfully stapled and validated the DMG. It then failed while collecting the updater bundle because the macOS runner's Bash 3.2 does not provide `mapfile`.
+- Replace Bash array discovery with direct checks and copies of `BugLogin.app.tar.gz` and its `.sig` file. Require the workflow policy to pin both paths and reject `mapfile`/`readarray` use.
+- Retest the release policy, then publish a new immutable RC tag `v3.0.3`. Keep stable promotion blocked pending Windows/macOS install/update smoke and Packet C/D gates.
+
 ## Development-build updater behavior — 2026-10-22
 
 - Root cause of the About toast `app_updater_not_configured`: local/debug builds intentionally do not embed the Tauri updater public key, so the Rust command correctly reports that updater checks are unavailable. The UI previously surfaced this expected dev state as an error.
