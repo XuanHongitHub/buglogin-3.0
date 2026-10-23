@@ -294,7 +294,7 @@ fn hex_digit(value: u8) -> Option<u8> {
 }
 
 fn validate_release(release: &RuntimeRelease) -> Result<(), Problem> {
-    if !matches!(&release.runtime, &Runtime::Wayfern | &Runtime::Bugmini) {
+    if release.runtime != Runtime::Wayfern {
         return Err(problem(
             "runtime_not_supported",
             "Runtime release has no approved desktop adapter",
@@ -472,6 +472,31 @@ mod tests {
             RuntimeCatalog {
                 schema_version: 1,
                 releases: vec![preserved],
+            }
+            .verify(&verifier)
+            .unwrap_err()
+            .code,
+            "runtime_not_supported"
+        );
+    }
+
+    #[test]
+    fn signed_bugmini_releases_are_no_longer_installable() {
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&[7_u8; 32]).unwrap();
+        let public_key: [u8; 32] = key_pair.public_key().as_ref().try_into().unwrap();
+        let verifier = Ed25519RuntimeSignatureVerifier::new(BTreeMap::from([(
+            "runtime-key-1".to_owned(),
+            public_key,
+        )]))
+        .unwrap();
+        let mut release = signed_release(&key_pair);
+        release.runtime = Runtime::Bugmini;
+        release.signature = encode_hex(key_pair.sign(&release.signing_payload()).as_ref());
+
+        assert_eq!(
+            RuntimeCatalog {
+                schema_version: 1,
+                releases: vec![release],
             }
             .verify(&verifier)
             .unwrap_err()

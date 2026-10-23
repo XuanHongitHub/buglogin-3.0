@@ -23,14 +23,12 @@ pub enum Runtime {
 #[serde(rename_all = "lowercase")]
 pub enum ProfileCreateRuntime {
     Wayfern,
-    Bugmini,
 }
 
 impl From<ProfileCreateRuntime> for Runtime {
     fn from(runtime: ProfileCreateRuntime) -> Self {
         match runtime {
             ProfileCreateRuntime::Wayfern => Self::Wayfern,
-            ProfileCreateRuntime::Bugmini => Self::Bugmini,
         }
     }
 }

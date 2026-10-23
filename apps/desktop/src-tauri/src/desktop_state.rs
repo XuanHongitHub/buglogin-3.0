@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt, fs,
     future::Future,
     path::{Path, PathBuf},
@@ -212,6 +212,9 @@ pub struct ProductionDesktopState {
     idempotency_order: Arc<Mutex<VecDeque<String>>>,
     operation_gate: Arc<Mutex<OperationGate>>,
     operation_drained: Arc<Notify>,
+    profile_operations: Arc<ProfileOperationLocks>,
+    exit_reconcile_backoff: Arc<Mutex<ExitReconcileBackoff>>,
+    runtime_dispatch_attempts: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -413,6 +416,57 @@ struct IdempotencyRecord {
     completed: bool,
 }
 
+/// One launch/stop/sync at a time per profile: local clicks, runtime dispatch
+/// jobs, the exit reconcile and shutdown otherwise race on the same lease and
+/// manifest generation.
+#[derive(Default)]
+struct ProfileOperationLocks {
+    locks: Mutex<HashMap<ProfileId, Arc<AsyncMutex<()>>>>,
+}
+
+impl ProfileOperationLocks {
+    fn lock_for(&self, profile_id: &ProfileId) -> Arc<AsyncMutex<()>> {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.entry(profile_id.clone()).or_default().clone()
+    }
+
+    fn is_busy(&self, profile_id: &ProfileId) -> bool {
+        self.lock_for(profile_id).try_lock().is_err()
+    }
+}
+
+/// Exponential backoff (3 s doubling to 5 min) for re-stopping profiles whose
+/// browser exited on its own, so a sync that keeps failing isn't retried every tick.
+#[derive(Default)]
+struct ExitReconcileBackoff {
+    attempts: HashMap<ProfileId, (u32, std::time::Instant)>,
+}
+
+impl ExitReconcileBackoff {
+    fn ready(&self, profile_id: &ProfileId, now: std::time::Instant) -> bool {
+        self.attempts
+            .get(profile_id)
+            .is_none_or(|(_, next_attempt)| now >= *next_attempt)
+    }
+
+    fn record_attempt(&mut self, profile_id: &ProfileId, now: std::time::Instant) {
+        let attempts = self.attempts.get(profile_id).map_or(0, |(count, _)| *count) + 1;
+        let delay = Duration::from_secs(3)
+            .saturating_mul(1 << attempts.saturating_sub(1).min(16))
+            .min(Duration::from_secs(300));
+        self.attempts
+            .insert(profile_id.clone(), (attempts, now + delay));
+    }
+
+    fn retain_exited(&mut self, exited: &[ProfileId]) {
+        self.attempts
+            .retain(|profile_id, _| exited.contains(profile_id));
+    }
+}
+
 #[derive(Default)]
 struct OperationGate {
     draining: bool,
@@ -547,6 +601,9 @@ impl ProductionDesktopState {
             idempotency_order: Arc::new(Mutex::new(VecDeque::new())),
             operation_gate: Arc::new(Mutex::new(OperationGate::default())),
             operation_drained: Arc::new(Notify::new()),
+            profile_operations: Arc::new(ProfileOperationLocks::default()),
+            exit_reconcile_backoff: Arc::new(Mutex::new(ExitReconcileBackoff::default())),
+            runtime_dispatch_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         Ok(state)
     }
@@ -573,7 +630,22 @@ impl ProductionDesktopState {
                     continue;
                 }
                 inbox_state.poll_cookie_job_inbox().await;
-                inbox_state.poll_runtime_dispatch_inbox().await;
+            }
+        });
+
+        // Launch/stop requests from web or MCP wait on this poll, so it runs on its own
+        // shorter interval and is never queued behind a long cookie job.
+        let dispatch_state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(RUNTIME_DISPATCH_POLL_INTERVAL).await;
+                let _ = dispatch_state
+                    .refresh_session_if_needed("desktop-runtime-dispatch")
+                    .await;
+                if !dispatch_state.client.has_token().unwrap_or(false) {
+                    continue;
+                }
+                dispatch_state.poll_runtime_dispatch_inbox().await;
             }
         });
 
@@ -604,6 +676,9 @@ impl ProductionDesktopState {
         let Ok(exited) = self.profile_runtime.unexpectedly_stopped_profiles().await else {
             return;
         };
+        if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
+            backoff.retain_exited(&exited);
+        }
         if exited.is_empty() {
             return;
         }
@@ -611,7 +686,21 @@ impl ProductionDesktopState {
             return;
         };
         for profile_id in exited {
-            if active.contains(&profile_id) {
+            if active.contains(&profile_id) || self.profile_operations.is_busy(&profile_id) {
+                continue;
+            }
+            let due = match self.exit_reconcile_backoff.lock() {
+                Ok(mut backoff) => {
+                    let now = std::time::Instant::now();
+                    let due = backoff.ready(&profile_id, now);
+                    if due {
+                        backoff.record_attempt(&profile_id, now);
+                    }
+                    due
+                }
+                Err(_) => return,
+            };
+            if !due {
                 continue;
             }
             if operation_busy() {
@@ -679,6 +768,16 @@ impl ProductionDesktopState {
             return;
         }
 
+        let attempt = self
+            .runtime_dispatch_attempts
+            .lock()
+            .map(|mut attempts| {
+                let attempt = attempts.entry(claimed.job_id.clone()).or_insert(0);
+                *attempt += 1;
+                *attempt
+            })
+            .unwrap_or(RUNTIME_DISPATCH_MAX_ATTEMPTS);
+        let out_of_attempts = attempt >= RUNTIME_DISPATCH_MAX_ATTEMPTS;
         let local_launch_receipt = if claimed.command_id == "profile.launch" {
             self.profile_runtime
                 .active_profiles()
@@ -707,7 +806,7 @@ impl ProductionDesktopState {
             } else {
                 "profile_stop"
             };
-            let idempotency_key = runtime_dispatch_operation_key(&claimed.job_id);
+            let idempotency_key = runtime_dispatch_operation_key(&claimed.job_id, attempt);
             self.invoke(invoke_name, correlation_id, Some(&idempotency_key), payload)
                 .await
                 .and_then(|accepted| {
@@ -749,17 +848,14 @@ impl ProductionDesktopState {
                     Err(error) => Err(error),
                 };
                 if let Err(error) = execution {
-                    if !error.retryable {
-                        let failure_code = stable_runtime_failure_code(&error.code);
-                        let _ = self
-                            .client
-                            .fail_runtime_dispatch(
-                                &workspace_id,
-                                &claimed.job_id,
-                                &failure_code,
-                                correlation_id,
-                            )
-                            .await;
+                    if !error.retryable || out_of_attempts {
+                        self.fail_runtime_dispatch_job(
+                            &workspace_id,
+                            &claimed.job_id,
+                            &error,
+                            correlation_id,
+                        )
+                        .await;
                     }
                     return;
                 }
@@ -776,7 +872,7 @@ impl ProductionDesktopState {
                     "commandId": claimed.command_id,
                     "state": state,
                 });
-                let _ = self
+                match self
                     .client
                     .complete_runtime_dispatch(
                         &workspace_id,
@@ -784,21 +880,52 @@ impl ProductionDesktopState {
                         receipt,
                         correlation_id,
                     )
-                    .await;
+                    .await
+                {
+                    Ok(_) => self.forget_runtime_dispatch_attempts(&claimed.job_id),
+                    Err(error) => eprintln!(
+                        "Runtime dispatch {} completion was not recorded: {}",
+                        claimed.job_id, error.code
+                    ),
+                }
             }
-            Err(error) if !error.retryable => {
-                let failure_code = stable_runtime_failure_code(&error.code);
-                let _ = self
-                    .client
-                    .fail_runtime_dispatch(
-                        &workspace_id,
-                        &claimed.job_id,
-                        &failure_code,
-                        correlation_id,
-                    )
-                    .await;
+            Err(error) if !error.retryable || out_of_attempts => {
+                self.fail_runtime_dispatch_job(
+                    &workspace_id,
+                    &claimed.job_id,
+                    &error,
+                    correlation_id,
+                )
+                .await;
             }
             Err(_) => {}
+        }
+    }
+
+    async fn fail_runtime_dispatch_job(
+        &self,
+        workspace_id: &WorkspaceId,
+        job_id: &str,
+        error: &Problem,
+        correlation_id: &str,
+    ) {
+        let failure_code = stable_runtime_failure_code(&error.code);
+        match self
+            .client
+            .fail_runtime_dispatch(workspace_id, job_id, &failure_code, correlation_id)
+            .await
+        {
+            Ok(_) => self.forget_runtime_dispatch_attempts(job_id),
+            Err(error) => eprintln!(
+                "Runtime dispatch {job_id} failure was not recorded: {}",
+                error.code
+            ),
+        }
+    }
+
+    fn forget_runtime_dispatch_attempts(&self, job_id: &str) {
+        if let Ok(mut attempts) = self.runtime_dispatch_attempts.lock() {
+            attempts.remove(job_id);
         }
     }
 
@@ -2555,6 +2682,11 @@ impl ProductionDesktopState {
                         &hash,
                         correlation_id,
                         move |state| async move {
+                            let _profile_operation = state
+                                .profile_operations
+                                .lock_for(&profile_id)
+                                .lock_owned()
+                                .await;
                             state
                                 .launch_profile(
                                     profile_id,
@@ -2582,6 +2714,11 @@ impl ProductionDesktopState {
                         &hash,
                         correlation_id,
                         move |state| async move {
+                            let _profile_operation = state
+                                .profile_operations
+                                .lock_for(&profile_id)
+                                .lock_owned()
+                                .await;
                             state
                                 .stop_profile(
                                     profile_id,
@@ -2612,6 +2749,11 @@ impl ProductionDesktopState {
                         &hash,
                         correlation_id,
                         move |state| async move {
+                            let _profile_operation = state
+                                .profile_operations
+                                .lock_for(&profile_id)
+                                .lock_owned()
+                                .await;
                             state
                                 .stop_profile(
                                     profile_id,
@@ -6152,7 +6294,25 @@ impl ProductionDesktopState {
         let profiles = self.profile_runtime.running_profiles().await?;
         let mut first_error = None;
         for profile_id in profiles {
-            let idempotency_key = shutdown_idempotency_key(&profile_id);
+            // Key the stop to this browser session so a later quit with the same
+            // profile never collides with the stored record of an earlier one.
+            let session = match self
+                .profile_runtime
+                .write_authority(profile_id.clone())
+                .await
+            {
+                Ok(Some(authority)) => authority.fencing_token,
+                _ => std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis() as u64)
+                    .unwrap_or_default(),
+            };
+            let idempotency_key = shutdown_idempotency_key(&profile_id, session);
+            let _profile_operation = self
+                .profile_operations
+                .lock_for(&profile_id)
+                .lock_owned()
+                .await;
             if let Err(error) = self
                 .stop_profile(
                     profile_id,
@@ -6370,7 +6530,7 @@ impl DesktopState {
                 correlation_id,
             ));
         };
-        if !matches!(&runtime, Runtime::Wayfern | Runtime::Bugmini) {
+        if runtime != Runtime::Wayfern {
             return Err(Problem::new(
                 "runtime_not_supported",
                 "Runtime has no approved desktop adapter",
@@ -7137,8 +7297,16 @@ fn runtime_projection_idempotency_key(idempotency_key: &str, transition: &str) -
     format!("runtime_{}", &digest[..32])
 }
 
-fn runtime_dispatch_operation_key(job_id: &str) -> String {
-    let digest = format!("{:x}", Sha256::digest(job_id.as_bytes()));
+/// Retryable runtime dispatch failures are retried on later inbox polls with a
+/// fresh local operation key, then reported as failed after this many attempts.
+const RUNTIME_DISPATCH_MAX_ATTEMPTS: u32 = 5;
+const RUNTIME_DISPATCH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+fn runtime_dispatch_operation_key(job_id: &str, attempt: u32) -> String {
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{job_id}|{attempt}").as_bytes())
+    );
     format!("runtime_dispatch_{}", &digest[..32])
 }
 
@@ -7161,8 +7329,11 @@ fn stable_runtime_failure_code(code: &str) -> String {
     }
 }
 
-fn shutdown_idempotency_key(profile_id: &ProfileId) -> String {
-    let digest = format!("{:x}", Sha256::digest(profile_id.as_str().as_bytes()));
+fn shutdown_idempotency_key(profile_id: &ProfileId, session: u64) -> String {
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{}|{session}", profile_id.as_str()).as_bytes())
+    );
     format!("shutdown_{}", &digest[..32])
 }
 
@@ -7272,7 +7443,8 @@ mod tests {
     use super::{
         ConfirmedKeyRotationRecipient, DesktopState, ProxyCredentialInput, ProxyImportInput,
         WorkspaceSelectionStore, launch_state_allows_start, local_proxy_parse,
-        production_sync_not_ready, production_transport, validate_key_rotation_confirmation,
+        production_sync_not_ready, production_transport, runtime_dispatch_operation_key,
+        shutdown_idempotency_key, validate_key_rotation_confirmation,
     };
     use buglogin_api::services::{
         device_key_directory::DeviceEncryptionKey,
@@ -7578,6 +7750,68 @@ mod tests {
                 .unwrap_err()
                 .code,
             "invalid_command_input"
+        );
+    }
+
+    #[test]
+    fn shutdown_idempotency_key_is_unique_per_browser_session() {
+        let profile = buglogin_domain::ids::ProfileId::new("prf_shutdown_key").unwrap();
+        assert_eq!(
+            shutdown_idempotency_key(&profile, 7),
+            shutdown_idempotency_key(&profile, 7)
+        );
+        assert_ne!(
+            shutdown_idempotency_key(&profile, 7),
+            shutdown_idempotency_key(&profile, 8)
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_operations_are_serialized_per_profile() {
+        let locks = super::ProfileOperationLocks::default();
+        let first = buglogin_domain::ids::ProfileId::new("prf_serial_a").unwrap();
+        let second = buglogin_domain::ids::ProfileId::new("prf_serial_b").unwrap();
+
+        let held = locks.lock_for(&first).lock_owned().await;
+        assert!(locks.lock_for(&first).try_lock_owned().is_err());
+        assert!(locks.lock_for(&second).try_lock_owned().is_ok());
+        assert!(locks.is_busy(&first));
+        drop(held);
+        assert!(!locks.is_busy(&first));
+        assert!(locks.lock_for(&first).try_lock_owned().is_ok());
+    }
+
+    #[test]
+    fn exit_reconcile_retries_back_off_and_reset() {
+        let mut backoff = super::ExitReconcileBackoff::default();
+        let profile = buglogin_domain::ids::ProfileId::new("prf_backoff").unwrap();
+        let start = std::time::Instant::now();
+
+        assert!(backoff.ready(&profile, start));
+        backoff.record_attempt(&profile, start);
+        assert!(!backoff.ready(&profile, start + std::time::Duration::from_secs(2)));
+        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(3)));
+        backoff.record_attempt(&profile, start + std::time::Duration::from_secs(3));
+        assert!(!backoff.ready(&profile, start + std::time::Duration::from_secs(8)));
+        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(9)));
+        for attempt in 0..20 {
+            backoff.record_attempt(&profile, start + std::time::Duration::from_secs(attempt));
+        }
+        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(19 + 300)));
+
+        backoff.retain_exited(&[]);
+        assert!(backoff.ready(&profile, start));
+    }
+
+    #[test]
+    fn runtime_dispatch_retries_use_a_fresh_operation_key() {
+        assert_eq!(
+            runtime_dispatch_operation_key("runtime_job", 1),
+            runtime_dispatch_operation_key("runtime_job", 1)
+        );
+        assert_ne!(
+            runtime_dispatch_operation_key("runtime_job", 1),
+            runtime_dispatch_operation_key("runtime_job", 2)
         );
     }
 }

@@ -481,12 +481,8 @@ fn classify_runtime(runtime: String, records: u64) -> RuntimeFinding {
     let (class, reason_code) = match runtime.as_str() {
         "wayfern" => (MigrationClass::Direct, "runtime_supported"),
         "camoufox" => (MigrationClass::Unsupported, "runtime_unsupported"),
-        "bugmini" => (
-            MigrationClass::Partial,
-            "runtime_adapter_available_artifact_pending",
-        ),
-        "bugox" | "bugium" | "bugthor" | "bughelium" | "cloak" | "cloakbrowser" | "thorium"
-        | "helium" => (MigrationClass::Unsupported, "runtime_adapter_not_approved"),
+        "bugox" | "bugium" | "bugmini" | "bugthor" | "bughelium" | "cloak" | "cloakbrowser"
+        | "thorium" | "helium" => (MigrationClass::Unsupported, "runtime_adapter_not_approved"),
         _ => (MigrationClass::Unknown, "runtime_unknown"),
     };
     RuntimeFinding {

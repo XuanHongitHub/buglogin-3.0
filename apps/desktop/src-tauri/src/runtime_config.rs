@@ -271,9 +271,6 @@ pub fn open() -> Result<DesktopBootstrap, Problem> {
     if let Some(target) = runtime_target("WAYFERN", allow_runtime_environment_overrides)? {
         runtime_targets.insert(buglogin_domain::entities::Runtime::Wayfern, target);
     }
-    if let Some(target) = runtime_target("BUGMINI", allow_runtime_environment_overrides)? {
-        runtime_targets.insert(buglogin_domain::entities::Runtime::Bugmini, target);
-    }
     if mode == DeploymentMode::Production {
         let runtime_root = runtime_install_root()?;
         if crate::runtime_install::has_install_records(&runtime_root)? {
@@ -283,11 +280,6 @@ pub fn open() -> Result<DesktopBootstrap, Problem> {
             for target in installed.wayfern.into_values() {
                 if !runtime_targets.wayfern.contains_key(&target.binary.version) {
                     runtime_targets.insert(buglogin_domain::entities::Runtime::Wayfern, target);
-                }
-            }
-            for target in installed.bugmini.into_values() {
-                if !runtime_targets.bugmini.contains_key(&target.binary.version) {
-                    runtime_targets.insert(buglogin_domain::entities::Runtime::Bugmini, target);
                 }
             }
         }

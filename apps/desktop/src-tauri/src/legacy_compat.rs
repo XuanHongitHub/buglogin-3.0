@@ -1784,7 +1784,9 @@ async fn run_operation(state: &DesktopState, command: &str, payload: Value) -> R
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_response(&correlation_id))?;
 
-    for _ in 0..1_200 {
+    // Large profiles can take minutes to hydrate or upload; launch/stop are
+    // serialized per profile, so waiting longer never starts a parallel run.
+    for _ in 0..6_000 {
         let operation = state
             .invoke(
                 "operation_get",
