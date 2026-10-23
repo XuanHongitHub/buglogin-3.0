@@ -4,16 +4,23 @@ The API serves `GET /v1/runtime/catalog` only after validating the entire catalo
 
 ## API configuration
 
-Configure both paths or neither:
+For local development, configure the compact JSON pair in `.env.local`:
+
+- `BUGLOGIN_RUNTIME_CATALOG_JSON`: a compact `RuntimeCatalog` JSON value, limited to 24 KiB for Windows environment compatibility.
+- `BUGLOGIN_RUNTIME_TRUST_KEYS_JSON`: a JSON object mapping key IDs to 32-byte Ed25519 public keys in hex. This same public map is embedded in the local desktop dev build.
+
+The API also retains file-based configuration for hosted deployments and older local setups. Configure one catalog source and one matching trust-key source:
 
 - `BUGLOGIN_RUNTIME_CATALOG_PATH`: absolute path to a JSON `RuntimeCatalog` file, maximum 2 MiB.
 - `BUGLOGIN_RUNTIME_TRUST_KEYS_PATH`: absolute path to a JSON array of `{ "keyId": "...", "publicKey": "64 lowercase or uppercase hex characters" }`, maximum 64 KiB.
 
-For local PostgreSQL development, `scripts/dev-local-api.mjs` forwards this pair from `.env.local` or the process environment into the API process. Set both to absolute paths; setting only one fails before the API starts. If neither is set, local API readiness remains available for account/profile metadata work and `/v1/runtime/catalog` correctly reports `503 runtime_catalog_unavailable`.
+Do not mix inline JSON and file-path sources for either item. The catalog and trust-key values are public verification data, not signing secrets. Keep the private signing key offline or in the protected release signer.
 
-For local desktop development, `scripts/tauri-dev-local-api.mjs` forwards `BUGLOGIN_RUNTIME_TRUST_KEYS_JSON` from `.env.local` or the process environment into the Tauri build. It must be a JSON object mapping key IDs to 32-byte Ed25519 public keys in hex. This is a build-time public trust pin; never put private signing material in `.env.local` or the repository.
+For local PostgreSQL development, `scripts/dev-local-api.mjs` forwards either the inline pair or the path pair from `.env.local` or the process environment into the API process. A partial pair or mixed configuration fails before the API starts. If neither source is set, local API readiness remains available for account/profile metadata work and `/v1/runtime/catalog` correctly reports `503 runtime_catalog_unavailable`.
 
-The service rejects symlinks, non-files, oversized input, duplicate key IDs, unknown JSON fields, empty catalogs, unsupported runtimes, invalid release metadata, unknown key IDs, and invalid signatures. Configuration is loaded and verified before the HTTP listener starts. If neither file is configured, the route returns retryable `503 runtime_catalog_unavailable`; it never serves an unsigned fallback.
+For local desktop development, `scripts/tauri-dev-local-api.mjs` forwards `BUGLOGIN_RUNTIME_TRUST_KEYS_JSON` from `.env.local` or the process environment into the Tauri build. The local API converts that same object to its catalog trust-key contract. Never put private signing material in `.env.local` or the repository.
+
+The service rejects symlinks, non-files, oversized input, duplicate key IDs, unknown JSON fields, empty catalogs, unsupported runtimes, invalid release metadata, unknown key IDs, and invalid signatures. Configuration is loaded and verified before the HTTP listener starts. If neither source is configured, the route returns retryable `503 runtime_catalog_unavailable`; it never serves an unsigned fallback.
 
 The runtime catalog gates browser installation and launch. Local API development may remain ready without a catalog so auth and metadata CRUD can be exercised, but production readiness requires a configured, verified signed catalog. In production, `/v1/readyz` returns retryable `503 runtime_catalog_unavailable` until that condition is met. Successful readiness includes `X-BugLogin-Runtime-Catalog: available`; the response body remains unchanged. Runtime download and launch still fail closed until a verified artifact is installed on the desktop.
 
