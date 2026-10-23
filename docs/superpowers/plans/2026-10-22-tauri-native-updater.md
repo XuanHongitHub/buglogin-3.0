@@ -51,6 +51,13 @@ Status: **active; release blocked pending API parity, native platform artifacts,
 - The first local Windows release package is still compiling under `G:\buglogin-target`; it must be rebuilt after the public trust key/catalog source update before it can be treated as current release evidence.
 - The first local Tauri v2 Windows build produced the signed NSIS installer `.exe` and `.exe.sig`, with no `.nsis.zip`. The release workflow/feed had incorrectly expected the legacy archive suffix. They now consume the actual v2 `.exe` plus detached `.exe.sig`; static release checks pass 15/15 and actionlint passes. The local artifact was built before the v155 trust-map update and is not the release candidate; a fresh build is required.
 
+## Windows frontend embedding regression — 2026-10-23
+
+- [x] Root cause confirmed from the installed 3.0.1 screenshot and Tauri's Windows path parsing: the release wrapper passed absolute `G:\\buglogin-target\\desktop-dist` as `frontendDist`, which Tauri interprets as a `G:` URL, leaving the app pointed at the build directory.
+- [x] Keep Vite output in `CARGO_TARGET_DIR`, stage its files temporarily to the ignored `apps/desktop/dist`, and configure Tauri with relative `../dist` so the HTML and assets are embedded. Cargo-check helper also uses relative `../dist`.
+- [ ] Run focused release policy/Cargo helper checks, build a Windows installer, install and launch it, and verify the BugLogin UI rather than a directory listing.
+- [ ] Record a new immutable version/tag and workflow run. Do not promote stable; macOS notarization, OS update smoke, and Packet C/D gates remain release blockers.
+
 ## Development-build updater behavior — 2026-10-22
 
 - Root cause of the About toast `app_updater_not_configured`: local/debug builds intentionally do not embed the Tauri updater public key, so the Rust command correctly reports that updater checks are unavailable. The UI previously surfaced this expected dev state as an error.

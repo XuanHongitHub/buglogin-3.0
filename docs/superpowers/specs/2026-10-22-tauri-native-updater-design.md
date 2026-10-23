@@ -18,6 +18,10 @@ BugLogin 3.0 uses the existing DigitalOcean Spaces bucket `mavelnut-login` witho
 
 The update key pair is a release credential. The private key is only a protected GitHub environment secret, never generated or stored by application code. The public key is injected into the release build as a Tauri config overlay and is safe to publish. Local development builds have no update endpoint and must report updater unavailable without failing startup.
 
+### Windows asset embedding
+
+Tauri `build.frontendDist` must remain a relative directory path. On Windows, passing an absolute drive path such as `G:\\buglogin-target\\desktop-dist` is parsed as a URL with scheme `G:`; the packaged app then opens the build directory instead of embedding and serving `index.html`. The frontend build output stays under `CARGO_TARGET_DIR`; the Tauri build wrapper stages it temporarily at `apps/desktop/dist`, passes `../dist`, and removes that staging directory after packaging.
+
 ## Behavior
 
 - Check reports the current version and an update only when a configured signed endpoint returns a valid newer artifact.
