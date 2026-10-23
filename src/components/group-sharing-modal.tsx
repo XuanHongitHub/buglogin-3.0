@@ -32,7 +32,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { resolveHumanIdentity } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
@@ -247,21 +246,17 @@ export function GroupSharingModal({
     const list = Object.values(grantStates);
     if (!searchQuery.trim()) return list;
     const q = searchQuery.toLowerCase();
-    return list.filter((item, idx) => {
-      const resolved = resolveHumanIdentity(
-        item.member.accountId,
+    return list.filter((item) => {
+      return [
+        item.member.identity?.username,
+        item.member.identity?.email,
         item.member.role,
-        idx,
-        t,
-      );
-      return (
-        resolved.displayName.toLowerCase().includes(q) ||
-        resolved.email.toLowerCase().includes(q) ||
-        item.member.role.toLowerCase().includes(q) ||
-        item.member.accountId.toLowerCase().includes(q)
-      );
+        item.member.accountId,
+      ]
+        .filter(Boolean)
+        .some((value) => value?.toLowerCase().includes(q));
     });
-  }, [grantStates, searchQuery, t]);
+  }, [grantStates, searchQuery]);
 
   const grantedCount = useMemo(() => {
     return Object.values(grantStates).filter((s) => s.granted).length;
@@ -385,17 +380,19 @@ export function GroupSharingModal({
                       </td>
                     </tr>
                   ) : (
-                    filteredMembers.map((item, idx) => {
+                    filteredMembers.map((item) => {
                       const isOwnerOrAdmin =
                         item.member.role === "owner" ||
                         item.member.role === "admin";
                       const isChecked = isOwnerOrAdmin || item.granted;
-                      const resolved = resolveHumanIdentity(
-                        item.member.accountId,
-                        item.member.role,
-                        idx,
-                        t,
-                      );
+                      const displayName =
+                        item.member.identity?.username ??
+                        "Danh tính chưa được cấp quyền xem";
+                      const displayEmail = item.member.identity?.email ?? "—";
+                      const initials =
+                        item.member.identity?.username
+                          ?.slice(0, 2)
+                          .toUpperCase() ?? "?";
 
                       return (
                         <tr
@@ -412,20 +409,20 @@ export function GroupSharingModal({
                               onCheckedChange={() =>
                                 handleToggleMember(item.member.id, item.granted)
                               }
-                              aria-label={`Toggle access for ${resolved.displayName}`}
+                              aria-label={`Toggle access for ${displayName}`}
                             />
                           </td>
                           <td className="py-2.5 px-3">
                             <div className="flex items-center gap-2.5">
                               <div className="flex size-7 items-center justify-center rounded-full bg-primary/10 font-bold text-[11px] text-primary shrink-0">
-                                {resolved.initials}
+                                {initials}
                               </div>
                               <div className="min-w-0">
                                 <div className="font-semibold text-foreground text-xs truncate">
-                                  {resolved.displayName}
+                                  {displayName}
                                 </div>
                                 <div className="text-[10px] text-muted-foreground truncate">
-                                  {resolved.email}
+                                  {displayEmail}
                                 </div>
                               </div>
                             </div>

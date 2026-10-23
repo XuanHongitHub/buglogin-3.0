@@ -36,7 +36,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { resolveHumanIdentity } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import type { BrowserProfile, GroupWithCount } from "@/types";
@@ -97,138 +96,46 @@ export function TeamManagerView({
   const [sourceMemberId, setSourceMemberId] = useState("");
   const [targetMemberId, setTargetMemberId] = useState("");
   const [handoverGroupId, setHandoverGroupId] = useState("");
-  const [isHandingOver, setIsHandingOver] = useState(false);
 
   // Load Real Members and Active Profiles
   const loadTeamData = useCallback(async () => {
     setIsLoading(true);
     try {
-      // 1. Fetch real workspace members
-      let loadedMembers: Array<{
-        id: string;
-        accountId: string;
-        role: string;
-        status: string;
-      }> = [];
-      try {
-        const page = await desktopApi.listMembers(workspaceId);
-        loadedMembers = page?.items ?? [];
-      } catch (err) {
-        console.warn("Could not load workspace members:", err);
-      }
-
-      // 2. Identify running profiles
+      const page = await desktopApi.listMembers(workspaceId);
+      const loadedMembers = page.items;
       const runningProfiles = profiles.filter((p) => p.state === "running");
-
-      // 3. Build session records
-      if (loadedMembers.length > 0) {
-        const mappedSessions: TeamOperatorSession[] = loadedMembers.map(
-          (member, index) => {
-            const activeProf = runningProfiles[index] ?? null;
-            const isRunning = Boolean(activeProf);
-
-            let proxyEndpoint: string | null = null;
-            if (activeProf?.proxy) {
-              proxyEndpoint = `${activeProf.proxy.protocol ?? "http"}://${activeProf.proxy.host}:${activeProf.proxy.port}`;
-            }
-
-            const resolved = resolveHumanIdentity(
-              member.accountId,
-              member.role,
-              index,
-              t,
-            );
-
-            return {
-              operatorId: member.id,
-              name: resolved.displayName,
-              email: resolved.email,
-              role: member.role,
-              profileId: activeProf?.id ?? null,
-              profileName: activeProf?.name ?? null,
-              proxyEndpoint: proxyEndpoint ?? (isRunning ? "Direct" : null),
-              runtimeVersion: activeProf?.runtimeVersion ?? "Core",
-              status: isRunning
-                ? "running"
-                : member.status === "active"
-                  ? "idle"
-                  : "offline",
-              groupScope: t("teamManager.allGroups", {
-                defaultValue: "Toàn bộ nhóm",
-              }),
-            };
-          },
-        );
-
-        // Add additional running profiles if any
-        if (runningProfiles.length > loadedMembers.length) {
-          for (let i = loadedMembers.length; i < runningProfiles.length; i++) {
-            const p = runningProfiles[i];
-            let proxyEndpoint: string | null = null;
-            if (p.proxy) {
-              proxyEndpoint = `${p.proxy.protocol ?? "http"}://${p.proxy.host}:${p.proxy.port}`;
-            }
-            mappedSessions.push({
-              operatorId: `op_local_${i + 1}`,
-              name: `${t("roles.operator", { defaultValue: "Thành viên" })} #${i + 1}`,
-              email: `member_${i + 1}@workspace.local`,
-              role: "operator",
-              profileId: p.id,
-              profileName: p.name,
-              proxyEndpoint: proxyEndpoint ?? "Direct",
-              runtimeVersion: p.runtimeVersion ?? "Core",
-              status: "running",
-              groupScope: t("teamManager.assignedScope", {
-                defaultValue: "Được chỉ định",
-              }),
-            });
-          }
-        }
-
-        setSessions(mappedSessions);
-      } else if (runningProfiles.length > 0) {
-        const mappedSessions: TeamOperatorSession[] = runningProfiles.map(
-          (p, i) => {
-            let proxyEndpoint: string | null = null;
-            if (p.proxy) {
-              proxyEndpoint = `${p.proxy.protocol ?? "http"}://${p.proxy.host}:${p.proxy.port}`;
-            }
-            return {
-              operatorId: `op_local_${i + 1}`,
-              name: `${t("roles.operator", { defaultValue: "Thành viên" })} #${i + 1}`,
-              email: `member_${i + 1}@workspace.local`,
-              role: "operator",
-              profileId: p.id,
-              profileName: p.name,
-              proxyEndpoint: proxyEndpoint ?? "Direct",
-              runtimeVersion: p.runtimeVersion ?? "Core",
-              status: "running",
-              groupScope: t("teamManager.allGroups", {
-                defaultValue: "Toàn bộ nhóm",
-              }),
-            };
-          },
-        );
-        setSessions(mappedSessions);
-      } else {
-        const resolvedSelf = resolveHumanIdentity(null, "owner", 0, t);
-        setSessions([
-          {
-            operatorId: "mem_current",
-            name: resolvedSelf.displayName,
-            email: resolvedSelf.email,
-            role: "owner",
-            profileId: null,
-            profileName: null,
-            proxyEndpoint: null,
-            runtimeVersion: "Core",
-            status: "idle",
-            groupScope: t("teamManager.allGroups", {
-              defaultValue: "Toàn bộ nhóm",
-            }),
-          },
-        ]);
-      }
+      const memberRows: TeamOperatorSession[] = loadedMembers.map((member) => ({
+        operatorId: member.id,
+        name: member.identity?.username ?? "Danh tính chưa được cấp quyền xem",
+        email: member.identity?.email ?? "—",
+        role: member.role,
+        profileId: null,
+        profileName: null,
+        proxyEndpoint: null,
+        runtimeVersion: "—",
+        status: member.status === "active" ? "idle" : "offline",
+        groupScope: member.teamId ?? "Chưa gán team",
+      }));
+      const profileRows: TeamOperatorSession[] = runningProfiles.map(
+        (profile) => {
+          const proxyEndpoint = profile.proxy
+            ? `${profile.proxy.protocol ?? "http"}://${profile.proxy.host}:${profile.proxy.port}`
+            : "Direct";
+          return {
+            operatorId: `profile:${profile.id}`,
+            name: profile.name,
+            email: "—",
+            role: "Profile session",
+            profileId: profile.id,
+            profileName: profile.name,
+            proxyEndpoint,
+            runtimeVersion: profile.runtimeVersion ?? "—",
+            status: "running",
+            groupScope: "—",
+          };
+        },
+      );
+      setSessions([...memberRows, ...profileRows]);
     } catch (err) {
       showErrorToast(
         t("teamManager.syncError", {
@@ -304,54 +211,6 @@ export function TeamManagerView({
           defaultValue: `Lỗi dừng hàng loạt: ${String(err)}`,
         }),
       );
-    }
-  };
-
-  // Bulk Handover Execution
-  const handleExecuteHandover = async () => {
-    if (!sourceMemberId || !targetMemberId) {
-      showErrorToast(
-        t("teamManager.selectHandoverMembers", {
-          defaultValue: "Vui lòng chọn thành viên bàn giao và nhận bàn giao.",
-        }),
-      );
-      return;
-    }
-    if (sourceMemberId === targetMemberId) {
-      showErrorToast(
-        t("teamManager.sameHandoverMembers", {
-          defaultValue:
-            "Thành viên nhận bàn giao không được trùng với thành viên chuyển giao.",
-        }),
-      );
-      return;
-    }
-    setIsHandingOver(true);
-    try {
-      const sourceName =
-        sessions.find((s) => s.operatorId === sourceMemberId)?.name ??
-        sourceMemberId;
-      const targetName =
-        sessions.find((s) => s.operatorId === targetMemberId)?.name ??
-        targetMemberId;
-      showSuccessToast(
-        t("teamManager.handoverSuccess", {
-          source: sourceName,
-          target: targetName,
-          defaultValue: `Bàn giao hồ sơ thành công từ ${sourceName} sang ${targetName}.`,
-        }),
-      );
-      setHandoverModalOpen(false);
-      setSelectedIds(new Set());
-      void loadTeamData();
-    } catch (err) {
-      showErrorToast(
-        t("teamManager.handoverError", {
-          defaultValue: `Lỗi bàn giao: ${String(err)}`,
-        }),
-      );
-    } finally {
-      setIsHandingOver(false);
     }
   };
 
@@ -1058,10 +917,8 @@ export function TeamManagerView({
               </span>
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              {t("teamManager.handoverDesc", {
-                defaultValue:
-                  "Chuyển giao quyền chạy profile giữa các thành viên với chính sách DLP bảo vệ dữ liệu.",
-              })}
+              API chuyển quyền profile giữa các thành viên chưa có. Nội dung lựa
+              chọn bên dưới chỉ là bản nháp; chưa có quyền nào được thay đổi.
             </DialogDescription>
           </DialogHeader>
 
@@ -1072,7 +929,11 @@ export function TeamManagerView({
                   defaultValue: "Từ thành viên bàn giao:",
                 })}
               </Label>
-              <Select value={sourceMemberId} onValueChange={setSourceMemberId}>
+              <Select
+                value={sourceMemberId}
+                onValueChange={setSourceMemberId}
+                disabled
+              >
                 <SelectTrigger className="h-9 text-xs">
                   <SelectValue
                     placeholder={t("common.selectPlaceholder", {
@@ -1100,7 +961,11 @@ export function TeamManagerView({
                   defaultValue: "Sang thành viên nhận bàn giao:",
                 })}
               </Label>
-              <Select value={targetMemberId} onValueChange={setTargetMemberId}>
+              <Select
+                value={targetMemberId}
+                onValueChange={setTargetMemberId}
+                disabled
+              >
                 <SelectTrigger className="h-9 text-xs">
                   <SelectValue
                     placeholder={t("common.selectPlaceholder", {
@@ -1131,6 +996,7 @@ export function TeamManagerView({
               <Select
                 value={handoverGroupId}
                 onValueChange={setHandoverGroupId}
+                disabled
               >
                 <SelectTrigger className="h-9 text-xs">
                   <SelectValue
@@ -1186,17 +1052,10 @@ export function TeamManagerView({
               type="button"
               variant="default"
               size="sm"
-              onClick={() => void handleExecuteHandover()}
-              disabled={isHandingOver}
+              disabled
               className="h-8 text-xs cursor-pointer font-medium"
             >
-              {isHandingOver
-                ? t("teamManager.handingOver", {
-                    defaultValue: "Đang bàn giao...",
-                  })
-                : t("teamManager.confirmHandover", {
-                    defaultValue: "Xác nhận bàn giao",
-                  })}
+              API chưa hỗ trợ
             </Button>
           </DialogFooter>
         </DialogContent>

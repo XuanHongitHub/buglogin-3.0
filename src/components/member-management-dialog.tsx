@@ -46,10 +46,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  getActiveUserEmail,
-  resolveHumanIdentity,
-} from "@/lib/identity-display";
+import { getActiveUserEmail } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
@@ -93,10 +90,12 @@ export function MemberManagementDialog({
 
   const [currentUser, setCurrentUser] = useState<{
     id: string;
+    accountId: string;
     email: string;
     role: string;
   }>({
     id: "",
+    accountId: "",
     email: "",
     role: "member",
   });
@@ -126,6 +125,7 @@ export function MemberManagementDialog({
     new Set(),
   );
   const [isBulkExecuting, setIsBulkExecuting] = useState(false);
+  const [bulkActionError, setBulkActionError] = useState<string | null>(null);
 
   // Bulk Provision Modal state
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
@@ -174,7 +174,7 @@ export function MemberManagementDialog({
   }, [propWorkspaceId]);
 
   const loadMembers = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!workspaceId) return false;
     setIsLoading(true);
     try {
       const [page, account] = await Promise.all([
@@ -187,17 +187,14 @@ export function MemberManagementDialog({
           (member) => member.accountId === account.accountId,
         );
         const activeEmail = getActiveUserEmail();
-        const resolved = resolveHumanIdentity(
-          account.accountId,
-          membership?.role ?? "member",
-          0,
-        );
         setCurrentUser({
           id: membership?.id ?? account.accountId,
-          email: activeEmail || resolved.email,
+          accountId: account.accountId,
+          email: membership?.identity?.email ?? activeEmail,
           role: membership?.role ?? "member",
         });
       }
+      return true;
     } catch (err) {
       console.error("Failed to load members:", err);
       showErrorToast(
@@ -205,6 +202,7 @@ export function MemberManagementDialog({
           defaultValue: "Không thể tải danh sách thành viên",
         }),
       );
+      return false;
     } finally {
       setIsLoading(false);
     }
@@ -340,12 +338,7 @@ export function MemberManagementDialog({
         workspaceId,
         memberId: offboardMember.id,
       });
-      const displayName = resolveHumanIdentity(
-        offboardMember.accountId,
-        offboardMember.role,
-        undefined,
-        t,
-      ).displayName;
+      const displayName = offboardMember.identity?.username ?? "thành viên";
       showSuccessToast(`Đã tạm ngưng quyền thành viên của ${displayName}.`);
       setOffboardMember(null);
       void loadMembers();
@@ -364,8 +357,10 @@ export function MemberManagementDialog({
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      list = list.filter(
-        (m) => m.accountId.toLowerCase().includes(q) || m.id.includes(q),
+      list = list.filter((m) =>
+        [m.identity?.username, m.identity?.email, m.accountId, m.id]
+          .filter(Boolean)
+          .some((value) => value?.toLowerCase().includes(q)),
       );
     }
     return list;
@@ -375,7 +370,7 @@ export function MemberManagementDialog({
     return filteredMembers.filter((m) => {
       const memberRank = ROLE_RANKS[m.role] ?? 0;
       const isSelf =
-        m.id === currentUser.id || m.accountId === currentUser.email;
+        m.id === currentUser.id || m.accountId === currentUser.accountId;
       return !isSelf && memberRank < currentUserRank;
     });
   }, [filteredMembers, currentUser, currentUserRank]);
@@ -403,7 +398,8 @@ export function MemberManagementDialog({
   const handleBulkChangeRole = async (newRole: MemberRole) => {
     if (!workspaceId || selectedMemberIds.size === 0) return;
     setIsBulkExecuting(true);
-    let count = 0;
+    setBulkActionError(null);
+    const failedIds: string[] = [];
     try {
       for (const memberId of selectedMemberIds) {
         try {
@@ -412,14 +408,27 @@ export function MemberManagementDialog({
             memberId,
             role: newRole,
           });
-          count++;
-        } catch (e) {
-          console.warn(`Failed to update role for ${memberId}:`, e);
+        } catch {
+          failedIds.push(memberId);
         }
       }
-      showSuccessToast(t("members.bulkActions.roleUpdated", { count }));
-      setSelectedMemberIds(new Set());
-      void loadMembers();
+      const refreshed = await loadMembers();
+      setSelectedMemberIds(
+        new Set(refreshed ? failedIds : [...selectedMemberIds]),
+      );
+      if (failedIds.length > 0 || !refreshed) {
+        const summary = !refreshed
+          ? "Đã gửi thay đổi nhưng không làm mới được danh sách. Hãy tải lại trước khi thao tác tiếp."
+          : `${selectedMemberIds.size - failedIds.length} thành công, ${failedIds.length} thất bại. Các thành viên lỗi vẫn được chọn để thử lại.`;
+        setBulkActionError(summary);
+        showErrorToast(summary);
+      } else {
+        showSuccessToast(
+          t("members.bulkActions.roleUpdated", {
+            count: selectedMemberIds.size,
+          }),
+        );
+      }
     } finally {
       setIsBulkExecuting(false);
     }
@@ -428,19 +437,33 @@ export function MemberManagementDialog({
   const handleBulkSuspend = async () => {
     if (!workspaceId || selectedMemberIds.size === 0) return;
     setIsBulkExecuting(true);
-    let count = 0;
+    setBulkActionError(null);
+    const failedIds: string[] = [];
     try {
       for (const memberId of selectedMemberIds) {
         try {
           await desktopApi.suspendMember({ workspaceId, memberId });
-          count++;
-        } catch (e) {
-          console.warn(`Failed to suspend ${memberId}:`, e);
+        } catch {
+          failedIds.push(memberId);
         }
       }
-      showSuccessToast(t("members.bulkActions.suspendedCount", { count }));
-      setSelectedMemberIds(new Set());
-      void loadMembers();
+      const refreshed = await loadMembers();
+      setSelectedMemberIds(
+        new Set(refreshed ? failedIds : [...selectedMemberIds]),
+      );
+      if (failedIds.length > 0 || !refreshed) {
+        const summary = !refreshed
+          ? "Đã gửi thay đổi nhưng không làm mới được danh sách. Hãy tải lại trước khi thao tác tiếp."
+          : `${selectedMemberIds.size - failedIds.length} thành công, ${failedIds.length} thất bại. Các thành viên lỗi vẫn được chọn để thử lại.`;
+        setBulkActionError(summary);
+        showErrorToast(summary);
+      } else {
+        showSuccessToast(
+          t("members.bulkActions.suspendedCount", {
+            count: selectedMemberIds.size,
+          }),
+        );
+      }
     } finally {
       setIsBulkExecuting(false);
     }
@@ -449,19 +472,33 @@ export function MemberManagementDialog({
   const handleBulkActivate = async () => {
     if (!workspaceId || selectedMemberIds.size === 0) return;
     setIsBulkExecuting(true);
-    let count = 0;
+    setBulkActionError(null);
+    const failedIds: string[] = [];
     try {
       for (const memberId of selectedMemberIds) {
         try {
           await desktopApi.activateMember({ workspaceId, memberId });
-          count++;
-        } catch (e) {
-          console.warn(`Failed to activate ${memberId}:`, e);
+        } catch {
+          failedIds.push(memberId);
         }
       }
-      showSuccessToast(t("members.bulkActions.activatedCount", { count }));
-      setSelectedMemberIds(new Set());
-      void loadMembers();
+      const refreshed = await loadMembers();
+      setSelectedMemberIds(
+        new Set(refreshed ? failedIds : [...selectedMemberIds]),
+      );
+      if (failedIds.length > 0 || !refreshed) {
+        const summary = !refreshed
+          ? "Đã gửi thay đổi nhưng không làm mới được danh sách. Hãy tải lại trước khi thao tác tiếp."
+          : `${selectedMemberIds.size - failedIds.length} thành công, ${failedIds.length} thất bại. Các thành viên lỗi vẫn được chọn để thử lại.`;
+        setBulkActionError(summary);
+        showErrorToast(summary);
+      } else {
+        showSuccessToast(
+          t("members.bulkActions.activatedCount", {
+            count: selectedMemberIds.size,
+          }),
+        );
+      }
     } finally {
       setIsBulkExecuting(false);
     }
@@ -827,16 +864,18 @@ export function MemberManagementDialog({
                         const memberRank = ROLE_RANKS[member.role] ?? 0;
                         const isSelf =
                           member.id === currentUser.id ||
-                          member.accountId === currentUser.email;
+                          member.accountId === currentUser.accountId;
                         const isHigherOrEqual = memberRank >= currentUserRank;
                         const canManage = !isSelf && !isHigherOrEqual;
                         const isUpdating = updatingMemberId === member.id;
-
-                        const resolved = resolveHumanIdentity(
-                          member.accountId,
-                          member.role,
-                          members.indexOf(member),
-                        );
+                        const displayIdentity =
+                          member.identity?.username ??
+                          "Danh tính chưa được cấp quyền xem";
+                        const displayEmail = member.identity?.email ?? "—";
+                        const initials =
+                          member.identity?.username
+                            ?.slice(0, 2)
+                            .toUpperCase() ?? "?";
 
                         return (
                           <tr
@@ -860,11 +899,11 @@ export function MemberManagementDialog({
                             <td className="py-2.5 px-3">
                               <div className="flex items-center gap-2.5">
                                 <div className="flex size-7 items-center justify-center rounded-full bg-primary/10 text-primary font-bold text-xs">
-                                  {resolved.initials}
+                                  {initials}
                                 </div>
                                 <div>
                                   <div className="font-semibold text-foreground text-xs flex items-center gap-1.5">
-                                    <span>{resolved.displayName}</span>
+                                    <span>{displayIdentity}</span>
                                     {isSelf && (
                                       <Badge
                                         variant="outline"
@@ -875,10 +914,10 @@ export function MemberManagementDialog({
                                     )}
                                   </div>
                                   <div className="text-[11px] text-muted-foreground">
-                                    {resolved.email}
+                                    {displayEmail}
                                   </div>
                                   <div className="text-[10px] text-muted-foreground/50 font-mono">
-                                    {resolved.shortId}
+                                    {member.id}
                                   </div>
                                 </div>
                               </div>
@@ -1080,6 +1119,11 @@ export function MemberManagementDialog({
                 </div>
               </div>
             )}
+            {bulkActionError ? (
+              <p role="alert" className="text-xs text-destructive">
+                {bulkActionError}
+              </p>
+            ) : null}
 
             {/* Role Permissions Summary */}
             <div className="rounded-lg border border-border/70 bg-muted/15 p-3 space-y-2">
@@ -1623,12 +1667,7 @@ export function MemberManagementDialog({
                 <LuShieldAlert className="size-4" />
                 <span>
                   Tạm ngưng thành viên:{" "}
-                  {
-                    resolveHumanIdentity(
-                      offboardMember.accountId,
-                      offboardMember.role,
-                    ).displayName
-                  }
+                  {offboardMember.identity?.username ?? "thành viên"}
                 </span>
               </DialogTitle>
               <DialogDescription className="text-xs text-muted-foreground">
