@@ -8,7 +8,44 @@ import {
   rmdir,
   unlink,
 } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
+
+const TERMINATION_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+
+// Keeps the launcher alive on Ctrl-C, kill or terminal close so the child's
+// exit handler can restore the binaries directory; the child gets the signal.
+export function forwardTerminationSignals(child, launcher = process) {
+  for (const signal of TERMINATION_SIGNALS) {
+    launcher.on(signal, () => {
+      if (child.exitCode === null) child.kill(signal);
+    });
+  }
+}
+
+// Restores a binaries directory left staged by a launcher that died before
+// its restore ran (for example a killed terminal).
+export async function recoverTauriSidecarDirectory({
+  sourceBinaries,
+  sidecarName,
+}) {
+  const parent = dirname(sourceBinaries);
+  const prefix = `${basename(sourceBinaries)}.build-restore-`;
+  const backups = (await readdir(parent)).filter((entry) =>
+    entry.startsWith(prefix),
+  );
+  if (backups.length === 0) return false;
+  if (backups.length > 1) {
+    throw new Error(
+      `Multiple Tauri binaries backups found next to ${sourceBinaries}; restore one manually`,
+    );
+  }
+  await restoreTauriSidecarDirectory({
+    sourceBinaries,
+    backupBinaries: resolve(parent, backups[0]),
+    sidecarName,
+  });
+  return true;
+}
 
 export async function restoreTauriSidecarDirectory({
   sourceBinaries,

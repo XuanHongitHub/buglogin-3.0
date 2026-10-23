@@ -14,7 +14,11 @@ import {
   parseTauriDevApiBaseUrl,
   validateMcpStatusResponse,
 } from "./tauri-dev-local-api-contract.mjs";
-import { stageTauriSidecarDirectory } from "./tauri-sidecar-staging.mjs";
+import {
+  forwardTerminationSignals,
+  recoverTauriSidecarDirectory,
+  stageTauriSidecarDirectory,
+} from "./tauri-sidecar-staging.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const desktopRoot = resolve(repositoryRoot, "apps/desktop");
@@ -219,6 +223,7 @@ delete childEnv.BUGLOGIN_API_TOKEN;
 delete childEnv.BUGLOGIN_DATA_ROOT;
 delete childEnv.BUGLOGIN_PROFILE_CACHE_ROOT;
 
+await recoverTauriSidecarDirectory({ sourceBinaries, sidecarName });
 await stageMigrationSidecar();
 
 const isWindows = process.platform === "win32";
@@ -246,9 +251,9 @@ child.on("error", (error) => {
     process.exitCode = 1;
   });
 });
+forwardTerminationSignals(child);
 child.on("exit", (code, signal) => {
   void restoreBinariesDirectory().finally(() => {
-    if (signal) process.kill(process.pid, signal);
-    else process.exitCode = code ?? 1;
+    process.exitCode = signal ? 130 : (code ?? 1);
   });
 });
