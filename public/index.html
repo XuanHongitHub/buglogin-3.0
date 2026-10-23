@@ -292,6 +292,8 @@ a{color:inherit}
       <h1 id="hero-title">Mỗi tài khoản<br>một vân tay&nbsp;riêng.</h1>
       <p class="lede">BugLogin là trình duyệt antidetect cho người bán hàng đa sàn. Mỗi hồ sơ có vân tay thiết bị, proxy và cookie riêng, nên hàng trăm tài khoản chạy trên cùng một máy tính vẫn tách biệt hoàn toàn.</p>
 
+      <p id="release-channel" role="status" hidden style="margin:14px 0 0;color:#8b5e00;font-size:14px">Đang cung cấp bản thử nghiệm Release Candidate.</p>
+
       <div class="cta" id="download">
         <div class="dl-frame">
           <a class="btn btn-xl" href="#" data-dl="auto" id="dl-primary">
@@ -641,9 +643,13 @@ a{color:inherit}
       const catalog = await response.json();
       setAvailable('windows', typeof catalog.platforms?.windows?.url === 'string');
       setAvailable('macos', typeof catalog.platforms?.macos?.url === 'string');
+      const releaseNotice = document.getElementById('release-channel');
+      releaseNotice.hidden = catalog.channel !== 'rc';
+      if (catalog.channel === 'rc') releaseNotice.textContent = `Bạn đang tải bản thử nghiệm Release Candidate ${catalog.version}.`;
     } catch {
       setAvailable('windows', false);
       setAvailable('macos', false);
+      document.getElementById('release-channel').hidden = true;
     }
   };
 
