@@ -22,6 +22,15 @@ test("OSV dependency scanning does not require private-repository code scanning"
   assert.match(workflow, /osv-scanner-reusable-pr\.yml@[0-9a-f]{40}/);
 });
 
+test("Rust compatibility tests install their Node.js dependencies", async () => {
+  const workflow = await readFile(".github/workflows/ci.yml", "utf8");
+  const normalized = workflow.replace(/\r\n/g, "\n");
+  const rustJob = normalized.match(/^  rust:\n([\s\S]*?)(?=^  javascript:\n)/m)?.[1];
+  assert.ok(rustJob, "expected Rust CI job");
+  assert.match(rustJob, /actions\/setup-buglogin/);
+  assert.doesNotMatch(rustJob, /install-node-dependencies:\s*false/);
+});
+
 test("release publishes verified platform bundles as a downloadable prerelease candidate", async () => {
   const { release } = await verifyReleaseWorkflows();
   assert.match(release, /publish-rc:[\s\S]*?needs:\s*\[validate, sign-and-verify\]/);

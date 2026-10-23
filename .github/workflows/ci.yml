@@ -28,8 +28,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-buglogin
-        with:
-          install-node-dependencies: false
       - name: Install native dependencies for the Tauri workspace
         run: |
           sudo apt-get update
