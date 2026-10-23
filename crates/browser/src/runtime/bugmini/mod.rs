@@ -47,7 +47,8 @@ impl RuntimeAdapter for BugminiAdapter {
     ) -> Result<LaunchSpecification, Problem> {
         let mut specification =
             WayfernAdapter.launch_specification(binary, profile_path, extra_args)?;
-        let profile_arg = specification.args.get(1).cloned().ok_or_else(|| {
+        let profile_arg = bugmini_path_argument(&specification.profile_path.to_string_lossy());
+        let user_data_dir = specification.args.first_mut().ok_or_else(|| {
             Problem::new(
                 "runtime_launch_specification_invalid",
                 "Runtime launch specification is invalid",
@@ -55,10 +56,7 @@ impl RuntimeAdapter for BugminiAdapter {
                 "runtime-bugmini-launch",
             )
         })?;
-        let profile_arg = bugmini_path_argument(&profile_arg);
-        specification
-            .args
-            .splice(0..2, [format!("--user-data-dir={profile_arg}")]);
+        *user_data_dir = format!("--user-data-dir={profile_arg}");
         specification.runtime = Runtime::Bugmini;
         Ok(specification)
     }
@@ -95,6 +93,27 @@ mod tests {
     }
 
     #[test]
+    fn launch_without_extra_arguments_keeps_the_isolated_profile() {
+        let root = std::env::temp_dir().join("buglogin-bugmini-runtime-no-args");
+        let binary = ValidatedRuntimeBinary {
+            path: root.join("chrome"),
+            version: "146.0.7680.177.4".to_owned(),
+            checksum: "a".repeat(64),
+            size_bytes: 1,
+        };
+        let profile = root.join("profile");
+        let specification = BugminiAdapter
+            .launch_specification(&binary, &profile, &[])
+            .unwrap();
+
+        assert_eq!(
+            specification.args,
+            vec![format!("--user-data-dir={}", profile.to_string_lossy())]
+        );
+        assert_eq!(specification.runtime, Runtime::Bugmini);
+    }
+
+    #[test]
     fn user_data_dir_is_one_argument_for_bugmini_headless() {
         let root = std::env::temp_dir().join("buglogin-bugmini-runtime-args");
         let binary = ValidatedRuntimeBinary {
@@ -117,8 +136,12 @@ mod tests {
 
         let expected_profile_arg = format!("--user-data-dir={}", profile.to_string_lossy());
         assert_eq!(
-            specification.args.first().map(String::as_str),
-            Some(expected_profile_arg.as_str())
+            specification.args,
+            vec![
+                expected_profile_arg,
+                "http://127.0.0.1:3000/check".to_owned(),
+                "--headless=new".to_owned(),
+            ]
         );
         assert!(
             !specification

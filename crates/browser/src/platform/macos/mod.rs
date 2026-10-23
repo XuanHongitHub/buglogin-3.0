@@ -13,7 +13,6 @@ use crate::process::ProcessIdentity;
 const GROUP_HELPER: &str = r#"
 owner_pid="$BUGLOGIN_OWNER_PID"
 owner_start="$BUGLOGIN_OWNER_START"
-shift
 "$@" &
 child=$!
 pgid=$$

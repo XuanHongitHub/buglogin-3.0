@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn launch_specification_uses_the_profile_specific_data_directory() {
-        let profile_path = Path::new(r"C:\BugLogin\profiles\profile-one");
+        let profile_path = &std::env::temp_dir().join("BugLogin/profiles/profile-one");
         let specification = WayfernAdapter
             .launch_specification(&binary(), profile_path, &["--disable-sync".into()])
             .unwrap();

@@ -27,7 +27,7 @@ fn child_pid_file(name: &str) -> PathBuf {
 fn launch_tree(controller: &MacOsProcessGroupController, pid_file: &Path) -> impl OwnedProcessTree {
     controller
         .launch(
-            Path::new("/bin/sh"),
+            Path::new("/bin/bash"),
             &[
                 "-c".into(),
                 "sleep 60 & echo $! > \"$1\"; wait".into(),
@@ -101,7 +101,7 @@ fn identity_mismatch_fails_closed() {
 #[test]
 fn system_controller_uses_owned_process_group() {
     let pid_file = child_pid_file("controller");
-    let executable = PathBuf::from("/bin/sh").canonicalize().unwrap();
+    let executable = PathBuf::from("/bin/bash").canonicalize().unwrap();
     let controller = SystemProcessController::new([ApprovedExecutable::new(&executable).unwrap()]);
     let specification = LaunchSpecification {
         runtime: Runtime::Wayfern,
