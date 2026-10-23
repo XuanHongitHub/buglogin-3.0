@@ -2832,6 +2832,17 @@ mod tests {
             b"same encrypted profile state on each device",
         )
         .unwrap();
+        fs::create_dir_all(source.join("Default/Sessions")).unwrap();
+        fs::write(
+            source.join("Default/Sessions/Session_123456789"),
+            b"simulated open-tab session state",
+        )
+        .unwrap();
+        fs::write(
+            source.join("Default/Sessions/Tabs_123456789"),
+            b"simulated tab navigation state",
+        )
+        .unwrap();
         let previous = SyncManifest::new(
             workspace.clone(),
             resource.clone(),
@@ -2848,6 +2859,13 @@ mod tests {
             .snapshot_with_proxy_encryption(&source, &previous, 2, None, &client_key, &recovery_key)
             .unwrap();
         descriptor.verify_manifest(&manifest).unwrap();
+        for path in [
+            "Default/Sessions/Session_123456789",
+            "Default/Sessions/Tabs_123456789",
+        ] {
+            assert!(descriptor.objects.iter().any(|object| object.path == path));
+            assert!(manifest.objects.iter().any(|object| object.key == path));
+        }
         let remote_objects: BTreeMap<_, _> = objects
             .iter()
             .map(|object| (object.key.clone(), object.read_bytes().unwrap()))
@@ -2938,6 +2956,22 @@ mod tests {
         let restored_b = fs::read(receipt_b.path.join("Default/Preferences")).unwrap();
         assert_eq!(checksum(&restored_a), checksum(&restored_b));
         assert_eq!(restored_a, b"same encrypted profile state on each device");
+        for (relative, expected) in [
+            (
+                "Default/Sessions/Session_123456789",
+                b"simulated open-tab session state".as_slice(),
+            ),
+            (
+                "Default/Sessions/Tabs_123456789",
+                b"simulated tab navigation state".as_slice(),
+            ),
+        ] {
+            let device_a_bytes = fs::read(receipt_a.path.join(relative)).unwrap();
+            let device_b_bytes = fs::read(receipt_b.path.join(relative)).unwrap();
+            assert_eq!(device_a_bytes, expected);
+            assert_eq!(device_b_bytes, expected);
+            assert_eq!(checksum(&device_a_bytes), checksum(&device_b_bytes));
+        }
         assert_eq!(receipt_a.root_checksum, receipt_b.root_checksum);
 
         server.abort();

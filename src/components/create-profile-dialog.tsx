@@ -75,7 +75,11 @@ import { useBrowserDownload } from "@/hooks/use-browser-download";
 import { useInputModality } from "@/hooks/use-input-modality";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { parseBackendError } from "@/lib/backend-errors";
-import { getOSDisplayName, getOSIcon } from "@/lib/browser-utils";
+import {
+  getOSDisplayName,
+  getOSIcon,
+  getRuntimeVersionLabel,
+} from "@/lib/browser-utils";
 import { DNS_BLOCKLIST_LEVELS } from "@/lib/dns-blocklist-levels";
 import { MOTION_EASE_OUT } from "@/lib/motion";
 import { showErrorToast } from "@/lib/toast-utils";
@@ -86,15 +90,6 @@ const PASSWORD_MIN_LEN = 8;
 type BrowserKernel = "wayfern";
 
 const OS_OPTIONS: WayfernOS[] = ["windows", "macos", "linux", "android", "ios"];
-
-const COMMON_RESOLUTIONS = [
-  { width: 1920, height: 1080 },
-  { width: 2560, height: 1440 },
-  { width: 1440, height: 900 },
-  { width: 1536, height: 864 },
-  { width: 1680, height: 1050 },
-  { width: 1366, height: 768 },
-];
 
 const COMMON_CORES = [8, 12, 16, 24];
 const COMMON_MEMORY = [8, 16, 32];
@@ -208,7 +203,7 @@ export function CreateProfileDialog({
   const versionRequestRef = useRef(0);
   const { storedProxies } = useProxyEvents();
   const {
-    isBrowserDownloading,
+    isVersionDownloading,
     downloadBrowser,
     loadVersions,
     loadDownloadedVersions,
@@ -309,6 +304,9 @@ export function CreateProfileDialog({
   const downloadedVersions = downloadedVersionsMap.wayfern ?? [];
   const creatableVersion =
     selectedVersion || downloadedVersions[0] || availableVersions[0];
+  const creatableVersionLabel = creatableVersion
+    ? getRuntimeVersionLabel(creatableVersion)
+    : undefined;
   const browserVersionStatus =
     creatableVersion && downloadedVersions.includes(creatableVersion)
       ? t("createProfile.version.installed")
@@ -317,16 +315,20 @@ export function CreateProfileDialog({
         : availableVersions.length > 0
           ? t("createProfile.version.available", {
               browser: t("createProfile.antiDetect.chromium"),
-              version: creatableVersion,
+              version: creatableVersionLabel,
             })
           : t("createProfile.version.fetching");
 
-  const downloading = isBrowserDownloading("wayfern");
+  const downloading = creatableVersion
+    ? isVersionDownloading("wayfern", creatableVersion)
+    : false;
   const canDownloadSelectedVersion =
     !!creatableVersion &&
     catalogVersions.includes(creatableVersion) &&
     !downloadedVersions.includes(creatableVersion);
-  const isCreateDisabled = !profileName.trim() || downloading || isCreating;
+  // A profile is metadata; the selected browser runtime is needed only when
+  // launching it. Let users save profiles while that runtime downloads.
+  const isCreateDisabled = !profileName.trim() || isCreating;
   const hostOs = getCurrentOS();
   const selectedOs = wayfernConfig.os ?? hostOs;
   const crossOs = selectedOs !== hostOs;
@@ -450,8 +452,6 @@ export function CreateProfileDialog({
   );
 
   const handleRandomizeFingerprint = useCallback(() => {
-    const res =
-      COMMON_RESOLUTIONS[Math.floor(Math.random() * COMMON_RESOLUTIONS.length)];
     const cores = COMMON_CORES[Math.floor(Math.random() * COMMON_CORES.length)];
     const memory =
       COMMON_MEMORY[Math.floor(Math.random() * COMMON_MEMORY.length)];
@@ -461,10 +461,12 @@ export function CreateProfileDialog({
 
     setWayfernConfig((prev) => ({
       ...prev,
-      screen_max_width: res.width,
-      screen_max_height: res.height,
-      screen_min_width: res.width,
-      screen_min_height: res.height,
+      // Keep browser display dimensions device-local so a profile follows
+      // the current monitor when opened on another computer.
+      screen_max_width: undefined,
+      screen_max_height: undefined,
+      screen_min_width: undefined,
+      screen_min_height: undefined,
       randomize_fingerprint_on_launch: true,
     }));
   }, []);
@@ -953,11 +955,7 @@ export function CreateProfileDialog({
                   <Select
                     value={creatableVersion ?? ""}
                     onValueChange={setSelectedVersion}
-                    disabled={
-                      availableVersions.length === 0 ||
-                      downloading ||
-                      isCreating
-                    }
+                    disabled={availableVersions.length === 0 || isCreating}
                   >
                     <SelectTrigger
                       aria-label={t("createProfile.version.browserLabel")}
@@ -977,8 +975,9 @@ export function CreateProfileDialog({
                           key={version}
                           value={version}
                           className="text-xs font-mono"
+                          title={version}
                         >
-                          {version}
+                          {getRuntimeVersionLabel(version)}
                           {downloadedVersions.includes(version)
                             ? ` · ${t("createProfile.version.installed")}`
                             : ""}
@@ -997,11 +996,7 @@ export function CreateProfileDialog({
                   ) : downloading ? (
                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-primary/10 text-primary border border-primary/20 shrink-0">
                       <LuLoader className="size-3.5 animate-spin" />
-                      <span>
-                        {downloadProgress?.percentage
-                          ? `${downloadProgress.percentage}%`
-                          : t("common.buttons.downloading")}
-                      </span>
+                      <span>{t("createProfile.version.downloadingShort")}</span>
                     </span>
                   ) : canDownloadSelectedVersion ? (
                     <Button

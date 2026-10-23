@@ -59,6 +59,12 @@ export function WebApp({
         anchor.origin !== window.location.origin
       )
         return;
+      if (
+        anchor.hash &&
+        anchor.pathname === window.location.pathname &&
+        anchor.search === window.location.search
+      )
+        return;
       event.preventDefault();
       window.history.pushState(null, "", anchor.href);
       setPath(window.location.pathname);

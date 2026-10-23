@@ -2,6 +2,8 @@ import { useCallback, useState } from "react";
 import { Button, Panel, Status } from "../../../design-system";
 import type { LoadState, PublicSummary, WebApiClient } from "../api";
 import { useLoadState, WebShell } from "../shells";
+import { BugLoginLanding } from "./landing.tsx";
+import { PlatformDownloads } from "./platform-downloads.tsx";
 
 const neverEmpty = () => false;
 const publicNav = [
@@ -89,8 +91,7 @@ export function PublicPage({ api, path }: { api: WebApiClient; path: string }) {
     (signal: AbortSignal) => api.reads.publicSummary(signal),
     [api],
   );
-  const needsSummary =
-    path === "/" || path.startsWith("/download") || path.startsWith("/status");
+  const needsSummary = path.startsWith("/status");
   const { state, retry } = useLoadState(
     load,
     neverEmpty,
@@ -99,9 +100,11 @@ export function PublicPage({ api, path }: { api: WebApiClient; path: string }) {
   );
   const summary = state.status === "ready" ? state.data : undefined;
 
+  if (path === "/" || path === "") return <BugLoginLanding />;
+
   let page = <HomePage summary={summary} state={state} retry={retry} />;
   if (path.startsWith("/download")) {
-    page = <DownloadPage summary={summary} state={state} retry={retry} />;
+    page = <DownloadPage />;
   } else if (path.startsWith("/features")) {
     page = <FeaturesPage />;
   } else if (path.startsWith("/pricing")) {
@@ -676,73 +679,8 @@ function FeaturesPage() {
   );
 }
 
-function DownloadPage({
-  summary,
-  state,
-  retry,
-}: {
-  summary?: PublicSummary;
-  state: LoadState<PublicSummary>;
-  retry: () => void;
-}) {
-  return (
-    <section className="buglogin-public-route" aria-labelledby="download-title">
-      <p className="buglogin-public-eyebrow">BẢN PHÁT HÀNH CHÍNH THỨC</p>
-      <h1 id="download-title">Tải Ứng Dụng BugLogin Desktop</h1>
-      <p className="buglogin-public-lede">
-        Trải nghiệm toàn bộ sức mạnh của lõi Rust Antidetect Engine trên máy
-        tính của bạn. Hỗ trợ hệ điều hành Windows 10/11 64-bit và macOS (Intel &
-        Apple Silicon).
-      </p>
-
-      {summary?.release ? (
-        <Panel
-          title={`BugLogin Desktop v${summary.release.version}`}
-          description="Bản cài đặt đã được ký số an toàn và xác minh tính toàn vẹn trong danh mục phát hành."
-          actions={
-            <div style={{ display: "flex", gap: "10px" }}>
-              <a
-                className="buglogin-btn-primary-crimson"
-                href={summary.release.downloadUrl}
-              >
-                Tải cho Windows (Installer 64-bit)
-              </a>
-              <a className="buglogin-btn-secondary-cyber" href="/status">
-                Xem mã SHA256 Checksum
-              </a>
-            </div>
-          }
-        >
-          <div
-            style={{
-              fontSize: "12px",
-              color: "var(--muted-foreground)",
-              marginTop: "8px",
-            }}
-          >
-            Yêu cầu hệ thống: Windows 10 build 19041 trở lên, RAM tối thiểu 4GB
-            (Khuyến nghị 8GB+), 500MB ổ cứng khả dụng.
-          </div>
-        </Panel>
-      ) : null}
-
-      {!summary ? (
-        <LiveStatus summary={undefined} state={state} retry={retry} />
-      ) : null}
-
-      <div style={{ marginTop: "24px" }}>
-        <Panel
-          title="Không muốn cài đặt phần mềm?"
-          description="Bạn có thể truy cập Web Dashboard trực tiếp trên trình duyệt để quản lý hồ sơ, phân quyền thành viên và theo dõi nhật ký hoạt động."
-          actions={
-            <a className="buglogin-btn-secondary-cyber" href="/workspaces">
-              Mở Web Dashboard
-            </a>
-          }
-        />
-      </div>
-    </section>
-  );
+function DownloadPage() {
+  return <PlatformDownloads standalone />;
 }
 
 function SecurityPage() {

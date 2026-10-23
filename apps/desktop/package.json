@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --config vite.config.ts",
     "build": "vite build",
-    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts && node --experimental-strip-types src/profile-workflow.self-test.ts",
+    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts && node --experimental-strip-types src/profile-workflow.self-test.ts && node --experimental-strip-types src/resource-inventory-pagination.self-test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "tauri:dev": "pnpm tauri:dev:local-api",
     "tauri:dev:local-api": "node ../../scripts/tauri-dev-local-api.mjs",

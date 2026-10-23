@@ -50,7 +50,8 @@ export type AppPage =
   | "teamManager"
   | "auditLogs"
   | "workspaces"
-  | "platformAdmin";
+  | "platformAdmin"
+  | "accountManagement";
 
 const CLICK_THRESHOLD = 5;
 const CLICK_WINDOW_MS = 2000;
@@ -270,6 +271,12 @@ interface MoreMenuItem {
 }
 
 const MORE_ITEMS: MoreMenuItem[] = [
+  {
+    page: "accountManagement",
+    Icon: LuUsers,
+    labelKey: "rail.more.accountManagement",
+    hintKey: "rail.more.accountManagementHint",
+  },
   {
     page: "shortcuts",
     Icon: LuKeyboard,

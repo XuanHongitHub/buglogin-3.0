@@ -7,6 +7,7 @@ import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AboutDialog } from "@/components/about-dialog";
+import { AccountManagementPanel } from "@/components/account-management-panel";
 import { AccountPage } from "@/components/account-page";
 import { AuditLogView } from "@/components/audit-log-view";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
@@ -129,6 +130,7 @@ function DesktopHome({
     profiles,
     runningProfiles,
     isLoading: profilesLoading,
+    isRefreshing: profilesRefreshing,
     error: profilesError,
     loadProfiles: refreshProfiles,
     loadGroups,
@@ -434,6 +436,7 @@ function DesktopHome({
           setAccountDialogOpen(true);
           break;
         case "shortcuts":
+        case "accountManagement":
         case "orgCenter":
         case "teamManager":
         case "auditLogs":
@@ -1541,7 +1544,13 @@ function DesktopHome({
                     onReset={clearProfileFilters}
                   />
                 }
-                infoDialogProfile={profileInfoDialog}
+                infoDialogProfile={
+                  profileInfoDialog
+                    ? (profiles.find(
+                        (profile) => profile.id === profileInfoDialog.id,
+                      ) ?? profileInfoDialog)
+                    : null
+                }
                 onInfoDialogProfileChange={setProfileInfoDialog}
                 onLaunchProfile={launchProfile}
                 onKillProfile={handleKillProfile}
@@ -1557,6 +1566,8 @@ function DesktopHome({
                 onRemovePassword={handleRemovePassword}
                 onDeleteProfile={handleDeleteProfile}
                 onRenameProfile={handleRenameProfile}
+                onRefreshProfiles={refreshProfiles}
+                isRefreshingProfiles={profilesRefreshing}
                 onConfigureWayfern={handleConfigureWayfern}
                 onCopyCookiesToProfile={handleCopyCookiesToProfile}
                 onOpenCookieManagement={handleOpenCookieManagement}
@@ -1761,6 +1772,17 @@ function DesktopHome({
                 onNavigateHome={() => setCurrentPage("profiles")}
                 onOpenAuditLogs={() => handleRailNavigate("auditLogs")}
               />
+            </motion.div>
+          )}
+
+          {currentPage === "accountManagement" && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
+              className="flex min-h-0 flex-1 flex-col overflow-hidden"
+            >
+              <AccountManagementPanel />
             </motion.div>
           )}
 

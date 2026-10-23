@@ -387,7 +387,8 @@
       "emptyFilteredHint": "Không có hồ sơ nào khớp với nhóm hoặc tìm kiếm này. Hãy thử bộ lọc khác hoặc tạo mới.",
       "none": "Không có",
       "bot": "Bot",
-      "profileId": "ID"
+      "profileId": "ID",
+      "refresh": "Làm mới danh sách profile"
     },
     "actions": {
       "launch": "Khởi chạy",
@@ -545,6 +546,7 @@
     "version": {
       "browserLabel": "Phiên bản trình duyệt",
       "installed": "Đã cài",
+      "downloadingShort": "Đang tải",
       "fetching": "Đang lấy danh sách phiên bản...",
       "fetchError": "Không thể tải danh mục phiên bản trình duyệt đã xác minh.",
       "errors": {
@@ -587,7 +589,7 @@
       "browser": "Nhân trình duyệt",
       "network": "Mạng / IP đầu ra",
       "screen": "Độ phân giải màn hình",
-      "screenAuto": "Tự động theo thiết bị",
+      "screenAuto": "Theo thiết bị",
       "hardware": "CPU & Bộ nhớ RAM",
       "canvas": "Canvas",
       "webgl": "WebGL / GPU",
@@ -2792,7 +2794,9 @@
       "teamManager": "Điều Hành Đội Ngũ",
       "teamManagerHint": "Quản lý nhân viên và phân bổ hồ sơ",
       "platformAdmin": "Quản Trị Nền Tảng",
-      "platformAdminHint": "Quản lý tổ chức và hạn mức hệ thống"
+      "platformAdminHint": "Quản lý tổ chức và hạn mức hệ thống",
+      "accountManagement": "Quản lý tài khoản",
+      "accountManagementHint": "Yêu cầu quyền quản trị tài khoản"
     },
     "network": "Mạng",
     "integrations": "Tích hợp",
@@ -2810,6 +2814,7 @@
     "settings": "Cài đặt",
     "integrations": "Tích hợp",
     "account": "Tài khoản",
+    "accountManagement": "Quản lý tài khoản",
     "shortcuts": "Phím tắt"
   },
   "encryption": {
@@ -3036,6 +3041,7 @@
     "checkingUpdates": "Đang kiểm tra…",
     "upToDate": "BugLogin đã là phiên bản mới nhất",
     "updateCheckFailed": "Không thể kiểm tra cập nhật",
+    "updateHint": "Luôn dùng bản BugLogin mới nhất",
     "updatesReleaseOnly": "Bản dev này không hỗ trợ kiểm tra cập nhật",
     "updatesReleaseOnlyDescription": "Hãy dùng bản BugLogin đã ký để kiểm tra và cài đặt cập nhật. Bạn có thể tải bản mới nhất tại buglogin.com.",
     "portableBadge": "bản portable",

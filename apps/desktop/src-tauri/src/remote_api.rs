@@ -190,6 +190,26 @@ pub struct DeviceSessionTokens {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct BugLabSsoStartRequest<'a> {
+    device_id: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BugLabSsoStartResponse {
+    pub authorization_url: String,
+    pub expires_in: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BugLabSsoCompleteRequest<'a> {
+    state: &'a str,
+    token: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DesktopLoginRequest {
     identifier: String,
     password: String,
@@ -847,6 +867,104 @@ impl RemoteApiClient {
             ));
         }
         Ok(token)
+    }
+
+    pub async fn buglab_sso_start(
+        &self,
+        device_id: &str,
+        correlation: &str,
+    ) -> Result<BugLabSsoStartResponse, Problem> {
+        let url = self
+            .base_url
+            .join("v1/auth/sso/buglab/start")
+            .map_err(|_| client_problem("api_url_invalid", 400))?;
+        let response = self
+            .http
+            .post(url)
+            .header("x-correlation-id", correlation)
+            .json(&BugLabSsoStartRequest { device_id })
+            .send()
+            .await
+            .map_err(|error| {
+                Problem::new(
+                    "api_unavailable",
+                    "BugLogin API is unavailable",
+                    503,
+                    correlation,
+                )
+                .retryable(error.is_connect() || error.is_timeout())
+            })?;
+        if !response.status().is_success() {
+            return Err(read_problem(response, correlation, false).await);
+        }
+        let body = read_bounded_auth_response(response)
+            .await
+            .map_err(|_| invalid_auth_response(correlation))?;
+        let result: BugLabSsoStartResponse =
+            serde_json::from_slice(&body).map_err(|_| invalid_auth_response(correlation))?;
+        let authorization_url = Url::parse(&result.authorization_url)
+            .map_err(|_| invalid_auth_response(correlation))?;
+        let query: std::collections::BTreeMap<_, _> =
+            authorization_url.query_pairs().into_owned().collect();
+        if authorization_url.scheme() != "https"
+            || authorization_url.host_str() != Some("id.buglab.vn")
+            || authorization_url.path() != "/sso/login"
+            || authorization_url.username() != ""
+            || authorization_url.password().is_some()
+            || authorization_url.fragment().is_some()
+            || query.len() != 3
+            || !query.contains_key("app")
+            || !query.contains_key("redirect_uri")
+            || !query.contains_key("state")
+            || !(1..=300).contains(&result.expires_in)
+        {
+            return Err(invalid_auth_response(correlation));
+        }
+        Ok(result)
+    }
+
+    pub async fn buglab_sso_complete(
+        &self,
+        state: &str,
+        token: &str,
+        correlation: &str,
+    ) -> Result<DeviceSessionTokens, Problem> {
+        let url = self
+            .base_url
+            .join("v1/auth/sso/buglab/complete")
+            .map_err(|_| client_problem("api_url_invalid", 400))?;
+        let response = self
+            .http
+            .post(url)
+            .header("x-correlation-id", correlation)
+            .json(&BugLabSsoCompleteRequest { state, token })
+            .send()
+            .await
+            .map_err(|error| {
+                Problem::new(
+                    "api_unavailable",
+                    "BugLogin API is unavailable",
+                    503,
+                    correlation,
+                )
+                .retryable(error.is_connect() || error.is_timeout())
+            })?;
+        if !response.status().is_success() {
+            return Err(read_problem(response, correlation, false).await);
+        }
+        let body = read_bounded_auth_response(response)
+            .await
+            .map_err(|_| invalid_auth_response(correlation))?;
+        let session: DeviceSessionTokens =
+            serde_json::from_slice(&body).map_err(|_| invalid_auth_response(correlation))?;
+        if session.access_token.is_empty()
+            || session.refresh_token.is_empty()
+            || session.token_type != "Bearer"
+            || session.expires_at <= unix_time_seconds(correlation)?
+        {
+            return Err(invalid_auth_response(correlation));
+        }
+        Ok(session)
     }
 
     pub async fn register_device_encryption_key(
@@ -1796,7 +1914,8 @@ impl RemoteApiClient {
         let result = match name {
             "system_health_get" => self.get::<Value>("/v1/health",correlation).await?,
             "account_get" => self.get::<Value>("/v1/account",correlation).await?,
-            "account_list" => json!({"items":self.get::<Vec<Value>>("/v1/accounts",correlation).await?,"nextCursor":Value::Null}),
+            "account_list" => self.get::<Value>("/v1/accounts",correlation).await?,
+            "account_create" => self.send::<Value>(Method::POST,"/v1/accounts",Some(payload),correlation,idem,None,&[]).await?,
             "account_status_update" => {
                 let account_id = AccountId::from_str(&path_arg(&payload, "accountId", correlation)?)
                     .map_err(|_| bad_input("accountId", correlation))?;
@@ -2552,6 +2671,15 @@ fn client_problem(code: &'static str, status: u16) -> Problem {
     Problem::new(code, "BugLogin API client error", status, "desktop-api")
 }
 
+fn invalid_auth_response(correlation: &str) -> Problem {
+    Problem::new(
+        "api_auth_response_invalid",
+        "BugLogin returned an invalid sign-in response",
+        502,
+        correlation,
+    )
+}
+
 fn validate_cookie_job_id(job_id: &str) -> Result<(), Problem> {
     let Some(suffix) = job_id.strip_prefix("job_") else {
         return Err(client_problem("cookie_job_id_invalid", 400));
@@ -2755,6 +2883,7 @@ fn command_id(name: &str) -> &str {
         "system_health_get" => "system.health.get",
         "account_get" => "account.get",
         "account_list" => "account.list",
+        "account_create" => "account.create",
         "account_status_update" => "account.status.update",
         "organization_list" => "organization.list",
         "organization_get" => "organization.get",
@@ -3521,6 +3650,17 @@ mod tests {
                 path: "/v1/accounts",
                 body: None,
                 idempotency_key: None,
+            },
+            Invocation {
+                name: "account_create",
+                command_id: "account.create",
+                payload: json!({"accountId":"acct_2","username":"alice","email":"alice@example.test"}),
+                method: "POST",
+                path: "/v1/accounts",
+                body: Some(
+                    json!({"accountId":"acct_2","username":"alice","email":"alice@example.test"}),
+                ),
+                idempotency_key: write_key("account-create"),
             },
             Invocation {
                 name: "account_status_update",

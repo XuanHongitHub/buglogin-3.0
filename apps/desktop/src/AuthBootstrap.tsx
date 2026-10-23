@@ -1,3 +1,4 @@
+import { listen as tauriListen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
   AlertTriangle,
@@ -16,6 +17,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -98,6 +100,7 @@ export function AuthBootstrap({
   const [showContactAdmin, setShowContactAdmin] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(true);
+  const callbackInFlight = useRef(false);
 
   const [darkMode, setDarkMode] = useState(() => {
     try {
@@ -147,6 +150,83 @@ export function AuthBootstrap({
     return () =>
       window.removeEventListener(DESKTOP_AUTH_STATUS_CHANGED_EVENT, load);
   }, [load]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    const consumeCallback = async (rawUrl: string) => {
+      if (disposed || callbackInFlight.current) return;
+      let callback: URL;
+      try {
+        callback = new URL(rawUrl);
+      } catch {
+        return;
+      }
+      if (
+        callback.protocol !== "buglogin:" ||
+        callback.hostname !== "sso" ||
+        callback.pathname !== "/callback" ||
+        callback.hash ||
+        callback.username ||
+        callback.password
+      ) {
+        return;
+      }
+      const states = callback.searchParams.getAll("state");
+      const tokens = callback.searchParams.getAll("token");
+      if (states.length !== 1 || tokens.length !== 1) return;
+      callbackInFlight.current = true;
+      setBusy(true);
+      setProblem(undefined);
+      try {
+        setStatus(await api.completeBugLabSso(states[0]!, tokens[0]!));
+      } catch (error) {
+        setProblem(normalizeProblem(error));
+      } finally {
+        callbackInFlight.current = false;
+        setBusy(false);
+      }
+    };
+    void (async () => {
+      try {
+        const stop = await tauriListen<string>(
+          "buglogin://deep-link",
+          (event) => {
+            void consumeCallback(event.payload);
+          },
+        );
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+        const initialUrls = await api.currentDeepLinks();
+        for (const url of initialUrls) {
+          await consumeCallback(url);
+        }
+      } catch {
+        // Deep links are optional when this component is rendered outside Tauri.
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [api]);
+
+  const startBugLabSso = async () => {
+    if (busy) return;
+    setBusy(true);
+    setProblem(undefined);
+    try {
+      await api.startBugLabSso();
+    } catch (error) {
+      setProblem(normalizeProblem(error));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (
     status?.state === "authenticated" ||
@@ -530,6 +610,26 @@ export function AuthBootstrap({
                   )}
                 </button>
               </form>
+              <div className="flex items-center gap-3 py-4" aria-hidden="true">
+                <div className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-500">
+                  {i18n.language === "vi" ? "hoặc" : "or"}
+                </span>
+                <div className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
+              </div>
+              <button
+                type="button"
+                onClick={() => void startBugLabSso()}
+                disabled={busy || loadingStatus}
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white text-xs font-semibold text-zinc-800 transition-colors hover:bg-zinc-50 disabled:pointer-events-none disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-100 dark:hover:bg-zinc-800"
+              >
+                {busy ? (
+                  <span className="size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                ) : null}
+                {i18n.language === "vi"
+                  ? "Tiếp tục với BugLab ID"
+                  : "Continue with BugLab ID"}
+              </button>
             </div>
 
             {/* Clean Footer */}

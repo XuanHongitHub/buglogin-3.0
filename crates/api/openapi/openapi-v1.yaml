@@ -79,6 +79,28 @@ paths:
         "500": { $ref: '#/components/responses/Problem' }
         "413": { $ref: '#/components/responses/Problem' }
         "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/sso/buglab/start:
+    post:
+      operationId: auth.sso.buglab.start
+      description: Starts a five-minute BugLab ID authorization transaction. The raw state is sent only to the configured provider authorization URL and stored server-side as a hash. Returns 503 when BugLab SSO is not configured.
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BugLabSsoStartInput' } } } }
+      responses:
+        "200": { description: Authorization URL to open in the system browser, content: { application/json: { schema: { $ref: '#/components/schemas/BugLabSsoStartResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/sso/buglab/complete:
+    post:
+      operationId: auth.sso.buglab.complete
+      description: Exchanges a provider callback token server-side. The state is single-use, expires after five minutes, and is bound to the starting desktop device. Issues the normal device-bound BugLogin session.
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BugLabSsoCompleteInput' } } } }
+      responses:
+        "200": { description: Device-bound access and refresh credentials, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthTokenResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
   /v1/auth/api-tokens:
     get:
       operationId: auth.api.tokens.list
@@ -709,7 +731,25 @@ paths:
           description: Account list
           content:
             application/json:
-              schema: { type: array, items: { $ref: '#/components/schemas/Account' } }
+              schema: { $ref: '#/components/schemas/AccountAdminPage' }
+    post:
+      operationId: account.create
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccountCreatePendingInput' }
+      responses:
+        "201":
+          description: Account created with pending identity verification; sign-in remains disabled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PendingAccountProvisioningReceipt' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "422": { $ref: '#/components/responses/Problem' }
   /v1/accounts/{accountId}/status:
     put:
       operationId: account.status.update
@@ -1333,6 +1373,8 @@ components:
     Account: { type: object, required: [id, status, revision, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/AccountStatus' }, revision: { type: integer, minimum: 1, description: Monotonic concurrency revision. Advances on lifecycle transitions and credential issuance or refresh; clients must use the latest returned revision for status updates. }, createdAt: { type: string }, updatedAt: { type: string } }, additionalProperties: false }
     AccountList: { type: array, items: { $ref: '#/components/schemas/Account' } }
     AccountPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Account' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
+    AccountAdminRecord: { type: object, required: [account, identity], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { oneOf: [{ $ref: '#/components/schemas/AccountIdentity' }, { type: "null" }] } }, additionalProperties: false }
+    AccountAdminPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/AccountAdminRecord' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
     AccountView: { type: object, required: [accountId], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     AccountStatusUpdateInput: { type: object, required: [status, expectedRevision], properties: { status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     AccountStatusUpdateCommandInput: { type: object, required: [accountId, status, expectedRevision], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
@@ -1371,7 +1413,8 @@ components:
     WorkspaceUpdate: { type: object, required: [workspace, expectedRevision], properties: { workspace: { $ref: '#/components/schemas/Workspace' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     MemberStatus: { enum: [invited, active, suspended] }
     MemberRole: { enum: [owner, admin, operator, member] }
-    Member: { type: object, required: [id, accountId, workspaceId, role, status, inviteExpiresAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, teamId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, role: { $ref: '#/components/schemas/MemberRole' }, status: { $ref: '#/components/schemas/MemberStatus' }, inviteExpiresAt: { type: [integer, "null"], minimum: 0 } }, additionalProperties: false }
+    MemberIdentityView: { type: object, required: [username, email], properties: { username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 } }, additionalProperties: false }
+    Member: { type: object, required: [id, accountId, workspaceId, role, status, inviteExpiresAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, teamId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, role: { $ref: '#/components/schemas/MemberRole' }, status: { $ref: '#/components/schemas/MemberStatus' }, inviteExpiresAt: { type: [integer, "null"], minimum: 0 }, identity: { $ref: '#/components/schemas/MemberIdentityView', description: Present only when the caller can manage membership in this workspace. } }, additionalProperties: false }
     MemberIdInput: { type: object, required: [workspaceId, memberId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     MemberInviteInput: { type: object, required: [workspaceId, member], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, member: { $ref: '#/components/schemas/Member' } }, additionalProperties: false }
     MemberInvitationCreateInput: { type: object, required: [workspaceId, email, role, expiresAt], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, email: { type: string, minLength: 3, maxLength: 254, format: email }, role: { $ref: '#/components/schemas/MemberRole' }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
@@ -1455,6 +1498,9 @@ components:
     AuthTokenResponse: { type: object, required: [accessToken, tokenType, expiresAt], properties: { accessToken: { type: string, minLength: 1 }, tokenType: { const: Bearer }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
     WebLoginInput: { type: object, required: [identifier, password], properties: { identifier: { type: string, minLength: 3, maxLength: 254 }, password: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
     DesktopLoginInput: { type: object, required: [identifier, password, deviceId], properties: { identifier: { type: string, minLength: 3, maxLength: 254 }, password: { type: string, minLength: 12, maxLength: 256, writeOnly: true }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' } }, additionalProperties: false }
+    BugLabSsoStartInput: { type: object, required: [deviceId], properties: { deviceId: { $ref: '#/components/schemas/DeviceIdentifier' } }, additionalProperties: false }
+    BugLabSsoStartResponse: { type: object, required: [authorizationUrl, expiresIn], properties: { authorizationUrl: { type: string, format: uri, description: HTTPS URL on id.buglab.vn; open only in the system browser }, expiresIn: { type: integer, minimum: 1, maximum: 300 } }, additionalProperties: false }
+    BugLabSsoCompleteInput: { type: object, required: [state, token], properties: { state: { $ref: '#/components/schemas/OpaqueHexToken64' }, token: { type: string, minLength: 16, maxLength: 4096, pattern: '^[A-Za-z0-9_.-]+$', writeOnly: true } }, additionalProperties: false }
     DesktopCredentialLoginInput: { type: object, required: [identifier, password, correlationId], properties: { identifier: { type: string, minLength: 3, maxLength: 254 }, password: { type: string, minLength: 12, maxLength: 256, writeOnly: true }, correlationId: { type: string, minLength: 1, maxLength: 128 } }, additionalProperties: false }
     RecoveryRequestInput: { type: object, required: [identifier], properties: { identifier: { type: string, minLength: 1, maxLength: 254 } }, additionalProperties: false }
     ApiTokenCreateInput: { type: object, required: [name, scopes, expiresAt], properties: { name: { type: string, minLength: 1, maxLength: 64 }, scopes: { type: array, minItems: 1, maxItems: 32, items: { $ref: '#/components/schemas/ApiTokenScope' } }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }

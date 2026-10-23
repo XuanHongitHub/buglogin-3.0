@@ -689,17 +689,19 @@ commands:
     kind: command
     capability: CAP-ADM-001
     action: create
-    adapters: [mcp]
+    adapters: [tauri, rest, mcp]
     input: AccountCreatePendingInput
     output: PendingAccountProvisioningReceipt
     idempotency: required
+    tauri: account_create
+    rest: account.create
   - id: account.list
     kind: query
     capability: CAP-ADM-001
     action: read
     adapters: [tauri, rest, mcp]
     input: Empty
-    output: AccountPage
+    output: AccountAdminPage
   - id: account.status.update
     kind: command
     capability: CAP-ADM-001

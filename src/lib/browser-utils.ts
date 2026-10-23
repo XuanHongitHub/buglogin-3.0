@@ -30,6 +30,11 @@ export function getBrowserDisplayName(browserType: string): string {
   return browserNames[browserType] || browserType;
 }
 
+/** Keep runtime labels compact while preserving the full version internally. */
+export function getRuntimeVersionLabel(version: string): string {
+  return version.split(".")[0] || version;
+}
+
 /**
  * Get the appropriate icon component for a browser type
  * Anti-detect browsers get their base browser icons

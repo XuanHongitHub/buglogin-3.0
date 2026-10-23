@@ -21,12 +21,19 @@ const CAPABILITIES: &[RuntimeCapability] = &[
     RuntimeCapability::Fingerprint,
     RuntimeCapability::Cdp,
 ];
+const DONUT_NEW_TAB_SHORTCUT: &str = "https://donutbrowser.com/";
 
 /// Hide generated New Tab shortcuts for BugLogin-managed profiles.
 /// Keep the profile history intact, but blacklist and clear the cached site
 /// suggestions so the runtime cannot immediately repopulate vendor shortcuts.
 pub fn hide_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
-    let suggested_urls = read_top_site_urls(profile_path)?;
+    let mut suggested_urls = read_top_site_urls(profile_path)?;
+    if !suggested_urls
+        .iter()
+        .any(|url| url == DONUT_NEW_TAB_SHORTCUT)
+    {
+        suggested_urls.push(DONUT_NEW_TAB_SHORTCUT.to_owned());
+    }
     let default_profile = profile_path.join("Default");
     fs::create_dir_all(&default_profile).map_err(|_| {
         Problem::new(
@@ -471,6 +478,32 @@ mod tests {
         assert_eq!(remaining_suggestions, 0);
         drop(connection);
 
+        fs::remove_dir_all(profile_path).unwrap();
+    }
+
+    #[test]
+    fn first_launch_blacklists_donut_shortcut_before_top_sites_database_exists() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "buglogin-wayfern-ntp-first-launch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let default_profile = profile_path.join("Default");
+        fs::create_dir_all(&default_profile).unwrap();
+        let preferences_path = default_profile.join("Preferences");
+
+        hide_new_tab_shortcuts(&profile_path).unwrap();
+
+        let preferences: serde_json::Value =
+            serde_json::from_slice(&fs::read(&preferences_path).unwrap()).unwrap();
+        let donut_hash = format!("{:x}", md5::compute(DONUT_NEW_TAB_SHORTCUT.as_bytes()));
+        assert_eq!(
+            preferences["ntp"]["most_visited_blacklist"][donut_hash],
+            serde_json::Value::Null
+        );
         fs::remove_dir_all(profile_path).unwrap();
     }
 }

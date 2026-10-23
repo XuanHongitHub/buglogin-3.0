@@ -9,6 +9,7 @@ interface UseProfileEventsReturn {
   groups: GroupWithCount[];
   runningProfiles: Set<string>;
   isLoading: boolean;
+  isRefreshing: boolean;
   error: string | null;
   loadProfiles: () => Promise<void>;
   loadGroups: () => Promise<void>;
@@ -27,6 +28,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
     new Set(),
   );
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const profilesRequestRef = useRef(0);
   const groupsRequestRef = useRef(0);
@@ -36,6 +38,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
   // Load profiles from backend
   const loadProfiles = useCallback(async () => {
     const request = ++profilesRequestRef.current;
+    setIsRefreshing(true);
     try {
       const profileList = await invoke<BrowserProfile[]>(
         "list_browser_profiles",
@@ -58,6 +61,8 @@ export function useProfileEvents(): UseProfileEventsReturn {
             : String(err);
         setError(i18n.t("errors.loadProfilesFailed", { error: errorDetail }));
       }
+    } finally {
+      if (request === profilesRequestRef.current) setIsRefreshing(false);
     }
   }, []);
 
@@ -87,6 +92,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
   useEffect(() => {
     let disposed = false;
     let profilesUnlisten: (() => void) | undefined;
+    let profileUpdatedUnlisten: (() => void) | undefined;
     let runningUnlisten: (() => void) | undefined;
     let listenerError: string | undefined;
 
@@ -125,6 +131,17 @@ export function useProfileEvents(): UseProfileEventsReturn {
               void loadGroups();
             }),
           (unlisten) => (profilesUnlisten = unlisten),
+        );
+        // Several profile edit screens publish this event after saving. Keep
+        // the central list in sync with both event names used by the desktop.
+        await registerListener(
+          "profile-updated",
+          () =>
+            listen("profile-updated", () => {
+              void loadProfiles();
+              void loadGroups();
+            }),
+          (unlisten) => (profileUpdatedUnlisten = unlisten),
         );
 
         // Listen for profile running state changes
@@ -182,9 +199,25 @@ export function useProfileEvents(): UseProfileEventsReturn {
       profilesRequestRef.current += 1;
       groupsRequestRef.current += 1;
       if (profilesUnlisten) profilesUnlisten();
+      if (profileUpdatedUnlisten) profileUpdatedUnlisten();
       if (runningUnlisten) runningUnlisten();
     };
   }, [loadProfiles, loadGroups]);
+
+  // Recover from missed desktop events and refresh when returning to the app.
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadProfiles();
+    };
+    const timer = window.setInterval(() => void loadProfiles(), 30_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [loadProfiles]);
 
   // Persisted process_id/profile state can outlive the browser process. Ask
   // the runtime owner for its live process set instead of treating database
@@ -228,6 +261,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
     groups,
     runningProfiles,
     isLoading,
+    isRefreshing,
     error,
     loadProfiles,
     loadGroups,

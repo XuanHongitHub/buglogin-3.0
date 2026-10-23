@@ -37,6 +37,7 @@ use desktop_state::{DesktopAuthStatus, DesktopState};
 use serde_json::{Value, json};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
 use legacy_compat::{
@@ -67,7 +68,9 @@ use profile_cookie_manager::{
 };
 
 pub fn run() {
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_deep_link::init());
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_opener::init());
     let updater_configured = option_env!("BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY")
         .is_some_and(|public_key| !public_key.trim().is_empty());
     if updater_configured {
@@ -153,6 +156,7 @@ pub fn run() {
             runtime_install,
             account_get,
             account_list,
+            account_create,
             account_status_update,
             events_stream,
             events_stream_stop,
@@ -282,6 +286,9 @@ pub fn run() {
             list_running_browser_profiles,
             desktop_auth_status,
             desktop_auth_login,
+            desktop_auth_sso_start,
+            desktop_auth_sso_complete,
+            desktop_deep_link_current,
             desktop_auth_logout,
             get_profile_traffic_snapshot,
             update_profile_clear_on_close,
@@ -1064,6 +1071,62 @@ async fn desktop_auth_login(
 }
 
 #[tauri::command]
+async fn desktop_auth_sso_start(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+) -> Result<u64, Problem> {
+    let response = state.start_buglab_sso(&correlation_id).await?;
+    app.opener()
+        .open_url(response.authorization_url, None::<&str>)
+        .map_err(|_| {
+            Problem::new(
+                "sso_browser_open_failed",
+                "Could not open BugLab ID sign-in page",
+                503,
+                &correlation_id,
+            )
+        })?;
+    Ok(response.expires_in)
+}
+
+#[tauri::command]
+async fn desktop_auth_sso_complete(
+    state: State<'_, DesktopState>,
+    callback_state: String,
+    token: String,
+    correlation_id: String,
+) -> Result<DesktopAuthStatus, Problem> {
+    state
+        .complete_buglab_sso(
+            Zeroizing::new(callback_state),
+            Zeroizing::new(token),
+            &correlation_id,
+        )
+        .await
+}
+
+#[tauri::command]
+fn desktop_deep_link_current(app: tauri::AppHandle) -> Result<Vec<String>, Problem> {
+    app.deep_link()
+        .get_current()
+        .map(|urls| {
+            urls.unwrap_or_default()
+                .into_iter()
+                .map(|url| url.to_string())
+                .collect()
+        })
+        .map_err(|_| {
+            Problem::new(
+                "deep_link_unavailable",
+                "Could not read the sign-in callback",
+                503,
+                "desktop-deep-link",
+            )
+        })
+}
+
+#[tauri::command]
 async fn desktop_auth_logout(
     state: State<'_, DesktopState>,
     correlation_id: String,
@@ -1227,6 +1290,23 @@ async fn account_list(
 ) -> Result<CommandResult<Value>, Problem> {
     state
         .invoke("account_list", &correlation_id, None, payload)
+        .await
+}
+
+#[tauri::command]
+async fn account_create(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    idempotency_key: Option<String>,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "account_create",
+            &correlation_id,
+            idempotency_key.as_deref(),
+            payload,
+        )
         .await
 }
 

@@ -1,5 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -573,6 +575,17 @@ impl<C: ProcessController> ProfileRuntime<C> {
             }
         };
         let mut proxy_bridge = request.proxy_bridge;
+        if request.specification.runtime == Runtime::Wayfern {
+            if let Err(error) = suppress_wayfern_top_sites(&request.profile_path) {
+                if let Some(bridge) = proxy_bridge.take() {
+                    let _ = bridge.stop().await;
+                }
+                if let Some(lease) = lease.as_ref() {
+                    let _ = release(self.coordination.clone(), lease).await;
+                }
+                return Err(error);
+            }
+        }
         let identity = match self
             .lifecycle
             .launch(&request.profile_path, &request.specification)
@@ -931,6 +944,77 @@ fn authority(lease: &LeaseGrant) -> WriteAuthority {
     }
 }
 
+fn suppress_wayfern_top_sites(profile_path: &Path) -> Result<(), Problem> {
+    static FILE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let file_id = FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let default_path = profile_path.join("Default");
+    fs::create_dir_all(&default_path).map_err(|_| unavailable())?;
+    let preferences_path = default_path.join("Preferences");
+    let mut preferences = match fs::symlink_metadata(&preferences_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(unavailable());
+        }
+        Ok(metadata) if metadata.len() > 32 * 1024 * 1024 => return Err(unavailable()),
+        Ok(_) => {
+            let bytes = fs::read(&preferences_path).map_err(|_| unavailable())?;
+            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| unavailable())?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+        Err(_) => return Err(unavailable()),
+    };
+    let root = preferences.as_object_mut().ok_or_else(unavailable)?;
+    let ntp = root
+        .entry("ntp")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(unavailable)?;
+    // Chromium persists this preference with the historical `shortcust` typo.
+    ntp.insert(
+        "shortcust_visible".to_owned(),
+        serde_json::Value::Bool(false),
+    );
+    let bytes = serde_json::to_vec(&preferences).map_err(|_| unavailable())?;
+    let temporary_path = preferences_path.with_file_name(format!(
+        ".Preferences.buglogin-{}-{}.tmp",
+        std::process::id(),
+        file_id
+    ));
+    let mut temporary = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .map_err(|_| unavailable())?;
+    if temporary.write_all(&bytes).is_err() || temporary.sync_all().is_err() {
+        drop(temporary);
+        let _ = fs::remove_file(&temporary_path);
+        return Err(unavailable());
+    }
+    drop(temporary);
+    let backup_path = preferences_path.with_file_name(format!(
+        ".Preferences.buglogin-{}-{}.previous",
+        std::process::id(),
+        file_id
+    ));
+    let had_preferences = preferences_path.exists();
+    if had_preferences && fs::rename(&preferences_path, &backup_path).is_err() {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(unavailable());
+    }
+    if let Err(error) = fs::rename(&temporary_path, &preferences_path) {
+        if had_preferences {
+            let _ = fs::rename(&backup_path, &preferences_path);
+        }
+        let _ = fs::remove_file(&temporary_path);
+        return Err(unavailable().with_detail(error.to_string()));
+    }
+    if had_preferences {
+        fs::remove_file(backup_path).map_err(|_| unavailable())?;
+    }
+    Ok(())
+}
+
 fn unavailable() -> Problem {
     Problem::new(
         "profile_runtime_unavailable",
@@ -1244,6 +1328,25 @@ mod tests {
         let path = std::env::temp_dir().join(format!("buglogin-runtime-{label}-{nonce}"));
         fs::create_dir_all(&path).unwrap();
         path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn wayfern_launch_hides_new_tab_shortcuts_and_preserves_profile_preferences() {
+        let path = profile_path("new-tab-preferences");
+        fs::create_dir_all(path.join("Default")).unwrap();
+        fs::write(
+            path.join("Default/Preferences"),
+            br#"{"profile":{"name":"preserve-me"},"ntp":{"shortcust_visible":true}}"#,
+        )
+        .unwrap();
+
+        suppress_wayfern_top_sites(&path).unwrap();
+
+        let preferences: serde_json::Value =
+            serde_json::from_slice(&fs::read(path.join("Default/Preferences")).unwrap()).unwrap();
+        assert_eq!(preferences["profile"]["name"], "preserve-me");
+        assert_eq!(preferences["ntp"]["shortcust_visible"], false);
+        let _ = fs::remove_dir_all(path);
     }
 
     fn request(path: &Path, managed: bool) -> LaunchRequest {

@@ -131,6 +131,7 @@ mod auth_workspace_profile_e2e;
 mod control;
 mod control_import;
 pub(crate) mod package_upload;
+mod sso;
 mod sync_import;
 
 const CONTROL_TENANT: &str = "control";
@@ -380,6 +381,21 @@ pub struct OperatorPasswordResetResult {
     pub account_id: AccountId,
     pub revoked_sessions: usize,
     pub revoked_api_tokens: usize,
+}
+
+pub struct OperatorPlatformAdminProvisionInput {
+    pub username: String,
+    pub email: String,
+    pub password: zeroize::Zeroizing<String>,
+    pub organization_name: String,
+    pub workspace_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorPlatformAdminProvisionResult {
+    pub account_id: AccountId,
+    pub organization_id: OrganizationId,
+    pub workspace_id: WorkspaceId,
 }
 
 pub struct LocalDevAdminProvisionInput {
@@ -963,6 +979,226 @@ impl ApiState {
         password: &str,
     ) -> Result<OperatorPasswordResetResult, Problem> {
         self.reset_platform_admin_password(account_id, password, "production_operator", false)
+    }
+
+    /// Provision an additional login-capable platform administrator through the
+    /// production-only operator path. The identity is marked verified under the
+    /// operator-attestation exception; this does not claim mailbox verification.
+    pub fn operator_create_platform_admin(
+        &self,
+        mut input: OperatorPlatformAdminProvisionInput,
+    ) -> Result<OperatorPlatformAdminProvisionResult, Problem> {
+        if self.local_account_provisioning {
+            input.password.zeroize();
+            return Err(problem(
+                "hosted_identity_required",
+                "Operator administrator provisioning requires hosted identity storage",
+                409,
+            ));
+        }
+
+        let _mutation = self
+            .control_mutation
+            .lock()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        let (mut aggregate, aggregate_revision) = self
+            .control_persistence
+            .load_versioned::<ControlAggregate>(
+                CONTROL_TENANT,
+                CONTROL_STATE_TYPE,
+                CONTROL_STATE_ID,
+            )?
+            .ok_or_else(|| {
+                problem(
+                    "control_state_unavailable",
+                    "Control state unavailable",
+                    503,
+                )
+            })?;
+
+        const OPERATOR_PROVISION_RECORD: &str = "platform_admin_operator_provision";
+        const OPERATOR_PROVISION_ID: &str = "owner_account";
+        if self
+            .control_persistence
+            .load::<serde_json::Value>(
+                CONTROL_TENANT,
+                OPERATOR_PROVISION_RECORD,
+                OPERATOR_PROVISION_ID,
+            )?
+            .is_some()
+        {
+            input.password.zeroize();
+            return Err(problem(
+                "operator_admin_already_provisioned",
+                "The one-time production owner administrator was already provisioned",
+                409,
+            ));
+        }
+
+        let account_id = AccountId::new(random_bootstrap_id("acct")?)
+            .map_err(|_| problem("invalid_account", "Account ID is invalid", 500))?;
+        let organization_id = OrganizationId::new(random_bootstrap_id("org")?)
+            .map_err(|_| problem("invalid_organization", "Organization ID is invalid", 500))?;
+        let workspace_id = WorkspaceId::new(random_bootstrap_id("ws")?)
+            .map_err(|_| problem("invalid_workspace", "Workspace ID is invalid", 500))?;
+        let member_id = MemberId::new(random_bootstrap_id("member")?)
+            .map_err(|_| problem("invalid_member", "Member ID is invalid", 500))?;
+        let current = checked_now("production-admin-provision")?;
+        let created_at = migration_timestamp()?;
+        let identity = AccountIdentity::new(
+            account_id.clone(),
+            input.username,
+            input.email,
+            created_at.clone(),
+        )?
+        .verify(1, created_at.clone())?;
+        let mut puts = self.identity_persistence.prepare_create_puts(&identity)?;
+        puts.push(self.credentials.prepare_initial_password_put(
+            &account_id,
+            input.password.as_str(),
+            current,
+        )?);
+        input.password.zeroize();
+
+        let platform_principal = Principal {
+            account_id: Some(account_id.clone()),
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        let organization = Organization {
+            id: organization_id.clone(),
+            account_id: account_id.clone(),
+            name: input.organization_name,
+            created_at: created_at.clone(),
+        };
+        aggregate.workspaces.add_organization(
+            &platform_principal,
+            &[],
+            organization,
+            OrganizationPolicy {
+                max_workspaces: 10,
+                offline_entitled: false,
+            },
+        )?;
+        let workspace = Workspace {
+            id: workspace_id.clone(),
+            organization_id: organization_id.clone(),
+            name: input.workspace_name,
+            policy: WorkspacePolicy {
+                max_profiles: 1_000,
+                max_members: 100,
+                max_storage_bytes: 10 * 1024 * 1024 * 1024,
+                offline_entitled: false,
+            },
+            created_at: created_at.clone(),
+        };
+        aggregate.workspaces.create_workspace(
+            &platform_principal,
+            &[],
+            &organization_id,
+            workspace,
+        )?;
+        let expires_at = current.checked_add(600).ok_or_else(|| {
+            problem(
+                "admin_provision_expiry_invalid",
+                "Administrator invitation expiry is invalid",
+                500,
+            )
+        })?;
+        aggregate.members.invite(
+            &platform_principal,
+            &[],
+            Member {
+                id: member_id.clone(),
+                account_id: account_id.clone(),
+                workspace_id: workspace_id.clone(),
+                team_id: None,
+                role: MemberRole::Owner,
+                status: MemberStatus::Invited,
+                invite_expires_at: Some(expires_at),
+            },
+            current,
+        )?;
+        aggregate
+            .members
+            .activate(&platform_principal, &[], &workspace_id, &member_id, current)?;
+        aggregate.platform_admin_accounts.insert(account_id.clone());
+
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: "account".into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(0),
+            value: serde_json::to_value(Account::new(account_id.clone(), created_at.clone()))
+                .map_err(|_| problem("account_record_invalid", "Account record is invalid", 500))?,
+        });
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: CONTROL_STATE_TYPE.into(),
+            record_id: CONTROL_STATE_ID.into(),
+            expected_revision: Some(aggregate_revision),
+            value: serde_json::to_value(&aggregate)
+                .map_err(|_| problem("control_state_invalid", "Control state is invalid", 500))?,
+        });
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: OPERATOR_PROVISION_RECORD.into(),
+            record_id: OPERATOR_PROVISION_ID.into(),
+            expected_revision: Some(0),
+            value: json!({
+                "accountId": account_id,
+                "provisionedAt": created_at,
+                "verificationMethod": "operator-attested-owner",
+            }),
+        });
+        self.control_persistence.execute(ExecuteControlCommand {
+            tenant_id: CONTROL_TENANT.into(),
+            command_id: "identity.production_operator_admin_provision".into(),
+            idempotency_key: random_bootstrap_id("operator-admin")?,
+            expected_revisions: BTreeMap::from([(
+                ControlRecordKey {
+                    tenant_id: CONTROL_TENANT.into(),
+                    record_type: CONTROL_STATE_TYPE.into(),
+                    record_id: CONTROL_STATE_ID.into(),
+                },
+                aggregate_revision,
+            )]),
+            puts,
+            deletes: vec![],
+            audit: ControlAuditEntry {
+                tenant_id: CONTROL_TENANT.into(),
+                command_id: "identity.production_operator_admin_provision".into(),
+                actor_id: "production_operator".into(),
+                allowed: true,
+                detail: json!({
+                    "accountId": account_id,
+                    "organizationId": organization_id,
+                    "workspaceId": workspace_id,
+                    "memberId": member_id,
+                    "identityVerification": "verified",
+                    "verificationMethod": "operator-attested-owner",
+                    "mailboxOwnershipClaimed": false,
+                    "credentialIssued": true,
+                    "sessionIssued": false,
+                }),
+            },
+            response: HttpResponse {
+                status: 201,
+                headers: Default::default(),
+                body: json!({
+                    "accountId": account_id,
+                    "organizationId": organization_id,
+                    "workspaceId": workspace_id,
+                }),
+            },
+        })?;
+        self.reload_control_aggregate()?;
+
+        Ok(OperatorPlatformAdminProvisionResult {
+            account_id,
+            organization_id,
+            workspace_id,
+        })
     }
 
     pub fn dev_reset_platform_admin_password(
@@ -5631,6 +5867,14 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/auth/desktop/login",
             post(desktop_login).layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/auth/sso/buglab/start",
+            post(sso::start).layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/auth/sso/buglab/complete",
+            post(sso::complete).layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
         )
         .route(
             "/v1/auth/recovery/request",
@@ -10481,6 +10725,93 @@ mod persistence_tests {
         let serialized = serde_json::to_value(&admins).unwrap();
         assert!(serialized[0].get("password").is_none());
         assert!(serialized[0].get("token").is_none());
+    }
+
+    #[test]
+    fn operator_admin_provision_is_atomic_verified_and_keeps_existing_tenants() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "existing-owner".into(),
+                email: "existing-owner@example.com".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("initial owner password 2026".into()),
+                organization_name: "Existing Organization".into(),
+                workspace_name: "Existing Workspace".into(),
+                max_workspaces: 10,
+                max_profiles: 1_000,
+                max_members: 100,
+                max_storage_bytes: 10 * 1024 * 1024 * 1024,
+            })
+            .unwrap();
+
+        let created = state
+            .operator_create_platform_admin(OperatorPlatformAdminProvisionInput {
+                username: "new-owner".into(),
+                email: "new-owner@example.com".into(),
+                password: zeroize::Zeroizing::new("new admin password 2026".into()),
+                organization_name: "New Owner Organization".into(),
+                workspace_name: "New Owner Workspace".into(),
+            })
+            .unwrap();
+
+        let admins = state.operator_list_platform_admins().unwrap();
+        assert_eq!(admins.len(), 2);
+        assert!(admins.iter().any(|admin| {
+            admin.account_id == created.account_id
+                && admin.email.as_deref() == Some("new-owner@example.com")
+                && admin.status == AccountStatus::Active
+                && admin.identity_available
+        }));
+        assert_eq!(
+            state
+                .credentials
+                .authenticate("new-owner@example.com", "new admin password 2026", now())
+                .unwrap(),
+            created.account_id
+        );
+        let aggregate = state.control_aggregate().unwrap();
+        let platform_principal = Principal {
+            account_id: Some(created.account_id.clone()),
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        assert!(
+            aggregate
+                .workspaces
+                .get_workspace_record(
+                    &platform_principal,
+                    &[],
+                    &created.organization_id,
+                    &created.workspace_id,
+                )
+                .is_ok()
+        );
+        assert!(
+            aggregate
+                .platform_admin_accounts
+                .contains(&owner.account_id)
+        );
+        assert!(
+            aggregate
+                .platform_admin_accounts
+                .contains(&created.account_id)
+        );
+        let repeated = state
+            .operator_create_platform_admin(OperatorPlatformAdminProvisionInput {
+                username: "another-owner".into(),
+                email: "another-owner@example.com".into(),
+                password: zeroize::Zeroizing::new("another admin password 2026".into()),
+                organization_name: "Another Organization".into(),
+                workspace_name: "Another Workspace".into(),
+            })
+            .unwrap_err();
+        assert_eq!(repeated.code, "operator_admin_already_provisioned");
     }
 
     #[test]

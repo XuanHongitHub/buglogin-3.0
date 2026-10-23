@@ -8,7 +8,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use buglogin_domain::{
-    account::{Account, AccountStatus, IdentityVerification, canonical_email},
+    account::{Account, AccountIdentity, AccountStatus, IdentityVerification, canonical_email},
     audit::{AuditEvent, AuditOutcome, AuditResource},
     entities::{Profile, Proxy, ProxyProtocol},
     errors::Problem,
@@ -888,7 +888,7 @@ struct ProxyCreateResultView {
 pub(super) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/account", get(account))
-        .route("/v1/accounts", get(list_accounts))
+        .route("/v1/accounts", get(list_accounts).post(create_account))
         .route("/v1/accounts/{account_id}/status", put(set_account_status))
         .route(
             "/v1/organizations",
@@ -1427,10 +1427,32 @@ fn proxy_response_problem(error: RepositoryError) -> ResponseProblem {
     ))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountAdminRecordView {
+    account: Account,
+    identity: Option<AccountIdentity>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountAdminPageView {
+    items: Vec<AccountAdminRecordView>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountCreateInput {
+    account_id: AccountId,
+    username: String,
+    email: String,
+}
+
 async fn list_accounts(
     State(state): State<ApiState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<Account>>, Response> {
+) -> Result<Json<AccountAdminPageView>, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     authorize_control(
@@ -1447,7 +1469,93 @@ async fn list_accounts(
         .list::<Account>("control", "account")
         .map_err(response)?;
     accounts.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(Json(accounts))
+    let identities = crate::services::identity_persistence::IdentityPersistence::new(
+        state.control_persistence.clone(),
+    );
+    let items = accounts
+        .into_iter()
+        .map(|account| {
+            Ok(AccountAdminRecordView {
+                identity: identities.load(&account.id).map_err(response_problem)?,
+                account,
+            })
+        })
+        .collect::<Result<Vec<_>, Response>>()?;
+    Ok(Json(AccountAdminPageView {
+        items,
+        next_cursor: None,
+    }))
+}
+
+async fn create_account(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<AccountCreateInput>,
+) -> Result<Response, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grant_snapshot = grants(&state)?;
+    authorize_control(
+        &principal,
+        &grant_snapshot,
+        "CAP-ADM-001",
+        Action::Create,
+        &ResourceScope::global(),
+        "account_forbidden",
+        "Account access denied",
+    )?;
+
+    with_authorization_snapshot(
+        &state,
+        &headers,
+        &principal,
+        &grant_snapshot,
+        |principal, current_grants, _| {
+            authorize_control(
+                principal,
+                current_grants,
+                "CAP-ADM-001",
+                Action::Create,
+                &ResourceScope::global(),
+                "account_forbidden",
+                "Account access denied",
+            )?;
+            let actor_id = principal.account_id.as_ref().ok_or_else(|| {
+                problem_response(
+                    "account_missing",
+                    "Account is missing",
+                    401,
+                    correlation(&headers),
+                )
+            })?;
+            let idempotency_key = mutation_key(&headers, &correlation(&headers))?;
+            let created_at =
+                crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?;
+            let pending = crate::services::account_provisioning::AccountProvisioningService::new(
+                state.control_persistence.clone(),
+            )
+            .create_pending(
+                input.account_id,
+                &input.username,
+                &input.email,
+                actor_id,
+                &idempotency_key,
+                &created_at,
+            )
+            .map_err(response_problem)?;
+            Ok((
+                StatusCode::CREATED,
+                Json(json!({
+                    "account": pending.account,
+                    "identity": pending.identity,
+                    "replayed": pending.replayed,
+                    "onboardingStatus": "pending_verification",
+                    "loginEnabled": false,
+                })),
+            )
+                .into_response())
+        },
+    )
+    .await
 }
 
 async fn set_account_status(
@@ -3524,17 +3632,73 @@ async fn list_members(
     State(state): State<ApiState>,
     Path(workspace_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<Vec<Member>>, Response> {
+) -> Result<Json<Vec<MemberDirectoryView>>, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
-    let items = state
+    let members = state
         .members
         .read()
         .map_err(|_| service_unavailable("member"))?
         .list(&principal, &grants, &workspace_id)
         .map_err(response_problem)?;
+    let items = members
+        .into_iter()
+        .map(|member| member_directory_view(&state, &principal, &grants, member))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(items))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemberIdentityView {
+    username: String,
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemberDirectoryView {
+    #[serde(flatten)]
+    member: Member,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<MemberIdentityView>,
+}
+
+fn member_directory_view(
+    state: &ApiState,
+    principal: &Principal,
+    grants: &[buglogin_domain::permissions::Grant],
+    member: Member,
+) -> Result<MemberDirectoryView, Response> {
+    let can_read_identity = is_allowed(
+        principal,
+        &Capability::new("CAP-MEM-001").map_err(|_| {
+            problem_response(
+                "invalid_capability",
+                "Membership capability is invalid",
+                500,
+                "member-directory".into(),
+            )
+        })?,
+        Action::Manage,
+        &ResourceScope::workspace(member.workspace_id.clone()),
+        grants,
+    );
+    let identity = if can_read_identity {
+        crate::services::identity_persistence::IdentityPersistence::new(
+            state.control_persistence.clone(),
+        )
+        .load(&member.account_id)
+        .map_err(response_problem)?
+        .map(|identity| MemberIdentityView {
+            username: identity.username,
+            email: identity.email,
+        })
+    } else {
+        None
+    };
+    Ok(MemberDirectoryView { member, identity })
 }
 
 async fn list_members_page(
@@ -3542,7 +3706,7 @@ async fn list_members_page(
     Path(workspace_id): Path<String>,
     Query(query): Query<CollectionPageQuery>,
     headers: HeaderMap,
-) -> Result<Json<CollectionPageView<Member>>, Response> {
+) -> Result<Json<CollectionPageView<MemberDirectoryView>>, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
@@ -3553,12 +3717,16 @@ async fn list_members_page(
         .transpose()
         .map_err(|_| bad_id("cursor"))?;
     let limit = collection_page_limit(query.limit)?;
-    let (items, next_cursor) = state
+    let (members, next_cursor) = state
         .members
         .read()
         .map_err(|_| service_unavailable("member"))?
         .list_page(&principal, &grants, &workspace_id, cursor.as_ref(), limit)
         .map_err(response_problem)?;
+    let items = members
+        .into_iter()
+        .map(|member| member_directory_view(&state, &principal, &grants, member))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(CollectionPageView {
         items,
         next_cursor: next_cursor.map(|id| id.as_str().to_owned()),
@@ -7126,6 +7294,76 @@ mod tests {
         assert_eq!(member["accountId"], invitee_id.as_str());
         assert_eq!(member["workspaceId"], owner.workspace_id.as_str());
         assert_eq!(member["status"], "invited");
+
+        let member_page_uri = format!(
+            "/v1/workspaces/{}/members/page?limit=50",
+            owner.workspace_id.as_str()
+        );
+        let owner_page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&member_page_uri)
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("x-correlation-id", "member-directory-owner")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner_page.status(), StatusCode::OK);
+        let owner_page: Value = serde_json::from_slice(
+            &axum::body::to_bytes(owner_page.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let listed_invitee = owner_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["accountId"] == invitee_id.as_str())
+            .unwrap();
+        assert_eq!(listed_invitee["identity"]["username"], "invite-member");
+        assert_eq!(listed_invitee["identity"]["email"], "Invitee@Example.com");
+
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::new("grant_invitee_member_read").unwrap(),
+            account_id: Some(invitee_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-MEM-001").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(owner.workspace_id.clone()),
+            effect: buglogin_domain::permissions::Effect::Allow,
+        });
+        let invitee_page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&member_page_uri)
+                    .header("authorization", format!("Bearer {invitee_token}"))
+                    .header("x-correlation-id", "member-directory-reader")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invitee_page.status(), StatusCode::OK);
+        let invitee_page: Value = serde_json::from_slice(
+            &axum::body::to_bytes(invitee_page.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let listed_owner = invitee_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["accountId"] == owner.account_id.as_str())
+            .unwrap();
+        assert!(listed_owner.get("identity").is_none());
 
         let replay_response = app
             .oneshot(redeem("invitation-redeem-test-key-02"))

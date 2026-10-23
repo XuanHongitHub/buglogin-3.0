@@ -73,7 +73,7 @@ jobs:
           UPDATER_CONFIG_PATH: ${{ runner.temp }}/tauri-updater.json
         run: |
           $updater = Get-Content -Raw $env:UPDATER_CONFIG_PATH | ConvertFrom-Json
-          $config = @{ build = @{ beforeBuildCommand = '' }; bundle = @{ createUpdaterArtifacts = $true }; plugins = @{ updater = $updater.plugins.updater } } | ConvertTo-Json -Depth 8
+          $config = @{ bundle = @{ createUpdaterArtifacts = $true }; plugins = @{ updater = $updater.plugins.updater } } | ConvertTo-Json -Depth 8
           $config | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'windows-release.json')
       - name: Build Windows installer and signed updater artifact
         shell: pwsh
@@ -84,7 +84,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          pnpm tauri build --target $env:TARGET --bundles nsis --config "$env:RUNNER_TEMP\windows-release.json"
+          pnpm --dir apps/desktop tauri:build --target $env:TARGET --bundles nsis --config "$env:RUNNER_TEMP\windows-release.json"
       - name: Verify Windows installer and updater signature
         shell: pwsh
         run: |
@@ -221,7 +221,7 @@ jobs:
           BUGLOGIN_TAURI_UPDATER_ENDPOINT: https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build --target "$TARGET" --bundles app,dmg --config "$RUNNER_TEMP/tauri-updater.json"
+        run: pnpm --dir apps/desktop tauri:build --target "$TARGET" --bundles app,dmg --config "$RUNNER_TEMP/tauri-updater.json"
       - name: Notarize, staple, and verify macOS artifacts
         shell: bash
         env:

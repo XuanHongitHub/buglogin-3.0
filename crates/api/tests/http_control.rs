@@ -64,6 +64,13 @@ async fn account_admin_and_team_crud_are_acl_and_revision_checked() {
         ),
         allow(
             &admin,
+            "grant_account_create",
+            "CAP-ADM-001",
+            Action::Create,
+            ResourceScope::global(),
+        ),
+        allow(
+            &admin,
             "grant_team_create",
             "CAP-TEAM-001",
             Action::Create,
@@ -204,14 +211,91 @@ async fn account_admin_and_team_crud_are_acl_and_revision_checked() {
         .unwrap();
     assert_eq!(accounts.status(), StatusCode::OK);
     let accounts = json_body(accounts).await;
-    assert_eq!(accounts.as_array().unwrap().len(), 3);
-    let target_revision = accounts
+    assert_eq!(accounts["items"].as_array().unwrap().len(), 3);
+    let target_revision = accounts["items"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|account| account["id"] == "acct_control_target")
-        .and_then(|account| account["revision"].as_u64())
+        .find(|record| record["account"]["id"] == "acct_control_target")
+        .and_then(|record| record["account"]["revision"].as_u64())
         .expect("target account revision");
+
+    let create_input = json!({
+        "accountId": "acct_control_created",
+        "username": "created-user",
+        "email": "created@example.test"
+    });
+    let denied_create = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/accounts",
+            Some(&denied_token),
+            Some("account-create-denied-0001"),
+            Some("account-create-denied-idem"),
+            Some(create_input.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied_create.status(), StatusCode::FORBIDDEN);
+
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/accounts",
+            Some(&admin_token),
+            Some("account-create-allowed-idem"),
+            Some("account-create-allowed-0001"),
+            Some(create_input.clone()),
+        ))
+        .await
+        .unwrap();
+    let created_status = created.status();
+    let created_body = json_body(created).await;
+    assert_eq!(created_status, StatusCode::CREATED, "{created_body}");
+    assert_eq!(created_body["identity"]["username"], "created-user");
+    assert_eq!(created_body["identity"]["verification"], "pending");
+    assert_eq!(created_body["loginEnabled"], false);
+
+    let replayed = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/accounts",
+            Some(&admin_token),
+            Some("account-create-allowed-idem"),
+            Some("account-create-allowed-0002"),
+            Some(create_input),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replayed.status(), StatusCode::CREATED);
+    assert_eq!(json_body(replayed).await["replayed"], true);
+
+    let updated_accounts = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/accounts",
+            Some(&admin_token),
+            None,
+            Some("account-list-after-create"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let updated_accounts = json_body(updated_accounts).await;
+    assert_eq!(updated_accounts["items"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        updated_accounts["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["account"]["id"] == "acct_control_created")
+            .unwrap()["identity"]["email"],
+        "created@example.test"
+    );
 
     let suspended = app
         .clone()
