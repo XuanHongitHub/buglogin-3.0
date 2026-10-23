@@ -11,6 +11,7 @@ use buglogin_sync::{
 use serde::{Deserialize, Serialize};
 
 use crate::package::NeutralPackage;
+use crate::snapshot::is_chromium_runtime_link;
 
 const INDEX_PATH: &str = "encrypted/profile-data/index.json";
 const OBJECT_PREFIX: &str = "encrypted/profile-data";
@@ -171,6 +172,9 @@ fn collect_files(
         let file_type = entry
             .file_type()
             .map_err(|_| data_problem("migration_encrypted_profile_read_failed"))?;
+        if is_chromium_runtime_link(file_type, &entry.file_name()) {
+            continue;
+        }
         if file_type.is_symlink() {
             return Err(data_problem(
                 "migration_encrypted_profile_symlink_unsupported",

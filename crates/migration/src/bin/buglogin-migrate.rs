@@ -20,7 +20,9 @@ use buglogin_migration::package::{
 use buglogin_migration::reconcile::{ReconciliationStatus, reconcile_activation};
 use buglogin_migration::rollback::{confirm_rollback, rollback_activation, rollback_cutover};
 use buglogin_migration::signature::{SignatureMetadata, sign_package, verify_signed_package};
-use buglogin_migration::snapshot::{SourceSnapshot, create_snapshot, validate_source_path};
+use buglogin_migration::snapshot::{
+    SourceSnapshot, create_snapshot, is_legacy_runtime_artifact, validate_source_path,
+};
 use buglogin_migration::transform::{discard_staging, stage_package};
 use buglogin_migration::verify::verify_package;
 use buglogin_migration::{MigrationKey, activate_package, plan_package_activation};
@@ -165,7 +167,7 @@ fn initialize_keys(options: &Options) -> Result<(), Problem> {
         encryption_hex.as_str(),
         signing_hex.as_str()
     ));
-    if let Err(error) = write_new(&output, env_content.as_bytes()) {
+    if let Err(error) = write_new_secret(&output, env_content.as_bytes()) {
         let _ = vault.remove(&signing_key, signing_version);
         let _ = vault.remove(&encryption_key, encryption_version);
         return Err(error);
@@ -383,6 +385,13 @@ fn copy_source_tree(source_root: &Path, current: &Path, output_root: &Path) -> R
     for entry in fs::read_dir(current).map_err(io_problem)? {
         let entry = entry.map_err(io_problem)?;
         let file_type = entry.file_type().map_err(io_problem)?;
+        let entry_path = entry.path();
+        let relative = entry_path
+            .strip_prefix(source_root)
+            .map_err(|_| invalid_path())?;
+        if is_legacy_runtime_artifact(relative, file_type) {
+            continue;
+        }
         if file_type.is_symlink() {
             return Err(problem(
                 "migration_symlink_rejected",
@@ -390,10 +399,6 @@ fn copy_source_tree(source_root: &Path, current: &Path, output_root: &Path) -> R
                 400,
             ));
         }
-        let entry_path = entry.path();
-        let relative = entry_path
-            .strip_prefix(source_root)
-            .map_err(|_| invalid_path())?;
         let destination = output_root.join(relative);
         if file_type.is_dir() {
             fs::create_dir(&destination).map_err(io_problem)?;
@@ -790,6 +795,21 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Problem> {
         .map_err(io_problem)
 }
 
+/// Key material is created owner-only (0600) instead of inheriting the umask.
+fn write_new_secret(path: &Path, bytes: &[u8]) -> Result<(), Problem> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(io_problem)?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(io_problem)
+}
+
 fn print_json(value: &impl Serialize) -> Result<(), Problem> {
     println!(
         "{}",
@@ -850,4 +870,30 @@ fn io_problem(error: std::io::Error) -> Problem {
 
 fn problem(code: &str, title: &str, status: u16) -> Problem {
     Problem::new(code, title, status, "migration-cli")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_new_secret;
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_key_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "buglogin-migrate-secret-file-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("keys.env");
+
+        write_new_secret(&path, b"BUGLOGIN_MIGRATION_ENCRYPTION_KEY_HEX=00\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(write_new_secret(&path, b"overwrite").is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
