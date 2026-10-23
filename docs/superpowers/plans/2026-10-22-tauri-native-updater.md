@@ -76,3 +76,4 @@ Status: **active; release blocked pending API parity, native platform artifacts,
 - [x] Resolve stable installer links from the stable catalog and expose release candidates as explicitly labeled test downloads; never promote an RC from the landing page.
 - [x] Verify installer URL host, version, run ID, filename, and platform suffix before redirecting or promoting catalog metadata.
 - [ ] Verify published stable and RC catalog URLs with public HEAD requests after the corresponding release/promotion workflow runs.
+- Release note: remote tag `v3.0.4` is already fixed to `ce421bc9` and its signing workflow was cancelled before publication. Keep that tag unchanged; the corrected release candidate is version `3.0.5`.

@@ -29,4 +29,4 @@ Status: **design only; no implementation authorized until the listed contracts a
 - [ ] Complete approved visual/interaction/accessibility QA for ACC-02.
 - [ ] Verify native browser redirects, deep-link callback, install/update, and retained data on Windows and macOS.
 - [ ] Deploy and parity-verify API config/routes through Packet A; validate exact CORS origins only if a browser client needs cross-origin fetches.
-- [ ] Build immutable `v3.0.4` only after API and OS evidence gates pass; do not change stable feed as part of this proposal.
+- [ ] Build immutable `v3.0.5` only after API and OS evidence gates pass; do not change stable feed as part of this proposal.
