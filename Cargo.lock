@@ -794,6 +794,7 @@ name = "buglogin-desktop-app"
 version = "3.0.0"
 dependencies = [
  "aes",
+ "argon2",
  "async-trait",
  "base64 0.22.1",
  "buglogin-api",
@@ -804,10 +805,12 @@ dependencies = [
  "buglogin-storage",
  "buglogin-sync",
  "cbc",
+ "data-encoding",
  "dirs 6.0.0",
  "fs2",
  "futures-util",
  "getrandom 0.3.4",
+ "hmac 0.13.0",
  "image",
  "native-tls",
  "reqwest",
@@ -815,6 +818,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "tauri",
  "tauri-build",

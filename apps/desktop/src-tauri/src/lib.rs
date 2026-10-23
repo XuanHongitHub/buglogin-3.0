@@ -16,6 +16,7 @@ mod migration_commands;
 mod network_features;
 mod profile_cookie_manager;
 mod profile_lifecycle;
+mod profile_password;
 mod profile_projection;
 pub mod profile_runtime;
 mod proxy_bridge;
