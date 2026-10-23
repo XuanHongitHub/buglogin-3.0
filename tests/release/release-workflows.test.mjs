@@ -146,12 +146,11 @@ test("release verifier rejects mutable action tags", async () => {
   assert.throws(() => verifyReleaseText(release.replace(/actions\/checkout@[0-9a-f]{40}/, "actions/checkout@v6")), /not pinned/);
 });
 
-test("release verifier rejects legacy desktop artifact paths", async () => {
+test("signing artifact lookup follows the configured Cargo target directory", async () => {
   const { signing } = await verifyReleaseWorkflows();
-  assert.throws(
-    () => verifySigningText(signing.replace("target/$env:TARGET/release/buglogin-desktop-app.exe", "src-tauri/target/$env:TARGET/release/donutbrowser.exe")),
-    /missing|forbidden/,
-  );
+  assert.match(signing, /Join-Path \$env:CARGO_TARGET_DIR \"\$env:TARGET\/release\"/);
+  assert.match(signing, /RELEASE_DIR=\"\$CARGO_TARGET_DIR\/\$TARGET\/release\"/);
+  assert.doesNotMatch(signing, /(?:[\" ])target\/\$env:TARGET\/release|(?:[\" ])target\/\$TARGET\/release/);
 });
 
 test("evidence generators emit SBOM, hashes, and lock-bound provenance", async () => {

@@ -88,12 +88,14 @@ jobs:
       - name: Verify Windows installer and updater signature
         shell: pwsh
         run: |
-          $app = "target/$env:TARGET/release/buglogin-desktop-app.exe"
-          $installers = @(Get-ChildItem "target/$env:TARGET/release/bundle/nsis" -Filter *-setup.exe -File)
+          $releaseDir = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET/release"
+          $bundleDir = Join-Path $releaseDir 'bundle/nsis'
+          $app = Join-Path $releaseDir 'buglogin-desktop-app.exe'
+          $installers = @(Get-ChildItem $bundleDir -Filter *-setup.exe -File)
           if (-not (Test-Path -LiteralPath $app) -or $installers.Count -ne 1) { throw 'Expected Windows app executable and one NSIS installer' }
           New-Item -ItemType Directory -Force dist-release | Out-Null
           Copy-Item $installers.FullName dist-release
-          $updaterSignatures = @(Get-ChildItem "target/$env:TARGET/release/bundle/nsis" -Filter *.exe.sig -File)
+          $updaterSignatures = @(Get-ChildItem $bundleDir -Filter *.exe.sig -File)
           if ($updaterSignatures.Count -ne 1 -or $updaterSignatures[0].BaseName -ne $installers[0].Name) { throw 'Expected the Tauri updater signature for the NSIS installer' }
           Copy-Item $updaterSignatures.FullName dist-release
       - name: Generate SBOM, hashes, provenance
@@ -230,18 +232,19 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          APP_PATH="$(find "target/$TARGET/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
-          DMG_PATH="$(find "target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+          RELEASE_DIR="$CARGO_TARGET_DIR/$TARGET/release"
+          APP_PATH="$(find "$RELEASE_DIR/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          DMG_PATH="$(find "$RELEASE_DIR/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
           [[ -n "$APP_PATH" && -n "$DMG_PATH" ]] || { echo "Expected app and DMG artifacts"; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          spctl --assess --type execute --verbose=2 "$APP_PATH"
           xcrun notarytool submit "$DMG_PATH" --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait --timeout 30m
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$DMG_PATH"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
           mkdir -p dist-release
           cp "$DMG_PATH" dist-release/
-          mapfile -t updater_files < <(find "target/$TARGET/release/bundle" -type f \( -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) -print)
+          mapfile -t updater_files < <(find "$RELEASE_DIR/bundle" -type f \( -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) -print)
           [[ "${#updater_files[@]}" -eq 2 ]] || { echo 'Expected one signed app updater archive and its .sig file'; exit 1; }
           cp "${updater_files[@]}" dist-release/
       - name: Generate SBOM, hashes, provenance
