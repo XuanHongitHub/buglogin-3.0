@@ -1423,6 +1423,130 @@ async fn web_api_tokens_are_one_time_scoped_listable_and_revocable() {
 }
 
 #[tokio::test]
+async fn api_tokens_cannot_manage_credentials_or_approve_devices() {
+    let root = root("api-token-credential-boundary");
+    let _ = fs::remove_dir_all(&root);
+    let state = hosted_state_with_verified_owner(
+        ProfileService::new(LocalRepository::open(&root).unwrap()),
+        "acct_api_token_boundary_http",
+        "Api.Token.Boundary",
+        "api.token.boundary@example.com",
+        "correct horse battery staple",
+    );
+    let session = state.issue_token("acct_api_token_boundary_http").unwrap();
+    let app = router(state);
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let created = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/auth/api-tokens",
+            json!({
+                "name": "Narrow proxy reader",
+                "scopes": ["CAP-NET-001:read"],
+                "expiresAt": expires_at
+            }),
+            Some(&session),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = serde_json::from_slice(
+        &axum::body::to_bytes(created.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let api_token = created["token"].as_str().unwrap().to_owned();
+    let token_id = created["tokenRecord"]["id"].as_str().unwrap().to_owned();
+
+    let started = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/auth/device/start",
+            json!({"deviceId":"desktop-boundary-1","clientName":"BugLogin Desktop"}),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let started: Value = serde_json::from_slice(
+        &axum::body::to_bytes(started.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let user_code = started["userCode"].as_str().unwrap().to_owned();
+
+    let attempts = [
+        json_request(
+            "POST",
+            "/v1/auth/api-tokens",
+            json!({
+                "name": "Escalated",
+                "scopes": ["CAP-ADM-001:*"],
+                "expiresAt": expires_at
+            }),
+            Some(&api_token),
+        ),
+        request("GET", "/v1/auth/api-tokens", &api_token),
+        json_idempotent_request(
+            "DELETE",
+            &format!("/v1/auth/api-tokens/{token_id}"),
+            json!({}),
+            &api_token,
+            "api-token-boundary-revoke-0001",
+        ),
+        json_request(
+            "POST",
+            "/v1/auth/device/approve",
+            json!({"userCode": user_code}),
+            Some(&api_token),
+        ),
+        json_idempotent_request(
+            "DELETE",
+            "/v1/auth/sessions/sess_api_token_boundary",
+            json!({}),
+            &api_token,
+            "api-token-boundary-session-0001",
+        ),
+    ];
+    for attempt in attempts {
+        let label = format!("{} {}", attempt.method(), attempt.uri());
+        let response = app.clone().oneshot(attempt).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{label}");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["code"], "api_token_credential_management_forbidden",
+            "{label}"
+        );
+    }
+
+    let still_listed = app
+        .oneshot(request("GET", "/v1/auth/api-tokens", &session))
+        .await
+        .unwrap();
+    assert_eq!(still_listed.status(), StatusCode::OK);
+    let still_listed: Value = serde_json::from_slice(
+        &axum::body::to_bytes(still_listed.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(still_listed["tokens"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn desktop_session_bearer_can_manage_account_api_tokens() {
     let root = root("desktop-api-token-management");
     let _ = fs::remove_dir_all(&root);

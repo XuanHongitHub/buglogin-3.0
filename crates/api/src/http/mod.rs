@@ -6110,7 +6110,9 @@ async fn list_api_tokens(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     let account_id = if headers.get(header::AUTHORIZATION).is_some() {
-        authenticate(&state, &headers)?.account_id.ok_or_else(|| {
+        let principal = authenticate(&state, &headers)?;
+        reject_api_token_principal(&principal)?;
+        principal.account_id.ok_or_else(|| {
             response(problem(
                 "authentication_required",
                 "Authentication required",
@@ -9660,7 +9662,9 @@ fn authenticated_account_for_mutation(
     headers: &HeaderMap,
 ) -> Result<AccountId, Response> {
     if headers.get(header::AUTHORIZATION).is_some() {
-        return authenticate(state, headers)?.account_id.ok_or_else(|| {
+        let principal = authenticate(state, headers)?;
+        reject_api_token_principal(&principal)?;
+        return principal.account_id.ok_or_else(|| {
             response(problem(
                 "authentication_required",
                 "Authentication required",
@@ -9697,12 +9701,26 @@ fn authenticated_account_for_mutation(
     require_active_account(state, account_id)
 }
 
+/// API tokens are scoped automation credentials; they never manage tokens,
+/// sessions or device approvals, which would let them escape their scopes.
+fn reject_api_token_principal(principal: &Principal) -> Result<(), Response> {
+    if principal.token_scopes.is_some() {
+        return Err(response(problem(
+            "api_token_credential_management_forbidden",
+            "API tokens cannot manage credentials or approve devices",
+            403,
+        )));
+    }
+    Ok(())
+}
+
 fn authenticated_account_and_credential_version_for_mutation(
     state: &ApiState,
     headers: &HeaderMap,
 ) -> Result<(AccountId, Option<u32>), Response> {
     if headers.get(header::AUTHORIZATION).is_some() {
         let principal = authenticate(state, headers)?;
+        reject_api_token_principal(&principal)?;
         let account_id = principal.account_id.ok_or_else(|| {
             response(problem(
                 "authentication_required",
@@ -9711,33 +9729,25 @@ fn authenticated_account_and_credential_version_for_mutation(
             ))
         })?;
         let token = bearer_token(headers)?;
-        let version = if token.starts_with("blapi_") {
-            state
-                .credentials
-                .password_version(&account_id)
-                .map_err(response)
-        } else {
-            let (session_account, version) = state
-                .auth
-                .read()
-                .map_err(|_| {
-                    response(problem(
-                        "auth_unavailable",
-                        "Authentication unavailable",
-                        503,
-                    ))
-                })?
-                .authenticate_with_credential_version(token, request_now(headers)?)
-                .map_err(response)?;
-            if session_account != account_id {
-                return Err(response(problem(
-                    "authentication_required",
-                    "Authentication required",
-                    401,
-                )));
-            }
-            Ok(version)
-        }?;
+        let (session_account, version) = state
+            .auth
+            .read()
+            .map_err(|_| {
+                response(problem(
+                    "auth_unavailable",
+                    "Authentication unavailable",
+                    503,
+                ))
+            })?
+            .authenticate_with_credential_version(token, request_now(headers)?)
+            .map_err(response)?;
+        if session_account != account_id {
+            return Err(response(problem(
+                "authentication_required",
+                "Authentication required",
+                401,
+            )));
+        }
         let version = match version {
             Some(version) => Some(version),
             None => state
