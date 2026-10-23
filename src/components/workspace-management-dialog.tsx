@@ -1,0 +1,1354 @@
+"use client";
+
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import {
+  LuArrowUpDown,
+  LuBuilding2,
+  LuCheck,
+  LuChevronLeft,
+  LuChevronRight,
+  LuHardDrive,
+  LuPencil,
+  LuPlus,
+  LuSearch,
+  LuSend,
+  LuShieldCheck,
+  LuTrash2,
+  LuTriangleAlert,
+  LuUsers,
+  LuWifiOff,
+} from "react-icons/lu";
+import { CreateInviteModal } from "@/components/create-invite-modal";
+import { LoadingButton } from "@/components/loading-button";
+import { MemberManagementDialog } from "@/components/member-management-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
+import { cn } from "@/lib/utils";
+import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
+import type {
+  Organization,
+  Workspace,
+  WorkspacePolicy,
+} from "../../frontend/src/generated/command-registry";
+import { RippleButton } from "./ui/ripple";
+
+interface WorkspaceManagementDialogProps {
+  mode?: "page" | "dialog";
+  isOpen?: boolean;
+  onClose?: () => void;
+  activeWorkspaceId: string;
+  onWorkspaceSwitched: (workspaceId: string) => void;
+  onNavigateHome?: () => void;
+}
+
+const desktopApi = createTauriDesktopApi();
+
+export function WorkspaceManagementDialog({
+  mode = "dialog",
+  isOpen = true,
+  onClose = () => {},
+  activeWorkspaceId,
+  onWorkspaceSwitched,
+  onNavigateHome,
+}: WorkspaceManagementDialogProps) {
+  const { t } = useTranslation();
+  const isPageMode = mode === "page";
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [selectedOrgId, setSelectedOrgId] = useState<string>("");
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [switchingId, setSwitchingId] = useState<string | null>(null);
+
+  // Sub-modal states
+  const [createWsOpen, setCreateWsOpen] = useState(false);
+  const [createOrgOpen, setCreateOrgOpen] = useState(false);
+  const [editingWs, setEditingWs] = useState<Workspace | null>(null);
+  const [deletingWs, setDeletingWs] = useState<Workspace | null>(null);
+  const [deleteConfirmName, setDeleteConfirmName] = useState("");
+  const [isDeletingWs, setIsDeletingWs] = useState(false);
+  const [inviteWs, setInviteWs] = useState<Workspace | null>(null);
+  const [membersWs, setMembersWs] = useState<Workspace | null>(null);
+
+  // Form states for Create Workspace
+  const [wsName, setWsName] = useState("");
+  const [wsMaxProfiles, setWsMaxProfiles] = useState(300);
+  const [wsMaxMembers, setWsMaxMembers] = useState(10);
+  const [wsOffline, setWsOffline] = useState(true);
+  const [isSubmittingWs, setIsSubmittingWs] = useState(false);
+
+  // Form states for Edit Workspace
+  const [editWsName, setEditWsName] = useState("");
+  const [editWsOrgId, setEditWsOrgId] = useState("");
+  const [editWsMaxProfiles, setEditWsMaxProfiles] = useState(500);
+  const [editWsMaxMembers, setEditWsMaxMembers] = useState(10);
+  const [editWsOffline, setEditWsOffline] = useState(true);
+  const [isUpdatingWs, setIsUpdatingWs] = useState(false);
+
+  useEffect(() => {
+    if (editingWs) {
+      setEditWsName(editingWs.name);
+      setEditWsOrgId(editingWs.organizationId);
+      setEditWsMaxProfiles(editingWs.policy?.maxProfiles ?? 300);
+      setEditWsMaxMembers(editingWs.policy?.maxMembers ?? 10);
+      setEditWsOffline(editingWs.policy?.offlineEntitled ?? true);
+    }
+  }, [editingWs]);
+
+  // Form states for Create Org
+  const [orgName, setOrgName] = useState("");
+  const [isSubmittingOrg, setIsSubmittingOrg] = useState(false);
+
+  // Load organizations
+  const loadOrgs = useCallback(async () => {
+    try {
+      const orgPage = await desktopApi.listOrganizations();
+      setOrganizations(orgPage.items);
+      if (orgPage.items.length > 0 && !selectedOrgId) {
+        setSelectedOrgId(orgPage.items[0].id);
+      }
+    } catch (err) {
+      console.warn("Could not list organizations, fallback to available:", err);
+    }
+  }, [selectedOrgId]);
+
+  // Load workspaces for the selected organization
+  const loadWorkspaces = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      if (selectedOrgId) {
+        const wsPage = await desktopApi.listWorkspaces(selectedOrgId);
+        setWorkspaces(wsPage.items);
+      } else {
+        // Fallback to get_available_workspaces if no org loaded
+        const available = await invoke<Array<any>>("get_available_workspaces");
+        const mapped: Workspace[] = available.map((w: any) => ({
+          id: w.id,
+          organizationId: w.organizationId || "org_default",
+          name: w.name,
+          policy: w.policy ?? {
+            maxProfiles: 0,
+            maxMembers: 0,
+            maxStorageBytes: 0,
+            offlineEntitled: false,
+          },
+          createdAt: w.createdAt || new Date().toISOString(),
+        }));
+        setWorkspaces(mapped);
+      }
+    } catch (err) {
+      console.error("Failed to load workspaces:", err);
+      showErrorToast(
+        t("workspaces.loadFailed", {
+          defaultValue: "Không thể tải danh sách không gian làm việc",
+        }),
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }, [selectedOrgId, t]);
+
+  useEffect(() => {
+    if (isOpen) {
+      void loadOrgs();
+      void loadWorkspaces();
+    }
+  }, [isOpen, loadOrgs, loadWorkspaces]);
+
+  const handleSwitchWorkspace = async (workspaceId: string) => {
+    setSwitchingId(workspaceId);
+    try {
+      await invoke("select_active_workspace", { workspaceId });
+      showSuccessToast(
+        t("workspaces.switched", {
+          defaultValue: "Đã chuyển sang không gian làm việc mới",
+        }),
+      );
+      onWorkspaceSwitched(workspaceId);
+    } catch (err) {
+      console.error("Failed to switch workspace:", err);
+      showErrorToast(String(err));
+    } finally {
+      setSwitchingId(null);
+    }
+  };
+
+  const handleCreateWorkspace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!wsName.trim() || !selectedOrgId) return;
+
+    setIsSubmittingWs(true);
+    try {
+      const policy: WorkspacePolicy = {
+        maxProfiles: Number(wsMaxProfiles) || 300,
+        maxMembers: Number(wsMaxMembers) || 10,
+        maxStorageBytes: 10 * 1024 * 1024 * 1024,
+        offlineEntitled: wsOffline,
+      };
+
+      await desktopApi.createWorkspace({
+        organizationId: selectedOrgId,
+        workspace: {
+          id: `ws_${crypto.randomUUID()}`,
+          organizationId: selectedOrgId,
+          name: wsName.trim(),
+          policy,
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      showSuccessToast(
+        t("workspaces.created", {
+          defaultValue: `Đã tạo workspace "${wsName.trim()}" thành công`,
+        }),
+      );
+      setWsName("");
+      setCreateWsOpen(false);
+      void loadWorkspaces();
+    } catch (err) {
+      console.error("Failed to create workspace:", err);
+      showErrorToast(String(err));
+    } finally {
+      setIsSubmittingWs(false);
+    }
+  };
+
+  const handleCreateOrg = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!orgName.trim()) return;
+
+    setIsSubmittingOrg(true);
+    try {
+      const orgId = `org_${crypto.randomUUID()}`;
+      const account = await desktopApi.getAccount();
+      await desktopApi.createOrganization({
+        organization: {
+          id: orgId,
+          accountId: account.accountId,
+          name: orgName.trim(),
+          createdAt: new Date().toISOString(),
+        },
+        policy: {
+          maxWorkspaces: 10,
+          offlineEntitled: false,
+        },
+      });
+
+      showSuccessToast(
+        t("workspaces.orgCreated", {
+          defaultValue: `Đã tạo tổ chức "${orgName.trim()}"`,
+        }),
+      );
+      setOrgName("");
+      setCreateOrgOpen(false);
+      await loadOrgs();
+      setSelectedOrgId(orgId);
+    } catch (err) {
+      console.error("Failed to create organization:", err);
+      showErrorToast(String(err));
+    } finally {
+      setIsSubmittingOrg(false);
+    }
+  };
+
+  const handleUpdateWorkspace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingWs || !editWsName.trim()) return;
+
+    setIsUpdatingWs(true);
+    try {
+      await desktopApi.updateWorkspace({
+        organizationId: editingWs.organizationId,
+        workspaceId: editingWs.id,
+        update: {
+          name: editWsName.trim(),
+          policy: {
+            maxProfiles:
+              Number(editWsMaxProfiles) || editingWs.policy?.maxProfiles || 300,
+            maxMembers:
+              Number(editWsMaxMembers) || editingWs.policy?.maxMembers || 10,
+            maxStorageBytes:
+              editingWs.policy?.maxStorageBytes ?? 10 * 1024 * 1024 * 1024,
+            offlineEntitled: editWsOffline,
+          },
+        },
+      });
+
+      showSuccessToast(
+        t("workspaces.updated", {
+          defaultValue: `Đã cập nhật workspace "${editWsName.trim()}"`,
+        }),
+      );
+      setEditingWs(null);
+      void loadWorkspaces();
+    } catch (err) {
+      console.error("Failed to update workspace:", err);
+      showErrorToast(String(err));
+    } finally {
+      setIsUpdatingWs(false);
+    }
+  };
+
+  const handleDeleteWorkspace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!deletingWs || deleteConfirmName !== deletingWs.name) return;
+
+    setIsDeletingWs(true);
+    try {
+      await desktopApi.updateWorkspace({
+        organizationId: deletingWs.organizationId,
+        workspaceId: deletingWs.id,
+        update: {
+          name: `[Archived] ${deletingWs.name}`,
+        },
+      });
+
+      showSuccessToast(
+        t("workspaces.deleted", {
+          defaultValue: `Đã giải tán workspace "${deletingWs.name}"`,
+        }),
+      );
+      setDeletingWs(null);
+      setEditingWs(null);
+      setDeleteConfirmName("");
+      void loadWorkspaces();
+    } catch (err) {
+      console.error("Failed to delete workspace:", err);
+      showErrorToast(String(err));
+    } finally {
+      setIsDeletingWs(false);
+    }
+  };
+
+  const [filterType, setFilterType] = useState<"all" | "active" | "hasMembers">(
+    "all",
+  );
+  const [sortBy, setSortBy] = useState<
+    "active" | "name" | "profiles" | "members"
+  >("active");
+  const [page, setPage] = useState(0);
+  const pageSize = isPageMode ? 10 : 6;
+
+  const processedWorkspaces = useMemo(() => {
+    let list = workspaces;
+    if (filterType === "active") {
+      list = list.filter((w) => w.id === activeWorkspaceId);
+    } else if (filterType === "hasMembers") {
+      list = list.filter((w) => (w.policy?.maxMembers ?? 0) > 0);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter((w) => w.name.toLowerCase().includes(q));
+    }
+    return [...list].sort((a, b) => {
+      if (sortBy === "active") {
+        if (a.id === activeWorkspaceId) return -1;
+        if (b.id === activeWorkspaceId) return 1;
+        return a.name.localeCompare(b.name);
+      }
+      if (sortBy === "name") {
+        return a.name.localeCompare(b.name);
+      }
+      if (sortBy === "profiles") {
+        return (b.policy?.maxProfiles ?? 0) - (a.policy?.maxProfiles ?? 0);
+      }
+      if (sortBy === "members") {
+        return (b.policy?.maxMembers ?? 0) - (a.policy?.maxMembers ?? 0);
+      }
+      return 0;
+    });
+  }, [workspaces, searchQuery, filterType, sortBy, activeWorkspaceId]);
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(processedWorkspaces.length / pageSize),
+  );
+  const pagedWorkspaces = useMemo(() => {
+    const start = page * pageSize;
+    return processedWorkspaces.slice(start, start + pageSize);
+  }, [processedWorkspaces, page, pageSize]);
+
+  const cycleSort = () => {
+    setSortBy((curr) => {
+      if (curr === "active") return "name";
+      if (curr === "name") return "profiles";
+      if (curr === "profiles") return "members";
+      return "active";
+    });
+    setPage(0);
+  };
+
+  const renderActiveWorkspaceInfo = () => {
+    const activeWsDetail =
+      workspaces.find((w) => w.id === activeWorkspaceId) || workspaces[0];
+    if (!activeWsDetail) return null;
+    return (
+      <div className="rounded-lg border border-border/70 bg-muted/15 p-3 space-y-2 text-xs">
+        <div className="flex items-center justify-between font-semibold text-foreground text-xs">
+          <div className="flex items-center gap-2">
+            <LuBuilding2 className="size-4 text-primary" />
+            <span>THÔNG TIN CHI TIẾT WORKSPACE: "{activeWsDetail.name}"</span>
+          </div>
+          <Badge
+            variant="outline"
+            className="font-mono text-[10px] text-emerald-600 bg-emerald-500/10 border-emerald-500/30"
+          >
+            Active Context
+          </Badge>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-muted-foreground pt-1 border-t border-border/40">
+          <div>
+            • <strong>Trạng thái:</strong>{" "}
+            <span className="text-foreground/80 font-medium">
+              Không gian làm việc chính (Đang hoạt động)
+            </span>
+          </div>
+          <div>
+            • <strong>Giới hạn lưu trữ:</strong>{" "}
+            <span className="text-foreground/80 font-medium">
+              {activeWsDetail.policy?.maxStorageBytes
+                ? `${Math.round(activeWsDetail.policy.maxStorageBytes / (1024 * 1024))} MB`
+                : "Không giới hạn dung lượng"}
+            </span>
+          </div>
+          <div>
+            • <strong>Chính sách Profile:</strong>{" "}
+            <span className="text-foreground/80 font-medium">
+              {activeWsDetail.policy?.maxProfiles != null
+                ? `${activeWsDetail.policy.maxProfiles} Profiles`
+                : "Không giới hạn"}
+            </span>
+            {" • "}
+            <strong>Thành viên:</strong>{" "}
+            <span className="text-foreground/80 font-medium">
+              {activeWsDetail.policy?.maxMembers != null
+                ? `${activeWsDetail.policy.maxMembers} Thành viên`
+                : "Không giới hạn"}
+            </span>
+          </div>
+          <div>
+            • <strong>Hỗ trợ ngoại tuyến (Offline):</strong>{" "}
+            {activeWsDetail.policy?.offlineEntitled
+              ? "Được phép mở khi mất mạng"
+              : "Chỉ Online"}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderTableContent = (isPageMode: boolean) => (
+    <div className="space-y-4">
+      {/* 4 Metric KPI Cards in Page Mode */}
+      {isPageMode && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-xs font-medium">Tổng Workspace</span>
+              <LuBuilding2 className="size-4 text-primary" />
+            </div>
+            <div className="mt-2 text-2xl font-bold text-foreground">
+              {workspaces.length}
+            </div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">
+              Không gian làm việc
+            </div>
+          </div>
+          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-xs font-medium">Đang Hoạt Động</span>
+              <LuCheck className="size-4 text-emerald-500" />
+            </div>
+            <div className="mt-2 text-2xl font-bold text-emerald-600 truncate">
+              {workspaces.find((w) => w.id === activeWorkspaceId)?.name || "—"}
+            </div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">
+              Phiên làm việc hiện tại
+            </div>
+          </div>
+          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-xs font-medium">Tổng Hạn Mức Profile</span>
+              <LuHardDrive className="size-4 text-primary" />
+            </div>
+            <div className="mt-2 text-2xl font-bold text-foreground">
+              {workspaces.reduce(
+                (sum, w) => sum + (w.policy?.maxProfiles || 0),
+                0,
+              ) || "—"}
+            </div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">
+              Hạn mức các Workspace
+            </div>
+          </div>
+          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-xs font-medium">Hỗ Trợ Ngoại Tuyến</span>
+              <LuShieldCheck className="size-4 text-emerald-500" />
+            </div>
+            <div className="mt-2 text-2xl font-bold text-foreground">
+              {workspaces.filter((w) => w.policy?.offlineEntitled).length}/
+              {workspaces.length}
+            </div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">
+              Workspace bật Offline
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Table Container */}
+      <div
+        className={cn(
+          "rounded-lg border border-border overflow-hidden",
+          isPageMode && "shadow-xs bg-card",
+        )}
+      >
+        {/* Top Toolbar */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 border-b border-border/50 bg-muted/20">
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground font-medium text-xs">
+              Tổ chức:
+            </span>
+            {organizations.length > 0 ? (
+              <Select value={selectedOrgId} onValueChange={setSelectedOrgId}>
+                <SelectTrigger className="h-8 w-52 text-xs">
+                  <SelectValue placeholder="Chọn tổ chức..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {organizations.map((org) => (
+                    <SelectItem key={org.id} value={org.id} className="text-xs">
+                      {org.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <Badge variant="outline" className="text-xs py-1">
+                Cá nhân & Nhóm mặc định
+              </Badge>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCreateOrgOpen(true)}
+              className="h-8 text-xs gap-1 cursor-pointer"
+            >
+              <LuPlus className="size-3" />
+              <span>
+                {t("workspaces.addOrg", { defaultValue: "Thêm Org" })}
+              </span>
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Filter Pills */}
+            <div className="flex items-center gap-1">
+              {(["all", "active", "hasMembers"] as const).map((tFilter) => {
+                const label =
+                  tFilter === "all"
+                    ? `Tất cả (${workspaces.length})`
+                    : tFilter === "active"
+                      ? "Đang chọn"
+                      : "Có thành viên";
+                const isSelected = filterType === tFilter;
+                return (
+                  <button
+                    key={tFilter}
+                    type="button"
+                    onClick={() => {
+                      setFilterType(tFilter);
+                      setPage(0);
+                    }}
+                    className={cn(
+                      "px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer",
+                      isSelected
+                        ? "bg-primary text-primary-foreground font-semibold shadow-2xs"
+                        : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Sort Toggle */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={cycleSort}
+              className="h-8 text-xs gap-1 cursor-pointer"
+              title="Thay đổi thứ tự sắp xếp"
+            >
+              <LuArrowUpDown className="size-3 text-primary" />
+              <span>
+                {sortBy === "active"
+                  ? "Sắp xếp: Đang dùng"
+                  : sortBy === "name"
+                    ? "Sắp xếp: Tên A-Z"
+                    : sortBy === "profiles"
+                      ? "Sắp xếp: Hạn mức"
+                      : "Sắp xếp: Thành viên"}
+              </span>
+            </Button>
+
+            <div className="relative w-44 sm:w-52">
+              <LuSearch className="absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
+              <Input
+                placeholder={t("workspaces.searchPlaceholder", {
+                  defaultValue: "Tìm tên workspace...",
+                })}
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setPage(0);
+                }}
+                className="h-8 pl-8 text-xs"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={() => setCreateWsOpen(true)}
+              className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+            >
+              <LuPlus className="size-3.5" />
+              <span>
+                {t("workspaces.createBtn", {
+                  defaultValue: "Tạo Workspace Mới",
+                })}
+              </span>
+            </Button>
+          </div>
+        </div>
+
+        {/* Workspaces Table */}
+        <div className={cn("overflow-y-auto", !isPageMode && "max-h-[300px]")}>
+          <table className="w-full text-left text-xs">
+            <thead className="bg-muted/50 border-b border-border sticky top-0 font-medium text-muted-foreground text-[11px]">
+              <tr>
+                <th className="py-2.5 px-3">Tên Không Gian Làm Việc</th>
+                <th className="py-2.5 px-3 w-28">Hạn mức Profile</th>
+                <th className="py-2.5 px-3 w-24">Thành viên</th>
+                <th className="py-2.5 px-3 w-24">Ngoại tuyến</th>
+                <th className="py-2.5 px-3 w-24 text-center">Trạng thái</th>
+                <th className="py-2.5 px-3 w-28 text-center">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {isLoading ? (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="py-8 text-center text-muted-foreground"
+                  >
+                    {t("common.buttons.loading", {
+                      defaultValue: "Đang tải dữ liệu...",
+                    })}
+                  </td>
+                </tr>
+              ) : processedWorkspaces.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="py-8 text-center text-muted-foreground"
+                  >
+                    {t("workspaces.noWorkspacesFound", {
+                      defaultValue:
+                        "Không tìm thấy workspace nào phù hợp với bộ lọc",
+                    })}
+                  </td>
+                </tr>
+              ) : (
+                pagedWorkspaces.map((ws) => {
+                  const isActive = ws.id === activeWorkspaceId;
+                  const isSwitching = switchingId === ws.id;
+
+                  return (
+                    <tr
+                      key={ws.id}
+                      className={cn(
+                        "transition-colors hover:bg-muted/30",
+                        isActive && "bg-primary/5",
+                      )}
+                    >
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center gap-2.5">
+                          <span className="grid size-7 shrink-0 place-items-center rounded bg-primary/10 text-primary font-semibold">
+                            <LuBuilding2 className="size-3.5" />
+                          </span>
+                          <div>
+                            <div className="font-semibold text-foreground flex items-center gap-1.5">
+                              <span>{ws.name}</span>
+                              {isActive && (
+                                <Badge
+                                  variant="outline"
+                                  className="h-4 border-emerald-500/30 bg-emerald-500/10 px-1.5 text-[9px] text-emerald-500 font-semibold"
+                                >
+                                  Đang chọn
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-muted-foreground">
+                              {organizations.find(
+                                (o) => o.id === ws.organizationId,
+                              )?.name || "Không gian làm việc"}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 font-mono text-muted-foreground">
+                        {ws.policy?.maxProfiles
+                          ? `${ws.policy.maxProfiles} slots`
+                          : "Không giới hạn"}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono text-muted-foreground">
+                        {ws.policy?.maxMembers
+                          ? `${ws.policy.maxMembers} seats`
+                          : "Không giới hạn"}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        {ws.policy?.offlineEntitled ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600 font-medium">
+                            <LuCheck className="size-3" />
+                            <span>Được phép</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                            <LuWifiOff className="size-3" />
+                            <span>Chỉ Online</span>
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-center">
+                        {isActive ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-500">
+                            <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            Active
+                          </span>
+                        ) : (
+                          <LoadingButton
+                            variant="outline"
+                            size="sm"
+                            isLoading={isSwitching}
+                            onClick={() => void handleSwitchWorkspace(ws.id)}
+                            className="h-7 px-2.5 text-xs cursor-pointer"
+                          >
+                            <span>Chuyển sang</span>
+                          </LoadingButton>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setEditingWs(ws)}
+                            className="h-7 w-7 p-0 cursor-pointer"
+                            title="Chỉnh sửa cài đặt workspace"
+                          >
+                            <LuPencil className="size-3 text-muted-foreground hover:text-foreground" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setMembersWs(ws)}
+                            className="h-7 w-7 p-0 cursor-pointer"
+                            title="Quản lý thành viên & phân quyền"
+                          >
+                            <LuUsers className="size-3 text-muted-foreground hover:text-foreground" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setInviteWs(ws)}
+                            className="h-7 w-7 p-0 cursor-pointer"
+                            title="Tạo mã mời thành viên"
+                          >
+                            <LuSend className="size-3 text-muted-foreground hover:text-foreground" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination Controls */}
+        <div className="flex items-center justify-between border-t border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+          <span>
+            Hiển thị {processedWorkspaces.length > 0 ? page * pageSize + 1 : 0}-
+            {Math.min((page + 1) * pageSize, processedWorkspaces.length)} trên{" "}
+            {processedWorkspaces.length} workspace
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page === 0}
+              onClick={() => setPage((p) => p - 1)}
+              className="h-7 px-2 text-xs gap-1 cursor-pointer"
+            >
+              <LuChevronLeft className="size-3.5" />
+              <span>Trước</span>
+            </Button>
+            <span className="font-mono text-xs px-1.5 font-medium text-foreground">
+              {page + 1} / {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages - 1}
+              onClick={() => setPage((p) => p + 1)}
+              className="h-7 px-2 text-xs gap-1 cursor-pointer"
+            >
+              <span>Sau</span>
+              <LuChevronRight className="size-3.5" />
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {renderActiveWorkspaceInfo()}
+    </div>
+  );
+
+  const renderSubModals = () => (
+    <>
+      {/* SUB-MODAL: Create Workspace */}
+      <Dialog open={createWsOpen} onOpenChange={setCreateWsOpen}>
+        <DialogContent className="max-w-md p-6">
+          <DialogHeader className="border-b border-border/50 pb-3">
+            <DialogTitle className="text-base font-semibold">
+              {t("workspaces.createModalTitle", {
+                defaultValue: "Khởi Tạo Không Gian Làm Việc Mới",
+              })}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground">
+              Tạo không gian cô lập an toàn để lưu trữ Profile và chia sẻ theo
+              nhóm
+            </DialogDescription>
+          </DialogHeader>
+
+          <form
+            onSubmit={(e) => void handleCreateWorkspace(e)}
+            className="space-y-4 py-2 text-xs"
+          >
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium">
+                Tên Không Gian Làm Việc (Workspace Name)
+              </Label>
+              <Input
+                placeholder="VD: Shopee Ads Global Q4"
+                value={wsName}
+                onChange={(e) => setWsName(e.target.value)}
+                required
+                className="h-9 text-xs"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium">Hạn mức Profiles</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={wsMaxProfiles}
+                  onChange={(e) => setWsMaxProfiles(Number(e.target.value))}
+                  className="h-9 text-xs"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium">
+                  Hạn mức Thành viên
+                </Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={wsMaxMembers}
+                  onChange={(e) => setWsMaxMembers(Number(e.target.value))}
+                  className="h-9 text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1 text-xs text-muted-foreground cursor-pointer select-none">
+              <Checkbox
+                aria-label="Cho phép mở Profile ngoại tuyến khi mất mạng"
+                checked={wsOffline}
+                onCheckedChange={(checked) => setWsOffline(checked === true)}
+              />
+              <span>
+                Cho phép mở Profile ngoại tuyến khi mất mạng (Offline Entitled)
+              </span>
+            </div>
+
+            <DialogFooter className="border-t border-border/50 pt-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setCreateWsOpen(false)}
+                className="h-8 text-xs cursor-pointer"
+              >
+                Hủy
+              </Button>
+              <LoadingButton
+                type="submit"
+                size="sm"
+                isLoading={isSubmittingWs}
+                disabled={!wsName.trim()}
+                className="h-8 text-xs font-medium cursor-pointer"
+              >
+                Khởi Tạo Workspace
+              </LoadingButton>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* SUB-MODAL: Create Organization */}
+      <Dialog open={createOrgOpen} onOpenChange={setCreateOrgOpen}>
+        <DialogContent className="max-w-md p-6">
+          <DialogHeader className="border-b border-border/50 pb-3">
+            <DialogTitle className="text-base font-semibold">
+              {t("workspaces.createOrgTitle", {
+                defaultValue: "Tạo Tổ Chức (Organization) Mới",
+              })}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground">
+              Tổ chức chứa nhiều không gian làm việc và quản lý gói tài nguyên
+              tổng thể
+            </DialogDescription>
+          </DialogHeader>
+
+          <form
+            onSubmit={(e) => void handleCreateOrg(e)}
+            className="space-y-4 py-2 text-xs"
+          >
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium">
+                Tên Tổ Chức (Organization Name)
+              </Label>
+              <Input
+                placeholder="VD: Alpha Media Agency"
+                value={orgName}
+                onChange={(e) => setOrgName(e.target.value)}
+                required
+                className="h-9 text-xs"
+              />
+            </div>
+
+            <DialogFooter className="border-t border-border/50 pt-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setCreateOrgOpen(false)}
+                className="h-8 text-xs cursor-pointer"
+              >
+                Hủy
+              </Button>
+              <LoadingButton
+                type="submit"
+                size="sm"
+                isLoading={isSubmittingOrg}
+                disabled={!orgName.trim()}
+                className="h-8 text-xs font-medium cursor-pointer"
+              >
+                Tạo Tổ Chức
+              </LoadingButton>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* SUB-MODAL: Edit Workspace (Section 14.2) */}
+      <Dialog
+        open={!!editingWs}
+        onOpenChange={(open) => !open && setEditingWs(null)}
+      >
+        <DialogContent className="max-w-md p-6">
+          <DialogHeader className="border-b border-border/50 pb-3">
+            <DialogTitle className="text-base font-semibold">
+              {t("workspaces.editTitle", {
+                defaultValue: "Cài đặt không gian làm việc",
+              })}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground">
+              {t("workspaces.editDesc", {
+                defaultValue:
+                  "Cập nhật tên, chính sách và hạn mức phân bổ cho không gian này",
+              })}
+            </DialogDescription>
+          </DialogHeader>
+
+          {editingWs && (
+            <form
+              onSubmit={(e) => void handleUpdateWorkspace(e)}
+              className="space-y-4 py-2 text-xs"
+            >
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium">Tên Workspace: *</Label>
+                <Input
+                  value={editWsName}
+                  onChange={(e) => setEditWsName(e.target.value)}
+                  required
+                  className="h-9 text-xs"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium">
+                  Thuộc Tổ Chức (Parent Organization):
+                </Label>
+                <Select value={editWsOrgId} onValueChange={setEditWsOrgId}>
+                  <SelectTrigger className="h-9 text-xs">
+                    <SelectValue placeholder="Chọn tổ chức..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {organizations.map((org) => (
+                      <SelectItem
+                        key={org.id}
+                        value={org.id}
+                        className="text-xs"
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <LuBuilding2 className="size-3.5 text-muted-foreground" />
+                          {org.name} ({org.id.slice(0, 12)}...)
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium">
+                    Hạn mức Profiles
+                  </Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10000}
+                    value={editWsMaxProfiles}
+                    onChange={(e) =>
+                      setEditWsMaxProfiles(Number(e.target.value))
+                    }
+                    className="h-9 text-xs"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium">
+                    Hạn mức Thành viên
+                  </Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={editWsMaxMembers}
+                    onChange={(e) =>
+                      setEditWsMaxMembers(Number(e.target.value))
+                    }
+                    className="h-9 text-xs"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 pt-1 text-xs text-muted-foreground cursor-pointer select-none">
+                <Checkbox
+                  aria-label="Cho phép mở Profile ngoại tuyến khi mất mạng"
+                  checked={editWsOffline}
+                  onCheckedChange={(checked) =>
+                    setEditWsOffline(checked === true)
+                  }
+                />
+                <span>
+                  Cho phép mở Profile ngoại tuyến khi mất mạng (Offline
+                  Entitled)
+                </span>
+              </div>
+
+              {/* Danger Zone */}
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 space-y-2">
+                <div className="font-semibold text-red-600 dark:text-red-400 text-xs flex items-center gap-1.5">
+                  <LuTriangleAlert className="size-3.5" />
+                  <span>KHU VỰC NGUY HIỂM (DANGER ZONE)</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Giải tán không gian làm việc này. Dữ liệu hồ sơ sẽ được chuyển
+                  vào lưu trữ an toàn.
+                </p>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => {
+                    setDeletingWs(editingWs);
+                    setDeleteConfirmName("");
+                  }}
+                  className="h-7 px-3 text-xs cursor-pointer"
+                >
+                  <LuTrash2 className="size-3 mr-1" />
+                  <span>Xóa / Giải Tán Workspace Này...</span>
+                </Button>
+              </div>
+
+              <DialogFooter className="border-t border-border/50 pt-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEditingWs(null)}
+                  className="h-8 text-xs cursor-pointer"
+                >
+                  Hủy Thay Đổi
+                </Button>
+                <LoadingButton
+                  type="submit"
+                  size="sm"
+                  isLoading={isUpdatingWs}
+                  disabled={!editWsName.trim()}
+                  className="h-8 text-xs font-medium cursor-pointer"
+                >
+                  Lưu Cập Nhật
+                </LoadingButton>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* SUB-MODAL: Delete Workspace (Section 14.3) */}
+      <Dialog
+        open={!!deletingWs}
+        onOpenChange={(open) => !open && setDeletingWs(null)}
+      >
+        <DialogContent className="max-w-md p-6">
+          <DialogHeader className="border-b border-border/50 pb-3">
+            <DialogTitle className="text-base font-semibold text-red-600 flex items-center gap-2">
+              <LuTriangleAlert className="size-4" />
+              <span>CẢNH BÁO: XÓA KHÔNG GIAN LÀM VIỆC</span>
+            </DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground">
+              Bạn đang chuẩn bị xóa vĩnh viễn Workspace:{" "}
+              <strong>"{deletingWs?.name}"</strong>
+            </DialogDescription>
+          </DialogHeader>
+
+          {deletingWs && (
+            <form
+              onSubmit={(e) => void handleDeleteWorkspace(e)}
+              className="space-y-4 py-2 text-xs"
+            >
+              <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 space-y-1.5 text-xs text-muted-foreground">
+                <div className="font-semibold text-foreground">
+                  Tài nguyên bị ảnh hưởng:
+                </div>
+                <div>
+                  • Toàn bộ Profile trình duyệt trong Workspace này sẽ được bảo
+                  vệ lưu trữ
+                </div>
+                <div>• Thành viên và Operator sẽ bị thu hồi quyền truy cập</div>
+                <div>• Proxy gán riêng sẽ được trả về kho tự do</div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground">
+                  Để xác nhận, vui lòng nhập chính xác tên Workspace bên dưới:
+                </Label>
+                <div className="font-mono text-xs text-primary font-semibold select-all bg-muted/40 p-1.5 rounded">
+                  {deletingWs.name}
+                </div>
+                <Input
+                  placeholder={`Nhập lại "${deletingWs.name}"`}
+                  value={deleteConfirmName}
+                  onChange={(e) => setDeleteConfirmName(e.target.value)}
+                  required
+                  className="h-9 text-xs"
+                />
+              </div>
+
+              <DialogFooter className="border-t border-border/50 pt-3 flex items-center justify-between sm:justify-between">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setDeletingWs(null)}
+                  className="h-8 text-xs cursor-pointer"
+                >
+                  Hủy Bỏ
+                </Button>
+                <LoadingButton
+                  type="submit"
+                  variant="destructive"
+                  size="sm"
+                  isLoading={isDeletingWs}
+                  disabled={deleteConfirmName !== deletingWs.name}
+                  className="h-8 text-xs font-semibold cursor-pointer"
+                >
+                  <LuTrash2 className="size-3 mr-1" />
+                  <span>Tôi hiểu rủi ro, Xóa Workspace</span>
+                </LoadingButton>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* SUB-MODAL: Create Invite Modal (Section 14.1) */}
+      {inviteWs && (
+        <CreateInviteModal
+          isOpen={!!inviteWs}
+          onClose={() => setInviteWs(null)}
+          workspaceId={inviteWs.id}
+          workspaceName={inviteWs.name}
+        />
+      )}
+
+      {/* SUB-MODAL: Member Management Dialog (Section 4.2) */}
+      {membersWs && (
+        <MemberManagementDialog
+          isOpen={!!membersWs}
+          onClose={() => setMembersWs(null)}
+          workspaceId={membersWs.id}
+          workspaceName={membersWs.name}
+        />
+      )}
+    </>
+  );
+
+  if (mode === "page") {
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden bg-background">
+        {/* Full-Page Header */}
+        <div className="flex items-center justify-between border-b border-border/60 px-6 py-3.5 bg-card/30">
+          <div className="flex items-center gap-3">
+            <div className="grid size-9 place-items-center rounded-lg bg-primary/10 text-primary shadow-xs">
+              <LuBuilding2 className="size-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base font-semibold text-foreground">
+                  {t("workspaces.managementTitle", {
+                    defaultValue:
+                      "Quản Lý Không Gian Làm Việc (Workspace Center)",
+                  })}
+                </h1>
+                <Badge
+                  variant="outline"
+                  className="text-[10px] font-mono border-primary/30 text-primary"
+                >
+                  {workspaces.length} Không gian
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {t("workspaces.managementSubtitle", {
+                  defaultValue:
+                    "Phân chia môi trường vận hành riêng biệt giữa các dự án, khách hàng và phòng ban",
+                })}
+              </p>
+            </div>
+          </div>
+          {onNavigateHome && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onNavigateHome}
+              className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+            >
+              <span>← Trở về Profiles</span>
+            </Button>
+          )}
+        </div>
+
+        {/* Scrollable Page Body */}
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          {renderTableContent(true)}
+        </div>
+
+        {renderSubModals()}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <Dialog open={isOpen} onOpenChange={onClose}>
+        <DialogContent className="max-w-3xl p-6">
+          <DialogHeader className="border-b border-border/50 pb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs">
+                  <LuBuilding2 className="size-5" />
+                </div>
+                <div>
+                  <DialogTitle className="text-base font-semibold">
+                    {t("workspaces.managementTitle", {
+                      defaultValue: "Quản Lý Tổ Chức & Không Gian Làm Việc",
+                    })}
+                  </DialogTitle>
+                  <DialogDescription className="text-xs text-muted-foreground mt-0.5">
+                    {t("workspaces.managementSubtitle", {
+                      defaultValue:
+                        "Phân chia môi trường vận hành riêng biệt giữa các dự án, khách hàng và phòng ban",
+                    })}
+                  </DialogDescription>
+                </div>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div className="space-y-3.5 py-1 text-xs">
+            {renderTableContent(false)}
+          </div>
+
+          <DialogFooter className="border-t border-border/50 pt-3 flex items-center justify-between sm:justify-between">
+            <span className="text-xs text-muted-foreground">
+              Tổng cộng:{" "}
+              <strong className="text-foreground">{workspaces.length}</strong>{" "}
+              Workspaces
+            </span>
+            <RippleButton
+              variant="outline"
+              size="sm"
+              onClick={onClose}
+              className="h-8 text-xs font-medium cursor-pointer"
+            >
+              {t("common.buttons.close", { defaultValue: "Đóng" })}
+            </RippleButton>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {renderSubModals()}
+    </>
+  );
+}

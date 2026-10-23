@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "apps/control",
+  "apps/desktop/src-tauri",
+  "crates/api",
+  "crates/browser",
+  "crates/control",
+  "crates/domain",
+  "crates/migration",
+  "crates/network",
+  "crates/storage",
+  "crates/sync",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.95"
+version = "3.0.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

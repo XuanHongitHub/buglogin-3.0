@@ -1,0 +1,17 @@
+{
+  "snapshotId": "sha256:cafd411fbf505c909b80a31d676eaff2efe333e0d088b4e96875fb3ae6fc10c9",
+  "sourceTreeSha256": "cafd411fbf505c909b80a31d676eaff2efe333e0d088b4e96875fb3ae6fc10c9",
+  "totalBytes": 181,
+  "files": [
+    {
+      "path": "profiles/broken/metadata.json",
+      "bytes": 51,
+      "sha256": "f6fd3327a188772dc452a16260e5aecf00378b7388dd5dc944e6b1a5c29283c0"
+    },
+    {
+      "path": "version.json",
+      "bytes": 130,
+      "sha256": "e1c9f5846fb9642c68dc7b051b7389383ddac964f913532de641a8abdc73c612"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "schema": "buglogin.inspect/1",
+  "source": {
+    "system": "buglogin-legacy",
+    "version": "1.1.84",
+    "instanceId": "sha256:fa29ddb4740702715a6e682be25219fe99085216f5c2a6bce03d904fea075933",
+    "os": "windows",
+    "architecture": "x86_64",
+    "root": "."
+  },
+  "entityCounts": {
+    "extensions": 1,
+    "groups": 1,
+    "profiles": 1,
+    "proxies": 1
+  },
+  "totalBytes": 773,
+  "runtimeFindings": [
+    {
+      "runtime": "wayfern",
+      "class": "direct",
+      "reasonCode": "runtime_supported",
+      "records": 1
+    }
+  ],
+  "secretScan": {
+    "filesWithSecretFields": 0,
+    "secretFieldsPresent": 0
+  },
+  "invalidRecords": [],
+  "danglingReferences": [],
+  "sourceTreeSha256": "4fdf03c3ba63f3acae7999e1aa20a5db530e6e236056542af7f92c1690ba5dd1",
+  "cutoverEligibility": "eligible"
+}

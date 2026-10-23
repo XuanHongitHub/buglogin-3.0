@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "buglogin://contracts/access-control/v1",
+  "title": "BugLogin Access Control Contract v1",
+  "type": "object",
+  "required": ["contractVersion", "entity", "data"],
+  "properties": {
+    "contractVersion": {"const": "1.0"},
+    "entity": {"enum": ["account", "organization", "workspace", "team", "member", "resource", "grant"]},
+    "data": {"type": "object", "additionalProperties": false}
+  },
+  "x-rules": [
+    "Every entity carries a canonical typed ID and tenant scope.",
+    "Workspace, team, member, resource, and grant records require server-side authorization.",
+    "HR fields remain out of this contract until legal and retention approval.",
+    "Unknown fields are rejected; no implicit additional entities."
+  ]
+}

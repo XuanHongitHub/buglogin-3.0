@@ -1,0 +1,1 @@
+{"id":"socks5-auth-ipv6","proxy_settings":{"proxy_type":"socks5","host":"2001:db8::50","port":"1081","username":"fixture-socks-user","password":"MIG-004-SOCKS-PASSWORD"},"bypass_rules":["::1"]}

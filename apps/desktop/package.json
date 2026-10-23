@@ -1,0 +1,28 @@
+{
+  "name": "@buglogin/desktop",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "build": "vite build",
+    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts && node --experimental-strip-types src/profile-workflow.self-test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "tauri:dev": "pnpm tauri:dev:local-api",
+    "tauri:dev:local-api": "node ../../scripts/tauri-dev-local-api.mjs",
+    "api:dev:local": "node ../../scripts/dev-local-api.mjs",
+    "tauri:build": "node ../../scripts/tauri-build.mjs",
+    "copy-migration-binary": "node copy-migration-binary.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "~2.12.4",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "~6.0.3",
+    "vite": "^7.0.0"
+  }
+}

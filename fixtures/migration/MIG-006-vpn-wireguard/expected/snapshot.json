@@ -1,0 +1,32 @@
+{
+  "snapshotId": "sha256:3460e1bd8ee20e0a9d6a76093e75b90be624b753eb275ee6311cad5dac1e1239",
+  "sourceTreeSha256": "3460e1bd8ee20e0a9d6a76093e75b90be624b753eb275ee6311cad5dac1e1239",
+  "totalBytes": 891,
+  "files": [
+    {
+      "path": "profiles/66666666-6666-4666-8666-666666666666/metadata.json",
+      "bytes": 145,
+      "sha256": "f37632ba030a55c6b9420aace46f9facb3a23a867d204d6c22230284e3c468c6"
+    },
+    {
+      "path": "profiles/66666666-6666-4666-8666-666666666666/profile/Preferences",
+      "bytes": 42,
+      "sha256": "54993a83efb14c2d8ae50b796337057305250e33730a2872ba3fde3bec4d0d61"
+    },
+    {
+      "path": "version.json",
+      "bytes": 124,
+      "sha256": "c3bae497572e3c7f5afb809ac638b775f884b868eb194cd001d5f45b8b8610d1"
+    },
+    {
+      "path": "vpn/.vpn_key",
+      "bytes": 32,
+      "sha256": "redacted"
+    },
+    {
+      "path": "vpn/vpn_configs.json",
+      "bytes": 548,
+      "sha256": "redacted"
+    }
+  ]
+}

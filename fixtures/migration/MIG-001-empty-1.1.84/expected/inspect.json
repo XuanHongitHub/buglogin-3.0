@@ -1,0 +1,22 @@
+{
+  "schema": "buglogin.inspect/1",
+  "source": {
+    "system": "buglogin-legacy",
+    "version": "1.1.84",
+    "instanceId": "sha256:7dc1023fad1dcd00608820d142a1b069e318803290be947db6a912eb4d139d98",
+    "os": "windows",
+    "architecture": "x86_64",
+    "root": "."
+  },
+  "entityCounts": {},
+  "totalBytes": 150,
+  "runtimeFindings": [],
+  "secretScan": {
+    "filesWithSecretFields": 0,
+    "secretFieldsPresent": 0
+  },
+  "invalidRecords": [],
+  "danglingReferences": [],
+  "sourceTreeSha256": "a0c0693b07dd091869f86ec10f200ebd60b39019e1cab0b36640b640b62271bd",
+  "cutoverEligibility": "eligible"
+}

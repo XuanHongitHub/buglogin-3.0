@@ -1,0 +1,494 @@
+version: 1.0.0
+title: BugLogin Hosted Desktop Launch Sync
+status: draft
+
+purpose: >-
+  Hosted control-plane contract for desktop-owned browser launch. The API owns
+  profile/resource binding, lease fencing, and profile payload manifests. The
+  desktop owns the browser process. No endpoint authorizes a process by UI state.
+
+security:
+  bearer: Rust desktop bearer only
+  correlation: required x-correlation-id
+  mutations: required Idempotency-Key
+  secrets: lease token never enters React, logs, MCP, or audit detail
+
+endpoints:
+  - id: runtime.dispatch.enqueue
+    method: POST
+    path: /v1/workspaces/{workspaceId}/profiles/{profileId}/runtime-dispatch
+    capability: profile.launch or profile.stop (selected by commandId)
+    idempotency: required
+    input: RuntimeDispatchInput
+    response: RuntimeDispatchJob (202)
+    invariants:
+      - authorize the current account token against the current workspace, profile resource, and requested lifecycle capability before enqueue
+      - targetDeviceId must be an active device session owned by the authenticated account; no active device returns retryable device_offline without changing profile runtime state
+      - commandId is exactly profile.launch or profile.stop; the desktop resolves executable and profile data root from its own verified runtime/profile authority
+      - input is command-specific and cannot contain executable paths, profile roots, arbitrary process arguments, bearer tokens, or lease tokens
+      - duplicate idempotency key with the same command, scope, profile, device, and input replays the original job; conflicting reuse fails
+      - job expires within five minutes and profile runtime projection changes only after a device receipt
+
+  - id: runtime.dispatch.inbox
+    method: GET
+    path: /v1/device/runtime-dispatch/inbox
+    capability: authenticated device session
+    response: RuntimeDispatchJob[]
+    invariants:
+      - device identity is derived from the device bearer, never from query or body input
+      - recheck current profile.launch/profile.stop access before returning each job
+      - include a running job only for recovery by the same authenticated device account
+
+  - id: runtime.dispatch.claim
+    method: POST
+    path: /v1/workspaces/{workspaceId}/runtime-dispatch/{jobId}/claim
+    capability: authenticated device session
+    response: RuntimeDispatchJob
+    invariants:
+      - authenticated device and account must match the enqueued target and workspace
+      - claim is idempotent for the same device/account; a different executor is rejected
+      - expired jobs cannot begin execution
+
+  - id: runtime.dispatch.complete
+    method: POST
+    path: /v1/workspaces/{workspaceId}/runtime-dispatch/{jobId}/complete
+    capability: authenticated device session
+    input: RuntimeDispatchReceipt
+    response: RuntimeDispatchJob
+    invariants:
+      - only the claimed device/account can acknowledge completion
+      - receipt binds the exact operation, command, profile, and resulting runtime state
+      - a receipt is persisted before reporting operation completion; secret process data is forbidden
+
+  - id: runtime.dispatch.fail
+    method: POST
+    path: /v1/workspaces/{workspaceId}/runtime-dispatch/{jobId}/fail
+    capability: authenticated device session
+    input: RuntimeDispatchFailure
+    response: RuntimeDispatchJob
+    invariants:
+      - only the claimed device/account can acknowledge failure
+      - failure is a stable error code; free-form process output and secrets are never persisted
+
+  - id: profile.binding.get
+    method: GET
+    path: /v1/profiles/{profileId}/binding
+    capability: profile.read
+    response: ProfileResourceBinding
+
+  - id: profile.binding.upsert
+    method: PUT
+    path: /v1/profiles/{profileId}/binding
+    capability: profile.update
+    idempotency: required
+    input: ProfileResourceBinding
+    response: ProfileResourceBinding
+    invariants:
+      - profileId path equals body profileId
+      - resource and workspace exist
+      - one active binding per profile
+      - archive is explicit and audited
+
+  - id: resource.lease.acquire
+    method: POST
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/lease
+    capability: profile.launch
+    idempotency: required
+    input: LeaseAcquireInput
+    response: LeaseGrant
+    invariants:
+      - replay while the grant is live returns the original grant; after expiry and only when no competing lease exists, the same fingerprint may acquire a fresh grant
+      - reusing a key with a different actor, resource, or TTL returns idempotency_conflict
+      - during key rotation, only a principal with profile.update may acquire a rekey write lease; the lease does not authorize browser launch
+      - an update-authorized launch attempt during key rotation returns profile_key_rotation_required before desktop payload hydration
+
+  - id: resource.lease.renew
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/lease
+    capability: profile.launch
+    idempotency: required
+    input: LeaseRenewInput
+    response: LeaseGrant
+    invariants:
+      - replaying the same idempotency key and input returns the original lease receipt without extending its expiry again
+      - reusing a key with a different actor, resource, owner token, or TTL returns idempotency_conflict
+      - renewal requires profile.launch/Execute normally and profile.update/Update while a resource key rotation is pending
+      - a logically expired lease whose coordination key remains is rejected with lease_expired (409); an absent lease returns lease_not_found (404)
+      - Redis key expiry is aligned to the stored logical expiresAt so a dead lease does not block a new fencing-token acquisition beyond its contract lifetime
+
+  - id: resource.lease.release
+    method: DELETE
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/lease
+    capability: profile.stop
+    idempotency: required
+    input: LeaseReleaseInput
+    response: LeaseReleaseReceipt
+    invariants:
+      - replaying the same key and actor/resource/owner token returns the released receipt, including when the lease was already absent
+      - reusing a key with a different actor, resource, or owner token returns idempotency_conflict
+
+  - id: profile.manifest.get
+    method: GET
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/manifest
+    capability: profile.read
+    required_header: x-buglogin-actor-id
+    response: SyncManifest
+    invariants:
+      - x-buglogin-actor-id must equal the account identity in the authenticated bearer principal
+      - normal reads verify current profile and proxy dependency revisions before returning a non-empty active manifest
+      - repairStaleProxy=true requires both profile.read and profile.update and may return the active manifest despite a stale proxy revision for client-side re-encryption only
+      - repair-mode reads never grant launch or commit authority; manifest commit still validates current profile and proxy revisions
+      - the empty generation-one bootstrap manifest is returned before profile data is first synced
+
+  - id: profile.proxy.assignment.get
+    method: GET
+    path: /v1/workspaces/{workspaceId}/profiles/{profileId}/proxy-assignment
+    capability: profile.read
+    response: ProfileProxyAssignment
+    invariants:
+      - returns only a staged assignment for this workspace and profile
+      - returns stale staged assignments so the owner can inspect and restage them against the current profile revision
+
+  - id: profile.proxy.assignment.set
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/profiles/{profileId}/proxy-assignment
+    capability: profile.update
+    idempotency: required
+    input: ProfileProxyAssignmentSetInput
+    response: ProfileProxyAssignment
+    invariants:
+      - proxyId must be explicit; null means remove the proxy
+      - profile must be stopped, active, writable, and at expectedProfileRevision
+      - selected proxy must be readable in the same workspace
+      - staging does not change active profile metadata or manifest
+      - proxy updates and deletion are rejected while any pending assignment references that proxy, until the matching manifest commit consumes the assignment
+
+  - id: profile.manifest.commit
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/manifest
+    capability: profile.update
+    idempotency: required
+    required_headers:
+      - x-buglogin-owner-id
+      - x-buglogin-owner-token
+      - x-buglogin-fencing-token
+    input: SyncManifest
+    response: SyncManifest
+    optional_headers:
+      - x-buglogin-profile-revision
+    invariants:
+      - verifies active write authority before reading referenced remote payloads, then revalidates the lease after those reads before entering the control mutation path
+      - rejects regenerable browser cache and crash-dump path segments in plain objects and chunked logical files, keeping the server contract aligned with desktop snapshot filtering
+      - rejects a successor when the current manifest generation is exhausted instead of overflowing generation arithmetic
+      - when a pending proxy assignment exists, this revision must match both the assignment and current profile
+      - manifest proxy dependency must exactly match the staged selection, including null for unassign
+      - profile proxy, profile revision, manifest, audit/idempotency receipt, and pending-assignment consumption commit atomically
+
+  - id: profile.blob.get
+    method: GET
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs?key={objectKey}[&repairStaleProxy=true]
+    capability: profile.read
+    repair_capabilities:
+      - profile.read
+      - profile.update
+    required_headers:
+      - x-buglogin-actor-id
+      - x-buglogin-generation
+      - x-content-sha256
+    response: immutable binary bytes
+    max_size_bytes: 67108864
+    capacity: shares the bounded large-transfer budget with blob writes; returns retryable 503 when saturated
+    invariants:
+      - x-buglogin-actor-id must equal the account identity in the authenticated bearer principal
+      - object must belong to the active manifest at the requested generation
+      - normal reads reject a stale proxy dependency; repairStaleProxy=true permits only that stale revision while still checking current proxy selection and access
+
+  - id: profile.blob.check
+    method: GET
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs/check?key={objectKey}&generation={generation}&checksum={checksum}
+    capability: profile.update
+    audit: metadata-only
+    required_headers:
+      - x-buglogin-owner-id
+      - x-buglogin-owner-token
+      - x-buglogin-fencing-token
+    response: BlobPresence
+    invariants:
+      - validates the active profile-resource ACL and exact live write lease/fencing token
+      - checks only the server-derived storage key for this workspace resource, generation, object key, and checksum
+      - returns presence only; it never returns bytes or caller-controlled storage keys
+
+  - id: migration.sync.import
+    method: POST
+    path: /v1/migrations/sync/import
+    capability: migration.write
+    idempotency: required
+    status: implementation-staging-not-release-ready
+    input: SyncImportInput
+    response: SyncImportReceipt
+    invariants:
+      - refreshes the PostgreSQL-backed authorization snapshot and reauthenticates before preflight
+      - acquires destination lease, then rechecks actor, migration ACL, active binding, and proxy dependencies before object writes
+      - plans against the PostgreSQL-backed current manifest after acquiring the destination lease
+      - remaps source fencing token to destination fencing authority
+      - holds the journal-scoped PostgreSQL advisory lock from before idempotency claim through finalization/release; stale recovery acquires the same lock, reloads the durable journal, and reapplies the stale cutoff before fencing
+      - never calls Redis manifest commit
+      - PostgreSQL aggregate journal audit and receipt finalize in one transaction
+      - ambiguous commit probes durable receipt and never deletes blobs
+
+  - id: profile.blob.put
+    method: PUT
+    path: /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs?key={objectKey}
+    capability: profile.update
+    idempotency: required
+    required_headers:
+      - x-buglogin-owner-id
+      - x-buglogin-owner-token
+      - x-buglogin-fencing-token
+      - x-buglogin-generation
+      - x-content-sha256
+    input: immutable binary bytes
+    max_size_bytes: 67108864
+    response: BlobReceipt
+    invariants:
+      - lease and fencing token validated before storage write
+      - checksum verified before acknowledgement
+      - request and manifest object limits use the same 64 MiB maximum
+      - physical object key derived by Rust API
+      - no blob delete endpoint in v1
+
+schemas:
+  RuntimeDispatchInput:
+    required: [commandId, targetDeviceId]
+    properties:
+      commandId: [profile.launch, profile.stop]
+      targetDeviceId: registered active device ID belonging to the authenticated account
+      input: command-specific allowlisted object (optional)
+
+  RuntimeDispatchJob:
+    required: [jobId, operationId, commandId, workspaceId, deviceId, profileId, state, expiresAt]
+    properties:
+      state: [accepted, dispatched, running, completed, failed, cancelled, expired]
+      input: command-specific launch preferences only; cleared after terminal state
+      result: redacted RuntimeDispatchReceipt (optional)
+
+  RuntimeDispatchReceipt:
+    required: [operationId, jobId, deviceId, profileId, commandId, state]
+    properties:
+      state: [ready, running, stopped]
+
+  RuntimeDispatchFailure:
+    required: [failureCode]
+    properties:
+      failureCode: bounded stable snake_case code; no free-form message
+
+  ProfileResourceBinding:
+    required: [profileId, resourceId, workspaceId, archiveState]
+    properties:
+      profileId: string
+      resourceId: string
+      workspaceId: string
+      archiveState: [active, archived]
+
+  LeaseAcquireInput:
+    required: [ownerId, ttlSeconds]
+    properties:
+      ownerId: string
+      ttlSeconds: integer
+
+  LeaseRenewInput:
+    required: [ownerId, ownerToken, ttlSeconds]
+    properties:
+      ownerId: string
+      ownerToken: string
+      ttlSeconds: integer
+
+  LeaseReleaseInput:
+    required: [ownerId, ownerToken]
+    properties:
+      ownerId: string
+      ownerToken: string
+
+  LeaseGrant:
+    required: [fencingToken, resourceId, workspaceId, ownerId, ownerToken, issuedAtMs, expiresAtMs]
+    redacted_fields: [ownerToken]
+
+  LeaseReleaseReceipt:
+    required: [resourceId, released]
+
+  BlobReceipt:
+    required: [resourceId, key, generation, checksum, size]
+    properties:
+      resourceId: string
+      key: string
+      generation: integer
+      checksum: string
+      size: integer
+
+  SyncImportInput:
+    required: [export]
+    properties:
+      export: SyncExport
+      dryRun: boolean
+
+  SyncImportReceipt:
+    required: [operationId, exportId, workspaceId, resourceId, generation, manifestSha256, replayed, dryRun, createdBlobs, resumedBlobs, state]
+    properties:
+      state: [planned, active]
+
+  SyncManifest:
+    required: [schemaVersion, resourceId, workspaceId, fencingToken, generation, rootChecksum, objects, tombstones]
+    properties:
+      schemaVersion: [2, 3]
+      resourceId: string
+      workspaceId: string
+      fencingToken: integer
+      generation: integer
+      parentGeneration: [integer, null]
+      rootChecksum: string
+      objects: [ManifestObject]
+      tombstones: array
+      payloadEncryption: [ManifestPayloadEncryption, null]
+      dependencies:
+        type: array
+        description: Draft additive dependency list; profile-plus-proxy activation is not enabled until the versioned contract is verified in staging.
+        items: ManifestDependency
+      fileChunks:
+        type: array
+        description: Schema v3 sorted logical file mappings to ordered encrypted chunks; every referenced immutable chunk object must be listed exactly once.
+        items: ManifestFileChunks
+  ManifestTombstone:
+    required: [key, deletedGeneration, deletedAtUnixMs, retentionDeadlineUnixMs]
+    properties:
+      key: string
+      deletedGeneration: positive integer
+      deletedAtUnixMs: positive integer
+      retentionDeadlineUnixMs: positive integer
+      objectRetired: boolean (optional; defaults false; marks an immutable object retirement distinct from logical file deletion)
+
+  ManifestFileChunks:
+    required: [path, plaintextSize, plaintextChecksum, chunks]
+    properties:
+      path: confined relative profile path
+      plaintextSize: integer
+      plaintextChecksum: sha256
+      chunks: [ManifestFileChunk]
+
+  ManifestFileChunk:
+    required: [index, plaintextSize, plaintextChecksum, object]
+    properties:
+      index: contiguous zero-based integer
+      plaintextSize: integer (1..4194304)
+      plaintextChecksum: sha256
+      object: ManifestObjectReference
+    constraints:
+      - all chunks except final are exactly 4 MiB plaintext
+      - each logical file is at most 1 GiB and has at most 256 chunks
+      - referenced object key begins .buglogin/file-chunks/
+      - referenced object is present in manifest objects with exact key, size, checksum
+      - each chunk object is referenced once and no file-chunk object is orphaned
+
+  ManifestObject:
+    required: [key, size, checksum]
+    properties:
+      key: string (1-1024 UTF-8 bytes; slash-separated relative path, no empty/dot/dot-dot segments, backslashes, colons, or control characters)
+      size: integer
+      checksum: sha256
+      sourceGeneration: integer (optional; v2 reuse from immediately previous manifest only)
+
+  ManifestDependency:
+    required: [kind, proxyId, revision, credentialEnvelopeObject]
+    properties:
+      kind: [proxy]
+      proxyId: string
+      revision: integer
+      credentialVersion: string (optional opaque identifier; must match current proxy record when present, required for new commits when the proxy has credentials)
+      metadataObject: [ManifestObjectReference, null]
+      credentialEnvelopeObject: [ManifestObjectReference, null]
+    metadataObjectCompatibility: legacy references remain readable and verifiable; new manifests omit the field and use the canonical workspace proxy record.
+
+  ManifestPayloadEncryption:
+    required: [schemaVersion, algorithm, resourceKeyEnvelope]
+    properties:
+      schemaVersion: { const: 1 }
+      algorithm: [aes-256-gcm-chunk-v1, aes-256-gcm-chunk-v2]
+      keyVersion:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
+        required_when: algorithm=aes-256-gcm-chunk-v2
+      resourceKeyEnvelope: ManifestObjectReference
+    canonicalEnvelopeKey: .buglogin/resource-key-envelope.json
+    keyScope: workspaceId+resourceId
+
+  ManifestObjectReference:
+    required: [key, size, checksum]
+    properties:
+      key: string
+      size: integer
+      checksum: string
+
+migrationEnvelope:
+  schema: buglogin.sync-export/1
+  implemented:
+    - canonical manifest SHA-256
+    - deterministic complete blob-set SHA-256
+    - ordered generation chain
+    - retained tombstones
+    - exact blob coverage and checksum verification
+    - source fencing token replaced by destination authority
+    - signed migration package preservation as sync/export.json
+    - startup recovery and a 60-second retry worker for stale finalizing and cleanup-pending journals
+    - per-object staging intent checkpoints before immutable blob writes; retries resume checksum-verified objects while preserving import ownership
+  pendingReleaseBlockers:
+    - live PostgreSQL proof that journal-scoped recovery locking defers active writers and safely resumes stale staging cleanup
+    - idempotent end-to-end process-loss rehearsal for retried signed exports
+    - PostgreSQL integration proof that manifest, import journal, audit, and idempotency receipt promotion commit atomically after every blob verifies
+    - ambiguous-commit reconciliation and orphan-blob retention/GC proof
+  invariants:
+    - generation is the canonical sync revision
+    - same-generation import replay requires identical manifest schema, scope, generation chain, root/object/tombstone state, dependencies, encryption metadata, and chunk mappings; destination fencing token is reissued by the destination authority
+    - manifestSha256 canonicalizes scope, generation, objects, and tombstones with fencingToken set to zero
+    - source fencing tokens never authorize destination writes
+    - migration exports contain every manifest object's verified bytes; imports stage each object at the destination manifest generation and clear sourceGeneration
+    - same-state migration replay ignores sourceGeneration because it identifies source-store placement, not object content or logical manifest state
+    - missing extra duplicate or tampered blobs block import
+    - failed import cannot replace the current destination manifest
+    - PostgreSQL is the only hosted manifest visibility authority
+    - Redis is lease/fencing/event infrastructure only and never migration manifest authority
+    - object-store blobs are immutable and invisible until PostgreSQL activation
+    - successful migration activation promotes its object reservations to committed manifest bytes atomically; promoted reservation rows are removed in the same PostgreSQL transaction
+    - retrying a pending import uses a fresh resource-lease attempt key so an expired Redis grant cannot be replayed as current authority
+    - ambiguous staging or finalizing journal acknowledgements preserve immutable blobs until durable journal and receipt state is reconciled
+    - lease and import-plan failures after journal creation persist retryable or cleanup-pending state instead of leaving an unclassified staging journal
+    - destination write authority is renewed after blob staging and validated immediately before manifest activation
+    - long-running object staging renews the destination lease independently of blocking storage I/O; lease loss prevents manifest activation
+    - profile manifests with a selected proxy include exactly one matching proxy dependency
+    - sourceGeneration reuses only an exact object in the immediately previous active manifest under the same resource key version
+    - proxy dependency revision and metadata object must match same-workspace Rust API authority
+    - normal manifest reads reject a proxy dependency whose revision is no longer current
+    - repairStaleProxy reads with profile.read and profile.update may expose that active manifest only to re-encrypt against current proxy state; commits and launches still require current dependency revisions
+    - proxy credential state requires a separate opaque encrypted envelope object; new commits also bind its opaque credentialVersion to the canonical proxy record
+
+errors:
+  - binding_not_found
+  - resource_lease_held
+  - lease_expired
+  - lease_not_owner
+  - fencing_token_stale
+  - sync_manifest_conflict
+  - manifest_object_too_large
+  - manifest_dependency_mismatch
+  - manifest_dependency_stale
+  - manifest_dependency_object_missing
+  - proxy_metadata_object_mismatch
+  - proxy_credential_envelope_required
+  - proxy_credential_version_required
+  - proxy_credential_version_stale
+  - payload_encryption_required
+  - unsupported_payload_encryption_schema
+  - invalid_resource_key_envelope_key
+  - resource_key_envelope_invalid
+  - resource_key_envelope_scope_mismatch
+  - encrypted_payload_object_invalid
+  - production_api_unavailable
+  - migration_sync_commit_outcome_unknown

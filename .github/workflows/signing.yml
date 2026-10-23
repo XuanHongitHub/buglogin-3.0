@@ -1,0 +1,277 @@
+name: BugLogin Signing Verification
+
+on:
+  workflow_call:
+    inputs:
+      source-ref:
+        required: true
+        type: string
+      source-sha:
+        required: true
+        type: string
+    secrets:
+      APPLE_CERTIFICATE_P12_BASE64:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_PASSWORD:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      RUST_TOOLCHAIN: 1.95.0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+      - name: Create signed updater configuration
+        shell: bash
+        env:
+          BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: ${{ vars.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: node scripts/release/create-tauri-updater-config.mjs "$RUNNER_TEMP/tauri-updater.json"
+      - name: Validate embedded runtime trust keys
+        shell: bash
+        run: node scripts/release/verify-runtime-trust-keys.mjs
+      - name: Assert immutable source and Rust pin
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.source-sha }}"
+          rustc --version | grep -q '^rustc 1\.95\.0 '
+          rustup target add "$TARGET" --toolchain "$RUST_TOOLCHAIN"
+      - name: Create Windows updater build configuration
+        shell: pwsh
+        env:
+          UPDATER_CONFIG_PATH: ${{ runner.temp }}/tauri-updater.json
+        run: |
+          $updater = Get-Content -Raw $env:UPDATER_CONFIG_PATH | ConvertFrom-Json
+          $config = @{ build = @{ beforeBuildCommand = '' }; bundle = @{ createUpdaterArtifacts = $true }; plugins = @{ updater = $updater.plugins.updater } } | ConvertTo-Json -Depth 8
+          $config | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'windows-release.json')
+      - name: Build Windows installer and signed updater artifact
+        shell: pwsh
+        env:
+          PROFILE: release
+          BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: ${{ vars.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY }}
+          BUGLOGIN_TAURI_UPDATER_ENDPOINT: https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          pnpm tauri build --target $env:TARGET --bundles nsis --config "$env:RUNNER_TEMP\windows-release.json"
+      - name: Verify Windows installer and updater signature
+        shell: pwsh
+        run: |
+          $app = "target/$env:TARGET/release/buglogin-desktop-app.exe"
+          $installers = @(Get-ChildItem "target/$env:TARGET/release/bundle/nsis" -Filter *-setup.exe -File)
+          if (-not (Test-Path -LiteralPath $app) -or $installers.Count -ne 1) { throw 'Expected Windows app executable and one NSIS installer' }
+          New-Item -ItemType Directory -Force dist-release | Out-Null
+          Copy-Item $installers.FullName dist-release
+          $updaterSignatures = @(Get-ChildItem "target/$env:TARGET/release/bundle/nsis" -Filter *.exe.sig -File)
+          if ($updaterSignatures.Count -ne 1 -or $updaterSignatures[0].BaseName -ne $installers[0].Name) { throw 'Expected the Tauri updater signature for the NSIS installer' }
+          Copy-Item $updaterSignatures.FullName dist-release
+      - name: Generate SBOM, hashes, provenance
+        shell: bash
+        run: |
+          node scripts/release/generate-spdx.mjs dist-release/dist.spdx.json
+          node scripts/release/generate-evidence.mjs dist-release windows-x64 "${{ inputs.source-ref }}" "${{ inputs.source-sha }}" "$TARGET"
+      - name: Verify signed release evidence and optional updater metadata
+        shell: bash
+        env:
+          BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64: ${{ vars.BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64 }}
+        run: node scripts/release/verify-bundle.mjs dist-release
+      - name: Attest signed Windows evidence
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
+        with:
+          subject-path: dist-release/*
+      - name: Verify Windows provenance attestations
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: for artifact in dist-release/*; do gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"; done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buglogin-${{ inputs.source-ref }}-windows-x64-signed
+          path: dist-release
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary Windows release configuration
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath "$env:RUNNER_TEMP\windows-release.json" -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath "$env:RUNNER_TEMP\tauri-updater.json" -Force -ErrorAction SilentlyContinue
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TARGET: ${{ matrix.target }}
+      RUST_TOOLCHAIN: 1.95.0
+    steps:
+      - name: Require Apple signing and notarization credentials
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 || secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD || secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_PASSWORD APPLE_TEAM_ID; do
+            [[ -n "${!name:-}" ]] || { echo "Missing required Apple credential: $name"; exit 1; }
+          done
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+      - name: Validate embedded runtime trust keys
+        shell: bash
+        run: node scripts/release/verify-runtime-trust-keys.mjs
+      - name: Create signed updater configuration
+        shell: bash
+        env:
+          BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: ${{ vars.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: node scripts/release/create-tauri-updater-config.mjs "$RUNNER_TEMP/tauri-updater.json"
+      - name: Assert immutable source and Rust pin
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.source-sha }}"
+          rustc --version | grep -q '^rustc 1\.95\.0 '
+          rustup target add "$TARGET" --toolchain "$RUST_TOOLCHAIN"
+      - name: Import Apple signing certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 || secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/buglogin-signing.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/buglogin-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          if [[ -n "$APPLE_SIGNING_IDENTITY" ]]; then
+            SELECTED_IDENTITY="$APPLE_SIGNING_IDENTITY"
+            grep -Fq "$SELECTED_IDENTITY" <<< "$IDENTITIES"
+          else
+            SELECTED_IDENTITY="$(sed -nE 's/^[[:space:]]*[0-9]+\) [A-Fa-f0-9]+ "([^"]+)".*/\1/p' <<< "$IDENTITIES" | grep -F 'Developer ID Application:' | grep -F "($APPLE_TEAM_ID)" | head -n 1 || true)"
+          fi
+          if [[ "$SELECTED_IDENTITY" != "Developer ID Application:"* || "$SELECTED_IDENTITY" != *"($APPLE_TEAM_ID)" ]]; then
+            echo 'No valid Developer ID Application identity matches the configured Apple Team ID'
+            exit 1
+          fi
+          printf 'APPLE_SIGNING_IDENTITY=%s\n' "$SELECTED_IDENTITY" >> "$GITHUB_ENV"
+          rm -f "$CERTIFICATE_PATH"
+      - name: Build signed macOS application and DMG
+        shell: bash
+        env:
+          PROFILE: release
+          BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: ${{ vars.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY }}
+          BUGLOGIN_TAURI_UPDATER_ENDPOINT: https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --target "$TARGET" --bundles app,dmg --config "$RUNNER_TEMP/tauri-updater.json"
+      - name: Notarize, staple, and verify macOS artifacts
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD || secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find "target/$TARGET/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          DMG_PATH="$(find "target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+          [[ -n "$APP_PATH" && -n "$DMG_PATH" ]] || { echo "Expected app and DMG artifacts"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+          xcrun notarytool submit "$DMG_PATH" --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait --timeout 30m
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
+          mkdir -p dist-release
+          cp "$DMG_PATH" dist-release/
+          mapfile -t updater_files < <(find "target/$TARGET/release/bundle" -type f \( -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) -print)
+          [[ "${#updater_files[@]}" -eq 2 ]] || { echo 'Expected one signed app updater archive and its .sig file'; exit 1; }
+          cp "${updater_files[@]}" dist-release/
+      - name: Generate SBOM, hashes, provenance
+        shell: bash
+        run: |
+          node scripts/release/generate-spdx.mjs dist-release/dist.spdx.json
+          node scripts/release/generate-evidence.mjs dist-release "${{ matrix.platform }}" "${{ inputs.source-ref }}" "${{ inputs.source-sha }}" "$TARGET"
+      - name: Verify signed release evidence and optional updater metadata
+        shell: bash
+        env:
+          BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64: ${{ vars.BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64 }}
+        run: node scripts/release/verify-bundle.mjs dist-release
+      - name: Attest signed macOS evidence
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
+        with:
+          subject-path: dist-release/*
+      - name: Verify macOS provenance attestations
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: for artifact in dist-release/*; do gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"; done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buglogin-${{ inputs.source-ref }}-${{ matrix.platform }}-signed
+          path: dist-release
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove Apple signing material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/buglogin-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/buglogin-signing.p12"

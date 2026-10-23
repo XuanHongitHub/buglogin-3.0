@@ -1,0 +1,20 @@
+{
+  "name": "@buglogin/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate:api": "pnpm --dir .. generate:api",
+    "check:api": "pnpm --dir .. check:api",
+    "test": "node --experimental-strip-types src/apps/web/http-client.self-test.ts && node --experimental-strip-types src/apps/web/router.self-test.ts && tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "~6.0.3"
+  }
+}

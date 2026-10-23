@@ -1,0 +1,1 @@
+{"id":"http-auth","proxy_settings":{"proxy_type":"http","host":"proxy-http.example.test","port":8080,"username":"fixture-http-user","password":"MIG-004-HTTP-PASSWORD"},"bypass_rules":["localhost","127.0.0.1"]}

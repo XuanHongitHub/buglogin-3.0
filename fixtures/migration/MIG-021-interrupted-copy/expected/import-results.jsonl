@@ -1,0 +1,5 @@
+{"status":"resumed","missingBefore":true,"restored":true,"sourceUnchanged":true}
+{"status":"blocked","case":"partial_file","code":"migration_staging_file_mismatch","stagingRetained":true}
+{"status":"discarded","case":"partial_file","stagingExists":false,"sourceUnchanged":true}
+{"status":"blocked","case":"foreign_file","code":"migration_staging_replay_mismatch","stagingRetained":true}
+{"status":"discarded","case":"owned_only","stagingExists":false,"sourceUnchanged":true}

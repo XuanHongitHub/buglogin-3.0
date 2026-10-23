@@ -1,0 +1,1736 @@
+openapi: 3.1.0
+info:
+  title: BugLogin REST API
+  version: 1.0.0
+  description: Versioned Rust control, authentication, and sync API.
+servers:
+  - url: https://api3.buglogin.com
+security:
+  - bearerAuth: []
+tags:
+  - name: system
+  - name: profiles
+  - name: migration
+  - name: runtime
+paths:
+  /v1/health:
+    get:
+      operationId: system.health.get
+      security: []
+      responses:
+        "200": { description: Healthy, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+  /v1/openapi.yaml:
+    get:
+      security: []
+      responses:
+        "200": { description: Canonical BugLogin v1 OpenAPI document, content: { application/yaml: { schema: { type: string } } } }
+  /v1/readyz:
+    get:
+      security: []
+      responses:
+        "200": { description: Required service dependencies are ready; runtime catalog status is reported separately, headers: { X-BugLogin-Runtime-Catalog: { schema: { type: string, enum: [available, unavailable] } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Readiness' } } } }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/runtime/catalog:
+    get:
+      operationId: runtime.catalog.get
+      tags: [runtime]
+      security: []
+      parameters:
+        - { name: If-None-Match, in: header, schema: { type: string, maxLength: 256 } }
+      responses:
+        "200": { description: Validated signed runtime catalog, headers: { ETag: { schema: { type: string } }, Cache-Control: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeCatalog' } } } }
+        "304": { description: Runtime catalog is unchanged, headers: { ETag: { schema: { type: string } }, Cache-Control: { schema: { type: string } } } }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/device/start:
+    post:
+      operationId: auth.device.start
+      description: JSON request body is limited to 8 KiB at the Rust HTTP boundary.
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthorizationStartInput' } } } }
+      responses:
+        "200": { description: Device authorization started, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthorizationStartResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/login:
+    post:
+      operationId: auth.login
+      description: JSON request body is limited to 8 KiB at the Rust HTTP boundary.
+      security: []
+      parameters: [{ $ref: '#/components/parameters/WebOriginRequired' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WebLoginInput' } } } }
+      responses:
+        "200": { description: Browser session established; session is returned only as Secure HttpOnly cookie, content: { application/json: { schema: { $ref: '#/components/schemas/WebSessionResponse' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/desktop/login:
+    post:
+      operationId: auth.desktop.login
+      description: Authenticates a native desktop account and issues device-bound access and refresh credentials. The refresh credential must be stored only in the operating-system credential vault. JSON request body is limited to 8 KiB at the Rust HTTP boundary.
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DesktopLoginInput' } } } }
+      responses:
+        "200": { description: Device-bound session established, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthTokenResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "500": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/api-tokens:
+    get:
+      operationId: auth.api.tokens.list
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200": { description: Safe API token inventory, content: { application/json: { schema: { $ref: '#/components/schemas/ApiTokenPage' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: auth.api.token.create
+      description: JSON request body is limited to 8 KiB at the Rust HTTP boundary. Cookie-authenticated requests require the web origin and CSRF headers; bearer-authenticated desktop requests do not.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ApiTokenCreateInput' } } } }
+      responses:
+        "201": { description: Raw token returned once, content: { application/json: { schema: { $ref: '#/components/schemas/ApiTokenCreated' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/api-tokens/{tokenId}:
+    delete:
+      operationId: auth.api.token.revoke
+      description: Cookie-authenticated requests require the web origin and CSRF headers; bearer-authenticated desktop requests do not.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ApiTokenId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        "204": { description: API token revoked }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/recovery/request:
+    post:
+      operationId: auth.recovery.request
+      description: JSON request body is limited to 8 KiB. Returns 503 until recovery delivery is configured; no recovery token is issued while delivery is unavailable.
+      security: []
+      parameters: [{ $ref: '#/components/parameters/WebOriginRequired' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RecoveryRequestInput' } } } }
+      responses:
+        "202": { description: Recovery request accepted with enumeration-safe response }
+        "400": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/recovery/complete:
+    post:
+      operationId: auth.recovery.complete
+      description: JSON request body is limited to 8 KiB. Returns 503 until recovery delivery is configured.
+      security: []
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RecoveryCompleteInput' } } } }
+      responses:
+        "204": { description: Password reset; recovery token consumed; existing sessions revoked }
+        "400": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/session:
+    get:
+      operationId: auth.session
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200": { description: Current browser session, content: { application/json: { schema: { $ref: '#/components/schemas/WebSessionResponse' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/sessions:
+    get:
+      operationId: auth.sessions.list
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200": { description: Current account sessions, content: { application/json: { schema: { $ref: '#/components/schemas/WebSessionPage' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/sessions/{sessionId}:
+    delete:
+      operationId: auth.sessions.revoke
+      description: Revokes an account-owned session. For device-bound sessions with a current encrypted-profile key envelope, BugLogin persists rotation-pending fences before revoking the session; if fencing fails, the session remains active.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/SessionId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/WebOriginConditional' }
+        - { name: X-CSRF-Token, in: header, required: false, description: Required when authenticating with the browser session cookie., schema: { type: string, minLength: 1 } }
+      responses:
+        "204": { description: Session revoked }
+        "409": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/device/approve:
+    post:
+      operationId: auth.device.approve
+      description: Repeating approval is safe only for the same authenticated account and credential version. A different account receives a conflict. JSON request body is limited to 8 KiB at the Rust HTTP boundary.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/WebOriginConditional' }
+        - { name: X-CSRF-Token, in: header, required: false, description: Required when authenticating with the browser session cookie., schema: { type: string, minLength: 1 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthorizationApproveInput' } } } }
+      responses:
+        "200": { description: Device authorization approved, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthorizationApproveResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/device/token:
+    post:
+      operationId: auth.device.token
+      description: The approved device code is consumed only after the access and refresh session is durably issued. If the exchange response is lost, restart device authorization; the code is single-use and this operation is not replayable. A slow_down Problem includes fields.retryAfterSeconds, which clients must use for the next poll. JSON request body is limited to 8 KiB at the Rust HTTP boundary.
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthorizationTokenInput' } } } }
+      responses:
+        "200": { description: Device-bound access and refresh credentials, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthTokenResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+  /v1/auth/device/refresh:
+    post:
+      operationId: auth.device.refresh
+      description: "Rotates a device-bound bearer/refresh pair; the replacement refresh token keeps the original absolute expiry. An optional Idempotency-Key (16-128 ASCII characters) lets a retry with the same key replay the exact response for 5 minutes after rotation. Reuse with a different key, or without a key, revokes the device session family. JSON request body is limited to 8 KiB at the Rust HTTP boundary."
+      parameters:
+        - { name: Idempotency-Key, in: header, required: false, schema: { type: string, minLength: 16, maxLength: 128 } }
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceRefreshInput' } } } }
+      responses:
+        "200": { description: Rotated device access and refresh credentials, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceAuthTokenResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+  /v1/auth/device/encryption-key:
+    put:
+      operationId: auth.device.encryptionkey.register
+      description: Registers the current authenticated device's HPKE public key. The private key must remain in that device's OS vault. JSON request body is limited to 8 KiB at the Rust HTTP boundary.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceEncryptionKeyRegistrationInput' } } } }
+      responses:
+        "200": { description: Registered device key, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceEncryptionKey' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/refresh:
+    post:
+      operationId: auth.refresh
+      description: "Rotates a bearer token. An optional Idempotency-Key (16-128 ASCII characters) lets a retry with the same key replay the exact response for 5 minutes after rotation. Reuse with a different key, or without a key, revokes the token family."
+      parameters:
+        - { name: Idempotency-Key, in: header, required: false, schema: { type: string, minLength: 16, maxLength: 128 } }
+      responses:
+        "200": { description: Rotated bearer session, content: { application/json: { schema: { $ref: '#/components/schemas/AuthTokenResponse' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/auth/logout:
+    post:
+      operationId: auth.logout
+      description: Revokes the current bearer or browser session. Browser-cookie requests must include an allowlisted Origin and the CSRF header.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/WebOriginConditional' }
+        - { name: X-CSRF-Token, in: header, required: false, schema: { type: string, minLength: 1 } }
+      responses:
+        "204": { description: Bearer session revoked }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/proxies/parse:
+    post:
+      operationId: proxy.parse
+      requestBody: { required: true, content: { text/plain: { schema: { $ref: '#/components/schemas/ProxyParseInput' } } } }
+      responses:
+        "200": { description: Parsed proxy report, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyParseReport' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/proxies:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: proxy.list
+      responses: { "200": { description: Workspace proxy inventory, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyPage' } } } } }
+    post:
+      operationId: proxy.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyCreateInput' } } } }
+      responses: { "200": { description: Created or deduplicated proxy, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyCreateResult' } } } } }
+  /v1/workspaces/{workspaceId}/proxies/{proxyId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/ProxyId' }
+    get:
+      operationId: proxy.get
+      responses: { "200": { description: Proxy metadata, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyRecord' } } } } }
+    patch:
+      operationId: proxy.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyUpdateInput' } } } }
+      responses:
+        "200": { description: Updated proxy metadata; update is rejected while a profile is running on or has a pending assignment for this proxy, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyRecord' } } } }
+        "409": { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: proxy.delete
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyDeleteInput' } } } }
+      responses: { "200": { description: Deleted proxy metadata, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyRecord' } } } } }
+  /v1/profiles:
+    get:
+      operationId: profile.list
+      description: Rejects repeated or unsupported query parameters and returns canonical Problem responses for malformed values.
+      parameters:
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+        - { $ref: '#/components/parameters/WorkspaceIdFilter' }
+        - { name: includeArchived, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200": { description: Versioned profile page, content: { application/json: { schema: { $ref: '#/components/schemas/VersionedProfilePage' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: profile.create
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCreateInput' } } } }
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "201": { description: Profile created, content: { application/json: { schema: { $ref: '#/components/schemas/VersionedProfile' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/profiles/{profileId}:
+    get:
+      operationId: profile.get
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      responses: { "200": { description: Versioned profile, content: { application/json: { schema: { $ref: '#/components/schemas/VersionedProfile' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+    delete:
+      operationId: profile.delete
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileDeleteBody' } } } }
+      responses: { "200": { description: Deleted, content: { application/json: { schema: { $ref: '#/components/schemas/DeleteReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/binding:
+    get:
+      operationId: profile.binding.get
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      responses: { "200": { description: Profile resource binding, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileResource' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/archive:
+    put:
+      operationId: profile.archive
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileRevisionBody' } } } }
+      responses: { "200": { description: Versioned archived profile, content: { application/json: { schema: { $ref: '#/components/schemas/VersionedProfile' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/restore:
+    put:
+      operationId: profile.restore
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileRevisionBody' } } } }
+      responses: { "200": { description: Versioned restored profile, content: { application/json: { schema: { $ref: '#/components/schemas/VersionedProfile' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/launch:
+    post:
+      operationId: profile.launch
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileLaunchInput' } } } }
+      responses: { "202": { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/OperationAccepted' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/clone:
+    post:
+      operationId: profile.clone
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCloneInput' } } } }
+      responses: { "200": { description: Metadata-only clone, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCloneReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/shares:
+    post:
+      operationId: profile.share
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileShareInput' } } } }
+      responses: { "200": { description: Profile share, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileShareReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' }, "503": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/shares/{memberId}:
+    delete:
+      operationId: profile.share.revoke
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/MemberId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileShareRevokeInput' } } } }
+      responses: { "200": { description: Profile share revocation, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileShareRevocationReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/shares/{memberId}/device-keys:
+    get:
+      operationId: profile.share.recipientdevicekeys.list
+      description: Lists registered device public keys for an active workspace member, after profile-share authorization. Expired or revoked device sessions are excluded.
+      parameters:
+        - { $ref: '#/components/parameters/ProfileId' }
+        - { $ref: '#/components/parameters/MemberId' }
+      responses:
+        "200": { description: Active recipient device public keys, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceEncryptionKeyList' } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+  /v1/profiles/{profileId}/key-envelope:
+    get:
+      operationId: profile.share.keyenvelope.get
+      description: Returns only the authenticated device's envelope while a current direct profile read share is active.
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      responses:
+        "200": { description: Device-bound encrypted resource key envelope, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileKeyShareEnvelope' } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/profiles/{profileId}/stop:
+    post:
+      operationId: profile.stop
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      responses: { "202": { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/OperationAccepted' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/cookies:
+    get:
+      operationId: cookie.list
+      parameters:
+        - { $ref: '#/components/parameters/ProfileId' }
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+      responses: { "200": { description: Cookie metadata only, content: { application/json: { schema: { $ref: '#/components/schemas/CookieListResult' } } } }, "403": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/runtime:
+    get:
+      operationId: profile.runtime.get
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      responses: { "200": { description: Runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } } }
+  /v1/profiles/{profileId}/runtime/started:
+    put:
+      operationId: profile.runtime.started
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjectionInput' } } } }
+      responses: { "200": { description: Started runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/runtime/stopped:
+    put:
+      operationId: profile.runtime.stopped
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjectionInput' } } } }
+      responses: { "200": { description: Stopped runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/groups:
+    put:
+      operationId: profile.groups.replace
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileGroupsReplaceInput' } } } }
+      responses: { "200": { description: Updated profile group membership, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/extension-group:
+    put:
+      operationId: profile.extension.group.set
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileExtensionGroupSetInput' } } } }
+      responses: { "200": { description: Updated profile extension group, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/profiles/{profileId}/proxy-assignment:
+    get:
+      operationId: profile.proxy.assignment.get
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ProfileId' }]
+      responses: { "200": { description: Pending proxy assignment, including stale choices for owner recovery, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileProxyAssignment' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+    put:
+      operationId: profile.proxy.assignment.set
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileProxyAssignmentSetInput' } } } }
+      responses: { "200": { description: Pending proxy assignment, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileProxyAssignment' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/profiles/{profileId}:
+    put:
+      operationId: profile.update
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileUpdateInput' } } } }
+      responses: { "200": { description: Updated profile metadata, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/profiles/{profileId}/runtime-dispatch:
+    post:
+      operationId: runtime.dispatch.enqueue
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchInput' } } } }
+      responses:
+        "202": { description: Runtime command accepted for the selected active desktop device, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchJobEnvelope' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/device/runtime-dispatch/inbox:
+    get:
+      operationId: runtime.dispatch.inbox
+      description: Requires a device bearer. Returns bounded, unexpired commands targeted to that device and rechecks current workspace/profile permissions.
+      responses:
+        "200": { description: Runtime commands for the authenticated device, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchInbox' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/runtime-dispatch/{jobId}/claim:
+    post:
+      operationId: runtime.dispatch.claim
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/JobId' }]
+      responses:
+        "200": { description: Device-bound runtime command claim, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchJobEnvelope' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/runtime-dispatch/{jobId}/complete:
+    post:
+      operationId: runtime.dispatch.complete
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/JobId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchReceipt' } } } }
+      responses:
+        "200": { description: Terminal runtime receipt, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchJobEnvelope' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/runtime-dispatch/{jobId}/fail:
+    post:
+      operationId: runtime.dispatch.fail
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/JobId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchFailure' } } } }
+      responses:
+        "200": { description: Terminal runtime failure, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDispatchJobEnvelope' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/cookie-jobs:
+    post:
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EnqueueCookieJobInput' } } } }
+      responses:
+        "202":
+          description: Cookie job durably accepted; device execution is not implied.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJob' } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "422": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/cookie-jobs/inbox:
+    get:
+      operationId: cookie.jobs.inbox
+      description: Requires a device bearer. Returns only active jobs targeted to that authenticated device within the requested workspace and authorized by the device account's current profile permissions. Claim checks those permissions again before changing state.
+      parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+      responses:
+        "200": { description: "Queued or running jobs for the authenticated device; running jobs remain available for reconciliation after the claim deadline", content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJobInbox' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/device/cookie-jobs/inbox:
+    get:
+      description: Requires a device bearer. Returns at most 4096 active jobs for that device across workspaces currently visible to the authenticated account, rechecking destination and source profile permissions. The route returns 503 when organization, workspace, or inbox bounds are exceeded. Claim rechecks permissions again before execution.
+      responses:
+        "200": { description: Bounded device inbox across authorized workspaces, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJobInbox' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/cookie-jobs/{jobId}:
+    get:
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+      responses:
+        "200": { description: Cookie job state, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJob' } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+  /v1/cookie-jobs/{jobId}/claim:
+    post:
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+      responses:
+        "200": { description: Device-bound job claim, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJob' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/cookie-jobs/{jobId}/ack:
+    post:
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+        - { name: x-buglogin-owner-id, in: header, required: true, schema: { type: string, minLength: 1 } }
+        - { name: x-buglogin-owner-token, in: header, required: true, schema: { type: string, minLength: 1 } }
+        - { name: x-buglogin-fencing-token, in: header, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200": { description: Device-bound job acknowledgement, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJob' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/cookie-jobs/{jobId}/complete:
+    post:
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieReceipt' } } } }
+      responses:
+        "200": { description: Persisted device receipt and terminal job state, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJob' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/cookie-jobs/{jobId}/fail:
+    post:
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FailCookieJobInput' } } } }
+      responses:
+        "200": { description: Persisted redacted device failure and terminal job state, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJob' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/cookie-jobs/{jobId}/cancel:
+    post:
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+      responses:
+        "200": { description: Requester-cancelled job before execution starts, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectedCookieJob' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/operations/{operationId}:
+    get:
+      operationId: operation.get
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      responses: { "200": { description: Operation state, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } } }
+  /v1/events:
+    get:
+      operationId: events.stream
+      description: Server-sent events scoped to a workspace; reconnect with Last-Event-ID. Events are at-least-once.
+      parameters:
+        - { $ref: '#/components/parameters/WorkspaceIdQuery' }
+        - { name: after, in: query, required: false, schema: { type: string, minLength: 1 } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+        - { name: Last-Event-ID, in: header, required: false, schema: { type: string, minLength: 1 } }
+      responses: { "200": { description: Event stream, content: { text/event-stream: { schema: { type: string } } } }, "409": { $ref: '#/components/responses/Problem' }, "503": { $ref: '#/components/responses/Problem' } }
+  /v1/migrations/inspect:
+    post:
+      operationId: migration.inspect
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationInspectInput' } } } }
+      responses: { "202": { description: Migration inspection operation, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } } }
+  /v1/migrations/import:
+    post:
+      operationId: migration.import
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationImportInput' } } } }
+      responses: { "202": { description: Migration import operation, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } } }
+  /v1/migrations/control/import:
+    post:
+      operationId: migration.control.import
+      description: Requires the migration.write execute capability. dryRun returns a non-mutating plan; otherwise the import activates the validated control graph. Idempotent retries replay the existing package receipt.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ControlImportInput' } } } }
+      responses:
+        "200": { description: Dry-run plan or activated/replayed import receipt, content: { application/json: { schema: { $ref: '#/components/schemas/ControlImportResult' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "422": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/migrations/control/rollback:
+    post:
+      operationId: migration.control.rollback
+      description: Requires the migration.write execute capability and exact confirmation ROLLBACK_CONTROL_MIGRATION. Rollback is compare-and-swap guarded and replays an already completed rollback.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ControlRollbackInput' } } } }
+      responses:
+        "200": { description: Rollback receipt, content: { application/json: { schema: { $ref: '#/components/schemas/ControlImportReceipt' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "422": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/migrations/sync/import:
+    post:
+      operationId: migration.sync.import
+      description: Refreshes authorization before preflight and again after acquiring the destination lease. The API rechecks the actor, migration ACL, active profile-resource binding, and proxy dependencies before writing blobs; import planning uses the PostgreSQL-backed current manifest.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        description: Direct JSON imports are limited to 320 MiB, with one import admitted per API process and a shared two-slot body-transfer budget across sync imports, profile blobs, and migration package files. Saturation returns a retryable 503; use staged migration-package upload for larger exports.
+        content: { application/json: { schema: { $ref: '#/components/schemas/SyncImportInput' } } }
+      responses:
+        "200": { description: Hosted sync import receipt, content: { application/json: { schema: { $ref: '#/components/schemas/SyncImportReceipt' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "415": { $ref: '#/components/responses/Problem' }
+        "422": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/migrations/packages/{packageId}/files:
+    put:
+      operationId: migration.package.file.put
+      parameters:
+        - { $ref: '#/components/parameters/MigrationPackageId' }
+        - { name: path, in: query, required: true, schema: { type: string, minLength: 1 } }
+        - { name: x-content-sha256, in: header, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody: { required: true, description: "Each staged file is limited to 67108864 bytes; each package is limited to 67108864 bytes total and 10000 files, enforced before staging each new file. Browser payloads use encrypted profile sync, not migration packages.", content: { application/octet-stream: { schema: { type: string, format: binary, maxLength: 67108864 } } } }
+      responses: { "200": { description: Staged migration package file, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationPackageFileReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' }, "413": { $ref: '#/components/responses/Problem' }, "415": { $ref: '#/components/responses/Problem' }, "503": { $ref: '#/components/responses/Problem', description: The shared two-slot large-transfer budget is full; retry the request } }
+  /v1/migrations/packages/{packageId}/verify:
+    post:
+      operationId: migration.package.verify
+      parameters:
+        - { $ref: '#/components/parameters/MigrationPackageId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses: { "200": { description: Verified staged migration package, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationPackageVerifyReceipt' } } } }, "401": { $ref: '#/components/responses/Problem' }, "403": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' }, "413": { $ref: '#/components/responses/Problem', description: Package exceeds the 64 MiB or 10,000-file limit }, "503": { $ref: '#/components/responses/Problem' } }
+  /v1/migrations/packages/{packageId}/activate:
+    post:
+      operationId: migration.package.activate
+      parameters:
+        - { $ref: '#/components/parameters/MigrationPackageId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses: { "200": { description: Activated migration package, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationPackageActivationReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+
+  /v1/account:
+    get:
+      operationId: account.get
+      responses:
+        "200":
+          description: Authenticated account identity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountView' }
+  /v1/accounts:
+    get:
+      operationId: account.list
+      responses:
+        "200":
+          description: Account list
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Account' } }
+  /v1/accounts/{accountId}/status:
+    put:
+      operationId: account.status.update
+      parameters:
+        - { $ref: '#/components/parameters/AccountId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AccountStatusUpdateInput' } } } }
+      responses: { "200": { description: Updated account, content: { application/json: { schema: { $ref: '#/components/schemas/Account' } } } }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations:
+    get:
+      operationId: organization.list
+      responses:
+        "200":
+          description: Organizations
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Organization' } }
+    post:
+      operationId: organization.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationCreateInput' } } } }
+      responses: { "200": { description: Created organization record, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationRecord' } } } }, "400": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: organization.get
+      responses: { "200": { description: Organization, content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+    patch:
+      operationId: organization.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationUpdate' } } } }
+      responses: { "200": { description: Updated organization, content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } } }, "400": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/record:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: organization.record.get
+      responses: { "200": { description: Revision-aware organization record, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/workspaces:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: workspace.list
+      responses:
+        "200":
+          description: Workspaces
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Workspace' } }
+    post:
+      operationId: workspace.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+      responses: { "200": { description: Created workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }, "400": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/workspaces/{workspaceId}:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/WorkspaceId' }
+    get:
+      operationId: workspace.get
+      responses: { "200": { description: Workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+    patch:
+      operationId: workspace.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceUpdate' } } } }
+      responses: { "200": { description: Updated workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }, "400": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/workspaces/{workspaceId}/record:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/WorkspaceId' }
+    get:
+      operationId: workspace.record.get
+      responses: { "200": { description: Revision-aware workspace record, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/workspaces/{workspaceId}/snapshot:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/WorkspaceId' }
+    get:
+      responses:
+        "200":
+          description: Organization snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrganizationSnapshot' }
+  /v1/organizations/{organizationId}/workspaces/{workspaceId}/usage/check:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/WorkspaceId' }
+    post:
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceUsage' } } } }
+      responses: { "200": { description: Usage accepted, content: { application/json: { schema: { $ref: '#/components/schemas/UsageCheckResult' } } } }, "400": { $ref: '#/components/responses/Problem' }, "403": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/workspaces/{workspaceId}/offline-entitlement:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/WorkspaceId' }
+    get:
+      responses:
+        "200":
+          description: Offline entitlement
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OfflineEntitlement' }
+  /v1/workspaces/{workspaceId}/teams:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: team.list
+      responses: { "200": { description: Workspace teams with current revisions, content: { application/json: { schema: { $ref: '#/components/schemas/TeamRecordList' } } } } }
+    post:
+      operationId: team.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } } }
+      responses: { "200": { description: Created team record, content: { application/json: { schema: { $ref: '#/components/schemas/TeamRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/teams/{teamId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/TeamId' }
+    get:
+      operationId: team.get
+      responses: { "200": { description: Team record, content: { application/json: { schema: { $ref: '#/components/schemas/TeamRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+    put:
+      operationId: team.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TeamUpdateBody' } } } }
+      responses: { "200": { description: Updated team record, content: { application/json: { schema: { $ref: '#/components/schemas/TeamRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+    delete:
+      operationId: team.delete
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TeamDeleteBody' } } } }
+      responses: { "200": { description: Deleted team record, content: { application/json: { schema: { $ref: '#/components/schemas/TeamRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/groups:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: group.list
+      responses: { "200": { description: Workspace groups with revisions, content: { application/json: { schema: { $ref: '#/components/schemas/GroupRecordList' } } } } }
+    post:
+      operationId: group.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GroupCreateInput' } } } }
+      responses: { "200": { description: Created group, content: { application/json: { schema: { $ref: '#/components/schemas/GroupRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/groups/{groupId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/GroupId' }
+    get:
+      operationId: group.get
+      responses: { "200": { description: Workspace group, content: { application/json: { schema: { $ref: '#/components/schemas/GroupRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+    put:
+      operationId: group.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GroupUpdateInput' } } } }
+      responses: { "200": { description: Updated group, content: { application/json: { schema: { $ref: '#/components/schemas/GroupRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+    delete:
+      operationId: group.delete
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GroupDeleteInput' } } } }
+      responses: { "200": { description: Deleted group, content: { application/json: { schema: { $ref: '#/components/schemas/GroupRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/extension-groups:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: extension.group.list
+      responses: { "200": { description: Workspace extension groups, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupRecordList' } } } } }
+    post:
+      operationId: extension.group.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupCreateInput' } } } }
+      responses: { "200": { description: Created extension group, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/extension-groups/{extensionGroupId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/ExtensionGroupId' }
+    get:
+      operationId: extension.group.get
+      responses: { "200": { description: Workspace extension group, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+    put:
+      operationId: extension.group.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupUpdateInput' } } } }
+      responses: { "200": { description: Updated extension group, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+    delete:
+      operationId: extension.group.delete
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupDeleteInput' } } } }
+      responses: { "200": { description: Deleted extension group, content: { application/json: { schema: { $ref: '#/components/schemas/ExtensionGroupRecord' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/groups/{groupId}/shares:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/GroupId' }
+    get:
+      operationId: group.share.list
+      responses:
+        "200":
+          description: Group share grants
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/GroupShareGrant' } }
+    post:
+      operationId: group.share.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GroupShareCreateInput' } } } }
+      responses: { "200": { description: Created group share grant, content: { application/json: { schema: { $ref: '#/components/schemas/GroupShareGrant' } } } }, "422": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/groups/{groupId}/shares/{grantId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/GroupId' }
+      - { $ref: '#/components/parameters/GrantId' }
+    delete:
+      operationId: group.share.revoke
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GroupShareRevokeInput' } } } }
+      responses: { "200": { description: Revoked grant retained for audit, content: { application/json: { schema: { $ref: '#/components/schemas/GroupShareGrant' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/members:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      deprecated: true
+      responses: { "200": { description: Legacy member array response, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Member' } } } } } }
+    post:
+      operationId: member.invite
+      responses: { "202": { description: Member invitation } }
+  /v1/workspaces/{workspaceId}/members/page:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: member.list
+      parameters:
+        - { name: cursor, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200": { description: Member page, content: { application/json: { schema: { $ref: '#/components/schemas/MemberPage' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/invitations:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    post:
+      operationId: member.invitation.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberInvitationCreateBody' }
+      responses:
+        "201":
+          description: Invitation created. The code is returned only in this response; an idempotent replay returns code null.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberInvitationCreateReceipt' }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/invitations/{invitationId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/MemberInvitationId' }
+    delete:
+      operationId: member.invitation.revoke
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "200":
+          description: Invitation revoked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberInvitationRevocationReceipt' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/workspace-invitations/{invitationId}/redeem:
+    parameters: [{ $ref: '#/components/parameters/MemberInvitationId' }]
+    post:
+      operationId: member.invitation.redeem
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberInvitationRedeemBody' }
+      responses:
+        "200":
+          description: Pending membership created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "410": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/members/{memberId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/MemberId' }
+    get:
+      operationId: member.get
+      responses: { "200": { description: Member } }
+  /v1/workspaces/{workspaceId}/members/{memberId}/activate:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/MemberId' }
+    put:
+      operationId: member.activate
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "200":
+          description: Activated member
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+  /v1/workspaces/{workspaceId}/members/{memberId}/suspend:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/MemberId' }
+    put:
+      operationId: member.suspend
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "200":
+          description: Suspended member
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+  /v1/workspaces/{workspaceId}/members/{memberId}/role:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/MemberId' }
+    put:
+      operationId: member.role.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberRoleUpdateBody' }
+      responses:
+        "200":
+          description: Updated member role
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+  /v1/workspaces/{workspaceId}/resources:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      deprecated: true
+      responses:
+        "200":
+          description: Legacy resource array response
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Resource' } }
+    post:
+      operationId: resource.register
+      responses: { "201": { description: Resource } }
+  /v1/workspaces/{workspaceId}/resources/page:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: resource.list
+      parameters:
+        - { name: cursor, in: query, required: false, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Resource page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourcePage' }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/resources/{resourceId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/ResourceId' }
+    get:
+      operationId: resource.get
+      responses: { "200": { description: Resource } }
+  /v1/workspaces/{workspaceId}/resources/{resourceId}/lease:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/ResourceId' }
+    get:
+      operationId: resource.lease.get
+      description: Returns the active resource lease without its secret owner token, or null when no live lease exists.
+      parameters: [{ $ref: '#/components/parameters/ActorIdHeader' }]
+      responses:
+        "200": { description: Lease status or null, content: { application/json: { schema: { $ref: '#/components/schemas/OptionalLeaseStatus' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: resource.lease.acquire
+      description: Replaying while the grant is live returns the original lease grant. Once it expires and no competing lease exists, the same fingerprint may acquire a fresh grant. Reusing the key with different input returns idempotency_conflict.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "200": { description: Lease grant }
+        "409": { $ref: '#/components/responses/Problem' }
+    put:
+      operationId: resource.lease.renew
+      description: Replaying the same idempotency key and input returns the original lease receipt without extending expiry again. Reusing a key with a different actor, resource, owner token, or TTL returns idempotency_conflict.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "200": { description: Renewed lease }
+        "409": { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: resource.lease.release
+      description: Replaying the same idempotency key and actor/resource/owner token returns the released receipt, including when the lease is already absent. Reusing a key with different input returns idempotency_conflict.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "200": { description: Released lease }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/resources/{resourceId}/manifest:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/ResourceId' }
+    get:
+      operationId: profile.manifest.get
+      parameters:
+        - { $ref: '#/components/parameters/ActorIdHeader' }
+        - name: repairStaleProxy
+          in: query
+          required: false
+          description: Read the active manifest while refreshing a stale proxy revision. Requires profile.read and profile.update; does not authorize launch or commit.
+          schema: { type: boolean, default: false }
+      responses:
+        "200": { description: Current durable sync manifest, content: { application/json: { schema: { $ref: '#/components/schemas/OptionalSyncManifest' } } } }
+        "403": { $ref: '#/components/responses/Problem', description: Actor header does not match the authenticated account }
+    put:
+      operationId: profile.manifest.commit
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - name: x-buglogin-profile-revision
+          in: header
+          required: false
+          description: Required when committing a pending profile proxy assignment; must match the profile revision used to stage it.
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - { $ref: '#/components/schemas/SyncManifest' }
+                - { $ref: '#/components/schemas/ResourceManifestKeyRotationInput' }
+      responses:
+        "200": { description: Committed durable sync manifest, content: { application/json: { schema: { $ref: '#/components/schemas/SyncManifest' } } } }
+        "413": { $ref: '#/components/responses/Problem' }
+  /v1/profiles/{profileId}/key-rotation-recipients:
+    get:
+      operationId: profile.keyrotation.recipients.list
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      responses:
+        "200": { description: Active direct and group-share recipient device keys for a pending owner key rotation, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileKeyRotationRecipientDevicesList' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/ResourceId' }
+    get:
+      operationId: profile.blob.get
+      parameters:
+        - { $ref: '#/components/parameters/ActorIdHeader' }
+        - { name: key, in: query, required: true, schema: { type: string } }
+        - name: repairStaleProxy
+          in: query
+          required: false
+          description: Read an object from the active manifest while refreshing only a stale proxy revision. Requires profile.read and profile.update; current proxy access is still checked.
+          schema: { type: boolean, default: false }
+      responses:
+        "200": { description: Verified immutable profile blob }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "404": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "502": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem', description: Storage is temporarily unavailable, or the shared large-transfer budget is full; retry the request }
+    put:
+      operationId: profile.blob.put
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: key, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary, maxLength: 67108864 }
+      responses:
+        "200": { description: Verified immutable blob receipt }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem', description: Storage or coordination is temporarily unavailable, or the shared large-transfer budget is full; retry the request }
+  /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs/check:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/ResourceId' }
+    get:
+      operationId: profile.blob.check
+      parameters:
+        - { name: key, in: query, required: true, schema: { type: string } }
+        - { name: generation, in: query, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: checksum, in: query, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+        - { name: x-buglogin-owner-id, in: header, required: true, schema: { type: string } }
+        - { name: x-buglogin-owner-token, in: header, required: true, schema: { type: string } }
+        - { name: x-buglogin-fencing-token, in: header, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200": { description: Whether the encrypted blob is already staged, content: { application/json: { schema: { $ref: '#/components/schemas/BlobPresence' } } } }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/grants:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: grant.list.legacy
+      parameters:
+        - { $ref: '#/components/parameters/ResourceIdQuery' }
+        - { $ref: '#/components/parameters/MemberIdQuery' }
+      responses:
+        "200":
+          description: Workspace grants
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Grant' } }
+    post:
+      operationId: grant.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Grant' } } } }
+      responses: { "200": { description: Created grant, content: { application/json: { schema: { $ref: '#/components/schemas/Grant' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/grants/page:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: grant.list.page
+      parameters:
+        - { $ref: '#/components/parameters/ResourceIdQuery' }
+        - { $ref: '#/components/parameters/MemberIdQuery' }
+        - { name: cursor, in: query, required: false, schema: { $ref: '#/components/schemas/CanonicalId' } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200": { description: Bounded workspace grant page, content: { application/json: { schema: { $ref: '#/components/schemas/GrantPage' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/grants/{grantId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkspaceId' }
+      - { $ref: '#/components/parameters/GrantId' }
+    delete:
+      operationId: grant.revoke
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses: { "200": { description: Revoked grant, content: { application/json: { schema: { $ref: '#/components/schemas/GrantRevocationReceipt' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/resources/{resourceId}/grants:
+    post:
+      parameters:
+        - { $ref: '#/components/parameters/WorkspaceId' }
+        - { $ref: '#/components/parameters/ResourceId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Grant' } } } }
+      responses: { "200": { description: Created grant, content: { application/json: { schema: { $ref: '#/components/schemas/Grant' } } } }, "403": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/resource-grants/{grantId}:
+    delete:
+      parameters:
+        - { $ref: '#/components/parameters/GrantId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses: { "200": { description: Revoked grant, content: { application/json: { schema: { $ref: '#/components/schemas/GrantRevocationReceipt' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/workspaces/{workspaceId}/audit-events:
+    get:
+      operationId: audit.events.list
+      parameters:
+        - { $ref: '#/components/parameters/WorkspaceId' }
+        - { name: cursor, in: query, required: false, schema: { type: string, maxLength: 280 } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        "200": { description: Bounded, newest-first audit event page, content: { application/json: { schema: { $ref: '#/components/schemas/AuditEventPage' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: opaque-local-token }
+    cookieAuth: { type: apiKey, in: cookie, name: __Host-buglogin_session }
+  parameters:
+    WorkspaceIdQuery: { name: workspaceId, in: query, required: true, schema: { $ref: '#/components/schemas/CanonicalId' } }
+    WorkspaceIdFilter: { name: workspaceId, in: query, required: false, schema: { $ref: '#/components/schemas/CanonicalId' } }
+    ResourceIdQuery: { name: resourceId, in: query, required: false, schema: { $ref: '#/components/schemas/CanonicalId' } }
+    MemberIdQuery: { name: memberId, in: query, required: false, schema: { $ref: '#/components/schemas/CanonicalId' } }
+    AccountId: { name: accountId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    OrganizationId: { name: organizationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    TeamId: { name: teamId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    GroupId: { name: groupId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    WorkspaceId: { name: workspaceId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    ExtensionGroupId: { name: extensionGroupId, in: path, required: true, schema: { $ref: '#/components/schemas/CanonicalId' } }
+    ProfileId: { name: profileId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    MemberId: { name: memberId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    MemberInvitationId: { name: invitationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    ResourceId: { name: resourceId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    GrantId: { name: grantId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    ProxyId: { name: proxyId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    JobId: { name: jobId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    OperationId: { name: operationId, in: path, required: true, schema: { $ref: '#/components/schemas/OperationIdentifier' } }
+    MigrationPackageId: { name: packageId, in: path, required: true, schema: { $ref: '#/components/schemas/MigrationPackageId' } }
+    ApiTokenId: { name: tokenId, in: path, required: true, schema: { $ref: '#/components/schemas/ApiTokenIdentifier' } }
+    SessionId: { name: sessionId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+    ActorIdHeader: { name: x-buglogin-actor-id, in: header, required: true, description: Must exactly match the account ID authenticated by the bearer token., schema: { $ref: '#/components/schemas/CanonicalId' } }
+    WebOriginRequired: { name: Origin, in: header, required: true, description: Must exactly match a configured BugLogin web origin., schema: { type: string, minLength: 1 } }
+    WebOriginConditional: { name: Origin, in: header, required: false, description: Required when authenticating with the browser session cookie; must exactly match a configured BugLogin web origin., schema: { type: string, minLength: 1 } }
+  responses:
+    Problem: { description: Canonical error, content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+  schemas:
+    Empty: { type: object, properties: {}, additionalProperties: false }
+    CanonicalId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }
+    OperationIdentifier: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    MigrationPackageId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    NonBlankText: { type: string, minLength: 1, pattern: '^[\s\S]*\S[\s\S]*$' }
+    SyncObjectKey: { type: string, minLength: 1, maxLength: 1024, pattern: '^(?!/)(?!.*\\)(?!.*:)(?!.*[\x00-\x1F\x7F])(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$)).{1,1024}$', description: 'Confined slash-separated relative storage key; server enforces a 1024-byte UTF-8 limit.' }
+    ProfileFilePath: { type: string, minLength: 1, maxLength: 512, description: 'The API additionally enforces a maximum UTF-8 encoded size of 512 bytes; OpenAPI maxLength counts Unicode characters.', pattern: '^(?!/)(?!\.buglogin/)(?![\s\S]*(?:^|/)\.{1,2}(?:/|$))(?![\s\S]*[\\:])[^/]+(?:/[^/]+)*$' }
+    DeviceIdentifier: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$' }
+    EncryptionDeviceIdentifier: { $ref: '#/components/schemas/DeviceIdentifier' }
+    CorrelationIdentifier: { type: string, minLength: 1, maxLength: 128, description: 'The API enforces a maximum UTF-8 encoded size of 128 bytes.', pattern: '^[\s\S]*\S[\s\S]*$' }
+    RuntimeDeviceIdentifier: { type: string, minLength: 1, maxLength: 128, description: 'The API enforces a maximum UTF-8 encoded size of 128 bytes and rejects whitespace-only values.', pattern: '^[\s\S]*\S[\s\S]*$' }
+    CoordinationOwnerIdentifier: { type: string, minLength: 1, maxLength: 128, description: 'The API rejects whitespace and enforces a maximum UTF-8 encoded size of 128 bytes.', pattern: '^\S+$' }
+    ApiTokenScope: { type: string, maxLength: 136, pattern: '^[A-Za-z0-9._:-]+:(read|create|update|delete|execute|share|manage|\*)$' }
+    ApiTokenIdentifier: { type: string, pattern: '^[0-9a-f]{64}$' }
+    DeviceCode: { type: string, pattern: '^[0-9a-f]{64}$' }
+    DeviceUserCode: { type: string, pattern: '^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$' }
+    OpaqueHexToken64: { type: string, pattern: '^[0-9a-f]{64}$', description: 'Opaque case-sensitive token in the exact lowercase hexadecimal form issued by BugLogin; 32 random bytes encoded as 64 characters.', writeOnly: true }
+    AccountStatus: { type: string, enum: [active, suspended, disabled] }
+    Account: { type: object, required: [id, status, revision, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/AccountStatus' }, revision: { type: integer, minimum: 1, description: Monotonic concurrency revision. Advances on lifecycle transitions and credential issuance or refresh; clients must use the latest returned revision for status updates. }, createdAt: { type: string }, updatedAt: { type: string } }, additionalProperties: false }
+    AccountList: { type: array, items: { $ref: '#/components/schemas/Account' } }
+    AccountPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Account' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
+    AccountView: { type: object, required: [accountId], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    AccountStatusUpdateInput: { type: object, required: [status, expectedRevision], properties: { status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    AccountStatusUpdateCommandInput: { type: object, required: [accountId, status, expectedRevision], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    AccountCreatePendingInput: { type: object, required: [accountId, username, email], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 } }, additionalProperties: false, description: Creates only an account with pending identity verification. Passwords and credentials are not accepted; login remains disabled until a separate verification and credential flow completes. }
+    AccountIdentityVerification: { type: string, enum: [pending, verified] }
+    AccountIdentity: { type: object, required: [accountId, username, canonicalUsername, email, canonicalEmail, verification, revision, createdAt, updatedAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, canonicalUsername: { type: string }, email: { type: string, format: email }, canonicalEmail: { type: string, format: email }, verification: { $ref: '#/components/schemas/AccountIdentityVerification' }, revision: { type: integer, minimum: 1 }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
+    PendingAccountProvisioningReceipt: { type: object, required: [account, identity, replayed, onboardingStatus, loginEnabled], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { $ref: '#/components/schemas/AccountIdentity' }, replayed: { type: boolean }, onboardingStatus: { const: pending_verification }, loginEnabled: { const: false } }, additionalProperties: false, description: A provisioned account record with a pending identity. It is not login-capable; no password, credential, access token, or session is issued. }
+    OrganizationSnapshot: { type: object, required: [organization, policy, workspaceIds], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, workspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
+    WorkspaceUsage: { type: object, required: [profiles, members, storageBytes], properties: { profiles: { type: integer, minimum: 0 }, members: { type: integer, minimum: 0 }, storageBytes: { type: integer, minimum: 0 } }, additionalProperties: false }
+    UsageCheckResult: { type: object, required: [ok], properties: { ok: { type: boolean } }, additionalProperties: false }
+    OfflineEntitlement: { type: string, enum: [enabled, disabled] }
+    GrantRevocationReceipt: { type: object, required: [revoked, grantId], properties: { revoked: { const: true }, grantId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    OperationIdInput: { type: object, required: [operationId], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' } }, additionalProperties: false }
+    EventFilterInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, after: { type: [string, "null"], minLength: 1 }, limit: { type: integer, minimum: 1, maximum: 1000, default: 100 } }, additionalProperties: false }
+    ProfileListInput: { type: object, properties: { includeArchived: { type: boolean, default: false }, limit: { type: integer, minimum: 1, maximum: 100, default: 100 }, cursor: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProfileIdInput: { type: object, required: [profileId], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProfileDeleteInput: { type: object, required: [profileId, revision, confirmation], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, confirmation: { const: QUARANTINE_PROFILE_DATA } }, additionalProperties: false }
+    ProfileRevisionInput: { type: object, required: [profileId, revision], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProfileDeleteBody: { type: object, required: [revision, confirmation], properties: { revision: { type: integer, minimum: 1 }, confirmation: { const: QUARANTINE_PROFILE_DATA } }, additionalProperties: false }
+    ProfileRevisionBody: { type: object, required: [revision], properties: { revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    Organization: { type: object, required: [id, accountId, name, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, createdAt: { type: string, format: date-time } }, additionalProperties: false }
+    OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
+    OrganizationRecord: { type: object, required: [organization, policy, revision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WorkspaceRecord: { type: object, required: [workspace, revision], properties: { workspace: { $ref: '#/components/schemas/Workspace' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OrganizationCreateInput: { type: object, required: [organization, policy], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' } }, additionalProperties: false }
+    OrganizationIdInput: { type: object, required: [organizationId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    OrganizationListInput: { type: object, properties: {}, additionalProperties: false }
+    OrganizationUpdateInput: { type: object, required: [organizationId, update], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, update: { $ref: '#/components/schemas/OrganizationUpdate' } }, additionalProperties: false }
+    OrganizationUpdate: { type: object, required: [organization, policy, expectedRevision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WorkspacePolicy: { type: object, required: [maxProfiles, maxMembers, maxStorageBytes, offlineEntitled], properties: { maxProfiles: { type: integer, minimum: 0 }, maxMembers: { type: integer, minimum: 0 }, maxStorageBytes: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
+    Workspace: { type: object, required: [id, organizationId, name, policy, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, policy: { $ref: '#/components/schemas/WorkspacePolicy' }, createdAt: { type: string, format: date-time } }, additionalProperties: false }
+    WorkspaceCreateInput: { type: object, required: [organizationId, workspace], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspace: { $ref: '#/components/schemas/Workspace' } }, additionalProperties: false }
+    WorkspaceIdInput: { type: object, required: [organizationId, workspaceId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    WorkspaceListInput: { type: object, required: [organizationId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    WorkspaceUpdateInput: { type: object, required: [organizationId, workspaceId, update], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, update: { $ref: '#/components/schemas/WorkspaceUpdate' } }, additionalProperties: false }
+    WorkspaceUpdate: { type: object, required: [workspace, expectedRevision], properties: { workspace: { $ref: '#/components/schemas/Workspace' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    MemberStatus: { enum: [invited, active, suspended] }
+    MemberRole: { enum: [owner, admin, operator, member] }
+    Member: { type: object, required: [id, accountId, workspaceId, role, status, inviteExpiresAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, teamId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, role: { $ref: '#/components/schemas/MemberRole' }, status: { $ref: '#/components/schemas/MemberStatus' }, inviteExpiresAt: { type: [integer, "null"], minimum: 0 } }, additionalProperties: false }
+    MemberIdInput: { type: object, required: [workspaceId, memberId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    MemberInviteInput: { type: object, required: [workspaceId, member], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, member: { $ref: '#/components/schemas/Member' } }, additionalProperties: false }
+    MemberInvitationCreateInput: { type: object, required: [workspaceId, email, role, expiresAt], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, email: { type: string, minLength: 3, maxLength: 254, format: email }, role: { $ref: '#/components/schemas/MemberRole' }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    MemberInvitationCreateBody: { type: object, required: [email, role, expiresAt], properties: { email: { type: string, minLength: 3, maxLength: 254, format: email }, role: { $ref: '#/components/schemas/MemberRole' }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    MemberInvitationCreateReceipt: { type: object, required: [invitationId, code, expiresAt], properties: { invitationId: { $ref: '#/components/schemas/CanonicalId' }, code: { type: [string, "null"], minLength: 64, maxLength: 64, description: Null on idempotent replay; copy the code from the original response. }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    MemberInvitationRedeemInput: { type: object, required: [invitationId, code], properties: { invitationId: { $ref: '#/components/schemas/CanonicalId' }, code: { type: string, minLength: 64, maxLength: 64 } }, additionalProperties: false }
+    MemberInvitationRedeemBody: { type: object, required: [code], properties: { code: { type: string, minLength: 64, maxLength: 64 } }, additionalProperties: false }
+    MemberInvitationIdInput: { type: object, required: [workspaceId, invitationId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, invitationId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    MemberInvitationRevocationReceipt: { type: object, required: [revoked], properties: { revoked: { type: boolean, const: true } }, additionalProperties: false }
+    MemberListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, cursor: { type: [string, "null"], minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }, limit: { type: [integer, "null"], minimum: 1, maximum: 100 } }, additionalProperties: false }
+    MemberPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Member' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
+    MemberRoleUpdateInput: { type: object, required: [workspaceId, memberId, role], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false }
+    MemberRoleUpdateBody: { type: object, required: [role], properties: { role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false }
+    ResourceKind: { enum: [profile, proxy, vpn, cookieset, extension, runtime] }
+    ResourceState: { enum: [active, archived, locked] }
+    Resource: { type: object, required: [id, workspaceId, kind, state, displayName], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, kind: { $ref: '#/components/schemas/ResourceKind' }, state: { $ref: '#/components/schemas/ResourceState' }, displayName: { type: string, minLength: 1, maxLength: 200 } }, additionalProperties: false }
+    ResourceIdInput: { type: object, required: [workspaceId, resourceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ResourceListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, cursor: { type: [string, "null"], minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }, limit: { type: [integer, "null"], minimum: 1, maximum: 100 } }, additionalProperties: false }
+    ResourcePage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Resource' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
+    ResourceRegisterInput: { type: object, required: [resource], properties: { resource: { $ref: '#/components/schemas/Resource' } }, additionalProperties: false }
+    Action: { type: string, enum: [read, create, update, delete, execute, share, manage] }
+    Effect: { type: string, enum: [allow, deny] }
+    Grant: { type: object, required: [id, workspaceId, resourceId, memberId, action, effect], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, action: { $ref: '#/components/schemas/Action' }, effect: { $ref: '#/components/schemas/Effect' } }, additionalProperties: false }
+    GrantList: { type: array, items: { $ref: '#/components/schemas/Grant' } }
+    GrantPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Grant' } }, nextCursor: { type: [string, "null"], maxLength: 128 } }, additionalProperties: false }
+    GrantIdInput: { type: object, required: [workspaceId, grantId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, grantId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    GrantListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    GrantListPageInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, cursor: { $ref: '#/components/schemas/CanonicalId' }, limit: { type: integer, minimum: 1, maximum: 100 } }, additionalProperties: false }
+    GrantCreateInput: { $ref: '#/components/schemas/Grant' }
+    Team: { type: object, required: [id, workspaceId, name, memberIds], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 128 }, memberIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
+    TeamRecord: { type: object, required: [team, revision], properties: { team: { $ref: '#/components/schemas/Team' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    TeamRecordList: { type: array, items: { $ref: '#/components/schemas/TeamRecord' } }
+    TeamListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    TeamIdInput: { type: object, required: [workspaceId, teamId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, teamId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    TeamCreateInput: { type: object, required: [workspaceId, team], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, team: { $ref: '#/components/schemas/Team' } }, additionalProperties: false }
+    TeamUpdateInput: { type: object, required: [workspaceId, teamId, update], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, teamId: { $ref: '#/components/schemas/CanonicalId' }, update: { $ref: '#/components/schemas/TeamUpdateBody' } }, additionalProperties: false }
+    TeamUpdateBody: { type: object, required: [name, expectedRevision], properties: { name: { type: string, minLength: 1, maxLength: 128 }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    TeamDeleteInput: { type: object, required: [workspaceId, teamId, expectedRevision], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, teamId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    TeamDeleteBody: { type: object, required: [expectedRevision], properties: { expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    Group: { type: object, required: [id, name, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, appearance: { type: [object, "null"], additionalProperties: true }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
+    GroupRecord: { type: object, required: [group, workspaceId, revision], properties: { group: { $ref: '#/components/schemas/Group' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    GroupRecordList: { type: array, items: { $ref: '#/components/schemas/GroupRecord' } }
+    ExtensionGroup: { type: object, required: [id, name, extensionIds, syncMode, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
+    ExtensionGroupRecord: { type: object, required: [group, workspaceId, revision], properties: { group: { $ref: '#/components/schemas/ExtensionGroup' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ExtensionGroupRecordList: { type: array, items: { $ref: '#/components/schemas/ExtensionGroupRecord' } }
+    ExtensionGroupListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ExtensionGroupIdInput: { type: object, required: [workspaceId, extensionGroupId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ExtensionGroupCreateInput: { type: object, required: [workspaceId, extensionGroupId, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] } }, additionalProperties: false }
+    ExtensionGroupUpdateInput: { type: object, required: [workspaceId, extensionGroupId, expectedRevision, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] } }, additionalProperties: false }
+    ExtensionGroupDeleteInput: { type: object, required: [workspaceId, extensionGroupId, expectedRevision], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProfileExtensionGroupSetInput: { type: object, required: [workspaceId, profileId, expectedRevision, extensionGroupId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, extensionGroupId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] } }, additionalProperties: false }
+    GroupShareGrant: { type: object, required: [id, workspaceId, groupId, memberId, action, effect, revision, createdAt, revokedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, action: { type: string, enum: [read, update, execute, share] }, effect: { type: string, enum: [allow, deny] }, revision: { type: integer, minimum: 1 }, createdAt: { type: string }, revokedAt: { type: [string, "null"] } }, additionalProperties: false }
+    GroupShareGrantList: { type: array, items: { $ref: '#/components/schemas/GroupShareGrant' } }
+    GroupShareCreateInput: { type: object, required: [workspaceId, groupId, memberId, action, effect], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, action: { type: string, enum: [read, update, execute, share] }, effect: { type: string, enum: [allow, deny] } }, additionalProperties: false }
+    GroupShareRevokeInput: { type: object, required: [workspaceId, groupId, grantId, expectedRevision], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' }, grantId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    GroupListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    GroupIdInput: { type: object, required: [workspaceId, groupId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    GroupCreateInput: { type: object, required: [workspaceId, groupId, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, appearance: { type: [object, "null"], additionalProperties: true } }, additionalProperties: false }
+    GroupUpdateInput: { type: object, required: [workspaceId, groupId, expectedRevision, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, name: { type: string, minLength: 1, maxLength: 120 }, appearance: { type: [object, "null"], additionalProperties: true } }, additionalProperties: false }
+    GroupDeleteInput: { type: object, required: [workspaceId, groupId, expectedRevision], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProfileGroupsReplaceInput: { type: object, required: [workspaceId, profileId, expectedRevision, groupIds], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, groupIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' }, uniqueItems: true } }, additionalProperties: false }
+    ProfileProxyAssignment: { type: object, required: [profileId, workspaceId, expectedProfileRevision, proxyId, requestedAt], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, expectedProfileRevision: { type: integer, minimum: 1 }, proxyId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, requestedAt: { type: string, format: date-time } }, additionalProperties: false }
+    ProfileProxyAssignmentGetInput: { type: object, required: [workspaceId, profileId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProfileProxyAssignmentSetInput: { type: object, required: [workspaceId, profileId, expectedProfileRevision, proxyId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, expectedProfileRevision: { type: integer, minimum: 1 }, proxyId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] } }, additionalProperties: false }
+    ProfileUpdateInput: { type: object, required: [workspaceId, profileId, expectedRevision, name, note, tags], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, name: { type: string, minLength: 1, maxLength: 200 }, note: { type: [string, "null"], maxLength: 4096 }, tags: { type: array, maxItems: 64, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 64 } }, runtimeConfig: { $ref: '#/components/schemas/WayfernProfileRuntimeConfig' } }, additionalProperties: false }
+    CommandResult: { type: object, required: [commandId, correlationId, data], properties: { commandId: { type: string }, correlationId: { type: string }, data: {} } }
+    BlobPresence: { type: object, required: [present], properties: { present: { type: boolean } }, additionalProperties: false }
+    DeviceAuthorizationStartInput: { type: object, required: [deviceId, clientName], properties: { deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, clientName: { type: string, maxLength: 128 } }, additionalProperties: false }
+    DeviceAuthorizationStartResponse: { type: object, required: [deviceCode, userCode, verificationUri, expiresIn, interval], properties: { deviceCode: { $ref: '#/components/schemas/DeviceCode' }, userCode: { $ref: '#/components/schemas/DeviceUserCode' }, verificationUri: { type: string, format: uri, description: Absolute HTTPS URL without user information or fragment; local development may use loopback HTTP }, expiresIn: { type: integer, minimum: 1 }, interval: { type: integer, minimum: 1 } }, additionalProperties: false }
+    DeviceAuthorizationApproveInput: { type: object, required: [userCode], properties: { userCode: { $ref: '#/components/schemas/DeviceUserCode' } }, additionalProperties: false }
+    DeviceAuthorizationApproveResponse: { type: object, required: [approved], properties: { approved: { const: true } }, additionalProperties: false }
+    DeviceAuthorizationTokenInput: { type: object, required: [deviceCode], properties: { deviceCode: { $ref: '#/components/schemas/OpaqueHexToken64' } }, additionalProperties: false }
+    DeviceRefreshInput: { type: object, required: [refreshToken, deviceId], properties: { refreshToken: { $ref: '#/components/schemas/OpaqueHexToken64' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' } }, additionalProperties: false }
+    DeviceEncryptionKeyRegistrationInput: { type: object, required: [publicKey], properties: { publicKey: { type: string, pattern: '^[0-9a-fA-F]{64}$', description: '32-byte X25519 public key, hex encoded' } }, additionalProperties: false }
+    DeviceEncryptionKey: { type: object, required: [accountId, deviceId, schemaVersion, publicKey, fingerprint, registeredAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, schemaVersion: { const: 1 }, publicKey: { type: string, pattern: '^[0-9a-f]{64}$' }, fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }, registeredAt: { type: integer, minimum: 0 } }, additionalProperties: false }
+    DeviceEncryptionKeyList: { type: array, items: { $ref: '#/components/schemas/DeviceEncryptionKey' } }
+    ProfileShareRecipientDeviceKeysInput: { type: object, required: [profileId, memberId], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProfileKeyShareEnvelope: { type: object, required: [schemaVersion, workspaceId, resourceId, recipientDeviceId, keyVersion, encappedKey, ciphertext], properties: { schemaVersion: { const: 2 }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, recipientDeviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, keyVersion: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, encappedKey: { type: array, minItems: 32, maxItems: 32, items: { type: integer, minimum: 0, maximum: 255 } }, ciphertext: { type: array, minItems: 80, maxItems: 80, items: { type: integer, minimum: 0, maximum: 255 } } }, additionalProperties: false }
+    ConfirmedProfileKeyShareEnvelope: { type: object, required: [envelope, confirmedFingerprint], properties: { envelope: { $ref: '#/components/schemas/ProfileKeyShareEnvelope' }, confirmedFingerprint: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
+    DeviceAuthTokenResponse: { type: object, required: [accessToken, refreshToken, tokenType, expiresAt], properties: { accessToken: { type: string, minLength: 1 }, refreshToken: { type: string, minLength: 1 }, tokenType: { const: Bearer }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    AuthTokenResponse: { type: object, required: [accessToken, tokenType, expiresAt], properties: { accessToken: { type: string, minLength: 1 }, tokenType: { const: Bearer }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WebLoginInput: { type: object, required: [identifier, password], properties: { identifier: { type: string, minLength: 3, maxLength: 254 }, password: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
+    DesktopLoginInput: { type: object, required: [identifier, password, deviceId], properties: { identifier: { type: string, minLength: 3, maxLength: 254 }, password: { type: string, minLength: 12, maxLength: 256, writeOnly: true }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' } }, additionalProperties: false }
+    DesktopCredentialLoginInput: { type: object, required: [identifier, password, correlationId], properties: { identifier: { type: string, minLength: 3, maxLength: 254 }, password: { type: string, minLength: 12, maxLength: 256, writeOnly: true }, correlationId: { type: string, minLength: 1, maxLength: 128 } }, additionalProperties: false }
+    RecoveryRequestInput: { type: object, required: [identifier], properties: { identifier: { type: string, minLength: 1, maxLength: 254 } }, additionalProperties: false }
+    ApiTokenCreateInput: { type: object, required: [name, scopes, expiresAt], properties: { name: { type: string, minLength: 1, maxLength: 64 }, scopes: { type: array, minItems: 1, maxItems: 32, items: { $ref: '#/components/schemas/ApiTokenScope' } }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ApiTokenCreated: { type: object, required: [token, tokenRecord], properties: { token: { type: string, pattern: '^blapi_[0-9a-f]{64}$', writeOnly: true }, tokenRecord: { $ref: '#/components/schemas/ApiToken' } }, additionalProperties: false }
+    ApiTokenPage: { type: object, required: [tokens], properties: { tokens: { type: array, items: { $ref: '#/components/schemas/ApiToken' } } }, additionalProperties: false }
+    ApiToken: { type: object, required: [id, name, scopes, createdAt, expiresAt], properties: { id: { $ref: '#/components/schemas/ApiTokenIdentifier' }, name: { type: string }, scopes: { type: array, minItems: 1, maxItems: 32, items: { $ref: '#/components/schemas/ApiTokenScope' } }, createdAt: { type: integer }, expiresAt: { type: integer }, revokedAt: { type: [integer, "null"] } }, additionalProperties: false }
+    ApiTokenIdInput: { type: object, required: [tokenId], properties: { tokenId: { $ref: '#/components/schemas/ApiTokenIdentifier' } }, additionalProperties: false }
+    RecoveryCompleteInput: { type: object, required: [token, newPassword], properties: { token: { $ref: '#/components/schemas/OpaqueHexToken64' }, newPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
+    WebSessionResponse: { type: object, required: [accountId, expiresAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WebSessionPage: { type: object, required: [sessions], properties: { sessions: { type: array, items: { $ref: '#/components/schemas/WebSession' } } }, additionalProperties: false }
+    WebSession: { type: object, required: [id, kind, expiresAt, current], properties: { id: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, kind: { enum: [browser, desktop, api] }, deviceId: { anyOf: [{ $ref: '#/components/schemas/DeviceIdentifier' }, { type: "null" }] }, createdAt: { type: [integer, "null"] }, expiresAt: { type: integer, minimum: 1 }, revokedAt: { type: [integer, "null"] }, current: { type: boolean } }, additionalProperties: false }
+    SessionIdInput: { type: object, required: [sessionId], properties: { sessionId: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }, additionalProperties: false }
+    ProxyParseInput: { type: object, required: [text], properties: { text: { type: string, maxLength: 1048576 } }, additionalProperties: false }
+    ProxyParseReport: { type: object, required: [validCount, invalidCount, duplicateCount, rows], properties: { validCount: { type: integer, minimum: 0 }, invalidCount: { type: integer, minimum: 0 }, duplicateCount: { type: integer, minimum: 0 }, rows: { type: array, items: { $ref: '#/components/schemas/ProxyParseRow' } } }, additionalProperties: false }
+    ProxyImportInput: { type: object, required: [workspaceId, text, createdAt], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, text: { type: string, minLength: 1, maxLength: 1048576 }, createdAt: { type: string, format: date-time } }, additionalProperties: false }
+    ProxyImportReport: { type: object, required: [createdCount, duplicateCount, invalidCount, failedCount, rows], properties: { createdCount: { type: integer, minimum: 0 }, duplicateCount: { type: integer, minimum: 0 }, invalidCount: { type: integer, minimum: 0 }, failedCount: { type: integer, minimum: 0 }, rows: { type: array, items: { $ref: '#/components/schemas/ProxyImportRow' } } }, additionalProperties: false }
+    ProxyImportRow: { type: object, required: [index, status], properties: { index: { type: integer, minimum: 1 }, status: { type: string, enum: [created, duplicate, invalid, failed] }, proxyId: { $ref: '#/components/schemas/CanonicalId' }, error: { type: string, minLength: 1 } }, additionalProperties: false }
+    ProxyParseRow: { type: object, required: [valid], properties: { protocol: { type: [string, "null"] }, endpoint: { type: [string, "null"] }, valid: { type: boolean }, line: { type: [integer, "null"], minimum: 1 }, error: { type: [string, "null"] } }, additionalProperties: false }
+    ProxyCheckInput: { type: object, required: [workspaceId, proxyId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, proxyId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProxyCheckResult: { type: object, required: [proxyId, revision, status, latencyMs], properties: { proxyId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, status: { enum: [healthy] }, latencyMs: { type: integer, minimum: 0 } }, additionalProperties: false }
+    ProxyListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProxyIdInput: { type: object, required: [workspaceId, proxyId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, proxyId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProxyCreateInput: { type: object, required: [workspaceId, proxy], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, proxy: { $ref: '#/components/schemas/ProxyMetadataInput' } }, additionalProperties: false }
+    ProxyUpdateInput: { type: object, required: [workspaceId, proxyId, expectedRevision, proxy], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, proxyId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, proxy: { $ref: '#/components/schemas/ProxyMetadataInput' } }, additionalProperties: false }
+    ProxyDeleteInput: { type: object, required: [workspaceId, proxyId, expectedRevision], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, proxyId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProxyProtocol: { type: string, enum: [http, https, socks4, socks5] }
+    ProxyMetadataInput: { type: object, required: [id, protocol, host, port, bypassRules, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string }, protocol: { $ref: '#/components/schemas/ProxyProtocol' }, host: { type: string, minLength: 1 }, port: { type: integer, minimum: 1, maximum: 65535 }, hasCredential: { type: boolean, description: "On update, omit to preserve; false clears credentials; true marks a credential replacement. Secret values are never accepted here." }, bypassRules: { type: array, items: { type: string } }, createdAt: { type: string }, updatedAt: { type: string } }, additionalProperties: false }
+    ProxyRecord: { type: object, required: [workspaceId, proxy, revision], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, proxy: { $ref: '#/components/schemas/ProxyView' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProxyView: { type: object, required: [id, protocol, host, port, hasCredential, rotationConfigured, bypassRules, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string }, protocol: { $ref: '#/components/schemas/ProxyProtocol' }, host: { type: string }, port: { type: integer }, hasCredential: { type: boolean }, credentialVersion: { type: string, minLength: 1, description: Opaque credential generation identifier; contains no secret material. }, rotationConfigured: { type: boolean }, bypassRules: { type: array, items: { type: string } }, createdAt: { type: string }, updatedAt: { type: string } }, additionalProperties: false }
+    ProxyPage: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ProxyRecord' } } }, additionalProperties: false }
+    ProxyCreateResult: { type: object, required: [record, deduplicated], properties: { record: { $ref: '#/components/schemas/ProxyRecord' }, deduplicated: { type: boolean } }, additionalProperties: false }
+    Health: { type: object, required: [status, service], properties: { status: { const: ok }, service: { const: buglogin-api } }, additionalProperties: false }
+    Readiness: { type: object, required: [status, service], properties: { status: { const: ready }, service: { const: buglogin-api } }, additionalProperties: false }
+    RuntimeDispatchInput: { type: object, required: [commandId, targetDeviceId], properties: { commandId: { type: string, enum: [profile.launch, profile.stop] }, targetDeviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, input: { type: object, additionalProperties: true } }, additionalProperties: false }
+    RuntimeDispatchJobIdInput: { type: object, required: [workspaceId, jobId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, jobId: { type: string, pattern: '^runtime_[0-9a-f]{64}$' } }, additionalProperties: false }
+    RuntimeDispatchJob: { type: object, required: [jobId, operationId, commandId, workspaceId, deviceId, profileId, requestedBy, idempotencyKey, createdAt, expiresAt, state], properties: { jobId: { type: string, pattern: '^runtime_[0-9a-f]{64}$' }, operationId: { type: string, minLength: 1 }, commandId: { type: string, enum: [profile.launch, profile.stop] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, requestedBy: { $ref: '#/components/schemas/CanonicalId' }, idempotencyKey: { type: string, minLength: 1, maxLength: 256 }, createdAt: { type: integer, minimum: 0 }, expiresAt: { type: integer, minimum: 1 }, state: { type: string, enum: [accepted, dispatched, running, completed, failed, cancelled, expired] }, executorAccountId: { $ref: '#/components/schemas/CanonicalId' }, input: { type: object }, result: { type: object }, failureCode: { type: string, pattern: '^[a-z0-9_]{1,96}$' } }, additionalProperties: false }
+    RuntimeDispatchJobEnvelope: { type: object, required: [job], properties: { job: { $ref: '#/components/schemas/RuntimeDispatchJob' } }, additionalProperties: false }
+    RuntimeDispatchInbox: { type: object, required: [items], properties: { items: { type: array, maxItems: 4096, items: { $ref: '#/components/schemas/RuntimeDispatchJob' } } }, additionalProperties: false }
+    RuntimeDispatchReceipt: { type: object, required: [jobId, operationId, deviceId, profileId, commandId, state], properties: { jobId: { type: string }, operationId: { type: string }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, commandId: { type: string, enum: [profile.launch, profile.stop] }, state: { type: string, enum: [running, stopped] } }, additionalProperties: false }
+    RuntimeDispatchFailure: { type: object, required: [failureCode], properties: { failureCode: { type: string, pattern: '^[a-z0-9_]{1,96}$' } }, additionalProperties: false }
+    RuntimeCatalog: { type: object, required: [schemaVersion, releases], properties: { schemaVersion: { enum: [1, 2] }, releases: { type: array, minItems: 1, items: { $ref: '#/components/schemas/RuntimeRelease' } } }, additionalProperties: false }
+    RuntimeRelease: { type: object, required: [runtime, version, platform, architecture, relativePath, source, sha256, sizeBytes, keyId, signature], properties: { runtime: { type: string, enum: [wayfern, bugmini] }, version: { type: string, minLength: 1 }, platform: { type: string, enum: [windows, macos, linux] }, architecture: { type: string, enum: [x64, arm64] }, relativePath: { type: string, minLength: 1 }, packageFormat: { type: string, enum: [raw, zip, dmg], default: raw }, archivePrefix: { type: string, minLength: 1 }, source: { type: string, format: uri, pattern: '^https://' }, sha256: { type: string, pattern: '^[A-Fa-f0-9]{64}$' }, sizeBytes: { type: integer, minimum: 1, maximum: 4294967296 }, keyId: { type: string, minLength: 1 }, signature: { type: string, pattern: '^[A-Fa-f0-9]{128}$' } }, additionalProperties: false }
+    Runtime: { type: string, description: A migration-preserved runtime is retained for visibility and cannot be selected or launched., enum: [wayfern, bugox, bugium, bugmini, bugthor, bughelium, preserved] }
+    ProfileCreateRuntime: { type: string, description: Runtime adapters currently selectable for new profiles; legacy-only runtimes remain visible in profile responses but cannot be newly provisioned., enum: [wayfern, bugmini] }
+    ProfileState: { enum: [created, ready, launching, running, stopping, failed, recovering] }
+    SyncMode: { enum: [local, managed, disabled] }
+    JsonValue: { oneOf: [{ type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }, { type: array, items: { $ref: '#/components/schemas/JsonValue' } }, { type: string }, { type: number }, { type: boolean }, { type: "null" }] }
+    Profile: { type: object, required: [id, name, runtime, runtimeVersion, runtimeConfig, state, archived, fingerprint, note, proxyId, vpnId, groupIds, tags, extensionGroupId, syncMode, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, runtime: { $ref: '#/components/schemas/Runtime' }, runtimeVersion: { type: [string, "null"] }, runtimeConfig: { $ref: '#/components/schemas/JsonValue' }, state: { $ref: '#/components/schemas/ProfileState' }, archived: { type: boolean }, fingerprint: { $ref: '#/components/schemas/JsonValue' }, note: { type: [string, "null"] }, proxyId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, vpnId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, groupIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } }, tags: { type: array, items: { type: string } }, extensionGroupId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, syncMode: { oneOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
+    VersionedProfile: { type: object, required: [schemaVersion, revision, value], properties: { schemaVersion: { type: integer, minimum: 1 }, revision: { type: integer, minimum: 1 }, value: { $ref: '#/components/schemas/Profile' } }, additionalProperties: false }
+    VersionedProfilePage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/VersionedProfile' } }, nextCursor: { oneOf: [{ type: string }, { type: "null" }] } }, additionalProperties: false }
+    ProfileResource: { type: object, required: [profileId, resourceId, workspaceId, archiveState], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, archiveState: { type: string, enum: [active, archived] } }, additionalProperties: false }
+    ProfileRecord: { type: object, required: [id, name, runtime, runtimeVersion, runtimeConfig, state, archived, fingerprint, note, proxyId, vpnId, groupIds, tags, extensionGroupId, syncMode, createdAt, updatedAt, revision], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, runtime: { $ref: '#/components/schemas/Runtime' }, runtimeVersion: { type: [string, "null"] }, runtimeConfig: { $ref: '#/components/schemas/JsonValue' }, state: { $ref: '#/components/schemas/ProfileState' }, archived: { type: boolean }, fingerprint: { $ref: '#/components/schemas/JsonValue' }, note: { type: [string, "null"] }, proxyId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, vpnId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, groupIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } }, tags: { type: array, items: { type: string } }, extensionGroupId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, syncMode: { oneOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProfilePage: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ProfileRecord' } }, nextCursor: { oneOf: [{ type: string }, { type: "null" }] } } }
+    ProfileCreateCommandInput: { type: object, required: [name, runtime], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, runtime: { $ref: '#/components/schemas/ProfileCreateRuntime' }, runtimeVersion: { type: string }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, proxyId: { $ref: '#/components/schemas/CanonicalId' }, note: { type: string, maxLength: 4096 }, fingerprintTarget: { $ref: '#/components/schemas/ProfileFingerprintTarget' } }, additionalProperties: false }
+    FingerprintOperatingSystem: { type: string, enum: [windows, macos, linux, android, ios] }
+    ProfileFingerprintTarget: { type: object, required: [operatingSystem], properties: { operatingSystem: { $ref: '#/components/schemas/FingerprintOperatingSystem' }, operatingSystemVersion: { type: string, minLength: 1, maxLength: 12, pattern: '^[0-9]+(\.[0-9]+)*$' } }, additionalProperties: false }
+    WayfernProfileRuntimeConfig: { type: object, required: [schemaVersion, wayfern], properties: { schemaVersion: { type: integer, const: 1 }, wayfern: { $ref: '#/components/schemas/WayfernRuntimeConfig' } }, additionalProperties: false }
+    WayfernRuntimeConfig: { type: object, required: [fingerprintTarget], properties: { fingerprintTarget: { $ref: '#/components/schemas/ProfileFingerprintTarget' } }, additionalProperties: false }
+    ProfileCreateInput: { oneOf: [{ $ref: '#/components/schemas/ProfileCreateCommandInput' }, { $ref: '#/components/schemas/ProfileCreateLegacyInput' }] }
+    ProfileCreateLegacyInput: { type: object, required: [id, name, runtime, runtimeVersion, runtimeConfig, state, archived, fingerprint, note, proxyId, vpnId, groupIds, tags, extensionGroupId, syncMode, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, runtime: { $ref: '#/components/schemas/ProfileCreateRuntime' }, runtimeVersion: { type: [string, "null"] }, runtimeConfig: { $ref: '#/components/schemas/JsonValue' }, state: { $ref: '#/components/schemas/ProfileState' }, archived: { type: boolean }, fingerprint: { $ref: '#/components/schemas/JsonValue' }, note: { type: [string, "null"] }, proxyId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, vpnId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, groupIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } }, tags: { type: array, items: { type: string } }, extensionGroupId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, syncMode: { oneOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProfileCloneInput: { type: object, required: [sourceProfileId, targetProfileId, name, expectedRevision], properties: { sourceProfileId: { $ref: '#/components/schemas/CanonicalId' }, targetProfileId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProfileCloneReceipt: { type: object, required: [sourceProfileId, profile, resourceId, metadataOnly, copiedFields, excludedFields], properties: { sourceProfileId: { $ref: '#/components/schemas/CanonicalId' }, profile: { $ref: '#/components/schemas/ProfileRecord' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, metadataOnly: { const: true }, copiedFields: { type: array, items: { type: string } }, excludedFields: { type: array, items: { type: string } } }, additionalProperties: false }
+    CookieListInput: { type: object, required: [workspaceId, profileId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    CookieStageInput: { type: object, required: [workspaceId, profileId, cookies], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, cookies: { type: array, minItems: 1, maxItems: 10000, items: { $ref: '#/components/schemas/CookieWireInput' } } }, additionalProperties: false }
+    CookieImportInput: { type: object, required: [workspaceId, profileId, stageId, expectedGeneration], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, stageId: { type: string, pattern: '^[0-9a-f]{64}$' }, expectedGeneration: { type: integer, minimum: 0 } }, additionalProperties: false }
+    CookieCopyInput: { type: object, required: [sourceWorkspaceId, sourceProfileId, destinationWorkspaceId, destinationProfileId, expectedGeneration], properties: { sourceWorkspaceId: { $ref: '#/components/schemas/CanonicalId' }, sourceProfileId: { $ref: '#/components/schemas/CanonicalId' }, destinationWorkspaceId: { $ref: '#/components/schemas/CanonicalId' }, destinationProfileId: { $ref: '#/components/schemas/CanonicalId' }, expectedGeneration: { type: integer, minimum: 0 } }, additionalProperties: false }
+    CookieWireInput: { type: object, required: [name, domain, path, secure, httpOnly, sameSite, value], properties: { name: { type: string, minLength: 1, maxLength: 4096 }, domain: { type: string, minLength: 1, maxLength: 4096 }, path: { type: string, minLength: 1, maxLength: 4096 }, secure: { type: boolean }, httpOnly: { type: boolean }, expiresAt: { type: [integer, "null"] }, sameSite: { enum: [unspecified, none, lax, strict] }, value: { type: string, minLength: 1, writeOnly: true } }, additionalProperties: false }
+    CookieSummary: { type: object, required: [name, domain, path, secure, httpOnly, valuePresent], properties: { name: { type: string }, domain: { type: string }, path: { type: string }, secure: { type: boolean }, httpOnly: { type: boolean }, expiresAt: { type: [integer, "null"] }, sameSite: { enum: [unspecified, none, lax, strict] }, valuePresent: { type: boolean } }, additionalProperties: false }
+    EnqueueCookieJobInput: { type: object, required: [commandId, workspaceId, deviceId, profileId, expectedGeneration], properties: { commandId: { type: string, enum: [cookie.import, cookie.copy] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, expectedGeneration: { type: integer, minimum: 0 }, sourceWorkspaceId: { $ref: '#/components/schemas/CanonicalId' }, sourceProfileId: { $ref: '#/components/schemas/CanonicalId' }, sourceDeviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, stagedImportRef: { type: string, pattern: '^[0-9A-Fa-f]{64}$' } }, additionalProperties: false }
+    ConnectedCookieJobState: { type: string, enum: [accepted, dispatched, running, completed, failed, cancelled, expired] }
+    ConnectedCookieFailureCode: { type: string, enum: [runtime_unavailable, profile_running, generation_conflict, stage_expired, materialization_failed, vault_unavailable] }
+    FailCookieJobInput: { type: object, required: [failureCode], properties: { failureCode: { $ref: '#/components/schemas/ConnectedCookieFailureCode' } }, additionalProperties: false }
+    ConnectedCookieReceipt: { type: object, required: [operationId, jobId, deviceId, profileId, previousGeneration, newGeneration, createdCount, replacedCount, deletedCount, metadataChecksum, completedAt], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' }, jobId: { type: string, minLength: 1 }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, previousGeneration: { type: integer, minimum: 1 }, newGeneration: { type: integer, minimum: 1 }, createdCount: { type: integer, minimum: 0 }, replacedCount: { type: integer, minimum: 0 }, deletedCount: { type: integer, minimum: 0 }, metadataChecksum: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, completedAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ConnectedCookieJob: { type: object, required: [jobId, operationId, commandId, workspaceId, deviceId, profileId, expectedGeneration, requestedBy, idempotencyKey, createdAt, expiresAt, state], properties: { jobId: { type: string, minLength: 1 }, operationId: { $ref: '#/components/schemas/OperationIdentifier' }, commandId: { type: string, enum: [cookie.import, cookie.copy] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, executorAccountId: { $ref: '#/components/schemas/CanonicalId' }, expectedGeneration: { type: integer, minimum: 0 }, sourceWorkspaceId: { $ref: '#/components/schemas/CanonicalId' }, sourceProfileId: { $ref: '#/components/schemas/CanonicalId' }, sourceDeviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, stagedImportRef: { type: string, pattern: '^[0-9A-Fa-f]{64}$' }, requestedBy: { type: string, minLength: 1 }, idempotencyKey: { type: string, minLength: 1 }, createdAt: { type: integer, minimum: 0 }, expiresAt: { type: integer, minimum: 1 }, state: { $ref: '#/components/schemas/ConnectedCookieJobState' }, receipt: { $ref: '#/components/schemas/ConnectedCookieReceipt' }, failureCode: { $ref: '#/components/schemas/ConnectedCookieFailureCode' } }, additionalProperties: false }
+    CookieReport: { type: object, required: [inserted, replaced, deduplicated, copied, cleanupPending], properties: { inserted: { type: integer, minimum: 0 }, replaced: { type: integer, minimum: 0 }, deduplicated: { type: integer, minimum: 0 }, copied: { type: integer, minimum: 0 }, cleanupPending: { type: integer, minimum: 0 } }, additionalProperties: false }
+    CookieListResult: { type: object, required: [generation, cookies], properties: { generation: { type: integer, minimum: 0 }, cookies: { type: array, items: { $ref: '#/components/schemas/CookieSummary' } } }, additionalProperties: false }
+    CookieJobInboxInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ConnectedCookieJobInbox: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ConnectedCookieJob' } } }, additionalProperties: false }
+    CookieStageReceipt: { type: object, required: [stageId], properties: { stageId: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
+    CookieMutationResult: { type: object, required: [report, generation, replayed], properties: { report: { $ref: '#/components/schemas/CookieReport' }, generation: { type: integer, minimum: 0 }, replayed: { type: boolean } }, additionalProperties: false }
+    ProfileShareInput: { type: object, required: [profileId, memberId, permission, expectedRevision], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, permission: { enum: [read, operate] }, expectedRevision: { type: integer, minimum: 1 }, recipientKeyEnvelopes: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ConfirmedProfileKeyShareEnvelope' } } }, additionalProperties: false }
+    ProfileShareReceipt: { type: object, required: [profileId, memberId, revision, shared], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, permission: { enum: [read, operate, "null"] }, revision: { type: integer, minimum: 1 }, shared: { const: true } }, additionalProperties: false }
+    ProfileShareRevokeInput: { type: object, required: [profileId, memberId, permission, expectedRevision], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, permission: { enum: [read, operate] }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProfileShareRevocationReceipt: { type: object, required: [profileId, memberId, revision, revoked], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, revoked: { const: true } }, additionalProperties: false }
+    ProfileLaunchInput: { type: object, required: [profilesRoot, extraArgs], properties: { profilesRoot: { type: string, minLength: 1 }, extraArgs: { type: array, items: { type: string } } }, additionalProperties: false }
+    RuntimeProjectionInput: { type: object, required: [deviceId, generation, rootChecksum], properties: { deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }, additionalProperties: false }
+    RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, ownerId: { $ref: '#/components/schemas/CoordinationOwnerIdentifier' }, ownerEmail: { type: [string, "null"] }, state: { enum: [running, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
+    OptionalRuntimeProjection: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] }
+    SyncManifest: { type: object, required: [schemaVersion, workspaceId, resourceId, fencingToken, generation, parentGeneration, rootChecksum, objects, tombstones], properties: { schemaVersion: { enum: [2, 3] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, fencingToken: { type: integer, minimum: 1 }, generation: { type: integer, minimum: 1 }, parentGeneration: { type: [integer, "null"], minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-f]{64}$' }, objects: { type: array, items: { $ref: '#/components/schemas/ManifestObject' } }, tombstones: { type: array, items: { $ref: '#/components/schemas/ManifestTombstone' } }, dependencies: { type: array, items: { $ref: '#/components/schemas/ManifestDependency' } }, payloadEncryption: { oneOf: [{ $ref: '#/components/schemas/ManifestPayloadEncryption' }, { type: "null" }] }, fileChunks: { type: array, items: { $ref: '#/components/schemas/ManifestFileChunks' } } }, additionalProperties: false }
+    ResourceManifestKeyRotationInput: { type: object, required: [manifest], properties: { manifest: { $ref: '#/components/schemas/SyncManifest' }, keyShareEnvelopeUpdates: { type: array, maxItems: 256, items: { $ref: '#/components/schemas/ProfileKeyRotationEnvelopeUpdate' } } }, additionalProperties: false }
+    ProfileKeyRotationEnvelopeUpdate: { type: object, required: [memberId, recipientKeyEnvelopes], properties: { memberId: { $ref: '#/components/schemas/CanonicalId' }, recipientKeyEnvelopes: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ConfirmedProfileKeyShareEnvelope' } } }, additionalProperties: false }
+    ProfileKeyRotationRecipientDevices: { type: object, required: [memberId, deviceKeys], properties: { memberId: { $ref: '#/components/schemas/CanonicalId' }, deviceKeys: { type: array, minItems: 1, maxItems: 64, items: { $ref: '#/components/schemas/DeviceEncryptionKey' } } }, additionalProperties: false }
+    ProfileKeyRotationRecipientDevicesList: { type: array, maxItems: 256, items: { $ref: '#/components/schemas/ProfileKeyRotationRecipientDevices' } }
+    ProfileKeyRotationExecuteInput: { type: object, required: [profileId, confirmedRecipients], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, confirmedRecipients: { type: array, maxItems: 16384, items: { type: object, required: [memberId, deviceId, fingerprint], properties: { memberId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } }, additionalProperties: false }
+    SyncImportInput: { type: object, required: [export], properties: { export: { $ref: '#/components/schemas/SyncExport' }, dryRun: { type: boolean, default: false } }, additionalProperties: false }
+    SyncExport: { type: object, required: [schemaVersion, exportId, sourceInstanceId, workspaceId, resourceId, baseGeneration, currentGeneration, manifestSha256, blobSetSha256, manifest, revisions, blobs, createdAtUnixMs, toolVersion], properties: { schemaVersion: { const: 1 }, exportId: { $ref: '#/components/schemas/NonBlankText' }, sourceInstanceId: { $ref: '#/components/schemas/NonBlankText' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, baseGeneration: { type: [integer, "null"], minimum: 0 }, currentGeneration: { type: integer, minimum: 1 }, manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, blobSetSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, manifest: { $ref: '#/components/schemas/SyncManifest' }, revisions: { type: array, minItems: 1, items: { $ref: '#/components/schemas/SyncRevision' } }, blobs: { type: array, items: { $ref: '#/components/schemas/SyncExportBlob' } }, createdAtUnixMs: { type: integer, minimum: 1 }, toolVersion: { $ref: '#/components/schemas/NonBlankText' } }, additionalProperties: false }
+    SyncRevision: { type: object, required: [generation, parentGeneration, manifestSha256], properties: { generation: { type: integer, minimum: 1 }, parentGeneration: { type: [integer, "null"], minimum: 1 }, manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
+    SyncExportBlob: { type: object, required: [key, size, checksum, data], properties: { key: { $ref: '#/components/schemas/SyncObjectKey' }, size: { type: integer, minimum: 0, maximum: 67108864 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' }, data: { type: array, maxItems: 67108864, items: { type: integer, minimum: 0, maximum: 255 } } }, additionalProperties: false }
+    SyncImportReceipt: { type: object, required: [operationId, exportId, workspaceId, resourceId, generation, manifestSha256, replayed, dryRun, createdBlobs, resumedBlobs, state], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' }, exportId: { $ref: '#/components/schemas/NonBlankText' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, generation: { type: integer, minimum: 1 }, manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, replayed: { type: boolean }, dryRun: { type: boolean }, createdBlobs: { type: integer, minimum: 0 }, resumedBlobs: { type: integer, minimum: 0 }, state: { enum: [planned, active] } }, additionalProperties: false }
+    ManifestObject: { type: object, required: [key, size, checksum], properties: { key: { $ref: '#/components/schemas/SyncObjectKey' }, size: { type: integer, minimum: 0, maximum: 67108864 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' }, sourceGeneration: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ManifestTombstone: { type: object, required: [key, deletedGeneration, deletedAtUnixMs, retentionDeadlineUnixMs], properties: { key: { $ref: '#/components/schemas/SyncObjectKey' }, deletedGeneration: { type: integer, minimum: 1 }, deletedAtUnixMs: { type: integer, minimum: 1 }, retentionDeadlineUnixMs: { type: integer, minimum: 1 }, objectRetired: { type: boolean, default: false } }, additionalProperties: false }
+    ManifestPayloadEncryption: { type: object, required: [schemaVersion, algorithm, resourceKeyEnvelope], properties: { schemaVersion: { const: 1 }, algorithm: { enum: [aes-256-gcm-chunk-v1, aes-256-gcm-chunk-v2] }, keyVersion: { type: string, pattern: '^[0-9a-f]{64}$' }, resourceKeyEnvelope: { allOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }], properties: { key: { const: .buglogin/resource-key-envelope.json } } } }, allOf: [{ if: { properties: { algorithm: { const: aes-256-gcm-chunk-v2 } }, required: [algorithm] }, then: { required: [keyVersion] } }], additionalProperties: false }
+    ManifestDependency: { oneOf: [{ type: object, required: [kind, proxyId, revision, credentialEnvelopeObject], properties: { kind: { const: proxy }, proxyId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, credentialVersion: { type: string, minLength: 1 }, metadataObject: { oneOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }, { type: "null" }] }, credentialEnvelopeObject: { oneOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }, { type: "null" }] } }, additionalProperties: false }] }
+    ManifestObjectReference: { type: object, required: [key, size, checksum], properties: { key: { $ref: '#/components/schemas/SyncObjectKey' }, size: { type: integer, minimum: 0 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
+    ManifestFileChunks: { type: object, required: [path, plaintextSize, plaintextChecksum, chunks], properties: { path: { $ref: '#/components/schemas/ProfileFilePath' }, plaintextSize: { type: integer, minimum: 1, maximum: 1073741824 }, plaintextChecksum: { type: string, pattern: '^[0-9a-f]{64}$' }, chunks: { type: array, minItems: 1, maxItems: 256, items: { $ref: '#/components/schemas/ManifestFileChunk' } } }, additionalProperties: false }
+    ManifestFileChunk: { type: object, required: [index, plaintextSize, plaintextChecksum, object], properties: { index: { type: integer, minimum: 0 }, plaintextSize: { type: integer, minimum: 1, maximum: 4194304 }, plaintextChecksum: { type: string, pattern: '^[0-9a-f]{64}$' }, object: { $ref: '#/components/schemas/ManifestObjectReference' } }, additionalProperties: false }
+    OptionalSyncManifest: { oneOf: [{ $ref: '#/components/schemas/SyncManifest' }, { type: "null" }] }
+    LeaseStatus: { type: object, required: [resourceId, workspaceId, ownerId, fencingToken, issuedAtMs, expiresAtMs], properties: { resourceId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, ownerId: { $ref: '#/components/schemas/CanonicalId' }, fencingToken: { type: integer, minimum: 1 }, issuedAtMs: { type: integer, minimum: 1 }, expiresAtMs: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OptionalLeaseStatus: { oneOf: [{ $ref: '#/components/schemas/LeaseStatus' }, { type: "null" }] }
+    OperationAccepted: { type: object, required: [operationId, commandId, status], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' }, commandId: { $ref: '#/components/schemas/OperationIdentifier' }, status: { enum: [accepted] } } }
+    OperationStatus: { type: string, enum: [queued, running, completed, failed, cancelled] }
+    Operation: { type: object, required: [operationId, commandId, scope, status, progress], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' }, commandId: { $ref: '#/components/schemas/OperationIdentifier' }, scope: { $ref: '#/components/schemas/ResourceScope' }, status: { $ref: '#/components/schemas/OperationStatus' }, progress: { type: [number, 'null'], minimum: 0, maximum: 1 }, result: {}, error: { $ref: '#/components/schemas/Problem' } }, additionalProperties: false }
+    MigrationInspectInput: { type: object, required: [sourceRoot], properties: { sourceRoot: { type: string } }, additionalProperties: false }
+    MigrationImportInput: { type: object, required: [sourceRoot, stagingParent, destinationRoot, runId, confirmation], properties: { sourceRoot: { type: string }, stagingParent: { type: string }, destinationRoot: { type: string }, runId: { type: string }, confirmation: { type: string } }, additionalProperties: false }
+    MigrationProfileDataImportInput: { type: object, required: [sourceRoot], properties: { sourceRoot: { type: string, minLength: 1 } }, additionalProperties: false }
+    ControlImportInput:
+      type: object
+      required: [packageId]
+      properties:
+        packageId: { $ref: '#/components/schemas/MigrationPackageId' }
+        dryRun: { type: boolean, default: false }
+        accounts: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralAccountRecord' }, default: [] }
+        profiles: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralProfileRecord' }, default: [] }
+        organizations: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralOrganizationRecord' }, default: [] }
+        workspaces: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralWorkspaceRecord' }, default: [] }
+        teams: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralTeamRecord' }, default: [] }
+        members: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralMemberRecord' }, default: [] }
+        resources: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralResourceRecord' }, default: [] }
+        profileResources: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralProfileResourceRecord' }, default: [] }
+        grants: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralGrantRecord' }, default: [] }
+      additionalProperties: false
+    ControlRollbackInput:
+      type: object
+      required: [packageId, confirmation]
+      properties:
+        packageId: { $ref: '#/components/schemas/MigrationPackageId' }
+        confirmation: { const: ROLLBACK_CONTROL_MIGRATION }
+      additionalProperties: false
+    MigrationNeutralSourceRef:
+      type: object
+      required: [system, instance_id, id]
+      properties:
+        system: { type: string, minLength: 1 }
+        instance_id: { type: string, minLength: 1 }
+        id: { type: string, minLength: 1 }
+      additionalProperties: false
+    MigrationNeutralAccountRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.account/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [status], properties: { status: { type: string, minLength: 1 } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralOrganizationRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.organization/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [account_id, name], properties: { account_id: { type: string, minLength: 1 }, name: { type: string, minLength: 1 } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralWorkspaceRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.workspace/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [organization_id, name, policy], properties: { organization_id: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, policy: { type: object, required: [max_profiles, max_members, max_storage_bytes, offline_entitled], properties: { max_profiles: { type: integer, minimum: 0 }, max_members: { type: integer, minimum: 0 }, max_storage_bytes: { type: integer, minimum: 0 }, offline_entitled: { type: boolean } }, additionalProperties: false } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralTeamRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.team/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [workspace_id, name, member_ids], properties: { workspace_id: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, member_ids: { type: array, items: { type: string, minLength: 1 } } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralMemberRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.member/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [account_id, workspace_id, role, status], properties: { account_id: { type: string, minLength: 1 }, workspace_id: { type: string, minLength: 1 }, team_id: { type: [string, "null"] }, role: { type: string, minLength: 1 }, status: { type: string, minLength: 1 } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralResourceRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.resource/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [workspace_id, kind, state, display_name], properties: { workspace_id: { type: string, minLength: 1 }, kind: { type: string, minLength: 1 }, state: { type: string, minLength: 1 }, display_name: { type: string, minLength: 1 } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralProfileResourceRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.profile-resource/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [profile_id, resource_id, workspace_id, archive_state], properties: { profile_id: { type: string, minLength: 1 }, resource_id: { type: string, minLength: 1 }, workspace_id: { type: string, minLength: 1 }, archive_state: { type: string, enum: [active, archived] } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralGrantRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.grant/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [workspace_id, resource_id, member_id, action, effect], properties: { workspace_id: { type: string, minLength: 1 }, resource_id: { type: string, minLength: 1 }, member_id: { type: string, minLength: 1 }, action: { type: string, minLength: 1 }, effect: { type: string, minLength: 1 } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    MigrationNeutralProfileRecord:
+      type: object
+      required: [schema, source_ref, id, revision, data, extensions]
+      properties:
+        schema: { const: buglogin.profile/1 }
+        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
+        id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        created_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        data: { type: object, required: [name, runtime, release_type, ephemeral, source_data_object, migration_class, tags], properties: { name: { type: string, minLength: 1 }, runtime: { type: string, minLength: 1 }, runtime_version: { type: [string, "null"] }, release_type: { type: string, minLength: 1 }, ephemeral: { type: boolean }, source_data_object: { type: object, required: [path, logical_type, disposition], properties: { path: { type: string, minLength: 1 }, logical_type: { type: string, minLength: 1 }, disposition: { type: object, required: [classification, reason_code], properties: { classification: { type: string, enum: [encrypted, excluded] }, reason_code: { type: string, minLength: 1 } }, additionalProperties: false } }, additionalProperties: false }, migration_class: { type: string, minLength: 1 }, group_id: { type: [string, "null"] }, proxy_id: { type: [string, "null"] }, vpn_id: { type: [string, "null"] }, extension_group_id: { type: [string, "null"] }, tags: { type: array, items: { type: string } }, note: { type: [string, "null"] }, legacy_runtime_config: { oneOf: [{ $ref: '#/components/schemas/JsonValue' }, { type: "null" }] } }, additionalProperties: false }
+        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
+      additionalProperties: false
+    ControlImportCounts: { type: object, required: [profiles, accounts, organizations, workspaces, teams, members, resources, profileResources, grants], properties: { profiles: { type: integer, minimum: 0 }, accounts: { type: integer, minimum: 0 }, organizations: { type: integer, minimum: 0 }, workspaces: { type: integer, minimum: 0 }, teams: { type: integer, minimum: 0 }, members: { type: integer, minimum: 0 }, resources: { type: integer, minimum: 0 }, profileResources: { type: integer, minimum: 0 }, grants: { type: integer, minimum: 0 } }, additionalProperties: false }
+    ControlImportPlan: { type: object, required: [packageId, packageSha256, create, reuse], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, packageSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, create: { $ref: '#/components/schemas/ControlImportCounts' }, reuse: { $ref: '#/components/schemas/ControlImportCounts' } }, additionalProperties: false }
+    ControlImportReceipt: { type: object, required: [packageId, packageSha256, state, replayed, create, reuse], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, packageSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, state: { type: string, enum: [active, rolled_back] }, replayed: { type: boolean }, create: { $ref: '#/components/schemas/ControlImportCounts' }, reuse: { $ref: '#/components/schemas/ControlImportCounts' } }, additionalProperties: false }
+    ControlImportResult: { oneOf: [{ $ref: '#/components/schemas/ControlImportPlan' }, { $ref: '#/components/schemas/ControlImportReceipt' }] }
+    MigrationPackageFileInput: { type: string, format: binary }
+    MigrationPackageFileReceipt: { type: object, required: [packageId, path, contentSha256, sizeBytes], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, path: { type: string }, contentSha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, sizeBytes: { type: integer, minimum: 0 } }, additionalProperties: false }
+    MigrationPackageVerifyReceipt: { type: object, required: [packageId, verified], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, verified: { type: boolean }, manifestSha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, fileCount: { type: integer, minimum: 0 } }, additionalProperties: false }
+    MigrationPackageActivationReceipt: { type: object, required: [packageId, state, replayed, controlImport, syncImport], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, state: { enum: [active] }, replayed: { type: boolean }, controlImport: {}, syncImport: {} }, additionalProperties: false }
+    MigrationPackageActivationInput: { type: object, required: [packageId], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' } }, additionalProperties: false }
+    DeleteReceipt: { type: object, required: [id, deleted, recoverable], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, deleted: { type: boolean }, recoverable: { type: boolean } } }
+    AuditEventsListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, cursor: { type: [string, "null"], maxLength: 280 }, limit: { type: [integer, "null"], minimum: 1, maximum: 100, default: 50 } }, additionalProperties: false }
+    AuditEventPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }, nextCursor: { type: [string, "null"], maxLength: 280 } }, additionalProperties: false }
+    AuditEvent: { type: object, required: [eventId, occurredAt, actorId, resource, commandId, correlationId, outcome, metadata], properties: { eventId: { type: string, minLength: 1, maxLength: 256 }, occurredAt: { type: integer, minimum: 0 }, actorId: { $ref: '#/components/schemas/CanonicalId' }, resource: { $ref: '#/components/schemas/AuditResource' }, commandId: { type: string, minLength: 1 }, correlationId: { $ref: '#/components/schemas/CorrelationIdentifier' }, outcome: { enum: [succeeded, failed, denied] }, metadata: { type: object, additionalProperties: { type: string } } }, additionalProperties: false }
+    AuditResource: { type: object, required: [resourceType, resourceId, scope], properties: { resourceType: { type: string, minLength: 1 }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, scope: { $ref: '#/components/schemas/ResourceScope' } }, additionalProperties: false }
+    ResourceScope: { type: object, required: [accountId, organizationId, workspaceId, teamId, memberId, resourceId, profileId], properties: { accountId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, organizationId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, workspaceId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, teamId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, memberId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, resourceId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] }, profileId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] } }, additionalProperties: false }
+    Problem: { type: object, required: [type, title, status, code, correlationId, retryable, fields], properties: { type: { type: string, format: uri }, title: { type: string }, status: { type: integer }, code: { type: string }, detail: { type: string }, instance: { type: string }, correlationId: { $ref: '#/components/schemas/CorrelationIdentifier' }, retryable: { type: boolean }, fields: { type: object, additionalProperties: true } }, additionalProperties: false }

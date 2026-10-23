@@ -1,0 +1,64 @@
+[package]
+name = "buglogin-api"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+
+[dependencies]
+axum = "0.8"
+futures-util = "0.3"
+tower-http = { version = "0.6.11", features = ["cors"] }
+buglogin-browser = { path = "../browser" }
+buglogin-domain = { path = "../domain" }
+buglogin-migration = { path = "../migration" }
+buglogin-network = { path = "../network" }
+buglogin-storage = { path = "../storage" }
+buglogin-sync = { path = "../sync" }
+async-trait = "0.1"
+argon2 = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+getrandom = "0.3"
+hkdf = "0.12"
+rpassword = "7.4"
+scrypt = "0.11"
+subtle = "2.6"
+time = { version = "0.3.54", features = ["formatting"] }
+url = "2"
+tokio = { version = "1.53", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7", features = ["io", "io-util"] }
+jsonschema = { version = "0.56.0", default-features = false }
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "buglogin-bootstrap"
+path = "src/bin/buglogin-bootstrap.rs"
+
+[[bin]]
+name = "buglogin-admin-password-reset"
+path = "src/bin/buglogin-admin-password-reset.rs"
+
+[[bin]]
+name = "buglogin-dev-bootstrap"
+path = "src/bin/buglogin-dev-bootstrap.rs"
+
+[[bin]]
+name = "buglogin-dev-admin-create"
+path = "src/bin/buglogin-dev-admin-create.rs"
+
+[[bin]]
+name = "buglogin-dev-seed-multitenant"
+path = "src/bin/buglogin-dev-seed-multitenant.rs"

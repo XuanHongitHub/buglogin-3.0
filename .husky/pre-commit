@@ -1,0 +1,2 @@
+# Keep the formatter and spelling passes sequential to avoid memory spikes.
+pnpm exec lint-staged --concurrent false

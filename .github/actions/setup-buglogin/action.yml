@@ -1,0 +1,56 @@
+name: Setup BugLogin toolchain
+description: Install the pinned Node.js, pnpm, and Rust toolchains.
+inputs:
+  install-node-dependencies:
+    description: Install JavaScript dependencies from the lockfile.
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Prepare the canonical Windows build volume
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (-not (Test-Path -LiteralPath 'G:\')) {
+          subst G: "$env:RUNNER_TEMP"
+        }
+        if (-not (Test-Path -LiteralPath 'G:\')) {
+          throw 'Could not prepare the canonical G: build volume.'
+        }
+        New-Item -ItemType Directory -Force -Path 'G:\buglogin-target' | Out-Null
+        "CARGO_TARGET_DIR=G:\buglogin-target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    - name: Configure Cargo target directory on Unix runners
+      if: runner.os != 'Windows'
+      shell: bash
+      run: echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target" >> "$GITHUB_ENV"
+    - name: Configure Git checkout behavior
+      shell: bash
+      run: git config --global core.autocrlf false
+    - name: Setup pnpm
+      uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+      with:
+        version: 11.10.0
+        run_install: false
+    - name: Setup Node.js
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version-file: .node-version
+        cache: pnpm
+    - name: Assert Node.js and pnpm pins
+      shell: bash
+      run: |
+        test "$(node --version)" = "v24.18.0"
+        test "$(pnpm --version)" = "11.10.0"
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+      with:
+        toolchain: 1.95.0
+        components: rustfmt,clippy
+    - name: Assert Rust pin
+      shell: bash
+      run: rustc --version | grep -q '^rustc 1\.95\.0 '
+    - name: Install JavaScript dependencies
+      if: inputs.install-node-dependencies == 'true'
+      shell: bash
+      run: pnpm install --frozen-lockfile

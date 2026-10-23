@@ -1,0 +1,29 @@
+{
+  "schema": "buglogin.inspect/1",
+  "source": {
+    "system": "buglogin-legacy",
+    "version": "1.1.84",
+    "instanceId": "sha256:95b38e5f742c55814f6004918c1fcc24e0ee5cd9941d0e680266cbded196d449",
+    "os": "windows",
+    "architecture": "x86_64",
+    "root": "."
+  },
+  "entityCounts": {
+    "profiles": 1
+  },
+  "totalBytes": 181,
+  "runtimeFindings": [],
+  "secretScan": {
+    "filesWithSecretFields": 0,
+    "secretFieldsPresent": 0
+  },
+  "invalidRecords": [
+    {
+      "sourceRef": "profiles/broken/metadata.json",
+      "code": "invalid_json"
+    }
+  ],
+  "danglingReferences": [],
+  "sourceTreeSha256": "cafd411fbf505c909b80a31d676eaff2efe333e0d088b4e96875fb3ae6fc10c9",
+  "cutoverEligibility": "blocked"
+}

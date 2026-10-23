@@ -1,0 +1,15 @@
+.git
+.tmp
+.buglogin-data
+node_modules
+target
+dist
+.next
+.next-web
+.playwright-mcp
+.gstack
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example

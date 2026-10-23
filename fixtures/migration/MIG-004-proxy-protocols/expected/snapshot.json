@@ -1,0 +1,32 @@
+{
+  "snapshotId": "sha256:f06204b6792c5ae862a545f927fb6542c74e27e81cdce2639774644c11174687",
+  "sourceTreeSha256": "f06204b6792c5ae862a545f927fb6542c74e27e81cdce2639774644c11174687",
+  "totalBytes": 742,
+  "files": [
+    {
+      "path": "proxies/http-auth.json",
+      "bytes": 210,
+      "sha256": "redacted"
+    },
+    {
+      "path": "proxies/https-ipv6.json",
+      "bytes": 100,
+      "sha256": "339b86a0fb3da034800becbaa364c145815a549d47a78e55b087427fb27d2d59"
+    },
+    {
+      "path": "proxies/socks4-ipv4.json",
+      "bytes": 112,
+      "sha256": "530baaa04d960e766720f06061bef81dfe7eb83570002d120396d0086b291b9d"
+    },
+    {
+      "path": "proxies/socks5-auth-ipv6.json",
+      "bytes": 194,
+      "sha256": "redacted"
+    },
+    {
+      "path": "version.json",
+      "bytes": 126,
+      "sha256": "05765f8135e2e85a8027b46a4fee025ce8f44bb28b220674707080a182e56491"
+    }
+  ]
+}

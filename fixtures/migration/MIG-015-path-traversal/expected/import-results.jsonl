@@ -1,0 +1,7 @@
+{"status":"blocked","path":"../escape.txt","code":"migration_package_path_invalid","stagingCreated":false}
+{"status":"blocked","path":"profiles/./escape.txt","code":"migration_package_path_invalid","stagingCreated":false}
+{"status":"blocked","path":"profiles//escape.txt","code":"migration_package_path_invalid","stagingCreated":false}
+{"status":"blocked","path":"C:/escape.txt","code":"migration_package_path_invalid","stagingCreated":false}
+{"status":"blocked","path":"..\\escape.txt","code":"migration_package_path_invalid","stagingCreated":false}
+{"status":"blocked","path":"/absolute/escape.txt","code":"migration_package_path_invalid","stagingCreated":false}
+{"status":"blocked","path":"source-directory-link","code":"migration_source_symlink_unsupported","outsideUnchanged":true}

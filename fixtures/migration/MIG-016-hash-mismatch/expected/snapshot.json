@@ -1,0 +1,10 @@
+{
+  "snapshotId":"sha256:64ca64c9eaaac1c6051900f640913535f6ce3716485e5b24599ae9942a9415c4",
+  "sourceTreeSha256":"64ca64c9eaaac1c6051900f640913535f6ce3716485e5b24599ae9942a9415c4",
+  "totalBytes":267,
+  "files":[
+    {"path":"profiles/16000000-0000-4000-8000-000000000016/metadata.json","bytes":97,"sha256":"ac9387ed4a1139b0d53a53e69464e381d76f842c4ce69ac520795edf82f6f54c"},
+    {"path":"profiles/16000000-0000-4000-8000-000000000016/profile/Preferences","bytes":46,"sha256":"495a0ed7c44771ff7e46dc65073d1525cf6a24eb3f271845f4c0edf7acc2e3ee"},
+    {"path":"version.json","bytes":124,"sha256":"13ee637acb584825060030538a8a0ab8ed2dbc1fa45c03f78e2855f093e37c02"}
+  ]
+}

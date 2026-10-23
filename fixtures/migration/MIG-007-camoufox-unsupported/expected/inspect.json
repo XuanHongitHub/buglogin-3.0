@@ -1,0 +1,26 @@
+{
+  "schema": "buglogin.inspect/1",
+  "source": {
+    "system": "buglogin-legacy",
+    "version": "1.1.84",
+    "instanceId": "sha256:30acf142abea758df21d3673cc946a4d18ae381f13e3cbfdfb05499702faff6f",
+    "os": "windows",
+    "architecture": "x86_64",
+    "root": "."
+  },
+  "entityCounts": { "profiles": 1 },
+  "totalBytes": 296,
+  "runtimeFindings": [
+    {
+      "runtime": "camoufox",
+      "class": "unsupported",
+      "reasonCode": "runtime_unsupported",
+      "records": 1
+    }
+  ],
+  "secretScan": { "filesWithSecretFields": 0, "secretFieldsPresent": 0 },
+  "invalidRecords": [],
+  "danglingReferences": [],
+  "sourceTreeSha256": "32793ff73dec5c7ed5b9c6d7ccb72e8fc9100edcede38232676668882a0406f5",
+  "cutoverEligibility": "blocked"
+}

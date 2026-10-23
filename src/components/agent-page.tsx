@@ -1,0 +1,633 @@
+"use client";
+
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import {
+  LuCloud,
+  LuHourglass,
+  LuLock,
+  LuLogIn,
+  LuPause,
+  LuPlay,
+  LuPlug,
+  LuPower,
+} from "react-icons/lu";
+import { AgentActivityFeed } from "@/components/agent-activity";
+import {
+  SetupPanel,
+  useNow,
+  useTimeFormat,
+} from "@/components/agent-console-parts";
+import {
+  AgentConversation,
+  NeedsYouList,
+} from "@/components/agent-conversation";
+import { AgentProfiles } from "@/components/agent-profiles";
+import { AgentRecipes } from "@/components/agent-recipes";
+import { AnimatedSwitch } from "@/components/ui/animated-switch";
+import {
+  AnimatedTabs,
+  AnimatedTabsContent,
+  AnimatedTabsList,
+  AnimatedTabsTrigger,
+} from "@/components/ui/animated-tabs";
+import { Button } from "@/components/ui/button";
+import { CodeSnippet } from "@/components/ui/code-snippet";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { SoftFields } from "@/components/ui/field-variant";
+import { Label } from "@/components/ui/label";
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+} from "@/components/ui/popover";
+import { RippleButton } from "@/components/ui/ripple";
+import { Textarea } from "@/components/ui/textarea";
+import type { AgentConsole } from "@/hooks/use-agent-console";
+import { MAX_TEXT_CHARS, profileRollup, quotaLeft } from "@/lib/agent-console";
+import { canUseRemoteControl } from "@/lib/entitlements";
+import { showSuccessToast } from "@/lib/toast-utils";
+import { cn } from "@/lib/utils";
+import type { BrowserProfile, CloudUser } from "@/types";
+import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
+
+export type AgentTab = "conversation" | "profiles" | "activity" | "recipes";
+
+const TABS: AgentTab[] = ["conversation", "profiles", "activity", "recipes"];
+
+interface AgentPageProps {
+  isOpen: boolean;
+  onClose: () => void;
+  subPage?: boolean;
+  initialTab?: AgentTab;
+  /** Reports manual tab changes, so Mod+J toggles from where the user is. */
+  onTabChange?: (tab: AgentTab) => void;
+  profiles: BrowserProfile[];
+  cloudUser: CloudUser | null;
+  isCloudAvailable: boolean;
+  agentConsole: AgentConsole;
+  /** Opens Integrations on its remote tab. */
+  onConnectAgent: () => void;
+  onOpenAccount: () => void;
+}
+
+const desktopApi = createTauriDesktopApi();
+
+function useRemoteStatus(isOpen: boolean) {
+  const [mcpEnabled, setMcpEnabled] = useState<boolean | null>(null);
+  const [known, setKnown] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    void desktopApi
+      .getIntegrationStatus()
+      .then((status) => {
+        if (active) setMcpEnabled(status.mcpEnabled);
+      })
+      .catch((error: unknown) => {
+        console.warn("Failed to get BugLogin MCP status:", error);
+      })
+      .finally(() => {
+        if (active) setKnown(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
+
+  return { mcpEnabled, known };
+}
+
+function PauseControl({ agentConsole }: { agentConsole: AgentConsole }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const switchId = useId();
+  const noteId = useId();
+  const paused = agentConsole.paused !== null;
+
+  const pause = async () => {
+    setBusy(true);
+    const trimmed = note.trim();
+    const ok = await agentConsole.setPaused(true, trimmed || null);
+    setBusy(false);
+    if (ok) {
+      setOpen(false);
+      setNote("");
+      showSuccessToast(t("agent.pause.pausedToast"));
+    }
+  };
+
+  const resume = async () => {
+    setBusy(true);
+    const ok = await agentConsole.setPaused(false, null);
+    setBusy(false);
+    if (ok) showSuccessToast(t("agent.pause.resumedToast"));
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverAnchor asChild>
+        <div className="flex items-center gap-2">
+          <AnimatedSwitch
+            id={switchId}
+            checked={paused || open}
+            disabled={busy}
+            data-testid="agent-pause-switch"
+            onCheckedChange={(checked) => {
+              if (checked) setOpen(true);
+              else if (paused) void resume();
+              else setOpen(false);
+            }}
+          />
+          <Label htmlFor={switchId} className="text-xs whitespace-nowrap">
+            {t("agent.pause.label")}
+          </Label>
+        </div>
+      </PopoverAnchor>
+      <PopoverContent align="end" className="w-72 p-3">
+        <form
+          className="flex flex-col gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void pause();
+          }}
+        >
+          <Label
+            htmlFor={noteId}
+            className="text-xs font-medium text-muted-foreground"
+          >
+            {t("agent.pause.noteLabel")}
+          </Label>
+          <Textarea
+            id={noteId}
+            variant="soft"
+            rows={3}
+            value={note}
+            maxLength={MAX_TEXT_CHARS}
+            placeholder={t("agent.pause.notePlaceholder")}
+            className="min-h-16 resize-none text-sm"
+            data-testid="agent-pause-note"
+            onChange={(event) => {
+              setNote(event.target.value);
+            }}
+          />
+          <p className="text-[11px] text-muted-foreground">
+            {t("agent.pause.explain")}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="subtle"
+              size="sm"
+              className="h-8 rounded-lg text-xs"
+              onClick={() => {
+                setOpen(false);
+              }}
+            >
+              {t("common.buttons.cancel")}
+            </Button>
+            <Button
+              type="submit"
+              size="sm"
+              className="h-8 rounded-lg text-xs"
+              disabled={busy}
+              aria-busy={busy}
+              data-testid="agent-pause-confirm"
+            >
+              {t("agent.pause.confirm")}
+            </Button>
+          </div>
+        </form>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function PausedBanner({ agentConsole }: { agentConsole: AgentConsole }) {
+  const { t } = useTranslation();
+  const { shortClock } = useTimeFormat();
+  const [busy, setBusy] = useState(false);
+  const paused = agentConsole.paused;
+  if (!paused) return null;
+  return (
+    <div
+      role="status"
+      data-testid="agent-paused-banner"
+      className="flex shrink-0 flex-wrap items-center gap-3 rounded-xl bg-warning/10 px-3 py-2 text-sm text-warning-text"
+    >
+      <LuPause className="size-4 shrink-0" aria-hidden="true" />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="font-medium">
+          {t("agent.pause.banner", { time: shortClock(paused.since) })}
+        </span>
+        {paused.note && (
+          <span className="truncate text-xs">
+            {t("agent.pause.bannerNote", { note: paused.note })}
+          </span>
+        )}
+      </div>
+      <Button
+        type="button"
+        size="sm"
+        variant="soft"
+        className="h-8 gap-1.5 rounded-lg text-xs"
+        disabled={busy}
+        aria-busy={busy}
+        data-testid="agent-resume"
+        onClick={async () => {
+          setBusy(true);
+          const ok = await agentConsole.setPaused(false, null);
+          setBusy(false);
+          if (ok) showSuccessToast(t("agent.pause.resumedToast"));
+        }}
+      >
+        <LuPlay className="size-3.5" aria-hidden="true" />
+        {t("agent.pause.resume")}
+      </Button>
+    </div>
+  );
+}
+
+export function AgentPage({
+  isOpen,
+  onClose,
+  subPage,
+  initialTab = "conversation",
+  onTabChange,
+  profiles,
+  cloudUser,
+  isCloudAvailable,
+  agentConsole,
+  onConnectAgent,
+  onOpenAccount,
+}: AgentPageProps) {
+  const { t } = useTranslation();
+  const now = useNow();
+  const { mcpEnabled, known: remoteKnown } = useRemoteStatus(isOpen);
+
+  const [activeTab, setActiveTab] = useState<AgentTab>(initialTab);
+  const [adoptedInitialTab, setAdoptedInitialTab] = useState(initialTab);
+  if (adoptedInitialTab !== initialTab) {
+    setAdoptedInitialTab(initialTab);
+    setActiveTab(initialTab);
+  }
+  const changeTab = useCallback(
+    (tab: AgentTab) => {
+      setActiveTab(tab);
+      onTabChange?.(tab);
+    },
+    [onTabChange],
+  );
+
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null,
+  );
+  const [composerProfileId, setComposerProfileId] = useState<string | null>(
+    null,
+  );
+  const [focusComposer, setFocusComposer] = useState(false);
+  const onComposerFocused = useCallback(() => {
+    setFocusComposer(false);
+  }, []);
+
+  const signedIn = cloudUser !== null;
+  const entitled = canUseRemoteControl(cloudUser);
+  const blocker = !isCloudAvailable
+    ? "cloudUnavailable"
+    : !signedIn
+      ? "signedOut"
+      : !entitled
+        ? "plan"
+        : null;
+  const remoteOff = remoteKnown && mcpEnabled === false;
+  const hasSessions = agentConsole.sessions.length > 0;
+  const quota = quotaLeft(agentConsole.quota);
+
+  const effectiveSessionId =
+    selectedSessionId !== null &&
+    agentConsole.sessions.some(
+      (session) => session.session_id === selectedSessionId,
+    )
+      ? selectedSessionId
+      : null;
+
+  const profileNames = useMemo(
+    () => new Map(profiles.map((profile) => [profile.id, profile.name])),
+    [profiles],
+  );
+
+  const preferredProfileIds = useMemo(
+    () =>
+      profileRollup(agentConsole.activity, agentConsole.holds, now).map(
+        (row) => row.profile_id,
+      ),
+    [agentConsole.activity, agentConsole.holds, now],
+  );
+
+  const openComposerFor = useCallback(
+    (profileId: string, sessionId: string | null) => {
+      setComposerProfileId(profileId);
+      setSelectedSessionId(sessionId);
+      setFocusComposer(true);
+      changeTab("conversation");
+    },
+    [changeTab],
+  );
+
+  const blockerPanel =
+    blocker === "cloudUnavailable" ? (
+      <SetupPanel
+        testId="agent-setup-cloud-unavailable"
+        icon={<LuCloud />}
+        title={t("agent.setup.remoteUnavailableTitle")}
+        body={t("sync.cloud.serviceUnavailable")}
+      />
+    ) : blocker === "signedOut" ? (
+      <SetupPanel
+        testId="agent-setup-signed-out"
+        icon={<LuLogIn />}
+        title={t("agent.setup.signedOutTitle")}
+        body={t("agent.setup.signedOutBody")}
+      >
+        <RippleButton
+          size="sm"
+          className="h-8 rounded-lg text-xs"
+          data-testid="agent-setup-sign-in"
+          onClick={onOpenAccount}
+        >
+          {t("agent.setup.signedOutAction")}
+        </RippleButton>
+      </SetupPanel>
+    ) : blocker === "plan" ? (
+      <SetupPanel
+        testId="agent-setup-plan"
+        icon={<LuLock />}
+        title={t("agent.setup.planTitle")}
+        body={t("agent.setup.planBody")}
+      >
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="soft"
+            className="h-8 rounded-lg text-xs"
+            data-testid="agent-setup-plan-account"
+            onClick={onOpenAccount}
+          >
+            {t("agent.setup.planAction")}
+          </Button>
+        </div>
+      </SetupPanel>
+    ) : null;
+
+  const remoteOffPanel = (
+    <SetupPanel
+      testId="agent-setup-remote-off"
+      icon={<LuPower />}
+      title={t("agent.setup.remoteOffTitle")}
+      body={t("agent.setup.remoteOffBody")}
+    >
+      <RippleButton
+        size="sm"
+        className="h-8 rounded-lg text-xs"
+        data-testid="agent-setup-turn-on"
+        onClick={onConnectAgent}
+      >
+        {t("agent.setup.remoteOffAction")}
+      </RippleButton>
+    </SetupPanel>
+  );
+
+  const waitingPanel = (
+    <SetupPanel
+      testId="agent-setup-waiting"
+      icon={<LuHourglass />}
+      title={t("agent.setup.waitingTitle")}
+      body={t("agent.setup.waitingBody")}
+    >
+      <div className="flex w-full max-w-xl flex-col gap-2 text-left">
+        <span className="text-xs font-medium text-muted-foreground">
+          {t("agent.setup.starterLabel")}
+        </span>
+        <CodeSnippet
+          multiline
+          wrap
+          data-testid="agent-starter-text"
+          code={t("agent.setup.starter")}
+          copyLabel={t("agent.setup.starterLabel")}
+          successMessage={t("agent.setup.starterCopied")}
+          className="font-sans text-xs leading-relaxed"
+        />
+        <Button
+          size="sm"
+          variant="soft"
+          className="mt-1 h-8 gap-1.5 self-center rounded-lg text-xs"
+          data-testid="agent-setup-connect"
+          onClick={onConnectAgent}
+        >
+          <LuPlug className="size-3.5" aria-hidden="true" />
+          {t("agent.header.connect")}
+        </Button>
+      </div>
+    </SetupPanel>
+  );
+
+  const conversationBody = () => {
+    if (blockerPanel) return blockerPanel;
+    const ready = agentConsole.loaded && remoteKnown;
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {agentConsole.openRequests.length > 0 && (
+          <NeedsYouList
+            agentConsole={agentConsole}
+            profileNames={profileNames}
+            now={now}
+          />
+        )}
+        {!ready && !hasSessions ? null : !hasSessions ? (
+          remoteOff ? (
+            remoteOffPanel
+          ) : (
+            waitingPanel
+          )
+        ) : (
+          <>
+            {remoteOff && (
+              <div
+                data-testid="agent-setup-remote-off"
+                className="flex shrink-0 flex-wrap items-center gap-3 rounded-xl bg-foreground/4 px-3 py-2 text-xs text-muted-foreground"
+              >
+                <LuPower className="size-3.5 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 flex-1">
+                  {t("agent.setup.remoteOffInline")}
+                </span>
+                <Button
+                  size="sm"
+                  variant="soft"
+                  className="h-8 rounded-lg text-xs"
+                  data-testid="agent-setup-turn-on"
+                  onClick={onConnectAgent}
+                >
+                  {t("agent.setup.remoteOffAction")}
+                </Button>
+              </div>
+            )}
+            <AgentConversation
+              agentConsole={agentConsole}
+              profiles={profiles}
+              profileNames={profileNames}
+              selectedSessionId={effectiveSessionId}
+              onSelectSession={setSelectedSessionId}
+              composerProfileId={composerProfileId}
+              onComposerProfileChange={setComposerProfileId}
+              focusComposer={focusComposer}
+              onComposerFocused={onComposerFocused}
+              preferredProfileIds={preferredProfileIds}
+              now={now}
+            />
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const title = t("rail.agent");
+  const description = t("agent.description");
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose} subPage={subPage}>
+      <DialogContent className="flex max-h-[85vh] max-w-[min(80rem,calc(100%-4rem))] flex-col">
+        <SoftFields>
+          <div
+            data-testid="agent-page"
+            className="@container flex min-h-0 w-full flex-1 flex-col gap-3"
+          >
+            <div className="flex shrink-0 flex-wrap items-start justify-between gap-3">
+              <div className="flex min-w-0 flex-col gap-1">
+                {subPage ? (
+                  <>
+                    <h2 className="text-base leading-none font-semibold">
+                      {title}
+                    </h2>
+                    <p className="text-xs text-muted-foreground">
+                      {description}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <DialogTitle>{title}</DialogTitle>
+                    <DialogDescription>{description}</DialogDescription>
+                  </>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <PauseControl agentConsole={agentConsole} />
+                {blocker === null && (
+                  <>
+                    {quota && (
+                      <span
+                        data-testid="agent-quota"
+                        className={cn(
+                          "text-xs tabular-nums",
+                          quota.left === 0
+                            ? "text-warning-text"
+                            : "text-muted-foreground",
+                        )}
+                      >
+                        {t("agent.header.quota", {
+                          left: quota.left,
+                          limit: quota.limit,
+                        })}
+                      </span>
+                    )}
+                    <RippleButton
+                      size="sm"
+                      className="flex h-8 items-center gap-1.5 rounded-lg text-xs"
+                      data-testid="agent-connect"
+                      onClick={onConnectAgent}
+                    >
+                      <LuPlug className="size-3.5" aria-hidden="true" />
+                      {t("agent.header.connect")}
+                    </RippleButton>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <PausedBanner agentConsole={agentConsole} />
+
+            <AnimatedTabs
+              value={activeTab}
+              onValueChange={(value) => {
+                changeTab(value as AgentTab);
+              }}
+              className="flex min-h-0 flex-1 flex-col"
+            >
+              <AnimatedTabsList className="shrink-0">
+                {TABS.map((tab) => (
+                  <AnimatedTabsTrigger
+                    key={tab}
+                    value={tab}
+                    data-testid={`agent-tab-${tab}`}
+                  >
+                    {t(`agent.tabs.${tab}`)}
+                    {tab === "conversation" &&
+                      agentConsole.openRequests.length > 0 && (
+                        <span className="rounded-full bg-warning/15 px-1.5 text-xs tabular-nums text-warning-text">
+                          {agentConsole.openRequests.length}
+                        </span>
+                      )}
+                  </AnimatedTabsTrigger>
+                ))}
+              </AnimatedTabsList>
+
+              <AnimatedTabsContent
+                value="conversation"
+                className="mt-3 min-h-0 flex-1 flex-col data-[state=active]:flex"
+              >
+                {conversationBody()}
+              </AnimatedTabsContent>
+
+              <AnimatedTabsContent
+                value="profiles"
+                className="mt-3 min-h-0 flex-1 flex-col data-[state=active]:flex"
+              >
+                <AgentProfiles
+                  agentConsole={agentConsole}
+                  profileNames={profileNames}
+                  now={now}
+                  onNote={openComposerFor}
+                />
+              </AnimatedTabsContent>
+
+              <AnimatedTabsContent
+                value="activity"
+                className="mt-3 min-h-0 flex-1 flex-col data-[state=active]:flex"
+              >
+                <AgentActivityFeed
+                  agentConsole={agentConsole}
+                  profileNames={profileNames}
+                  now={now}
+                />
+              </AnimatedTabsContent>
+
+              <AnimatedTabsContent
+                value="recipes"
+                className="mt-3 min-h-0 flex-1 flex-col data-[state=active]:flex"
+              >
+                <AgentRecipes profiles={profiles} />
+              </AnimatedTabsContent>
+            </AnimatedTabs>
+          </div>
+        </SoftFields>
+      </DialogContent>
+    </Dialog>
+  );
+}

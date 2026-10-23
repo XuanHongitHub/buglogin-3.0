@@ -1,0 +1,4 @@
+{"status":"first","createdProfiles":1,"revision":1}
+{"status":"second","createdProfiles":0,"reusedProfiles":1,"revision":1}
+{"status":"secondRollback","quarantinedProfiles":0,"profileRetained":true}
+{"status":"firstRollback","quarantinedProfiles":1,"profileRetained":false}

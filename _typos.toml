@@ -1,0 +1,28 @@
+[files]
+extend-exclude = [
+    "src-tauri/src/territory_info.xml",
+    "src/i18n/locales/*.json",
+    # Auto-generated from commit subjects by release.yml; typos here originate
+    # in commit messages, which are immutable, so don't spell-check it.
+    "CHANGELOG.md",
+]
+
+[default.extend-words]
+DBE = "DBE"
+Nam = "Nam"
+ba = "ba"
+nd = "nd"
+FPT = "FPT"
+PNG = "PNG"
+PN = "PN"
+flate = "flate"
+writeable = "writeable"
+ine = "ine"
+tham = "tham"
+Tham = "Tham"
+thay = "thay"
+Thay = "Thay"
+thi = "thi"
+Thi = "Thi"
+vai = "vai"
+Vai = "Vai"

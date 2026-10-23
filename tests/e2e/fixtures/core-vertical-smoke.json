@@ -1,0 +1,67 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureSet": "synthetic-core-vertical-v1",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "source": "synthetic",
+  "account": {
+    "id": "00000000-0000-5000-8000-000000000601",
+    "email": "vertical-owner@example.test",
+    "role": "owner"
+  },
+  "workspace": {
+    "id": "00000000-0000-5000-8000-000000000602",
+    "ownerId": "00000000-0000-5000-8000-000000000601",
+    "slug": "vertical-smoke"
+  },
+  "proxy": {
+    "id": "00000000-0000-5000-8000-000000000603",
+    "input": "http://synthetic-user:synthetic-pass@proxy-vertical.example.test:8080",
+    "normalized": {
+      "protocol": "http",
+      "host": "proxy-vertical.example.test",
+      "port": 8080,
+      "usernameSecretRef": "secret://synthetic/proxy/vertical/username",
+      "passwordSecretRef": "secret://synthetic/proxy/vertical/password"
+    }
+  },
+  "profile": {
+    "id": "00000000-0000-5000-8000-000000000604",
+    "workspaceId": "00000000-0000-5000-8000-000000000602",
+    "ownerId": "00000000-0000-5000-8000-000000000601",
+    "proxyId": "00000000-0000-5000-8000-000000000603",
+    "name": "Vertical Synthetic Profile",
+    "runtime": "wayfern",
+    "state": "ready"
+  },
+  "migration": {
+    "id": "00000000-0000-5000-8000-000000000605",
+    "sourceVersion": "buglogin-1.1.84-sanitized",
+    "sourcePath": "synthetic/migration/MIG-002-wayfern-complete",
+    "classification": "direct",
+    "dryRunApproved": true,
+    "sourceHashBefore": "ce0b65e0511c198aad0fd37ffb7147c245d9824020e3c8c71b0194e36e4df1f2",
+    "sourceHashAfter": "ce0b65e0511c198aad0fd37ffb7147c245d9824020e3c8c71b0194e36e4df1f2",
+    "firstRun": { "created": 1, "updated": 0, "failed": 0 },
+    "repeatRun": { "created": 0, "updated": 0, "failed": 0 }
+  },
+  "mcp": {
+    "tool": "profile_create",
+    "commandId": "profile.create",
+    "capability": "profile.create",
+    "workspaceId": "00000000-0000-5000-8000-000000000602",
+    "actorId": "00000000-0000-5000-8000-000000000601",
+    "resourceId": "00000000-0000-5000-8000-000000000604",
+    "result": "accepted"
+  },
+  "audit": {
+    "eventId": "00000000-0000-5000-8000-000000000606",
+    "commandId": "profile.create",
+    "adapter": "mcp",
+    "actorId": "00000000-0000-5000-8000-000000000601",
+    "workspaceId": "00000000-0000-5000-8000-000000000602",
+    "resourceId": "00000000-0000-5000-8000-000000000604",
+    "result": "accepted",
+    "occurredAt": "2026-01-01T00:00:01.000Z",
+    "redactedFields": ["authorization", "cookies", "proxy.password"]
+  }
+}

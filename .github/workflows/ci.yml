@@ -1,0 +1,144 @@
+name: BugLogin CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buglogin-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    uses: ./.github/workflows/contracts.yml
+    permissions:
+      contents: read
+
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+        with:
+          install-node-dependencies: false
+      - name: Install native dependencies for the Tauri workspace
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - name: Run scoped Rust checks
+        shell: bash
+        run: bash scripts/ci/check-rust.sh
+
+  javascript:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+      - name: Run scoped JavaScript checks
+        run: node scripts/ci/check-js.mjs
+
+  fixtures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+      - name: Verify sanitized deterministic fixtures
+        run: node scripts/ci/check-fixtures.mjs
+
+  api-container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Build the supported Rust API image
+        run: docker build --pull -f Dockerfile.api -t buglogin-api:ci .
+      - name: Smoke-check v1 API and production fail-closed startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_id="$(docker run --detach --rm \
+            --publish 127.0.0.1:12343:12343 \
+            --env BUGLOGIN_ENV=local \
+            --env BUGLOGIN_DATA_ROOT=/tmp/buglogin-api-ci \
+            --env BUGLOGIN_API_BIND=0.0.0.0:12343 \
+            buglogin-api:ci)"
+          cleanup() { docker rm --force "$container_id" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:12343/v1/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs "$container_id"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          curl --fail --silent http://127.0.0.1:12343/v1/openapi.yaml \
+            --output /tmp/buglogin-api-openapi.yaml
+          cmp crates/api/openapi/openapi-v1.yaml /tmp/buglogin-api-openapi.yaml
+
+          set +e
+          timeout 10s docker run --rm \
+            --env BUGLOGIN_ENV=production \
+            --env BUGLOGIN_API_BIND=0.0.0.0:12343 \
+            buglogin-api:ci >/tmp/buglogin-api-production-startup.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; then
+            cat /tmp/buglogin-api-production-startup.log
+            echo "Production image must fail before serving without PostgreSQL configuration."
+            exit 1
+          fi
+          grep -q "BUGLOGIN_POSTGRES_URL is required in production" \
+            /tmp/buglogin-api-production-startup.log
+
+  platforms:
+    uses: ./.github/workflows/platform-workspace.yml
+    permissions:
+      contents: read
+
+  status:
+    if: always()
+    needs: [contracts, rust, javascript, fixtures, api-container, platforms]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all CI contracts
+        env:
+          CONTRACTS: ${{ needs.contracts.result }}
+          RUST: ${{ needs.rust.result }}
+          JAVASCRIPT: ${{ needs.javascript.result }}
+          FIXTURES: ${{ needs.fixtures.result }}
+          API_CONTAINER: ${{ needs.api-container.result }}
+          PLATFORMS: ${{ needs.platforms.result }}
+        run: |
+          for result in "$CONTRACTS" "$RUST" "$JAVASCRIPT" "$FIXTURES" "$API_CONTAINER" "$PLATFORMS"; do
+            if [ "$result" != success ]; then
+              echo "CI contract failed: $result"
+              exit 1
+            fi
+          done
+
+

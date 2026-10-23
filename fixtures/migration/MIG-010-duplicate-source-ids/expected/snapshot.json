@@ -1,0 +1,10 @@
+{
+  "snapshotId":"sha256:b758ca32bdd61bf00cf3572b383de758ce26663901f6442d9f033c6ee8dc5d7f",
+  "sourceTreeSha256":"b758ca32bdd61bf00cf3572b383de758ce26663901f6442d9f033c6ee8dc5d7f",
+  "totalBytes":345,
+  "files":[
+    {"path":"proxies/duplicate-a.json","bytes":106,"sha256":"ac906c808cf34c544cdb7ddbb0c8e3c92f2f65533148df00312afa2eeaec61ea"},
+    {"path":"proxies/duplicate-b.json","bytes":108,"sha256":"cdbb7656e049ca8d4968e0c0b0a7d48be546c6c7b7e3784f7972d77ffdc39e6f"},
+    {"path":"version.json","bytes":131,"sha256":"b0e46a8d96df29915d19bcd3ed17fb3d56fa0a170d7376c121ac9603765ebbbe"}
+  ]
+}

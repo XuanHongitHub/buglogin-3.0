@@ -1,0 +1,58 @@
+name: BugLogin Platform Workspace
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  platform:
+    name: ${{ matrix.platform }} rebuilt workspace
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform_test: platform_windows
+          - platform: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            platform_test: platform_macos
+          - platform: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform_test: platform_macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+      - name: Install pinned native target
+        shell: bash
+        run: rustup target add "$TARGET" --toolchain 1.95.0
+      - name: Test rebuilt Rust workspace
+        shell: bash
+        run: node scripts/tauri-cargo.mjs test --workspace --all-targets --target "$TARGET"
+      - name: Test native browser platform adapter
+        shell: bash
+        run: node scripts/tauri-cargo.mjs test -p buglogin-browser --test "${{ matrix.platform_test }}" --target "$TARGET"
+      - name: Check desktop Rust application
+        shell: bash
+        run: node scripts/tauri-cargo.mjs check -p buglogin-desktop-app --all-targets --target "$TARGET"
+      - name: Test and typecheck desktop presentation
+        shell: bash
+        run: |
+          pnpm --filter @buglogin/desktop test
+          pnpm --filter @buglogin/desktop typecheck
+      - name: Build desktop presentation
+        shell: bash
+        run: pnpm --filter @buglogin/desktop build
