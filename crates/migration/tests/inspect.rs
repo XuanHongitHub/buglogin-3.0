@@ -214,7 +214,7 @@ fn neutral_package_is_deterministic_and_contains_no_secret_values() {
 }
 
 #[test]
-fn legacy_browser_field_reports_bugmini_adapter_pending_artifact_evidence() {
+fn legacy_browser_field_reports_bugmini_as_an_unsupported_runtime() {
     let source = TestDirectory::new();
     source.write(
         "version.json",
@@ -230,8 +230,8 @@ fn legacy_browser_field_reports_bugmini_adapter_pending_artifact_evidence() {
     assert_eq!(report.entity_counts["profiles"], 1);
     assert!(report.runtime_findings.iter().any(|finding| {
         finding.runtime == "bugmini"
-            && finding.class == MigrationClass::Partial
-            && finding.reason_code == "runtime_adapter_available_artifact_pending"
+            && finding.class == MigrationClass::Unsupported
+            && finding.reason_code == "runtime_adapter_not_approved"
             && finding.records == 1
     }));
     assert_eq!(report.cutover_eligibility, CutoverEligibility::Blocked);

@@ -52,3 +52,23 @@ fn vpn_and_extension_entities_match_domain_v2_wire_format() {
         "ext_1"
     );
 }
+
+#[test]
+fn new_profiles_can_only_use_the_wayfern_runtime() {
+    let wayfern: buglogin_domain::entities::ProfileCreateInput =
+        serde_json::from_value(serde_json::json!({"name": "New", "runtime": "wayfern"})).unwrap();
+    assert_eq!(wayfern.runtime, buglogin_domain::entities::Runtime::Wayfern);
+
+    for legacy in ["bugmini", "bugox", "bugium", "preserved"] {
+        assert!(
+            serde_json::from_value::<buglogin_domain::entities::ProfileCreateInput>(
+                serde_json::json!({"name": "New", "runtime": legacy})
+            )
+            .is_err(),
+            "{legacy} must not be selectable for new profiles"
+        );
+    }
+    let legacy_record: buglogin_domain::entities::Runtime =
+        serde_json::from_value(serde_json::json!("bugmini")).unwrap();
+    assert_eq!(legacy_record, buglogin_domain::entities::Runtime::Bugmini);
+}

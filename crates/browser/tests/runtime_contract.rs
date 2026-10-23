@@ -1,7 +1,6 @@
 use std::{fs, path::PathBuf};
 
 use buglogin_browser::runtime::{
-    bugmini::BugminiAdapter,
     contract::{RuntimeAdapter, RuntimeBinary, RuntimeCapability},
     wayfern::WayfernAdapter,
 };
@@ -37,46 +36,12 @@ fn wayfern_validates_checksum_and_builds_launch_specification() {
     assert_eq!(adapter.runtime(), Runtime::Wayfern);
     assert!(adapter.capabilities().contains(&RuntimeCapability::Proxy));
     assert_eq!(spec.executable, binary_path);
-    assert_eq!(spec.args[0], "--user-data-dir");
-    assert_eq!(spec.args[2], "--headless");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn bugmini_uses_verified_chromium_launch_contract_without_claiming_fingerprint() {
-    let root = temp_root("bugmini");
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let binary_path = root.join("chrome.exe");
-    let bytes = b"bugmini-test-binary";
-    fs::write(&binary_path, bytes).unwrap();
-    let adapter = BugminiAdapter;
-    let binary = adapter
-        .validate_binary(&RuntimeBinary {
-            path: binary_path.clone(),
-            version: "146.0.7680.177.4".into(),
-            expected_checksum: checksum(bytes),
-        })
-        .unwrap();
-    let profile_path = adapter
-        .profile_path(&root, &ProfileId::from_str("profile_1").unwrap())
-        .unwrap();
-    let specification = adapter
-        .launch_specification(
-            &binary,
-            &profile_path,
-            &["--remote-debugging-port=0".into()],
-        )
-        .unwrap();
-
-    assert_eq!(adapter.runtime(), Runtime::Bugmini);
-    assert_eq!(specification.runtime, Runtime::Bugmini);
-    assert_eq!(specification.executable, binary_path);
-    assert!(adapter.capabilities().contains(&RuntimeCapability::Cookies));
-    assert!(
-        !adapter
-            .capabilities()
-            .contains(&RuntimeCapability::Fingerprint)
+    assert_eq!(
+        spec.args,
+        vec![
+            format!("--user-data-dir={}", profile_path.to_string_lossy()),
+            "--headless".to_owned(),
+        ]
     );
     let _ = fs::remove_dir_all(root);
 }

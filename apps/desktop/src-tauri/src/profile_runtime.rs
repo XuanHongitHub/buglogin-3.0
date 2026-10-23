@@ -573,6 +573,28 @@ impl<C: ProcessController> ProfileRuntime<C> {
             }
         };
         let mut proxy_bridge = request.proxy_bridge;
+        if request.specification.runtime == Runtime::Wayfern {
+            let no_live_process = matches!(
+                self.lifecycle.reconcile_profile(&request.profile_path),
+                Ok(buglogin_browser::lifecycle::LifecycleState::Ready
+                    | buglogin_browser::lifecycle::LifecycleState::Stopped)
+            );
+            let prepared = if no_live_process {
+                clear_stale_chromium_lock_links(&request.profile_path)
+            } else {
+                Ok(())
+            }
+            .and_then(|()| suppress_wayfern_top_sites(&request.profile_path));
+            if let Err(error) = prepared {
+                if let Some(bridge) = proxy_bridge.take() {
+                    let _ = bridge.stop().await;
+                }
+                if let Some(lease) = lease.as_ref() {
+                    let _ = release(self.coordination.clone(), lease).await;
+                }
+                return Err(error);
+            }
+        }
         let identity = match self
             .lifecycle
             .launch(&request.profile_path, &request.specification)
@@ -791,17 +813,30 @@ impl<C: ProcessController> ProfileRuntime<C> {
                     result => break result,
                 }
             };
+            let process_stopped = self
+                .running
+                .get(&profile_id)
+                .is_some_and(|running| running.process_stopped);
             match renewed {
                 Ok(renewed) if renewed.fencing_token == lease.fencing_token => {
                     if let Some(running) = self.running.get_mut(&profile_id) {
                         running.lease = Some(renewed);
                     }
                 }
+                // A network blip, sleep or API restart: the lease is still ours
+                // until it expires, so keep the browser open and retry next tick.
+                Err(error) if !lease_ownership_lost(&error) && lease_still_valid(&lease) => {}
+                // Another device now owns the profile: this stopped session can
+                // never upload, so stop holding it (the local copy stays on disk).
+                Err(error) if process_stopped && lease_ownership_lost(&error) => {
+                    self.running.remove(&profile_id);
+                    self.unexpectedly_stopped.remove(&profile_id);
+                }
+                // Already stopped with a sync pending; the reconcile loop retries it.
+                _ if process_stopped => {}
                 _ => {
                     let _ = self.stop_for_sync(&profile_id).await;
-                    if let Some(running) = self.running.get_mut(&profile_id) {
-                        running.sync_pending = false;
-                    }
+                    self.unexpectedly_stopped.insert(profile_id.clone());
                 }
             }
         }
@@ -822,6 +857,17 @@ impl<C: ProcessController> ProfileRuntime<C> {
         }
         Ok(())
     }
+}
+
+fn lease_ownership_lost(error: &Problem) -> bool {
+    matches!(
+        error.code.as_str(),
+        "lease_not_owner" | "lease_not_found" | "lease_held" | "lease_tenant_mismatch"
+    )
+}
+
+fn lease_still_valid(lease: &LeaseGrant) -> bool {
+    unix_time_millis("lease_renewal").is_ok_and(|now_ms| now_ms < lease.expires_at_ms)
 }
 
 fn validate_preacquired(
@@ -931,6 +977,92 @@ fn authority(lease: &LeaseGrant) -> WriteAuthority {
     }
 }
 
+/// A browser stopped by signal leaves Chromium's lock links behind; a stale
+/// SingletonLock naming an old hostname makes the next start refuse the
+/// profile. Only called when the lifecycle reports no live process.
+fn clear_stale_chromium_lock_links(profile_path: &Path) -> Result<(), Problem> {
+    for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+        let path = profile_path.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::remove_file(&path).map_err(|_| unavailable())?;
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn suppress_wayfern_top_sites(profile_path: &Path) -> Result<(), Problem> {
+    static FILE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let file_id = FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let default_path = profile_path.join("Default");
+    fs::create_dir_all(&default_path).map_err(|_| unavailable())?;
+    let preferences_path = default_path.join("Preferences");
+    let mut preferences = match fs::symlink_metadata(&preferences_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(unavailable());
+        }
+        Ok(metadata) if metadata.len() > 32 * 1024 * 1024 => return Err(unavailable()),
+        Ok(_) => {
+            let bytes = fs::read(&preferences_path).map_err(|_| unavailable())?;
+            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| unavailable())?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+        Err(_) => return Err(unavailable()),
+    };
+    let root = preferences.as_object_mut().ok_or_else(unavailable)?;
+    let ntp = root
+        .entry("ntp")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(unavailable)?;
+    // Chromium persists this preference with the historical `shortcust` typo.
+    ntp.insert(
+        "shortcust_visible".to_owned(),
+        serde_json::Value::Bool(false),
+    );
+    let bytes = serde_json::to_vec(&preferences).map_err(|_| unavailable())?;
+    let temporary_path = preferences_path.with_file_name(format!(
+        ".Preferences.buglogin-{}-{}.tmp",
+        std::process::id(),
+        file_id
+    ));
+    let mut temporary = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .map_err(|_| unavailable())?;
+    if temporary.write_all(&bytes).is_err() || temporary.sync_all().is_err() {
+        drop(temporary);
+        let _ = fs::remove_file(&temporary_path);
+        return Err(unavailable());
+    }
+    drop(temporary);
+    let backup_path = preferences_path.with_file_name(format!(
+        ".Preferences.buglogin-{}-{}.previous",
+        std::process::id(),
+        file_id
+    ));
+    let had_preferences = preferences_path.exists();
+    if had_preferences && fs::rename(&preferences_path, &backup_path).is_err() {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(unavailable());
+    }
+    if let Err(error) = fs::rename(&temporary_path, &preferences_path) {
+        if had_preferences {
+            let _ = fs::rename(&backup_path, &preferences_path);
+        }
+        let _ = fs::remove_file(&temporary_path);
+        return Err(unavailable().with_detail(error.to_string()));
+    }
+    if had_preferences {
+        fs::remove_file(backup_path).map_err(|_| unavailable())?;
+    }
+    Ok(())
+}
 fn unavailable() -> Problem {
     Problem::new(
         "profile_runtime_unavailable",
@@ -1051,6 +1183,8 @@ mod tests {
         renewals: Arc<AtomicUsize>,
         fail_acquire: AtomicBool,
         fail_renew: AtomicBool,
+        renew_error_code: Mutex<Option<&'static str>>,
+        lease_expires_at_ms: std::sync::atomic::AtomicU64,
         release_failures: AtomicUsize,
         manifests: Mutex<BTreeMap<ResourceId, SyncManifest>>,
     }
@@ -1062,6 +1196,8 @@ mod tests {
                 renewals: Arc::new(AtomicUsize::new(0)),
                 fail_acquire: AtomicBool::new(false),
                 fail_renew: AtomicBool::new(false),
+                renew_error_code: Mutex::new(None),
+                lease_expires_at_ms: std::sync::atomic::AtomicU64::new(60_001),
                 release_failures: AtomicUsize::new(0),
                 manifests: Mutex::new(BTreeMap::new()),
             }
@@ -1092,7 +1228,7 @@ mod tests {
                 owner_token: "private-owner-token".into(),
                 fencing_token: 7,
                 issued_at_ms: 1,
-                expires_at_ms: 60_001,
+                expires_at_ms: self.lease_expires_at_ms.load(Ordering::SeqCst),
             })
         }
 
@@ -1107,7 +1243,10 @@ mod tests {
             self.renewals.fetch_add(1, Ordering::SeqCst);
             if self.fail_renew.load(Ordering::SeqCst) {
                 self.log.lock().unwrap().push("renew");
-                return Err(unavailable());
+                return Err(match *self.renew_error_code.lock().unwrap() {
+                    Some(code) => Problem::new(code, "Lease renewal rejected", 409, "test"),
+                    None => unavailable(),
+                });
             }
             Ok(LeaseGrant {
                 resource_id: resource_id.clone(),
@@ -1246,6 +1385,43 @@ mod tests {
         path.canonicalize().unwrap()
     }
 
+    #[test]
+    fn wayfern_launch_hides_new_tab_shortcuts_and_preserves_profile_preferences() {
+        let path = profile_path("new-tab-preferences");
+        fs::create_dir_all(path.join("Default")).unwrap();
+        fs::write(
+            path.join("Default/Preferences"),
+            br#"{"profile":{"name":"preserve-me"},"ntp":{"shortcust_visible":true}}"#,
+        )
+        .unwrap();
+
+        suppress_wayfern_top_sites(&path).unwrap();
+
+        let preferences: serde_json::Value =
+            serde_json::from_slice(&fs::read(path.join("Default/Preferences")).unwrap()).unwrap();
+        assert_eq!(preferences["profile"]["name"], "preserve-me");
+        assert_eq!(preferences["ntp"]["shortcust_visible"], false);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_chromium_lock_links_are_cleared_before_launch() {
+        let path = profile_path("stale-lock-links");
+        fs::create_dir_all(path.join("Default")).unwrap();
+        for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+            std::os::unix::fs::symlink("Old-Hostname-4242", path.join(name)).unwrap();
+        }
+        fs::write(path.join("Default/Cookies"), b"keep").unwrap();
+
+        clear_stale_chromium_lock_links(&path).unwrap();
+
+        for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+            assert!(fs::symlink_metadata(path.join(name)).is_err(), "{name}");
+        }
+        assert_eq!(fs::read(path.join("Default/Cookies")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(path);
+    }
     fn request(path: &Path, managed: bool) -> LaunchRequest {
         request_for(path, "prf_runtime_1", managed)
     }
@@ -1696,6 +1872,113 @@ mod tests {
             *log.lock().unwrap(),
             vec!["acquire", "launch", "renew", "renew", "stop"]
         );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    fn lease_valid_for(duration: Duration) -> u64 {
+        u64::try_from(
+            (SystemTime::now() + duration)
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transient_renewal_failure_keeps_the_browser_running_while_the_lease_is_valid() {
+        let path = profile_path("renewal-transient");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(45)), Ordering::SeqCst);
+        backend.fail_renew.store(true, Ordering::SeqCst);
+        let mut runtime = runtime(controller, managed_coordination(backend));
+        runtime.launch(request(&path, true)).await.unwrap();
+
+        runtime.renew().await;
+        runtime.renew().await;
+
+        assert!(
+            !log.lock().unwrap().contains(&"stop"),
+            "{:?}",
+            log.lock().unwrap()
+        );
+        assert!(
+            runtime
+                .authority(&ProfileId::from_str("prf_runtime_1").unwrap())
+                .is_some()
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_lease_stops_the_browser_but_keeps_the_sync_pending() {
+        let path = profile_path("renewal-expired");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend.fail_renew.store(true, Ordering::SeqCst);
+        let mut runtime = runtime(controller, managed_coordination(backend));
+        runtime.launch(request(&path, true)).await.unwrap();
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+
+        runtime.renew().await;
+        runtime.renew().await;
+
+        let entries = log.lock().unwrap().clone();
+        assert_eq!(entries.iter().filter(|entry| **entry == "stop").count(), 1);
+        assert!(!entries.contains(&"release"), "{entries:?}");
+        assert!(
+            runtime
+                .running
+                .get(&profile_id)
+                .is_some_and(|running| running.sync_pending)
+        );
+        assert!(runtime.unexpectedly_stopped.contains(&profile_id));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_lease_ownership_stops_the_browser_immediately() {
+        let path = profile_path("renewal-not-owner");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(45)), Ordering::SeqCst);
+        backend.fail_renew.store(true, Ordering::SeqCst);
+        *backend.renew_error_code.lock().unwrap() = Some("lease_not_owner");
+        let mut runtime = runtime(controller, managed_coordination(backend));
+        runtime.launch(request(&path, true)).await.unwrap();
+
+        runtime.renew().await;
+
+        assert!(log.lock().unwrap().contains(&"stop"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_profile_whose_lease_was_taken_over_is_dropped() {
+        let path = profile_path("renewal-taken-over");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend.fail_renew.store(true, Ordering::SeqCst);
+        let mut runtime = runtime(controller, managed_coordination(backend.clone()));
+        runtime.launch(request(&path, true)).await.unwrap();
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        runtime.renew().await;
+        assert!(runtime.running.contains_key(&profile_id));
+
+        *backend.renew_error_code.lock().unwrap() = Some("lease_not_owner");
+        runtime.renew().await;
+
+        assert!(!runtime.running.contains_key(&profile_id));
+        assert!(!runtime.unexpectedly_stopped.contains(&profile_id));
         fs::remove_dir_all(path).unwrap();
     }
 

@@ -69,3 +69,10 @@ Status: **active; release blocked pending API parity, native platform artifacts,
 - Root cause of the About toast `app_updater_not_configured`: local/debug builds intentionally do not embed the Tauri updater public key, so the Rust command correctly reports that updater checks are unavailable. The UI previously surfaced this expected dev state as an error.
 - Opening About no longer triggers a manual check; the user can press **Check for updates** to request one. That action shows a localized informational message for `app_updater_not_configured`; other network/feed/signature failures remain errors. Startup checking suppresses only the expected unconfigured-dev log. Rust also skips the three-hour background task when no updater key is embedded, and `build.rs` tracks updater key/endpoint environment changes to avoid stale Cargo artifacts.
 - Verification: desktop TypeScript typecheck, Biome lint with formatting disabled, Rust format check, Windows desktop `cargo check --all-targets`, and `git diff --check` passed. Native interaction in the running desktop has not yet been visually rechecked.
+
+## Landing page installer downloads — 2026-10-23
+
+- [x] Publish a checksummed immutable installer catalog alongside the updater feed: NSIS setup `.exe` for Windows and notarized `.dmg` for Apple Silicon macOS.
+- [x] Resolve stable installer links from the stable catalog and expose release candidates as explicitly labeled test downloads; never promote an RC from the landing page.
+- [x] Verify installer URL host, version, run ID, filename, and platform suffix before redirecting or promoting catalog metadata.
+- [ ] Verify published stable and RC catalog URLs with public HEAD requests after the corresponding release/promotion workflow runs.

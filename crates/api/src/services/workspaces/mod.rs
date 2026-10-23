@@ -279,6 +279,22 @@ impl WorkspaceService {
             .organizations
             .get_mut(organization_id)
             .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        // Workspace limits are the organization's plan; workspace-level update
+        // rights (held by operators) only cover the name.
+        let policy_changed = record
+            .workspaces
+            .get(workspace_id)
+            .is_some_and(|workspace| workspace.policy != update.workspace.policy);
+        if policy_changed {
+            authorize_organization(principal, grants, &record.organization, Action::Update)
+                .map_err(|_| {
+                    problem(
+                        "workspace_policy_forbidden",
+                        "Only organization administrators can change workspace limits",
+                        403,
+                    )
+                })?;
+        }
         let workspace = record
             .workspaces
             .get_mut(workspace_id)
@@ -776,6 +792,83 @@ mod tests {
                 .code,
             "forbidden"
         );
+    }
+
+    #[test]
+    fn workspace_operators_can_rename_but_not_change_limits() {
+        let organization = organization("org-limits", "account-owner");
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let workspace = workspace("workspace-limits", &organization.id);
+        service
+            .create_workspace(&platform_admin(), &[], &organization.id, workspace.clone())
+            .unwrap();
+        let operator_account = AccountId::new("account-operator").unwrap();
+        let operator = Principal {
+            account_id: Some(operator_account.clone()),
+            roles: BTreeSet::from([Role::Account]),
+            workspace_ids: BTreeSet::from([workspace.id.clone()]),
+            ..Principal::default()
+        };
+        let grants = [Grant {
+            id: GrantId::new("grant_operator_workspace_update").unwrap(),
+            account_id: Some(operator_account),
+            member_id: None,
+            capability: Capability::new(CAPABILITY).unwrap(),
+            action: Action::Update,
+            scope: ResourceScope::workspace(workspace.id.clone()),
+            effect: Effect::Allow,
+        }];
+
+        let mut renamed = workspace.clone();
+        renamed.name = "Operator Renamed".to_owned();
+        let updated = service
+            .update_workspace(
+                &operator,
+                &grants,
+                &organization.id,
+                &workspace.id,
+                WorkspaceUpdate {
+                    workspace: renamed.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.workspace.name, "Operator Renamed");
+
+        let mut raised = renamed.clone();
+        raised.policy.max_profiles = 1_000_000;
+        raised.policy.max_storage_bytes = u64::MAX / 2;
+        assert_eq!(
+            service
+                .update_workspace(
+                    &operator,
+                    &grants,
+                    &organization.id,
+                    &workspace.id,
+                    WorkspaceUpdate {
+                        workspace: raised.clone(),
+                        expected_revision: 2,
+                    },
+                )
+                .unwrap_err()
+                .code,
+            "workspace_policy_forbidden"
+        );
+
+        let raised_by_admin = service
+            .update_workspace(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                &workspace.id,
+                WorkspaceUpdate {
+                    workspace: raised,
+                    expected_revision: 2,
+                },
+            )
+            .unwrap();
+        assert_eq!(raised_by_admin.workspace.policy.max_profiles, 1_000_000);
     }
 
     #[test]

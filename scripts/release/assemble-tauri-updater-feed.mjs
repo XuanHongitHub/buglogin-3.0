@@ -16,10 +16,11 @@ if (artifactBaseUrl.protocol !== "https:" || artifactBaseUrl.username || artifac
   throw new Error("artifact base URL must be credential-free HTTPS and end with /v<version>/");
 }
 const platforms = [
-  { directory: `buglogin-v${version}-windows-x64-signed`, key: "windows-x86_64", suffix: ".exe" },
-  { directory: `buglogin-v${version}-macos-arm64-signed`, key: "darwin-aarch64", suffix: ".app.tar.gz" },
+  { directory: `buglogin-v${version}-windows-x64-signed`, key: "windows-x86_64", suffix: ".exe", installerSuffix: "-setup.exe", downloadKey: "windows" },
+  { directory: `buglogin-v${version}-macos-arm64-signed`, key: "darwin-aarch64", suffix: ".app.tar.gz", installerSuffix: ".dmg", downloadKey: "macos" },
 ];
 const manifestPlatforms = {};
+const downloadPlatforms = {};
 const assets = [];
 
 for (const platform of platforms) {
@@ -30,6 +31,11 @@ for (const platform of platforms) {
     .map((file) => file.name);
   if (candidates.length !== 1) throw new Error(`${platform.key}: expected exactly one ${platform.suffix} artifact`);
   const artifactName = candidates[0];
+  const installers = files
+    .filter((file) => file.isFile() && file.name.endsWith(platform.installerSuffix))
+    .map((file) => file.name);
+  if (installers.length !== 1) throw new Error(`${platform.key}: expected exactly one ${platform.installerSuffix} installer`);
+  const installerName = installers[0];
   const signatureName = `${artifactName}.sig`;
   const signature = (await readFile(join(directory, signatureName), "utf8")).trim();
   if (!signature || signature.length > 4096 || /[\r\n]/.test(signature)) {
@@ -40,7 +46,11 @@ for (const platform of platforms) {
   if (artifactBytes.length === 0) throw new Error(`${platform.key}: updater artifact is empty`);
   const url = new URL(encodeURIComponent(artifactName), artifactBaseUrl).toString();
   manifestPlatforms[platform.key] = { signature, url };
-  assets.push([artifactPath, artifactName], [join(directory, signatureName), signatureName]);
+  downloadPlatforms[platform.downloadKey] = {
+    filename: installerName,
+    url: new URL(encodeURIComponent(installerName), artifactBaseUrl).toString(),
+  };
+  assets.push([artifactPath, artifactName], [join(directory, signatureName), signatureName], [join(directory, installerName), installerName]);
 }
 
 await mkdir(outputRoot, { recursive: true });
@@ -48,6 +58,11 @@ for (const [source, name] of assets) await copyFile(source, join(outputRoot, nam
 await writeFile(
   join(outputRoot, "latest.json"),
   `${JSON.stringify({ version, platforms: manifestPlatforms }, null, 2)}\n`,
+  { flag: "wx" },
+);
+await writeFile(
+  join(outputRoot, "downloads.json"),
+  `${JSON.stringify({ version, platforms: downloadPlatforms }, null, 2)}\n`,
   { flag: "wx" },
 );
 console.log(`Assembled signed Tauri updater feed for ${Object.keys(manifestPlatforms).length} platform targets`);

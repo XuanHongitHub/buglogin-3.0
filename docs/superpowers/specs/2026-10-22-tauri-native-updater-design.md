@@ -35,6 +35,7 @@ Tauri `build.frontendDist` must remain a relative directory path. On Windows, pa
 - Protected release environment owns the updater private key; only signing jobs can read it.
 - Public key pin is embedded in each signed release. Key rotation requires a dual-key transition release and a tested revocation/rollback procedure.
 - The S3 stable `latest.json`, GitHub release assets, installer signatures, artifact checksums, SBOM, and provenance must refer to the same immutable version/artifacts.
+- Stable and RC `downloads.json` catalogs must reference only installer files covered by that release's checksums and provenance; the landing page labels RC downloads separately.
 - Windows/macOS clean install and previous-version-to-current-version update are required before stable promotion.
 - Until the updater key, Windows Authenticode credentials, Apple notarization credentials, and protected release environment are available, code may be validated but no production-ready release may be claimed.
 

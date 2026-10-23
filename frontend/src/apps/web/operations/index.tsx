@@ -30,7 +30,7 @@ import {
   WebShell,
 } from "../shells";
 
-const runtimeOptions: ProfileCreateRuntime[] = ["wayfern", "bugmini"];
+const runtimeOptions: ProfileCreateRuntime[] = ["wayfern"];
 
 export function OperationsPage({
   api,

@@ -2052,6 +2052,9 @@ fn collect_files(
         let entry = entry.map_err(|_| unavailable())?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(|_| unavailable())?;
+        if is_chromium_lock_link(&metadata, &entry.file_name()) {
+            continue;
+        }
         if metadata.file_type().is_symlink() {
             return Err(problem(
                 "profile_projection_symlink_rejected",
@@ -2096,6 +2099,9 @@ fn collect_file_paths(
         let entry = entry.map_err(|_| unavailable())?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(|_| unavailable())?;
+        if is_chromium_lock_link(&metadata, &entry.file_name()) {
+            continue;
+        }
         if metadata.file_type().is_symlink() {
             return Err(problem(
                 "profile_projection_symlink_rejected",
@@ -2136,6 +2142,22 @@ fn is_ephemeral_profile_directory(path: &Path) -> bool {
             name.eq_ignore_ascii_case("GPUCache") || is_ephemeral_profile_path(name)
         })
     })
+}
+
+const CHROMIUM_LOCK_LINKS: [&str; 4] = [
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "RunningChromeVersion",
+];
+
+/// Chromium leaves these lock links behind when it is stopped or killed on
+/// macOS/Linux; they are machine-local process state, never profile data.
+pub(crate) fn is_chromium_lock_link(metadata: &fs::Metadata, name: &std::ffi::OsStr) -> bool {
+    metadata.file_type().is_symlink()
+        && name
+            .to_str()
+            .is_some_and(|name| CHROMIUM_LOCK_LINKS.contains(&name))
 }
 
 fn is_projection_control_file(path: &str) -> bool {
@@ -2474,6 +2496,52 @@ mod tests {
 
         let descriptor = descriptor_from_manifest(&manifest).unwrap();
         descriptor.verify_manifest(&manifest).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_projection_skips_chromium_lock_links_left_after_a_stop() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-profile-lock-links-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(root.join("Default")).unwrap();
+        fs::write(root.join("Default/Cookies"), b"session").unwrap();
+        for name in [
+            "SingletonLock",
+            "SingletonSocket",
+            "SingletonCookie",
+            "RunningChromeVersion",
+        ] {
+            std::os::unix::fs::symlink("MacBook-Pro-12345", root.join(name)).unwrap();
+        }
+
+        let mut files = Vec::new();
+        collect_file_paths(&root, &root, &mut files).unwrap();
+        assert_eq!(
+            files.iter().map(|file| file.0.as_str()).collect::<Vec<_>>(),
+            vec!["Default/Cookies"]
+        );
+        let mut snapshot = Vec::new();
+        collect_files(&root, &root, &mut snapshot).unwrap();
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|file| file.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Default/Cookies"]
+        );
+
+        std::os::unix::fs::symlink("/etc/hosts", root.join("Default/Bookmarks")).unwrap();
+        let mut rejected = Vec::new();
+        assert_eq!(
+            collect_file_paths(&root, &root, &mut rejected)
+                .unwrap_err()
+                .code,
+            "profile_projection_symlink_rejected"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

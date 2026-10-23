@@ -123,6 +123,8 @@ impl<C: ProcessController> LifecycleManager<C> {
         match self.reconcile_profile(profile_path)? {
             LifecycleState::Ready | LifecycleState::Stopped => {}
             LifecycleState::Recovering => return Err(identity_unverified()),
+            // A verified live process owned by another manager holds the lock.
+            LifecycleState::Running => return Err(already_locked()),
             _ => return Err(already_running()),
         }
         let mut lock = ProfileLock::acquire(profile_path)?;
@@ -185,7 +187,8 @@ impl<C: ProcessController> LifecycleManager<C> {
         }
         let identity = read_identity(&lock_path)?;
         match self.controller.inspect(&identity) {
-            ProcessStatus::Running | ProcessStatus::Unknown => Ok(LifecycleState::Recovering),
+            ProcessStatus::Running => Ok(LifecycleState::Running),
+            ProcessStatus::Unknown => Ok(LifecycleState::Recovering),
             ProcessStatus::Exited => {
                 std::fs::remove_file(lock_path).map_err(|_| lock_failed())?;
                 Ok(LifecycleState::Ready)

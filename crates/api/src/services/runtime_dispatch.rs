@@ -11,6 +11,9 @@ use buglogin_storage::control::{
 };
 
 const RECORD_TYPE: &str = "runtime_dispatch_job";
+/// A claimed job can still be finished by the attempt that claimed it (the desktop waits up
+/// to 120 s for its local operation), so it only expires this long after its deadline.
+pub const RUNNING_EXPIRY_GRACE_SECONDS: u64 = 300;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -286,6 +289,69 @@ impl RuntimeDispatchService {
         )
     }
 
+    /// Moves a job that can no longer be delivered or finished to `expired`, so its
+    /// requester sees a terminal state. Returns the job only when it is (now) expired.
+    pub fn expire_if_overdue(
+        &self,
+        workspace_id: &str,
+        job_id: &str,
+        now: u64,
+    ) -> Result<Option<RuntimeDispatchJob>, Problem> {
+        let Some((job, _)) = self
+            .persistence
+            .load_versioned::<RuntimeDispatchJob>(workspace_id, RECORD_TYPE, job_id)?
+            .filter(|(job, _)| job.workspace_id == workspace_id)
+        else {
+            return Ok(None);
+        };
+        if job.state == RuntimeDispatchState::Expired {
+            return Ok(Some(job));
+        }
+        if !is_overdue(&job, now) {
+            return Ok(None);
+        }
+        self.update(
+            workspace_id,
+            job_id,
+            "runtime.dispatch.expire",
+            "system",
+            |job| {
+                if !is_overdue(job, now) {
+                    return Err(problem("runtime_job_invalid_state"));
+                }
+                job.state = RuntimeDispatchState::Expired;
+                job.failure_code = Some("runtime_job_expired".to_owned());
+                job.input = None;
+                Ok(())
+            },
+        )
+        .map(Some)
+    }
+
+    pub fn expire_overdue_for_device(
+        &self,
+        tenant_ids: &[String],
+        device_id: &str,
+        now: u64,
+    ) -> Result<Vec<RuntimeDispatchJob>, Problem> {
+        let overdue = self
+            .persistence
+            .list_versioned_for_tenants::<RuntimeDispatchJob>(tenant_ids, RECORD_TYPE)?
+            .into_iter()
+            .filter(|(tenant, _, job, _)| {
+                job.workspace_id == *tenant && job.device_id == device_id && is_overdue(job, now)
+            })
+            .map(|(_, _, job, _)| job)
+            .collect::<Vec<_>>();
+        let mut expired = Vec::with_capacity(overdue.len());
+        for job in overdue {
+            if let Some(job) = self.expire_if_overdue(&job.workspace_id, &job.job_id, now)? {
+                expired.push(job);
+            }
+        }
+        Ok(expired)
+    }
+
     fn update(
         &self,
         workspace_id: &str,
@@ -370,6 +436,25 @@ fn verify_executor(
         return Err(problem("runtime_job_executor_mismatch"));
     }
     Ok(())
+}
+
+fn is_overdue(job: &RuntimeDispatchJob, now: u64) -> bool {
+    match job.state {
+        RuntimeDispatchState::Accepted | RuntimeDispatchState::Dispatched => now >= job.expires_at,
+        RuntimeDispatchState::Running => {
+            now >= job.expires_at.saturating_add(RUNNING_EXPIRY_GRACE_SECONDS)
+        }
+        _ => false,
+    }
+}
+
+/// Job and operation ids are both derived from the enqueue idempotency key, so a
+/// dispatch operation id maps back to exactly one job id.
+pub fn job_id_for_operation(operation_id: &str) -> Option<String> {
+    operation_id
+        .strip_prefix("operation_")
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|digest| format!("runtime_{digest}"))
 }
 
 fn stable_id(prefix: &str, input: &str) -> String {
@@ -472,6 +557,158 @@ mod tests {
         assert_eq!(completed.state, RuntimeDispatchState::Completed);
         assert_eq!(completed.input, None);
         assert_eq!(completed.result.unwrap()["state"], "running");
+    }
+
+    #[test]
+    fn unclaimed_job_expires_at_its_deadline() {
+        let service = service();
+        let job = service
+            .enqueue(enqueue_input("profile.launch"), None)
+            .unwrap();
+
+        assert_eq!(
+            service
+                .expire_if_overdue("ws_runtime", &job.job_id, 199)
+                .unwrap(),
+            None
+        );
+        let expired = service
+            .expire_if_overdue("ws_runtime", &job.job_id, 200)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expired.state, RuntimeDispatchState::Expired);
+        assert_eq!(expired.failure_code.as_deref(), Some("runtime_job_expired"));
+        assert_eq!(
+            service
+                .claim(
+                    "ws_runtime",
+                    &job.job_id,
+                    "device_runtime",
+                    "acc_runtime",
+                    201
+                )
+                .unwrap_err()
+                .code,
+            "runtime_job_invalid_state"
+        );
+    }
+
+    #[test]
+    fn claimed_job_keeps_a_grace_period_for_the_running_attempt() {
+        let service = service();
+        let job = service
+            .enqueue(enqueue_input("profile.launch"), None)
+            .unwrap();
+        service
+            .claim(
+                "ws_runtime",
+                &job.job_id,
+                "device_runtime",
+                "acc_runtime",
+                150,
+            )
+            .unwrap();
+
+        let deadline = 200 + RUNNING_EXPIRY_GRACE_SECONDS;
+        assert_eq!(
+            service
+                .expire_if_overdue("ws_runtime", &job.job_id, deadline - 1)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            service
+                .expire_if_overdue("ws_runtime", &job.job_id, deadline)
+                .unwrap()
+                .unwrap()
+                .state,
+            RuntimeDispatchState::Expired
+        );
+    }
+
+    #[test]
+    fn finished_jobs_never_expire() {
+        let service = service();
+        let job = service
+            .enqueue(enqueue_input("profile.stop"), None)
+            .unwrap();
+        service
+            .claim(
+                "ws_runtime",
+                &job.job_id,
+                "device_runtime",
+                "acc_runtime",
+                101,
+            )
+            .unwrap();
+        service
+            .complete(
+                "ws_runtime",
+                &job.job_id,
+                "device_runtime",
+                "acc_runtime",
+                json!({"state":"stopped"}),
+            )
+            .unwrap();
+
+        assert_eq!(
+            service
+                .expire_if_overdue("ws_runtime", &job.job_id, u64::MAX)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn overdue_jobs_are_expired_for_the_polling_device_only() {
+        let service = service();
+        let mine = service
+            .enqueue(enqueue_input("profile.launch"), None)
+            .unwrap();
+        let other = service
+            .enqueue(
+                EnqueueRuntimeDispatch {
+                    device_id: "device_other".into(),
+                    idempotency_key: "runtime-launch-other".into(),
+                    ..enqueue_input("profile.launch")
+                },
+                None,
+            )
+            .unwrap();
+
+        let expired = service
+            .expire_overdue_for_device(&["ws_runtime".into()], "device_runtime", 200)
+            .unwrap();
+
+        assert_eq!(
+            expired
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![mine.job_id.as_str()]
+        );
+        assert_eq!(
+            service
+                .get_for_device("ws_runtime", &other.job_id, "device_other")
+                .unwrap()
+                .unwrap()
+                .state,
+            RuntimeDispatchState::Accepted
+        );
+    }
+
+    #[test]
+    fn operation_ids_map_back_to_their_job() {
+        let service = service();
+        let job = service
+            .enqueue(enqueue_input("profile.launch"), None)
+            .unwrap();
+
+        assert_eq!(
+            job_id_for_operation(&job.operation_id).as_deref(),
+            Some(job.job_id.as_str())
+        );
+        assert_eq!(job_id_for_operation("op_unrelated"), None);
     }
 
     #[test]

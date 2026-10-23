@@ -348,6 +348,58 @@ fn cli_prepare_source_is_copy_only_and_canonicalizes_control_plane() {
     assert!(!source.child("control-plane-export.json").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_prepare_source_skips_chromium_runtime_links_and_binaries() {
+    let source = TestDirectory::new("prepare-source-runtime-artifacts");
+    source.write(
+        "version.json",
+        br#"{"system":"buglogin-legacy","version":"1.1.84","instanceId":"prepare-runtime","os":"macos","architecture":"aarch64"}"#,
+    );
+    source.write(
+        "profiles/one/metadata.json",
+        br#"{"id":"one","name":"One","runtime":"wayfern"}"#,
+    );
+    source.write("profiles/one/profile/Preferences", b"{}");
+    std::os::unix::fs::symlink(
+        "MacBook-Pro-12345",
+        source.child("profiles/one/profile/SingletonLock"),
+    )
+    .expect("create chromium singleton link");
+    source.write(
+        "binaries/wayfern/154.0/Wayfern.app/Contents/Info.plist",
+        b"plist",
+    );
+    std::os::unix::fs::symlink(
+        "Versions/Current/Frameworks",
+        source.child("binaries/wayfern/154.0/Wayfern.app/Contents/Frameworks"),
+    )
+    .expect("create bundle link");
+    let control = TestDirectory::new("prepare-source-runtime-control");
+    control.write(
+        "export.json",
+        br#"{"organizations":[],"workspaces":[],"memberships":[],"shareGrants":[]}"#,
+    );
+    let work = TestDirectory::new("prepare-source-runtime-work");
+    let output = work.child("prepared");
+
+    let result = run(&[
+        "prepare-source",
+        "--source",
+        text(source.path()),
+        "--control-plane",
+        text(&control.child("export.json")),
+        "--output",
+        text(&output),
+        "--read-only",
+    ]);
+
+    assert_success(result);
+    assert!(output.join("profiles/one/profile/Preferences").is_file());
+    assert!(fs::symlink_metadata(output.join("profiles/one/profile/SingletonLock")).is_err());
+    assert!(!output.join("binaries").exists());
+}
+
 #[test]
 fn cli_prepare_source_rejects_symlinked_source_ancestor_before_canonicalization() {
     let root = TestDirectory::new("prepare-source-ancestor-link");

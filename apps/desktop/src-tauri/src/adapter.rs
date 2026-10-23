@@ -27,7 +27,7 @@ use buglogin_browser::{
     },
     process::{ApprovedExecutable, ProcessController, SystemProcessController},
     profile::{ProfileBindingService, ProfileService},
-    runtime::{RuntimeAdapter, RuntimeBinary, bugmini::BugminiAdapter, wayfern::WayfernAdapter},
+    runtime::{RuntimeAdapter, RuntimeBinary, wayfern::WayfernAdapter},
 };
 use buglogin_domain::{
     entities::{
@@ -158,7 +158,6 @@ pub struct RuntimeTarget {
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeTargets {
     pub wayfern: BTreeMap<String, RuntimeTarget>,
-    pub bugmini: BTreeMap<String, RuntimeTarget>,
 }
 
 impl RuntimeTargets {
@@ -171,7 +170,6 @@ impl RuntimeTargets {
     pub(crate) fn insert(&mut self, runtime: Runtime, target: RuntimeTarget) {
         let targets = match runtime {
             Runtime::Wayfern => &mut self.wayfern,
-            Runtime::Bugmini => &mut self.bugmini,
             _ => return,
         };
         targets.insert(target.binary.version.clone(), target);
@@ -180,7 +178,6 @@ impl RuntimeTargets {
     pub(crate) fn versions(&self, runtime: &Runtime) -> Vec<String> {
         let targets = match runtime {
             Runtime::Wayfern => &self.wayfern,
-            Runtime::Bugmini => &self.bugmini,
             _ => return Vec::new(),
         };
         let mut versions: Vec<_> = targets.keys().cloned().collect();
@@ -195,7 +192,6 @@ impl RuntimeTargets {
     ) -> Option<&RuntimeTarget> {
         let targets = match runtime {
             Runtime::Wayfern => &self.wayfern,
-            Runtime::Bugmini => &self.bugmini,
             _ => return None,
         };
         match version {
@@ -214,7 +210,6 @@ impl RuntimeTargets {
     pub fn supports(&self, runtime: &Runtime) -> bool {
         match runtime {
             Runtime::Wayfern => !self.wayfern.is_empty(),
-            Runtime::Bugmini => !self.bugmini.is_empty(),
             _ => false,
         }
     }
@@ -222,7 +217,6 @@ impl RuntimeTargets {
     pub(crate) fn approved_executables(&self) -> Result<Vec<ApprovedExecutable>, Problem> {
         self.wayfern
             .values()
-            .chain(self.bugmini.values())
             .map(|target| ApprovedExecutable::new(&target.binary.path))
             .collect()
     }
@@ -236,9 +230,6 @@ impl RuntimeTargets {
         match runtime {
             Runtime::Wayfern if self.supports(&Runtime::Wayfern) => {
                 WayfernAdapter.profile_path(root, profile_id)
-            }
-            Runtime::Bugmini if self.supports(&Runtime::Bugmini) => {
-                BugminiAdapter.profile_path(root, profile_id)
             }
             _ => Err(runtime_not_configured()),
         }
@@ -254,13 +245,6 @@ impl RuntimeTargets {
             Runtime::Wayfern => launch_with_adapter(
                 WayfernAdapter,
                 self.target(&Runtime::Wayfern, profile.runtime_version.as_deref())
-                    .ok_or_else(runtime_not_configured)?,
-                profile_path,
-                headless,
-            )?,
-            Runtime::Bugmini => launch_with_adapter(
-                BugminiAdapter,
-                self.target(&Runtime::Bugmini, profile.runtime_version.as_deref())
                     .ok_or_else(runtime_not_configured)?,
                 profile_path,
                 headless,
@@ -286,9 +270,6 @@ impl RuntimeTargets {
                     "runtime",
                 ));
             }
-        }
-        if profile.runtime == Runtime::Bugmini {
-            append_bugmini_profile_args(&mut specification.args, profile);
         }
         Ok(specification)
     }
@@ -329,81 +310,6 @@ fn launch_with_adapter<A: RuntimeAdapter>(
         extra_args.push("--headless".to_owned());
     }
     adapter.launch_specification(&validated, profile_path, &extra_args)
-}
-
-fn append_bugmini_profile_args(args: &mut Vec<String>, profile: &Profile) {
-    let digest = Sha256::digest(profile.id.as_str().as_bytes());
-    let seed = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 90_000 + 10_000;
-    push_or_replace_arg(args, format!("--fingerprint={seed}"));
-    push_or_replace_arg(
-        args,
-        format!(
-            "--fingerprint-platform={}",
-            if cfg!(target_os = "macos") {
-                "macos"
-            } else {
-                "windows"
-            }
-        ),
-    );
-    push_or_replace_arg(args, "--fingerprint-brand=Chrome".to_owned());
-    if let Some(version) = profile.runtime_version.as_deref() {
-        push_or_replace_arg(args, format!("--fingerprint-brand-version={version}"));
-    }
-    if cfg!(target_os = "windows") {
-        push_or_replace_arg(args, "--ignore-gpu-blocklist".to_owned());
-    }
-    if let Some(fingerprint) = profile.fingerprint.as_ref() {
-        if let Some(timezone) = fingerprint.get("timezone").and_then(Value::as_str) {
-            push_or_replace_arg(args, format!("--fingerprint-timezone={timezone}"));
-        }
-        let locale = fingerprint
-            .get("language")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                fingerprint
-                    .get("languages")
-                    .and_then(Value::as_array)
-                    .and_then(|values| values.first())
-                    .and_then(Value::as_str)
-            });
-        if let Some(locale) = locale.filter(|value| !value.trim().is_empty()) {
-            let locale = locale.replace('_', "-");
-            push_or_replace_arg(args, format!("--lang={locale}"));
-            push_or_replace_arg(args, format!("--fingerprint-locale={locale}"));
-        }
-        if let Some(user_agent) = fingerprint.get("userAgent").and_then(Value::as_str) {
-            push_or_replace_arg(args, format!("--user-agent={user_agent}"));
-        }
-    }
-    let payload = profile
-        .runtime_config
-        .as_ref()
-        .and_then(|config| config.get("payload"));
-    if payload
-        .and_then(|value| value.get("block_images"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        push_or_replace_arg(args, "--blink-settings=imagesEnabled=false".to_owned());
-    }
-    if payload
-        .and_then(|value| value.get("block_webgl"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        push_or_replace_arg(args, "--disable-webgl".to_owned());
-    }
-    if payload
-        .and_then(|value| value.get("block_webrtc"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        push_or_replace_arg(
-            args,
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
-        );
-    }
 }
 
 fn append_wayfern_profile_chrome_args(
@@ -1959,6 +1865,9 @@ impl AdapterState {
         idempotency_key: &str,
         correlation_id: &str,
     ) -> Result<Value, Problem> {
+        self.reconcile_exited_profiles(correlation_id).await;
+        self.recover_stale_runtime_state(profile_id, correlation_id)
+            .await?;
         let current = self
             .profiles
             .get(profile_id)
@@ -2171,6 +2080,69 @@ impl AdapterState {
             "revision": updated.revision,
             "processId": receipt.process_id
         }))
+    }
+
+    /// After an app restart or crash the record can still say Running/Launching/
+    /// Stopping/Failed although no process is tracked; return it to Ready.
+    async fn recover_stale_runtime_state(
+        &self,
+        profile_id: &ProfileId,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let current = self
+            .profiles
+            .get(profile_id)
+            .map_err(|error| correlate(error, correlation_id))?
+            .ok_or_else(|| profile_not_found(correlation_id))?;
+        let path = match current.value.state {
+            ProfileState::Running => vec![ProfileState::Stopping, ProfileState::Ready],
+            ProfileState::Stopping => vec![ProfileState::Ready],
+            ProfileState::Launching => vec![
+                ProfileState::Failed,
+                ProfileState::Recovering,
+                ProfileState::Ready,
+            ],
+            ProfileState::Failed => vec![ProfileState::Recovering, ProfileState::Ready],
+            _ => return Ok(()),
+        };
+        if self
+            .profile_runtime
+            .running_profiles()
+            .await
+            .map_err(|error| correlate(error, correlation_id))?
+            .contains(profile_id)
+        {
+            return Ok(());
+        }
+        let mut recovered = current.value;
+        for next in path {
+            recovered.state = recovered
+                .state
+                .clone()
+                .transition(next)
+                .map_err(|error| correlate(error, correlation_id))?;
+        }
+        recovered.updated_at = now(correlation_id)?;
+        self.profiles
+            .update(current.revision, recovered)
+            .map_err(|error| correlate(error, correlation_id))?;
+        Ok(())
+    }
+
+    /// Browsers closed by the user (or crashed) exit without a Stop; finish their
+    /// stop so the profile returns to Ready instead of staying Running forever.
+    async fn reconcile_exited_profiles(&self, correlation_id: &str) {
+        let Ok(active) = self.profile_runtime.active_profiles().await else {
+            return;
+        };
+        let Ok(exited) = self.profile_runtime.unexpectedly_stopped_profiles().await else {
+            return;
+        };
+        for profile_id in exited {
+            if !active.contains(&profile_id) {
+                let _ = self.stop_profile(&profile_id, correlation_id).await;
+            }
+        }
     }
 
     async fn stop_profile(
@@ -3266,9 +3238,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_targets_select_bugmini_and_apply_migrated_fingerprint() {
+    fn legacy_bugmini_profiles_are_not_launchable() {
         let root = std::env::temp_dir().join(format!(
-            "buglogin-bugmini-targets-{}-{}",
+            "buglogin-bugmini-legacy-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -3283,77 +3255,26 @@ mod tests {
             Runtime::Bugmini,
             RuntimeTarget {
                 binary: RuntimeBinary {
-                    path: executable.clone(),
+                    path: executable,
                     version: "146.0.7680.177.4".into(),
                     expected_checksum: checksum(b"bugmini runtime"),
                 },
-                extra_args: vec!["--lang=vi-VN".into()],
+                extra_args: Vec::new(),
             },
         );
-        let profile = Profile {
-            id: ProfileId::from_str("prf_bugmini_runtime").unwrap(),
-            name: "Migrated Bugmini".into(),
-            runtime: Runtime::Bugmini,
-            runtime_version: Some("146.0.7680.177.4".into()),
-            runtime_config: Some(json!({
-                "schema_key": "chromium.runtime-config.v1",
-                "schema_version": 1,
-                "payload": {
-                    "block_images": true,
-                    "block_webgl": true,
-                    "block_webrtc": true
-                }
-            })),
-            state: ProfileState::Ready,
-            archived: false,
-            fingerprint: Some(json!({
-                "language": "en_US",
-                "timezone": "America/New_York",
-                "userAgent": "Bugmini Test Agent"
-            })),
-            note: Some("legacy note".into()),
-            proxy_id: None,
-            vpn_id: None,
-            group_ids: Vec::new(),
-            tags: Vec::new(),
-            extension_group_id: None,
-            sync_mode: Some(SyncMode::Local),
-            created_at: "2026-07-23T00:00:00Z".into(),
-            updated_at: "2026-07-23T00:00:00Z".into(),
-        };
-        let profile_path = targets
-            .profile_path(&profile.runtime, &root, &profile.id)
-            .unwrap();
-        let specification = targets
-            .launch_specification(&profile, &profile_path, true)
-            .unwrap();
+        let profile_id = ProfileId::from_str("prf_bugmini_legacy").unwrap();
 
-        assert_eq!(specification.runtime, Runtime::Bugmini);
-        assert_eq!(specification.executable, executable);
-        assert!(specification.args.iter().any(|arg| arg == "--headless"));
-        assert!(
-            specification
-                .args
-                .iter()
-                .any(|arg| arg == "--fingerprint-timezone=America/New_York")
-        );
-        assert!(specification.args.iter().any(|arg| arg == "--lang=en-US"));
-        assert!(
-            specification
-                .args
-                .iter()
-                .any(|arg| arg == "--blink-settings=imagesEnabled=false")
-        );
+        assert!(!targets.supports(&Runtime::Bugmini));
+        assert!(targets.versions(&Runtime::Bugmini).is_empty());
         assert_eq!(
             targets
-                .profile_path(&Runtime::Wayfern, &root, &profile.id)
+                .profile_path(&Runtime::Bugmini, &root, &profile_id)
                 .unwrap_err()
                 .code,
             "runtime_not_configured"
         );
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn runtime_targets_launch_the_profile_version_without_changing_its_data_path() {
         let root = std::env::temp_dir().join(format!(

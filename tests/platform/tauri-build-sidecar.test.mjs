@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   lstat,
   mkdir,
@@ -13,7 +14,11 @@ import {
 import { resolve } from "node:path";
 import test from "node:test";
 import { resolveBuildTargetDir } from "../../scripts/build-target.mjs";
-import { stageTauriSidecarDirectory } from "../../scripts/tauri-sidecar-staging.mjs";
+import {
+  forwardTerminationSignals,
+  recoverTauriSidecarDirectory,
+  stageTauriSidecarDirectory,
+} from "../../scripts/tauri-sidecar-staging.mjs";
 
 const sidecarName = `buglogin-migrate-${process.platform === "win32" ? "x64" : "test"}${process.platform === "win32" ? ".exe" : ""}`;
 
@@ -148,4 +153,59 @@ test("Tauri build staging refuses unknown binaries without moving the original d
       "unexpected.bin",
     );
   });
+});
+
+test("Tauri staging recovers a backup left by an interrupted launcher", async () => {
+  await withTempRoot(async (root) => {
+    const sourceBinaries = resolve(root, "src-tauri", "binaries");
+    const backup = `${sourceBinaries}.build-restore-${randomUUID()}`;
+    await mkdir(sourceBinaries, { recursive: true });
+    await mkdir(backup, { recursive: true });
+    await writeFile(resolve(sourceBinaries, sidecarName), "staged-sidecar");
+    await writeFile(resolve(backup, ".gitkeep"), "");
+
+    assert.equal(
+      await recoverTauriSidecarDirectory({ sourceBinaries, sidecarName }),
+      true,
+    );
+    assert.deepEqual(await readdir(sourceBinaries), [".gitkeep"]);
+    assert.deepEqual((await readdir(resolve(root, "src-tauri"))).sort(), [
+      "binaries",
+    ]);
+    assert.equal(
+      await recoverTauriSidecarDirectory({ sourceBinaries, sidecarName }),
+      false,
+    );
+  });
+});
+
+test("Tauri staging refuses to guess between several leftover backups", async () => {
+  await withTempRoot(async (root) => {
+    const sourceBinaries = resolve(root, "src-tauri", "binaries");
+    await mkdir(sourceBinaries, { recursive: true });
+    await mkdir(`${sourceBinaries}.build-restore-${randomUUID()}`);
+    await mkdir(`${sourceBinaries}.build-restore-${randomUUID()}`);
+
+    await assert.rejects(
+      recoverTauriSidecarDirectory({ sourceBinaries, sidecarName }),
+      /Multiple Tauri binaries backups/,
+    );
+  });
+});
+
+test("Tauri dev launcher forwards termination signals to the child instead of dying", () => {
+  const launcher = new EventEmitter();
+  const forwarded = [];
+  const child = { exitCode: null, kill: (signal) => forwarded.push(signal) };
+
+  forwardTerminationSignals(child, launcher);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    assert.equal(launcher.listenerCount(signal), 1, signal);
+    launcher.emit(signal, signal);
+  }
+  assert.deepEqual(forwarded, ["SIGINT", "SIGTERM", "SIGHUP"]);
+
+  child.exitCode = 0;
+  launcher.emit("SIGTERM", "SIGTERM");
+  assert.deepEqual(forwarded, ["SIGINT", "SIGTERM", "SIGHUP"]);
 });

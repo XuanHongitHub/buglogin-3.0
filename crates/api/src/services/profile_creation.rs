@@ -108,7 +108,7 @@ impl ProfileCreationService {
                 400,
             ));
         }
-        if !matches!(input.runtime, Runtime::Wayfern | Runtime::Bugmini) {
+        if input.runtime != Runtime::Wayfern {
             return Err(problem(
                 "profile_runtime_unsupported",
                 "This legacy browser runtime is not available for new profiles",

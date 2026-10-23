@@ -8,16 +8,17 @@ import test from "node:test";
 
 const script = fileURLToPath(new URL("../../scripts/release/assemble-tauri-updater-feed.mjs", import.meta.url));
 const targets = [
-  ["windows-x64", "windows-x86_64", "BugLogin_1.2.3_x64-setup.exe"],
-  ["macos-arm64", "darwin-aarch64", "BugLogin_1.2.3_aarch64.app.tar.gz"],
+  ["windows-x64", "windows-x86_64", "BugLogin_1.2.3_x64-setup.exe", "BugLogin_1.2.3_x64-setup.exe"],
+  ["macos-arm64", "darwin-aarch64", "BugLogin_1.2.3_aarch64.app.tar.gz", "BugLogin_1.2.3_aarch64.dmg"],
 ];
 
 async function fixture(root, version = "1.2.3") {
-  for (const [platform, , artifact] of targets) {
+  for (const [platform, , artifact, installer] of targets) {
     const directory = join(root, `buglogin-v${version}-${platform}-signed`);
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, artifact), `signed bundle ${platform}`);
     await writeFile(join(directory, `${artifact}.sig`), `untrusted-fixture-signature-${platform}`);
+    if (installer !== artifact) await writeFile(join(directory, installer), `signed installer ${platform}`);
   }
 }
 
@@ -30,13 +31,18 @@ test("updater feed binds each supported target to a signed immutable release ass
     const result = spawnSync(process.execPath, [script, incoming, output, "1.2.3", "keyduc91/Malvanut-Login"], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(output, "latest.json"), "utf8"));
+    const downloads = JSON.parse(await readFile(join(output, "downloads.json"), "utf8"));
     assert.equal(manifest.version, "1.2.3");
     assert.deepEqual(Object.keys(manifest.platforms).sort(), targets.map(([, key]) => key).sort());
-    for (const [, key, artifact] of targets) {
+    for (const [, key, artifact, installer] of targets) {
       assert.match(manifest.platforms[key].url, new RegExp(`/releases/download/v1\\.2\\.3/${artifact.replaceAll(".", "\\.")}$`));
       assert.match(manifest.platforms[key].signature, /^untrusted-fixture-signature-/);
       await readFile(join(output, artifact));
       await readFile(join(output, `${artifact}.sig`));
+      const downloadKey = key === "windows-x86_64" ? "windows" : "macos";
+      assert.equal(downloads.platforms[downloadKey].filename, installer);
+      assert.match(downloads.platforms[downloadKey].url, new RegExp(`/${installer.replaceAll(".", "\\.")}$`));
+      await readFile(join(output, installer));
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -70,6 +76,9 @@ test("updater feed can point signed assets at an immutable BugLogin Spaces versi
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(output, "latest.json"), "utf8"));
     for (const [, key, artifact] of targets) assert.equal(manifest.platforms[key].url, `${base}${encodeURIComponent(artifact)}`);
+    const downloads = JSON.parse(await readFile(join(output, "downloads.json"), "utf8"));
+    assert.equal(downloads.platforms.windows.url, `${base}${encodeURIComponent("BugLogin_1.2.3_x64-setup.exe")}`);
+    assert.equal(downloads.platforms.macos.url, `${base}${encodeURIComponent("BugLogin_1.2.3_aarch64.dmg")}`);
     const invalid = spawnSync(process.execPath, [script, incoming, join(root, "invalid"), "1.2.3", "keyduc91/Malvanut-Login", "http://spaces.example.test/v1.2.3/"], { encoding: "utf8" });
     assert.notEqual(invalid.status, 0);
   } finally {

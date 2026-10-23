@@ -32,6 +32,8 @@ test("release publishes verified platform bundles as a downloadable prerelease c
   assert.match(release, /Publish immutable RC artifacts and feed to DigitalOcean Spaces/);
   assert.match(release, /secrets\.S3_ACCESS_KEY_ID/);
   assert.match(release, /releases\/desktop\/v3\/rc\/latest\.json/);
+  assert.match(release, /releases\/desktop\/v3\/rc\/downloads\.json/);
+  assert.match(release, /verify-downloads-manifest\.mjs/);
   const updaterFeed = await readFile("scripts/release/assemble-tauri-updater-feed.mjs", "utf8");
   assert.match(updaterFeed, /latest\.json/);
   assert.match(release, /--prerelease --verify-tag/);
@@ -57,6 +59,8 @@ test("stable promotion validates RC assets and changes metadata without rebuildi
   assert.match(promotion, /verify-tauri-updater-feed\.mjs/);
   assert.match(promotion, /gh release edit[\s\S]*?--prerelease=false --latest/);
   assert.match(promotion, /Publish stable updater feed to DigitalOcean Spaces/);
+  assert.match(promotion, /releases\/desktop\/v3\/stable\/downloads\.json/);
+  assert.match(promotion, /verify-downloads-manifest\.mjs/);
   assert.doesNotMatch(promotion, /gh release create|tauri build|cargo build|--clobber/);
   assert.match(promotion, /isDraft\|\|\(!r\.isPrerelease&&!r\.isLatest\)/);
   assert.match(await readFile("scripts/release/verify-tauri-updater-feed.mjs", "utf8"), /stable updater feed requires/);
@@ -94,6 +98,28 @@ test("stable updater feed validates version-bound Spaces artifact URLs", async (
     platforms["windows-x86_64"].url = `${base}v1.2.2/12345/BugLogin_1.2.3_x64-setup.exe`;
     await writeFile(manifestPath, JSON.stringify({ version: "1.2.3", platforms }));
     assert.throws(() => run("scripts/release/verify-tauri-updater-feed.mjs", manifestPath, "1.2.3", "owner/repo", base));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("installer download catalog only accepts immutable Windows and macOS installer URLs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "buglogin-download-catalog-"));
+  try {
+    const manifestPath = join(directory, "downloads.json");
+    const base = "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/artifacts/";
+    const manifest = {
+      version: "1.2.3",
+      platforms: {
+        windows: { filename: "BugLogin_1.2.3_x64-setup.exe", url: `${base}v1.2.3/12345/BugLogin_1.2.3_x64-setup.exe` },
+        macos: { filename: "BugLogin_1.2.3_aarch64.dmg", url: `${base}v1.2.3/12345/BugLogin_1.2.3_aarch64.dmg` },
+      },
+    };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    run("scripts/release/verify-downloads-manifest.mjs", manifestPath, "1.2.3", base);
+    manifest.platforms.macos.url = "https://evil.example/BugLogin_1.2.3_aarch64.dmg";
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    assert.throws(() => run("scripts/release/verify-downloads-manifest.mjs", manifestPath, "1.2.3", base));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

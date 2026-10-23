@@ -952,6 +952,20 @@ async fn runtime_dispatch_targets_owned_devices_and_requires_a_matching_receipt(
     let job = body(enqueue).await["job"].clone();
     assert_eq!(job["deviceId"], device_id);
     assert_eq!(job["state"], "accepted");
+    let operation_uri = format!("/v1/operations/{}", job["operationId"].as_str().unwrap());
+    let pending = app
+        .clone()
+        .oneshot(api_request(
+            "GET",
+            &operation_uri,
+            Some(&owner_token),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::OK);
+    assert_eq!(body(pending).await["status"], "running");
 
     let inbox = app
         .clone()
@@ -1027,6 +1041,19 @@ async fn runtime_dispatch_targets_owned_devices_and_requires_a_matching_receipt(
         .unwrap();
     assert_eq!(complete.status(), StatusCode::OK);
     assert_eq!(body(complete).await["job"]["state"], "completed");
+    let finished = app
+        .clone()
+        .oneshot(api_request(
+            "GET",
+            &operation_uri,
+            Some(&owner_token),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(finished.status(), StatusCode::OK);
+    assert_eq!(body(finished).await["status"], "completed");
 
     let replay = app
         .oneshot(api_request(

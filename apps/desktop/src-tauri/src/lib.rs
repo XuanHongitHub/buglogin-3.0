@@ -16,6 +16,7 @@ mod migration_commands;
 mod network_features;
 mod profile_cookie_manager;
 mod profile_lifecycle;
+mod profile_password;
 mod profile_projection;
 pub mod profile_runtime;
 mod proxy_bridge;
@@ -487,10 +488,21 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build BugLogin desktop application")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(state) = app.try_state::<DesktopState>() {
-                    if tauri::async_runtime::block_on(state.shutdown()).is_err() {
-                        api.prevent_exit();
+                    // Quit must always complete: unsynced profiles keep their local
+                    // markers and are reconciled on the next start, and the process
+                    // supervisor closes any browser left running.
+                    let shutdown = tauri::async_runtime::block_on(tokio::time::timeout(
+                        std::time::Duration::from_secs(45),
+                        state.shutdown(),
+                    ));
+                    match shutdown {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            eprintln!("BugLogin shutdown finished with an error: {}", error.code)
+                        }
+                        Err(_) => eprintln!("BugLogin shutdown timed out; exiting anyway"),
                     }
                 }
             }
@@ -653,7 +665,6 @@ fn runtime_name(runtime: &buglogin_domain::entities::Runtime) -> &'static str {
     use buglogin_domain::entities::Runtime;
     match runtime {
         Runtime::Wayfern => "wayfern",
-        Runtime::Bugmini => "bugmini",
         _ => "unsupported",
     }
 }
@@ -668,7 +679,7 @@ async fn install_verified_runtime(
     use buglogin_domain::entities::Runtime;
 
     let (platform, architecture) = runtime_install::current_platform_architecture(correlation_id)?;
-    if !matches!(&runtime, Runtime::Wayfern | Runtime::Bugmini) {
+    if runtime != Runtime::Wayfern {
         return Err(Problem::new(
             "runtime_not_supported",
             "Runtime has no approved desktop adapter",
@@ -780,7 +791,7 @@ async fn ensure_profile_runtime_installed(
                 correlation_id,
             )
         })?;
-    if !matches!(selection.runtime, Runtime::Wayfern | Runtime::Bugmini) {
+    if selection.runtime != Runtime::Wayfern {
         return Ok(());
     }
 

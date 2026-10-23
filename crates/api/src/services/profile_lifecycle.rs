@@ -8,7 +8,7 @@ use buglogin_browser::{
     lifecycle::Lifecycle,
     process::{ApprovedExecutable, ProcessController, SystemProcessController},
     profile::ProfileService,
-    runtime::{RuntimeAdapter, RuntimeBinary, bugmini::BugminiAdapter, wayfern::WayfernAdapter},
+    runtime::{RuntimeAdapter, RuntimeBinary, wayfern::WayfernAdapter},
 };
 use buglogin_domain::{
     entities::{ProfileState, Runtime},
@@ -90,15 +90,6 @@ impl ProfileLifecycleService {
         let (validated, specification) = match current.value.runtime {
             Runtime::Wayfern => {
                 let adapter = WayfernAdapter;
-                let validated = adapter.validate_binary(&binary)?;
-                let profile_path =
-                    adapter.profile_path(&command.profiles_root, &command.profile_id)?;
-                let specification =
-                    adapter.launch_specification(&validated, &profile_path, &command.extra_args)?;
-                (validated, specification)
-            }
-            Runtime::Bugmini => {
-                let adapter = BugminiAdapter;
                 let validated = adapter.validate_binary(&binary)?;
                 let profile_path =
                     adapter.profile_path(&command.profiles_root, &command.profile_id)?;

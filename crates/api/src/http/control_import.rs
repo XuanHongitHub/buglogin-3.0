@@ -1246,7 +1246,6 @@ fn legacy_username(account_id: &str) -> String {
 fn migrated_profile_runtime(legacy_runtime: &str) -> Runtime {
     match legacy_runtime.trim().to_ascii_lowercase().as_str() {
         "wayfern" => Runtime::Wayfern,
-        "bugmini" => Runtime::Bugmini,
         _ => Runtime::Preserved,
     }
 }
@@ -2773,7 +2772,7 @@ mod tests {
     #[test]
     fn unsupported_legacy_runtimes_map_to_non_launchable_preserved_runtime() {
         assert_eq!(migrated_profile_runtime("Wayfern"), Runtime::Wayfern);
-        assert_eq!(migrated_profile_runtime("bugmini"), Runtime::Bugmini);
+        assert_eq!(migrated_profile_runtime("bugmini"), Runtime::Preserved);
         assert_eq!(migrated_profile_runtime("cloak"), Runtime::Preserved);
         assert_eq!(
             migrated_profile_runtime("unknown-browser"),

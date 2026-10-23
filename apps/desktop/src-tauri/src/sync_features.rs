@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::desktop_state::DesktopState;
+use crate::profile_lifecycle::canonical_dir_name;
 
 fn get_app_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
@@ -102,7 +103,9 @@ pub async fn create_restore_point(
     label: Option<String>,
 ) -> Result<RestorePoint, String> {
     let id = format!("rp_{}", now_secs());
-    let p_dir = get_app_data_dir().join("profiles").join(&profile_id);
+    let p_dir = get_app_data_dir()
+        .join("profiles")
+        .join(canonical_dir_name(&profile_id)?);
     let size = if p_dir.exists() {
         dir_size(&p_dir).unwrap_or(1024 * 512)
     } else {
@@ -163,11 +166,14 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 
 #[tauri::command]
 pub async fn delete_restore_point(_profile_id: String, id: String) -> Result<(), String> {
+    let snapshot_name = canonical_dir_name(&id)?;
     let conn = init_db().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM restore_points WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
 
-    let snap_dir = get_app_data_dir().join("restore_points").join(&id);
+    let snap_dir = get_app_data_dir()
+        .join("restore_points")
+        .join(snapshot_name);
     if snap_dir.exists() {
         let _ = fs::remove_dir_all(snap_dir);
     }
@@ -176,8 +182,12 @@ pub async fn delete_restore_point(_profile_id: String, id: String) -> Result<(),
 
 #[tauri::command]
 pub async fn restore_restore_point(profile_id: String, id: String) -> Result<(), String> {
-    let snap_dir = get_app_data_dir().join("restore_points").join(&id);
-    let dst_dir = get_app_data_dir().join("profiles").join(&profile_id);
+    let snap_dir = get_app_data_dir()
+        .join("restore_points")
+        .join(canonical_dir_name(&id)?);
+    let dst_dir = get_app_data_dir()
+        .join("profiles")
+        .join(canonical_dir_name(&profile_id)?);
     if snap_dir.exists() {
         let _ = copy_dir_all(&snap_dir, &dst_dir);
     }

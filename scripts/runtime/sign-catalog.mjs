@@ -176,8 +176,7 @@ export async function buildSignedRuntimeCatalog(options) {
   await regularFile(privateKeyFile, "private signing key", 64 * 1024);
   if (!keyId?.trim() || keyId.length > 128)
     fail("key ID is required and must be at most 128 characters");
-  if (!new Set(["wayfern", "bugmini"]).has(runtime))
-    fail("runtime must be wayfern or bugmini");
+  if (runtime !== "wayfern") fail("runtime must be wayfern");
   if (!new Set(["windows", "macos", "linux"]).has(platform))
     fail("platform is unsupported");
   if (!new Set(["x64", "arm64"]).has(architecture))
@@ -348,7 +347,7 @@ function parseArguments(argv) {
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
     console.log(
-      "Usage: node scripts/runtime/sign-catalog.mjs --artifact FILE --private-key KEY.pem --key-id ID --runtime wayfern|bugmini --version VERSION --platform windows|macos|linux --architecture x64|arm64 --relative-path PATH --source HTTPS_URL --output catalog.json --trust-output trust-keys.json [--package-format raw|zip|dmg] [--archive-prefix PATH] [--existing-catalog FILE] [--existing-trust-keys FILE]",
+      "Usage: node scripts/runtime/sign-catalog.mjs --artifact FILE --private-key KEY.pem --key-id ID --runtime wayfern --version VERSION --platform windows|macos|linux --architecture x64|arm64 --relative-path PATH --source HTTPS_URL --output catalog.json --trust-output trust-keys.json [--package-format raw|zip|dmg] [--archive-prefix PATH] [--existing-catalog FILE] [--existing-trust-keys FILE]",
     );
     return;
   }

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 #[tokio::test]
 #[ignore = "requires an installed trusted Wayfern runtime; run explicitly with BUGLOGIN_WAYFERN_TEST_STRICT=1"]
 async fn wayfern_native_profile_lifecycle() {
-    if !cfg!(target_os = "windows") {
+    if !cfg!(any(target_os = "windows", target_os = "macos")) {
         return;
     }
     let Some(binary) = env::var_os("BUGLOGIN_WAYFERN_TEST_BINARY") else {
@@ -81,7 +81,6 @@ async fn wayfern_native_profile_lifecycle() {
                 },
             )]
             .into(),
-            bugmini: Default::default(),
         },
     ) {
         Ok(state) => state,

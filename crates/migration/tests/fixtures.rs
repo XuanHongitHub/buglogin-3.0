@@ -2219,10 +2219,7 @@ fn mig_008_runtime_aliases_remain_preserved_until_artifact_approval() {
     assert_json_file(&expected.join("snapshot.json"), &snapshot);
     assert_eq!(report.runtime_findings.len(), 6);
     assert!(report.runtime_findings.iter().all(|finding| {
-        (finding.runtime == "bugmini"
-            && finding.class == buglogin_migration::inspect::MigrationClass::Partial)
-            || (finding.runtime != "bugmini"
-                && finding.class == buglogin_migration::inspect::MigrationClass::Unsupported)
+        finding.class == buglogin_migration::inspect::MigrationClass::Unsupported
     }));
 
     let key = MigrationKey::from_bytes([8; 32]);

@@ -118,11 +118,49 @@ pub fn validate_source_path(path: &Path) -> Result<(), Problem> {
             continue;
         }
         let metadata = fs::symlink_metadata(ancestor).map_err(|_| source_unavailable())?;
-        if metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() && !is_system_managed_link(&metadata) {
             return Err(source_symlink_unsupported());
         }
     }
     Ok(())
+}
+
+/// Root-owned links such as macOS `/var -> /private/var` belong to the OS, not
+/// to whoever supplied the source path, so they cannot redirect a migration.
+#[cfg(unix)]
+fn is_system_managed_link(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.uid() == 0
+}
+
+#[cfg(not(unix))]
+fn is_system_managed_link(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+const CHROMIUM_RUNTIME_LINKS: [&str; 4] = [
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "RunningChromeVersion",
+];
+
+/// Chromium writes these lock links into every running (or crashed) profile;
+/// they are machine-local state, never user data.
+pub fn is_chromium_runtime_link(file_type: fs::FileType, name: &std::ffi::OsStr) -> bool {
+    file_type.is_symlink()
+        && name
+            .to_str()
+            .is_some_and(|name| CHROMIUM_RUNTIME_LINKS.contains(&name))
+}
+
+/// Legacy data roots carry downloaded browser binaries (with app-bundle links)
+/// and Chromium lock links; migration skips them instead of failing closed.
+pub fn is_legacy_runtime_artifact(relative: &Path, file_type: fs::FileType) -> bool {
+    relative == Path::new("binaries")
+        || relative
+            .file_name()
+            .is_some_and(|name| is_chromium_runtime_link(file_type, name))
 }
 
 fn reject_canonical_path_collisions(files: &[CollectedFile]) -> Result<(), Problem> {
@@ -161,6 +199,10 @@ fn collect_files(
         let entry = entry.map_err(|_| source_unavailable())?;
         let file_type = entry.file_type().map_err(|_| source_unavailable())?;
         let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|_| source_unavailable())?;
+        if is_legacy_runtime_artifact(relative, file_type) {
+            continue;
+        }
         if file_type.is_symlink() {
             return Err(source_symlink_unsupported());
         }

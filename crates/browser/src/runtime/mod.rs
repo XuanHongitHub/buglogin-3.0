@@ -1,4 +1,3 @@
-pub mod bugmini;
 pub mod catalog;
 pub mod contract;
 pub mod download;

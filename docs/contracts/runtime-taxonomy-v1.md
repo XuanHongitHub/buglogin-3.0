@@ -4,8 +4,8 @@
 
 | ID | Role | Compatibility status |
 |---|---|---|
-| `wayfern` | Primary BugLogin runtime | Selectable for new profiles; required baseline |
-| `bugmini` | Secondary BugLogin runtime | Selectable where a verified local binary is configured |
+| `wayfern` | BugLogin runtime | The only runtime selectable for new profiles, installable and launchable |
+| `bugmini` | Legacy runtime (retired 2026-10-23) | Preserve existing profiles; not selectable or launchable |
 | `bugox` | Legacy runtime | Preserve existing profiles; not selectable until an adapter is approved |
 | `bugium` | Legacy runtime | Preserve existing profiles; not selectable until an adapter is approved |
 | `bugthor` | Legacy runtime | Preserve existing profiles; not selectable until an adapter is approved |

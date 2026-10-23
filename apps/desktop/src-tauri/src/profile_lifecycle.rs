@@ -4,12 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use buglogin_domain::errors::Problem;
+use buglogin_domain::ids::ProfileId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::desktop_state::DesktopState;
 use crate::legacy_compat::{self, create_browser_profile_new};
+use crate::profile_password;
 
 static REQ_ID_SEQ: AtomicU64 = AtomicU64::new(1000);
 
@@ -121,9 +123,10 @@ pub async fn clone_profile(
         .unwrap_or("")
         .to_owned();
 
-    if !new_id.is_empty() {
-        let src_dir = get_app_data_dir().join("profiles").join(&profile_id);
-        let dst_dir = get_app_data_dir().join("profiles").join(&new_id);
+    if let (Ok(source), Ok(target)) = (canonical_dir_name(&profile_id), canonical_dir_name(&new_id))
+    {
+        let src_dir = get_app_data_dir().join("profiles").join(source);
+        let dst_dir = get_app_data_dir().join("profiles").join(target);
         if src_dir.exists() && !dst_dir.exists() {
             let _ = copy_dir_all(&src_dir, &dst_dir);
         }
@@ -167,7 +170,8 @@ pub async fn open_url_with_profile(
 
 #[tauri::command]
 pub async fn is_profile_locked(profile_id: String) -> Result<bool, String> {
-    Ok(legacy_compat::has_profile_password(&profile_id))
+    Ok(legacy_compat::has_profile_password(&profile_id)
+        && !profile_password::is_unlocked(&profile_id))
 }
 
 #[tauri::command]
@@ -176,10 +180,11 @@ pub async fn unlock_profile(
     profile_id: String,
     password: String,
 ) -> Result<(), String> {
-    legacy_compat::verify_profile_password(state, profile_id, password)
+    legacy_compat::verify_profile_password(state, profile_id.clone(), password)
         .await
-        .map(|_| ())
-        .map_err(|e| e.title)
+        .map_err(|e| e.title)?;
+    profile_password::grant_unlock(&profile_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -278,8 +283,10 @@ pub async fn list_trashed_profiles(
             let updated = item.get("updatedAt").and_then(Value::as_i64).unwrap_or(now);
             let has_pwd = legacy_compat::has_profile_password(&id);
 
-            let p_dir = get_app_data_dir().join("profiles").join(&id);
-            let size = dir_size(&p_dir).unwrap_or(1024 * 1024);
+            let size = canonical_dir_name(&id)
+                .ok()
+                .and_then(|name| dir_size(&get_app_data_dir().join("profiles").join(name)).ok())
+                .unwrap_or(1024 * 1024);
 
             trashed.push(TrashedProfileSummary {
                 id,
@@ -349,9 +356,11 @@ pub async fn purge_trashed_profile(
         )
         .await?;
 
-    let p_dir = get_app_data_dir().join("profiles").join(&profile_id);
-    if p_dir.exists() {
-        let _ = fs::remove_dir_all(p_dir);
+    if let Ok(name) = canonical_dir_name(&profile_id) {
+        let p_dir = get_app_data_dir().join("profiles").join(name);
+        if p_dir.exists() {
+            let _ = fs::remove_dir_all(p_dir);
+        }
     }
 
     let _ = app.emit("trash-changed", ());
@@ -371,9 +380,11 @@ pub async fn empty_trash(state: State<'_, DesktopState>, app: AppHandle) -> Resu
                 json!({ "profileId": item.id }),
             )
             .await;
-        let p_dir = get_app_data_dir().join("profiles").join(&item.id);
-        if p_dir.exists() {
-            let _ = fs::remove_dir_all(p_dir);
+        if let Ok(name) = canonical_dir_name(&item.id) {
+            let p_dir = get_app_data_dir().join("profiles").join(name);
+            if p_dir.exists() {
+                let _ = fs::remove_dir_all(p_dir);
+            }
         }
     }
 
@@ -391,17 +402,42 @@ pub struct ProfileArchivePreview {
     pub size_bytes: u64,
 }
 
+/// Profile and restore-point IDs reach the filesystem from the webview; only
+/// canonical IDs (no separators, leading dot or absolute path) may name a directory.
+pub(crate) fn canonical_dir_name(id: &str) -> Result<&str, String> {
+    ProfileId::new(id)
+        .map(|_| id)
+        .map_err(|_| "Invalid identifier".to_string())
+}
+
 #[tauri::command]
 pub async fn export_profile(profile_id: String, destination_path: String) -> Result<(), String> {
-    let src = get_app_data_dir().join("profiles").join(&profile_id);
+    if legacy_compat::has_profile_password(&profile_id)
+        && !profile_password::take_unlock(&profile_id)
+    {
+        return Err(profile_password::locked_problem().title);
+    }
+    export_profile_from(
+        &get_app_data_dir(),
+        &profile_id,
+        Path::new(&destination_path),
+    )
+}
+
+fn export_profile_from(data_dir: &Path, profile_id: &str, dst: &Path) -> Result<(), String> {
+    let src = data_dir
+        .join("profiles")
+        .join(canonical_dir_name(profile_id)?);
     if !src.exists() {
         return Err("Profile data directory not found".to_string());
     }
-    let dst = PathBuf::from(&destination_path);
+    if fs::symlink_metadata(dst).is_ok() {
+        return Err("Export destination already exists".to_string());
+    }
     if let Some(parent) = dst.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    copy_dir_all(&src, &dst).map_err(|e| e.to_string())
+    copy_dir_all(&src, dst).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -459,11 +495,72 @@ pub async fn import_profile_archive(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    if !new_id.is_empty() && p.is_dir() {
-        let dst_dir = get_app_data_dir().join("profiles").join(&new_id);
+    if let (Ok(target), true) = (canonical_dir_name(&new_id), p.is_dir()) {
+        let dst_dir = get_app_data_dir().join("profiles").join(target);
         let _ = copy_dir_all(&p, &dst_dir);
     }
 
     let _ = app.emit("profiles-changed", json!({ "profileId": new_id }));
     Ok(new_profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_dir_name, export_profile_from};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-profile-lifecycle-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("profiles/prf_source/Default")).unwrap();
+        fs::write(root.join("profiles/prf_source/Default/Preferences"), b"{}").unwrap();
+        root
+    }
+
+    #[test]
+    fn canonical_dir_name_accepts_only_canonical_ids() {
+        assert_eq!(canonical_dir_name("prf_source").unwrap(), "prf_source");
+        for bad in [
+            "",
+            "..",
+            "../outside",
+            "/Users/someone",
+            "a/b",
+            r"a\b",
+            ".hidden",
+        ] {
+            assert!(canonical_dir_name(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn export_rejects_profile_ids_that_leave_the_profiles_root() {
+        let root = temp_root("export-traversal");
+        fs::create_dir_all(root.join("outside")).unwrap();
+        let destination = root.join("exported");
+
+        assert!(export_profile_from(&root, "../outside", &destination).is_err());
+        assert!(export_profile_from(&root, root.to_str().unwrap(), &destination).is_err());
+        assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_never_merges_into_an_existing_directory() {
+        let root = temp_root("export-existing");
+        let existing = root.join("existing");
+        fs::create_dir_all(&existing).unwrap();
+
+        assert!(export_profile_from(&root, "prf_source", &existing).is_err());
+        assert!(!existing.join("Default").exists());
+
+        let fresh = root.join("fresh");
+        export_profile_from(&root, "prf_source", &fresh).unwrap();
+        assert!(fresh.join("Default/Preferences").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

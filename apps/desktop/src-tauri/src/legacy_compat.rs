@@ -12,6 +12,8 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::time::sleep;
 
 use crate::desktop_state::{DesktopAuthStatus, DesktopState};
+use crate::profile_lifecycle::canonical_dir_name;
+use crate::profile_password::{self, PasswordCheck};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Deserialize)]
@@ -1671,6 +1673,9 @@ pub async fn launch_browser_profile(
     profile_id: Option<String>,
 ) -> Result<Value, Problem> {
     let (profile, profile_id) = profile_argument(profile, profile_id)?;
+    if has_profile_password(&profile_id) && !profile_password::take_unlock(&profile_id) {
+        return Err(profile_password::locked_problem());
+    }
     run_operation(
         &state,
         "profile_launch",
@@ -1779,7 +1784,9 @@ async fn run_operation(state: &DesktopState, command: &str, payload: Value) -> R
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_response(&correlation_id))?;
 
-    for _ in 0..1_200 {
+    // Large profiles can take minutes to hydrate or upload; launch/stop are
+    // serialized per profile, so waiting longer never starts a parallel run.
+    for _ in 0..6_000 {
         let operation = state
             .invoke(
                 "operation_get",
@@ -1817,6 +1824,7 @@ async fn run_operation(state: &DesktopState, command: &str, payload: Value) -> R
 }
 
 pub(crate) fn load_local_profile_settings(profile_id: &str) -> Option<Value> {
+    let profile_id = canonical_dir_name(profile_id).ok()?;
     let data_dir = dirs::data_local_dir()?;
     for root in [
         data_dir.join("BugLogin").join("profiles").join(profile_id),
@@ -1865,6 +1873,14 @@ fn save_local_profile_settings(
     profile_id: &str,
     mutate: impl FnOnce(&mut Value),
 ) -> Result<Value, Problem> {
+    let profile_id = canonical_dir_name(profile_id).map_err(|_| {
+        Problem::new(
+            "profile_id_invalid",
+            "Profile identifier is invalid",
+            400,
+            "local-settings",
+        )
+    })?;
     let data_dir = dirs::data_local_dir().ok_or_else(|| {
         Problem::new(
             "data_dir_unavailable",
@@ -2208,18 +2224,17 @@ pub async fn update_profile_proxy_bypass_rules(
     Ok(legacy_profile(&profile))
 }
 
-fn hash_password_with_salt(password: &str, salt: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(password.as_bytes());
-    format!("{:x}", hasher.finalize())
+fn invalid_profile_password(title: &str) -> Problem {
+    Problem::new("invalid_password", title, 401, "profile-password")
 }
 
-fn rand_u64() -> u64 {
-    let mut bytes = [0u8; 8];
-    let _ = getrandom::fill(&mut bytes);
-    u64::from_le_bytes(bytes)
+fn store_profile_password_hash(profile_id: &str, phc: &str) -> Result<Value, Problem> {
+    save_local_profile_settings(profile_id, |s| {
+        if let Some(obj) = s.as_object_mut() {
+            obj.remove("password_salt");
+        }
+        s["password_hash"] = json!(phc);
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2229,31 +2244,15 @@ pub async fn verify_profile_password(
     password: String,
 ) -> Result<(), Problem> {
     let local = load_local_profile_settings(&profile_id);
-    let salt = local
-        .as_ref()
-        .and_then(|l| l.get("password_salt"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let hash = local
-        .as_ref()
-        .and_then(|l| l.get("password_hash"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-
-    if hash.is_empty() {
-        return Ok(());
-    }
-
-    let computed = hash_password_with_salt(&password, salt);
-    if computed == hash {
-        Ok(())
-    } else {
-        Err(Problem::new(
-            "invalid_password",
-            "Mật khẩu profile không chính xác",
-            401,
-            "profile-password",
-        ))
+    match profile_password::check_password(local.as_ref(), &password) {
+        PasswordCheck::NotSet => Ok(()),
+        PasswordCheck::Valid { upgrade } => {
+            if let Some(phc) = upgrade {
+                let _ = store_profile_password_hash(&profile_id, &phc);
+            }
+            Ok(())
+        }
+        PasswordCheck::Invalid => Err(invalid_profile_password("Mật khẩu profile không chính xác")),
     }
 }
 
@@ -2263,12 +2262,10 @@ pub async fn set_profile_password(
     profile_id: String,
     password: String,
 ) -> Result<(), Problem> {
-    let salt = format!("{:x}", rand_u64());
-    let hash = hash_password_with_salt(&password, &salt);
-    let _ = save_local_profile_settings(&profile_id, |s| {
-        s["password_salt"] = json!(salt);
-        s["password_hash"] = json!(hash);
-    });
+    let local = load_local_profile_settings(&profile_id);
+    profile_password::ensure_password_can_be_set(local.as_ref())?;
+    let phc = profile_password::hash_password(&password)?;
+    store_profile_password_hash(&profile_id, &phc)?;
     let _ = app.emit("profiles-changed", json!({ "profileId": profile_id }));
     Ok(())
 }
@@ -2281,35 +2278,13 @@ pub async fn change_profile_password(
     new_password: String,
 ) -> Result<(), Problem> {
     let local = load_local_profile_settings(&profile_id);
-    let salt = local
-        .as_ref()
-        .and_then(|l| l.get("password_salt"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let hash = local
-        .as_ref()
-        .and_then(|l| l.get("password_hash"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-
-    if !hash.is_empty() {
-        let computed = hash_password_with_salt(&old_password, salt);
-        if computed != hash {
-            return Err(Problem::new(
-                "invalid_password",
-                "Mật khẩu hiện tại không chính xác",
-                401,
-                "profile-password",
-            ));
-        }
+    if profile_password::check_password(local.as_ref(), &old_password) == PasswordCheck::Invalid {
+        return Err(invalid_profile_password(
+            "Mật khẩu hiện tại không chính xác",
+        ));
     }
-
-    let new_salt = format!("{:x}", rand_u64());
-    let new_hash = hash_password_with_salt(&new_password, &new_salt);
-    let _ = save_local_profile_settings(&profile_id, |s| {
-        s["password_salt"] = json!(new_salt);
-        s["password_hash"] = json!(new_hash);
-    });
+    let phc = profile_password::hash_password(&new_password)?;
+    store_profile_password_hash(&profile_id, &phc)?;
     let _ = app.emit("profiles-changed", json!({ "profileId": profile_id }));
     Ok(())
 }
@@ -2321,35 +2296,18 @@ pub async fn remove_profile_password(
     password: String,
 ) -> Result<(), Problem> {
     let local = load_local_profile_settings(&profile_id);
-    let salt = local
-        .as_ref()
-        .and_then(|l| l.get("password_salt"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let hash = local
-        .as_ref()
-        .and_then(|l| l.get("password_hash"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-
-    if !hash.is_empty() {
-        let computed = hash_password_with_salt(&password, salt);
-        if computed != hash {
-            return Err(Problem::new(
-                "invalid_password",
-                "Mật khẩu hiện tại không chính xác",
-                401,
-                "profile-password",
-            ));
-        }
+    if profile_password::check_password(local.as_ref(), &password) == PasswordCheck::Invalid {
+        return Err(invalid_profile_password(
+            "Mật khẩu hiện tại không chính xác",
+        ));
     }
 
-    let _ = save_local_profile_settings(&profile_id, |s| {
+    save_local_profile_settings(&profile_id, |s| {
         if let Some(obj) = s.as_object_mut() {
             obj.remove("password_salt");
             obj.remove("password_hash");
         }
-    });
+    })?;
     let _ = app.emit("profiles-changed", json!({ "profileId": profile_id }));
     Ok(())
 }

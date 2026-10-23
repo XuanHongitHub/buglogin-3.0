@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::desktop_state::DesktopState;
+use crate::legacy_compat::has_profile_password;
+use crate::profile_lifecycle::canonical_dir_name;
+use crate::profile_password;
 
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
 
@@ -75,6 +78,7 @@ fn decrypt_cookie_value(encrypted: &[u8], host_key: &str, key: &[u8; KEY_LEN]) -
 }
 
 pub fn resolve_profile_dir(state: &DesktopState, profile_id: &str) -> Option<PathBuf> {
+    let profile_id = canonical_dir_name(profile_id).ok()?;
     let profiles_root = state.profiles_root()?;
     let direct = profiles_root.join(profile_id);
     if direct.exists() {
@@ -204,6 +208,9 @@ pub async fn export_profile_cookies(
     profile_id: String,
     format: String,
 ) -> Result<String, Problem> {
+    if has_profile_password(&profile_id) && !profile_password::take_unlock(&profile_id) {
+        return Err(profile_password::locked_problem());
+    }
     let profile_dir = resolve_profile_dir(&state, &profile_id).ok_or_else(|| {
         Problem::new(
             "profile_not_found",

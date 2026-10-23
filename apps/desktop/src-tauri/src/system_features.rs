@@ -82,29 +82,46 @@ pub struct TotpEntryCode {
     pub remaining_seconds: u32,
 }
 
-fn compute_totp(secret: &str) -> (String, u32) {
-    let now = now_secs();
+fn compute_totp(secret: &str) -> Result<(String, u32), String> {
+    compute_totp_at(secret, now_secs())
+}
+
+/// RFC 6238 TOTP (HMAC-SHA1, 30-second step, 6 digits) over the base32 secret
+/// that authenticator apps share; spaces, dashes, case and padding are ignored.
+fn compute_totp_at(secret: &str, now: i64) -> Result<(String, u32), String> {
+    use hmac::{Hmac, KeyInit, Mac};
+
+    let normalized: String = secret
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '=')
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let key = data_encoding::BASE32_NOPAD
+        .decode(normalized.as_bytes())
+        .ok()
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| "TOTP secret must be a base32 key".to_string())?;
     let step = 30;
     let counter = (now / step) as u64;
     let remaining = (step - (now % step)) as u32;
 
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    hasher.update(&counter.to_be_bytes());
-    let hash = hasher.finalize();
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&key)
+        .map_err(|_| "TOTP secret must be a base32 key".to_string())?;
+    mac.update(&counter.to_be_bytes());
+    let hash = mac.finalize().into_bytes();
     let offset = (hash[19] & 0xf) as usize;
-    let code_num = ((u32::from(hash[offset] & 0x7f) << 24)
-        | (u32::from(hash[offset + 1]) << 16)
-        | (u32::from(hash[offset + 2]) << 8)
-        | u32::from(hash[offset + 3]))
-        % 1_000_000;
-    (format!("{:06}", code_num), remaining)
+    let code_num = u32::from_be_bytes([
+        hash[offset] & 0x7f,
+        hash[offset + 1],
+        hash[offset + 2],
+        hash[offset + 3],
+    ]) % 1_000_000;
+    Ok((format!("{:06}", code_num), remaining))
 }
 
 #[tauri::command]
 pub async fn generate_totp_code(key: String) -> Result<TotpCode, String> {
-    let (code, remaining_seconds) = compute_totp(&key);
+    let (code, remaining_seconds) = compute_totp(&key)?;
     Ok(TotpCode {
         code,
         remaining_seconds,
@@ -147,21 +164,19 @@ pub async fn get_profile_totp_codes(profile_id: String) -> Result<Vec<TotpEntryC
 
     let rows = stmt
         .query_map(params![profile_id], |r| {
-            let id: String = r.get(0)?;
-            let key: String = r.get(1)?;
-            let (code, remaining) = compute_totp(&key);
-            Ok(TotpEntryCode {
-                id,
-                code,
-                remaining_seconds: remaining,
-            })
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(|e| e.to_string())?;
 
     let mut list = Vec::new();
     for row in rows {
-        if let Ok(item) = row {
-            list.push(item);
+        if let Ok((id, key)) = row {
+            let (code, remaining) = compute_totp(&key)?;
+            list.push(TotpEntryCode {
+                id,
+                code,
+                remaining_seconds: remaining,
+            });
         }
     }
     Ok(list)
@@ -640,4 +655,43 @@ pub async fn get_commercial_trial_status() -> Result<Value, String> {
 #[tauri::command]
 pub async fn has_acknowledged_trial_expiration() -> Result<bool, String> {
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_totp_at;
+
+    // RFC 6238 appendix B (SHA-1, secret "12345678901234567890"), 6-digit truncation.
+    const RFC_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    #[test]
+    fn totp_matches_rfc_6238_sha1_vectors() {
+        assert_eq!(
+            compute_totp_at(RFC_SECRET, 59).unwrap(),
+            ("287082".to_owned(), 1)
+        );
+        assert_eq!(
+            compute_totp_at(RFC_SECRET, 1_111_111_109).unwrap().0,
+            "081804"
+        );
+        assert_eq!(
+            compute_totp_at(RFC_SECRET, 1_234_567_890).unwrap().0,
+            "005924"
+        );
+        assert_eq!(
+            compute_totp_at(RFC_SECRET, 2_000_000_000).unwrap().0,
+            "279037"
+        );
+    }
+
+    #[test]
+    fn totp_accepts_authenticator_formatted_secrets() {
+        let formatted = "gezd gnbv gy3t qojq gezd gnbv gy3t qojq";
+        assert_eq!(compute_totp_at(formatted, 59).unwrap().0, "287082");
+    }
+
+    #[test]
+    fn totp_rejects_secrets_that_are_not_base32() {
+        assert!(compute_totp_at("not-base32!", 59).is_err());
+    }
 }

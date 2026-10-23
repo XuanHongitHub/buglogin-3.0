@@ -111,6 +111,36 @@ fn packages_encrypted_profile_data_without_plaintext_and_sets_manifest_security(
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn encryption_skips_chromium_singleton_links_in_profile_data() {
+    let source = source();
+    let profile = source
+        .path()
+        .join("profiles/00000000-0000-0000-0000-000000000001/profile");
+    for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+        std::os::unix::fs::symlink("MacBook-Pro-12345", profile.join(name))
+            .expect("create chromium singleton link");
+    }
+
+    let data = encrypt_legacy_profile_data(source.path(), &ClientKey::from_bytes([3; 32]))
+        .expect("singleton links are skipped");
+
+    let paths: Vec<&str> = data
+        .index
+        .files
+        .iter()
+        .map(|file| file.source_path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "profiles/00000000-0000-0000-0000-000000000001/profile/Cookies",
+            "profiles/00000000-0000-0000-0000-000000000001/profile/nested/Preferences",
+        ]
+    );
+}
+
 #[test]
 fn tamper_and_wrong_key_fail_authentication() {
     let source = source();

@@ -58,12 +58,7 @@ pub(crate) fn current_platform_architecture(
 
 pub(crate) fn has_install_records(root: &Path) -> Result<bool, Problem> {
     let (platform, architecture) = current_platform_architecture("desktop-runtime-bootstrap")?;
-    for runtime in [Runtime::Wayfern, Runtime::Bugmini] {
-        if !install_record_paths(root, &runtime, &platform, &architecture)?.is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(!install_record_paths(root, &Runtime::Wayfern, &platform, &architecture)?.is_empty())
 }
 
 pub(crate) fn persist_install_record(
@@ -141,115 +136,114 @@ pub(crate) fn load_installed_targets(
 ) -> Result<RuntimeTargets, Problem> {
     let (platform, architecture) = current_platform_architecture("desktop-runtime-bootstrap")?;
     let mut targets = RuntimeTargets::default();
-    for runtime in [Runtime::Wayfern, Runtime::Bugmini] {
-        for path in install_record_paths(root, &runtime, &platform, &architecture)? {
-            let metadata = fs::symlink_metadata(&path).map_err(|_| {
-                problem(
-                    "runtime_install_record_unavailable",
-                    "Runtime install record unavailable",
-                )
-            })?;
-            if !metadata.file_type().is_file() {
-                return Err(problem(
-                    "runtime_install_record_invalid",
-                    "Runtime install record invalid",
-                ));
-            }
-            if metadata.len() > MAX_INSTALL_RECORD_BYTES {
-                return Err(problem(
-                    "runtime_install_record_invalid",
-                    "Runtime install record invalid",
-                ));
-            }
-            let bytes = fs::read(&path).map_err(|_| {
-                problem(
-                    "runtime_install_record_unavailable",
-                    "Runtime install record unavailable",
-                )
-            })?;
-            let record: InstalledRuntimeRecord = serde_json::from_slice(&bytes).map_err(|_| {
-                problem(
-                    "runtime_install_record_invalid",
-                    "Runtime install record invalid",
-                )
-            })?;
-            if record.schema_version != 1
-                || record.release.runtime != runtime
-                || record.release.platform != platform
-                || record.release.architecture != architecture
-                || record.executable_sha256.len() != 64
-                || !record
-                    .executable_sha256
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit())
-            {
-                return Err(problem(
-                    "runtime_install_record_invalid",
-                    "Runtime install record invalid",
-                ));
-            }
-            let catalog = buglogin_browser::runtime::catalog::RuntimeCatalog {
-                schema_version: record.catalog_schema_version,
-                releases: vec![record.release.clone()],
-            };
-            let verified = catalog.verify(verifier).map_err(|_| {
-                problem(
-                    "runtime_signature_invalid",
-                    "Installed runtime signature is invalid",
-                )
-            })?;
-            let verified_release = verified
-                .first()
-                .ok_or_else(|| problem("runtime_catalog_empty", "Runtime catalog is empty"))?;
-            let runtime_dir = path.parent().ok_or_else(|| {
-                problem(
-                    "runtime_install_record_invalid",
-                    "Runtime install record invalid",
-                )
-            })?;
-            let base_dir = download::runtime_directory_for(
-                root,
-                &record.release.runtime,
-                &record.release.platform,
-                &record.release.architecture,
-            )?;
-            let expected_version_dir = download::runtime_directory(root, &record.release)?;
-            let legacy_record = runtime_dir == base_dir;
-            if !legacy_record && runtime_dir != expected_version_dir {
-                return Err(problem(
-                    "runtime_install_record_invalid",
-                    "Runtime install record invalid",
-                ));
-            }
-            let executable = confined_path(runtime_dir, Path::new(&record.release.relative_path))?;
-            let (actual_checksum, _) = checksum_reader(File::open(&executable).map_err(|_| {
-                problem(
-                    "runtime_executable_missing",
-                    "Installed runtime executable is missing",
-                )
-            })?)
-            .map_err(|_| {
-                problem(
-                    "runtime_executable_invalid",
-                    "Installed runtime executable is invalid",
-                )
-            })?;
-            if actual_checksum != record.executable_sha256.to_ascii_lowercase() {
-                return Err(problem(
-                    "runtime_executable_checksum_mismatch",
-                    "Installed runtime executable checksum is invalid",
-                ));
-            }
-            let target = RuntimeTarget {
-                binary: RuntimeBinary {
-                    path: executable,
-                    version: verified_release.release().version.clone(),
-                    expected_checksum: actual_checksum,
-                },
-                extra_args: Vec::new(),
-            };
-            targets.insert(runtime.clone(), target);
+    let runtime = Runtime::Wayfern;
+    for path in install_record_paths(root, &runtime, &platform, &architecture)? {
+        let metadata = fs::symlink_metadata(&path).map_err(|_| {
+            problem(
+                "runtime_install_record_unavailable",
+                "Runtime install record unavailable",
+            )
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(problem(
+                "runtime_install_record_invalid",
+                "Runtime install record invalid",
+            ));
         }
+        if metadata.len() > MAX_INSTALL_RECORD_BYTES {
+            return Err(problem(
+                "runtime_install_record_invalid",
+                "Runtime install record invalid",
+            ));
+        }
+        let bytes = fs::read(&path).map_err(|_| {
+            problem(
+                "runtime_install_record_unavailable",
+                "Runtime install record unavailable",
+            )
+        })?;
+        let record: InstalledRuntimeRecord = serde_json::from_slice(&bytes).map_err(|_| {
+            problem(
+                "runtime_install_record_invalid",
+                "Runtime install record invalid",
+            )
+        })?;
+        if record.schema_version != 1
+            || record.release.runtime != runtime
+            || record.release.platform != platform
+            || record.release.architecture != architecture
+            || record.executable_sha256.len() != 64
+            || !record
+                .executable_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(problem(
+                "runtime_install_record_invalid",
+                "Runtime install record invalid",
+            ));
+        }
+        let catalog = buglogin_browser::runtime::catalog::RuntimeCatalog {
+            schema_version: record.catalog_schema_version,
+            releases: vec![record.release.clone()],
+        };
+        let verified = catalog.verify(verifier).map_err(|_| {
+            problem(
+                "runtime_signature_invalid",
+                "Installed runtime signature is invalid",
+            )
+        })?;
+        let verified_release = verified
+            .first()
+            .ok_or_else(|| problem("runtime_catalog_empty", "Runtime catalog is empty"))?;
+        let runtime_dir = path.parent().ok_or_else(|| {
+            problem(
+                "runtime_install_record_invalid",
+                "Runtime install record invalid",
+            )
+        })?;
+        let base_dir = download::runtime_directory_for(
+            root,
+            &record.release.runtime,
+            &record.release.platform,
+            &record.release.architecture,
+        )?;
+        let expected_version_dir = download::runtime_directory(root, &record.release)?;
+        let legacy_record = runtime_dir == base_dir;
+        if !legacy_record && runtime_dir != expected_version_dir {
+            return Err(problem(
+                "runtime_install_record_invalid",
+                "Runtime install record invalid",
+            ));
+        }
+        let executable = confined_path(runtime_dir, Path::new(&record.release.relative_path))?;
+        let (actual_checksum, _) = checksum_reader(File::open(&executable).map_err(|_| {
+            problem(
+                "runtime_executable_missing",
+                "Installed runtime executable is missing",
+            )
+        })?)
+        .map_err(|_| {
+            problem(
+                "runtime_executable_invalid",
+                "Installed runtime executable is invalid",
+            )
+        })?;
+        if actual_checksum != record.executable_sha256.to_ascii_lowercase() {
+            return Err(problem(
+                "runtime_executable_checksum_mismatch",
+                "Installed runtime executable checksum is invalid",
+            ));
+        }
+        let target = RuntimeTarget {
+            binary: RuntimeBinary {
+                path: executable,
+                version: verified_release.release().version.clone(),
+                expected_checksum: actual_checksum,
+            },
+            extra_args: Vec::new(),
+        };
+        targets.insert(runtime.clone(), target);
     }
     Ok(targets)
 }
@@ -536,7 +530,6 @@ pub(crate) fn emit_progress(
 fn runtime_name(runtime: &buglogin_domain::entities::Runtime) -> &'static str {
     match runtime {
         buglogin_domain::entities::Runtime::Wayfern => "wayfern",
-        buglogin_domain::entities::Runtime::Bugmini => "bugmini",
         _ => "unsupported",
     }
 }
