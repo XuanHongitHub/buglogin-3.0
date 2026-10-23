@@ -1493,9 +1493,15 @@ impl ApiState {
             ("identity", "account_identity_email", Some("account_id")),
             ("identity", "account_identity_username", Some("account_id")),
             ("identity", "account_password", Some("record_id")),
+            ("identity", "api_token", Some("account_id")),
+            ("identity", "device_encryption_key", Some("account_id")),
             ("identity", "session", None),
             ("identity", "session_family", None),
             ("identity", "device_refresh", None),
+            ("identity", "device_authorization", None),
+            ("identity", "device_user_code", None),
+            ("identity", "recovery_token", None),
+            ("identity", "recovery_rate", None),
         ];
         for (tenant, record_type, keep_rule) in record_sets {
             for (id, value, record_revision) in self
