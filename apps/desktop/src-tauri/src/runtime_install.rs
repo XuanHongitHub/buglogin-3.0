@@ -584,7 +584,7 @@ impl download::RuntimeArtifactSource for HttpsArtifactSource {
                 "Runtime source URL is invalid",
             ));
         }
-        let mut response = self
+        let response = self
             .client
             .get(url)
             .send()
