@@ -31,10 +31,15 @@ $env:BUGLOGIN_API_BASE_URL = "http://127.0.0.1:12343"
 $env:BUGLOGIN_BUILD_CPUS = "2"
 $env:NEXT_TELEMETRY_DISABLED = "1"
 Push-Location $repoRoot
+$nextEnvPath = Join-Path $repoRoot "next-env.d.ts"
+$nextEnvBytes = [IO.File]::ReadAllBytes($nextEnvPath)
 try {
     & pnpm.cmd build:web
     if ($LASTEXITCODE -ne 0) { throw "Next.js production web build failed." }
-} finally { Pop-Location }
+} finally {
+    [IO.File]::WriteAllBytes($nextEnvPath, $nextEnvBytes)
+    Pop-Location
+}
 
 $standalone = Join-Path $repoRoot ".next-web/standalone"
 $static = Join-Path $repoRoot ".next-web/static"
