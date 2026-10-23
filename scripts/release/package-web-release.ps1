@@ -51,6 +51,28 @@ Copy-Item -LiteralPath $static -Destination (Join-Path $standalone ".next-web/st
 Copy-Item -LiteralPath $public -Destination (Join-Path $standalone "public") -Recurse -Force
 if (-not (Test-Path -LiteralPath (Join-Path $standalone "server.js") -PathType Leaf)) { throw "Standalone server.js is missing." }
 
+# pnpm's standalone trace can leave dependency aliases under node_modules/.pnpm/node_modules.
+# Node does not search that directory when resolving from a flattened standalone package, so
+# materialize only aliases that are absent at the standalone node_modules root.
+$standaloneModules = Join-Path $standalone "node_modules"
+$pnpmAliases = Join-Path $standaloneModules ".pnpm/node_modules"
+if (Test-Path -LiteralPath $pnpmAliases -PathType Container) {
+    foreach ($entry in Get-ChildItem -LiteralPath $pnpmAliases -Force) {
+        $destination = Join-Path $standaloneModules $entry.Name
+        if ($entry.Name.StartsWith("@")) {
+            New-Item -ItemType Directory -Path $destination -Force | Out-Null
+            foreach ($package in Get-ChildItem -LiteralPath $entry.FullName -Force) {
+                $packageDestination = Join-Path $destination $package.Name
+                if (-not (Test-Path -LiteralPath $packageDestination)) {
+                    Copy-Item -LiteralPath $package.FullName -Destination $destination -Recurse -Force
+                }
+            }
+        } elseif (-not (Test-Path -LiteralPath $destination)) {
+            Copy-Item -LiteralPath $entry.FullName -Destination $standaloneModules -Recurse -Force
+        }
+    }
+}
+
 $bundlePath = Join-Path $outputRoot "buglogin3-web.tar.gz"
 $tar = (Get-Command tar.exe).Source
 & $tar -czf $bundlePath -C $standalone .
