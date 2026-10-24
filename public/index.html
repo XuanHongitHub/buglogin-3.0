@@ -102,9 +102,6 @@ a{color:inherit}
 .alt-dl:hover{color:#fff;text-decoration:underline;text-underline-offset:4px}
 .alt-dl:focus-visible{outline:2px solid #fff;outline-offset:2px}
 .release-version{margin:0;color:var(--on-ink-muted);font-size:13px;font-variant-numeric:tabular-nums}
-.rc-downloads{margin:4px 0 0;color:var(--on-ink-muted);font-size:13px}
-.rc-downloads[hidden]{display:none}
-.rc-downloads a{color:#fff;text-underline-offset:3px}
 
 .readout-wrap{margin-top:52px;width:100%;display:flex;flex-direction:column;align-items:center}
 .readout-cap{display:flex;align-items:center;gap:10px;margin:0 0 14px;font-size:13.5px;color:var(--on-ink-muted)}
@@ -308,7 +305,6 @@ a{color:inherit}
           <span>Dùng macOS? Tải bản cho Mac</span>
         </a>
         <p class="release-version" id="stable-version" role="status" aria-live="polite">Đang kiểm tra phiên bản tải xuống…</p>
-        <p class="rc-downloads" id="dl-rc" hidden></p>
       </div>
 
       <div class="readout-wrap" aria-hidden="true">
@@ -657,26 +653,6 @@ a{color:inherit}
     }
   };
 
-  const refreshRcDownload = async () => {
-    const note = document.getElementById('dl-rc');
-    try {
-      const response = await fetch('/api/downloads/latest?channel=rc', { cache: 'no-store', headers: { accept: 'application/json' } });
-      if (!response.ok) throw new Error('rc_unavailable');
-      const catalog = await response.json();
-      const windows = typeof catalog.platforms?.windows?.url === 'string';
-      const macos = typeof catalog.platforms?.macos?.url === 'string';
-      if (!windows && !macos) throw new Error('rc_unavailable');
-      const links = [];
-      if (windows) links.push(`<a href="/api/downloads/latest?channel=rc&platform=windows">Windows</a>`);
-      if (macos) links.push(`<a href="/api/downloads/latest?channel=rc&platform=macos">macOS</a>`);
-      note.innerHTML = `Bản thử nghiệm ${catalog.version} (RC): ${links.join(' · ')}`;
-      note.hidden = false;
-    } catch {
-      note.hidden = true;
-      note.textContent = '';
-    }
-  };
-
   links.forEach(a => {
     const platform = a === alt ? other.platform : (a.dataset.dl === 'auto' ? main.platform : (a.dataset.dl === 'mac' ? 'macos' : a.dataset.dl));
     a.href = `/api/downloads/latest?channel=stable&platform=${platform}`;
@@ -686,10 +662,9 @@ a{color:inherit}
   setAvailable('windows', false);
   setAvailable('macos', false);
   void refreshDownloads();
-  void refreshRcDownload();
-  window.setInterval(() => { void refreshDownloads(); void refreshRcDownload(); }, 5 * 60 * 1000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { void refreshDownloads(); void refreshRcDownload(); } });
-  window.addEventListener('focus', () => { void refreshDownloads(); void refreshRcDownload(); });
+  window.setInterval(() => { void refreshDownloads(); }, 5 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshDownloads(); });
+  window.addEventListener('focus', () => { void refreshDownloads(); });
   document.getElementById('year').textContent = new Date().getFullYear();
 
   /* ---------- Thanh điều hướng ---------- */
