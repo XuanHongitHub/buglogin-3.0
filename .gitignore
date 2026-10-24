@@ -17,5 +17,7 @@ target/
 apps/desktop/src-tauri/binaries/*
 !apps/desktop/src-tauri/binaries/.gitkeep
 apps/desktop/src-tauri/binaries.build-restore-*/
+apps/desktop/.tauri-frontend-dist-*/
+apps/desktop/.tauri-cargo-dist-*/
 output/
 /donut-browser-daemon

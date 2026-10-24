@@ -30,7 +30,11 @@ export function useAppUpdateNotifications() {
   const [updateProgress, setUpdateProgress] =
     useState<AppUpdateProgress | null>(null);
   const [updateReady, setUpdateReady] = useState(false);
+  const [manualUpdatePrompt, setManualUpdatePrompt] = useState(false);
   const [isClient, setIsClient] = useState(false);
+  const [autoUpdatePreferenceLoaded, setAutoUpdatePreferenceLoaded] =
+    useState(false);
+  const [autoUpdatesEnabled, setAutoUpdatesEnabled] = useState(false);
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const autoDownloadedVersion = useRef<string | null>(null);
   const updateCheckRef = useRef<Promise<AppUpdateInfo | null> | null>(null);
@@ -52,8 +56,23 @@ export function useAppUpdateNotifications() {
     setIsClient(true);
   }, []);
 
-  const checkForAppUpdates = useCallback(async () => {
+  useEffect(() => {
     if (!isClient) return;
+    void invoke<{ disableAutoUpdates?: boolean }>("get_app_settings")
+      .then((settings) => {
+        setAutoUpdatesEnabled(settings.disableAutoUpdates !== true);
+      })
+      .catch((error) => {
+        console.error("Failed to read automatic update preference:", error);
+        setAutoUpdatesEnabled(false);
+      })
+      .finally(() => {
+        setAutoUpdatePreferenceLoaded(true);
+      });
+  }, [isClient]);
+
+  const checkForAppUpdates = useCallback(async () => {
+    if (!isClient || !autoUpdatePreferenceLoaded || !autoUpdatesEnabled) return;
 
     try {
       setIsCheckingForUpdates(true);
@@ -61,9 +80,13 @@ export function useAppUpdateNotifications() {
 
       // Don't show update if this version was already dismissed
       if (update && update.new_version !== dismissedVersion) {
+        setManualUpdatePrompt(false);
         setUpdateInfo(update);
       } else if (update) {
         console.log("Update available but dismissed:", update.new_version);
+      } else {
+        setManualUpdatePrompt(false);
+        setUpdateInfo(null);
       }
     } catch (error) {
       if (!isUpdaterNotConfigured(error)) {
@@ -72,7 +95,13 @@ export function useAppUpdateNotifications() {
     } finally {
       setIsCheckingForUpdates(false);
     }
-  }, [isClient, dismissedVersion, requestAppUpdateCheck]);
+  }, [
+    isClient,
+    autoUpdatePreferenceLoaded,
+    autoUpdatesEnabled,
+    dismissedVersion,
+    requestAppUpdateCheck,
+  ]);
 
   const checkForAppUpdatesManual = useCallback(async () => {
     if (!isClient) return;
@@ -85,6 +114,7 @@ export function useAppUpdateNotifications() {
 
       // Always show manual check results, even if previously dismissed
       autoDownloadedVersion.current = null;
+      setManualUpdatePrompt(Boolean(update));
       setUpdateInfo(update);
       if (!update) {
         showToast({ type: "success", title: t("about.upToDate") });
@@ -159,6 +189,13 @@ export function useAppUpdateNotifications() {
     }
   }, [t]);
 
+  const handleManualUpdate = useCallback(() => {
+    if (!updateInfo) return;
+    autoDownloadedVersion.current = updateInfo.new_version;
+    setManualUpdatePrompt(false);
+    void handleAppUpdate(updateInfo);
+  }, [handleAppUpdate, updateInfo]);
+
   const dismissAppUpdate = useCallback(() => {
     if (!isClient) return;
 
@@ -169,6 +206,7 @@ export function useAppUpdateNotifications() {
     }
 
     setUpdateInfo(null);
+    setManualUpdatePrompt(false);
     toast.dismiss("app-update");
   }, [isClient, updateInfo]);
 
@@ -186,6 +224,7 @@ export function useAppUpdateNotifications() {
         // restart. The effect's updateReady guard keeps an already-prepared
         // update from being downloaded again.
         autoDownloadedVersion.current = null;
+        setManualUpdatePrompt(false);
         setUpdateInfo(event.payload);
       },
     );
@@ -217,12 +256,15 @@ export function useAppUpdateNotifications() {
     };
   }, [isClient]);
 
-  // Auto-download update in background when found
+  // Background checks may download automatically. Manual checks are check-only
+  // until the user selects Update now in the toast.
   useEffect(() => {
     if (
       !isClient ||
+      !autoUpdatesEnabled ||
       !updateInfo ||
       updateInfo.manual_update_required ||
+      manualUpdatePrompt ||
       isUpdating ||
       updateReady ||
       autoDownloadedVersion.current === updateInfo.new_version
@@ -232,13 +274,22 @@ export function useAppUpdateNotifications() {
     autoDownloadedVersion.current = updateInfo.new_version;
     console.log("Auto-downloading app update:", updateInfo.new_version);
     void handleAppUpdate(updateInfo);
-  }, [isClient, updateInfo, isUpdating, updateReady, handleAppUpdate]);
+  }, [
+    isClient,
+    autoUpdatesEnabled,
+    updateInfo,
+    manualUpdatePrompt,
+    isUpdating,
+    updateReady,
+    handleAppUpdate,
+  ]);
 
-  // Show toast only when update is ready to install or requires manual action
+  // Show the manual choice immediately, then show restart only after preparation.
   useEffect(() => {
     if (!isClient) return;
 
-    const showManualToast = updateInfo?.manual_update_required && !isUpdating;
+    const showManualToast =
+      (manualUpdatePrompt || updateInfo?.manual_update_required) && !isUpdating;
     if (!updateReady && !showManualToast) {
       return;
     }
@@ -249,8 +300,10 @@ export function useAppUpdateNotifications() {
         <AppUpdateToast
           updateInfo={updateInfo}
           onRestart={handleRestart}
+          onUpdate={handleManualUpdate}
           onDismiss={dismissAppUpdate}
           updateReady={updateReady}
+          updateAvailable={manualUpdatePrompt}
         />
       ),
       {
@@ -269,17 +322,24 @@ export function useAppUpdateNotifications() {
     handleRestart,
     dismissAppUpdate,
     updateReady,
+    manualUpdatePrompt,
+    handleManualUpdate,
     isUpdating,
     isClient,
   ]);
 
   // Check for app updates on startup
   useEffect(() => {
-    if (!isClient) return;
+    if (!isClient || !autoUpdatePreferenceLoaded || !autoUpdatesEnabled) return;
 
     // Check for updates immediately on startup
     void checkForAppUpdates();
-  }, [isClient, checkForAppUpdates]);
+  }, [
+    isClient,
+    autoUpdatePreferenceLoaded,
+    autoUpdatesEnabled,
+    checkForAppUpdates,
+  ]);
 
   return {
     updateInfo,

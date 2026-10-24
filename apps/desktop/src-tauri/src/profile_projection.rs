@@ -975,7 +975,10 @@ impl ProfileProjection {
         let mut tombstones = previous
             .tombstones
             .iter()
-            .filter(|tombstone| tombstone.retention_deadline_unix_ms > now)
+            .filter(|tombstone| {
+                tombstone.retention_deadline_unix_ms > now
+                    && !live.contains_key(tombstone.key.as_str())
+            })
             .cloned()
             .collect::<Vec<_>>();
         for object in &previous.objects {
@@ -1469,7 +1472,12 @@ impl ProfileProjection {
         let mut tombstones = previous
             .tombstones
             .iter()
-            .filter(|tombstone| tombstone.retention_deadline_unix_ms > now)
+            .filter(|tombstone| {
+                tombstone.retention_deadline_unix_ms > now
+                    && !live_object_keys.contains(tombstone.key.as_str())
+                    && (tombstone.object_retired
+                        || !live_file_paths.contains(tombstone.key.as_str()))
+            })
             .cloned()
             .collect::<Vec<_>>();
         for object in &previous.objects {
@@ -3285,6 +3293,40 @@ mod tests {
         assert_eq!(next_manifest.tombstones[0].key, "Default/Cookies");
         next_descriptor.verify_manifest(&next_manifest).unwrap();
         next_manifest.validate_successor(&manifest, 1).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_recreates_live_path_after_tombstone_with_new_fence() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-tombstone-recreate-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_projection_recreate").unwrap();
+        let resource = ResourceId::new("res_projection_recreate").unwrap();
+        let previous = SyncManifest::new_with_tombstones(
+            workspace,
+            resource,
+            4,
+            1,
+            None,
+            b"deleted",
+            Vec::new(),
+            vec![ManifestTombstone::new("Default/Cookies", 1, 1, u64::MAX).unwrap()],
+        )
+        .unwrap();
+        let profile_path = root.join("browser-profile");
+        fs::create_dir_all(profile_path.join("Default")).unwrap();
+        fs::write(profile_path.join("Default/Cookies"), b"fresh cookie db").unwrap();
+
+        let (_descriptor, _files, next) = projection
+            .snapshot_with_proxy(&profile_path, &previous, 5, None)
+            .unwrap();
+
+        assert!(next.tombstones.is_empty());
+        next.validate_successor(&previous, 2).unwrap();
         let _ = fs::remove_dir_all(root);
     }
 

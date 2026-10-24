@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>BugLogin | Profile TEST PROFILE 001 · Review 3.0.7</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;650;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #0A111D;
+      --canvas-raised: #0E1624;
+      --surface: #111C2B;
+      --surface-soft: #142236;
+      --line: rgba(170,190,225,.15);
+      --line-strong: rgba(170,190,225,.25);
+      --text: #E8EDF5;
+      --muted: #97A3B8;
+      --subtle: #718097;
+      --red: #CD1E25;
+      --red-light: #F0787C;
+      --green: #5DD6A4;
+      --amber: #F1BE69;
+      --display: "Chakra Petch", "Be Vietnam Pro", system-ui, sans-serif;
+      --body: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --width: 1160px;
+    }
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--canvas); -webkit-text-size-adjust: 100%; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--text);
+      background: radial-gradient(60% 45% at 50% 108%,rgba(205,30,37,.24),rgba(205,30,37,0) 70%),var(--canvas);
+      font: 14px/1.5 var(--body);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    button, a { font: inherit; }
+    button { color: inherit; }
+    a { color: inherit; }
+    :focus-visible { outline: 2px solid #F0787C; outline-offset: 3px; }
+    .wrap { width: min(calc(100% - 48px), var(--width)); margin-inline: auto; }
+    .demo-note { border-bottom: 1px solid rgba(240,120,124,.2); background: rgba(205,30,37,.09); color: #E9B6B8; }
+    .demo-note-inner { display: flex; min-height: 32px; align-items: center; gap: 9px; font-size: 11px; }
+    .demo-note strong { color: #F4CFD0; font-weight: 600; }
+    .demo-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--red-light); }
+    .context { height: 64px; border-bottom: 1px solid var(--line); background: rgba(14,22,36,.84); -webkit-backdrop-filter: blur(14px) saturate(140%); backdrop-filter: blur(14px) saturate(140%); }
+    .context-inner { display: flex; height: 100%; align-items: center; gap: 12px; }
+    .brand { display: inline-flex; align-items: center; gap: 13px; color: var(--text); font-family: var(--display); font-size: 18px; font-weight: 600; letter-spacing: .01em; text-decoration: none; }
+    .brand img { display: block; width: 78px; height: 34px; object-fit: contain; filter: url(#logo-on-dark); }
+    .brand-sep { width: 1px; height: 22px; background: rgba(232,237,245,.24); }
+    .crumb-sep { color: #718097; font-size: 12px; }
+    .crumb { color: #97A3B8; font-size: 13px; }
+    .crumb strong { color: var(--text); font-weight: 500; }
+    .context-end { display: flex; align-items: center; gap: 9px; margin-left: auto; color: var(--muted); font-size: 11px; }
+    .key { padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: 5px; color: #C5CEDB; font: 10px var(--mono); }
+    main { padding: 32px 0 52px; }
+    .profile-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 0 2px 23px; }
+    .head-main { min-width: 0; }
+    .eyebrow { display: flex; align-items: center; gap: 8px; margin: 0 0 7px; color: var(--red-light); font-size: 10px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 0; color: #F4F7FB; font: 700 clamp(27px,3.4vw,38px)/1.12 var(--display); letter-spacing: -.025em; overflow-wrap: anywhere; }
+    .head-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 16px; margin-top: 10px; color: var(--muted); font-size: 11px; }
+    .head-meta span { display: inline-flex; align-items: center; gap: 7px; }
+    .head-meta svg { width: 14px; height: 14px; color: #77869D; }
+    .status { display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px; border: 1px solid rgba(93,214,164,.25); border-radius: 6px; background: rgba(22,125,91,.13); color: #82E0B8; font-size: 10px; font-weight: 600; white-space: nowrap; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(93,214,164,.12); }
+    .head-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+    .button { display: inline-flex; min-height: 40px; align-items: center; justify-content: center; gap: 9px; padding: 0 16px; border: 0; border-radius: 8px; background: var(--red); color: #fff; font-family: var(--display); font-size: 13px; font-weight: 600; cursor: pointer; transition: background .2s ease,transform .2s ease; }
+    .button:hover { background: var(--red-hi); }
+    .button:active { transform: translateY(1px); }
+    .button svg { width: 14px; height: 14px; }
+    .overview { display: grid; grid-template-columns: minmax(310px,.86fr) minmax(0,1.4fr); gap: 14px; align-items: stretch; }
+    .panel { min-width: 0; border: 1px solid rgba(170,190,225,.16); border-radius: 12px; background: rgba(14,22,36,.62); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+    .network { position: relative; overflow: hidden; padding: 22px 23px 19px; }
+    .network::after { position: absolute; top: -155px; right: -125px; width: 330px; height: 330px; border: 1px solid rgba(150,174,214,.09); border-radius: 50%; box-shadow: 0 0 0 14px rgba(150,174,214,.018),0 0 0 34px rgba(150,174,214,.015),0 0 0 58px rgba(150,174,214,.012); content: ""; pointer-events: none; }
+    .section-label { display: flex; align-items: center; gap: 8px; margin: 0; color: #AEB9CB; font-size: 12px; font-weight: 500; letter-spacing: .01em; }
+    .section-label svg { width: 14px; height: 14px; color: var(--red-light); }
+    .ip-line { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .ip { margin: 0; color: #F4F7FB; font: 700 clamp(30px,3.4vw,42px)/1.1 var(--display); letter-spacing: -.025em; font-variant-numeric: tabular-nums; }
+    .country-flag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; color: #AEB9CB; background: rgba(255,255,255,.035); font-size: 10px; white-space: nowrap; }
+    .country-flag svg { width: 17px; height: 12px; border-radius: 2px; box-shadow: 0 0 0 1px rgba(255,255,255,.16); }
+    .icon-button { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border: 1px solid var(--line-strong); border-radius: 7px; background: rgba(255,255,255,.035); color: #AEBBD0; cursor: pointer; }
+    .icon-button:hover { border-color: rgba(240,120,124,.5); color: #FFF; }
+    .icon-button svg { width: 14px; height: 14px; }
+    .ip-sub { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+    .network-state { display: flex; align-items: flex-start; gap: 10px; margin-top: 17px; padding: 10px 11px; border: 1px solid rgba(241,190,105,.2); border-radius: 7px; background: rgba(160,103,22,.09); }
+    .network-state svg { width: 15px; height: 15px; flex: 0 0 auto; margin-top: 1px; color: var(--amber); }
+    .network-state strong { display: block; color: #F0D39F; font-size: 10px; font-weight: 600; }
+    .network-state span { display: block; margin-top: 2px; color: #B7A88A; font-size: 10px; line-height: 1.45; }
+    .network-details { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px 16px; margin: 18px 0 0; padding-top: 15px; border-top: 1px solid var(--line); }
+    .network-details div { min-width: 0; }
+    .network-details dt,.fact dt,.meta-item dt { color: var(--muted); font-size: 10px; }
+    .network-details dd { margin: 3px 0 0; color: #DEE5EF; font-size: 11px; font-weight: 600; overflow-wrap: anywhere; }
+    .env { padding: 22px 23px 19px; }
+    .env-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 15px; border-bottom: 1px solid var(--line); }
+    .env-head h2 { margin: 0; color: #F4F7FB; font: 600 21px/1.2 var(--display); }
+    .env-head p { margin: 5px 0 0; color: #AEB9CB; font-size: 12px; }
+    .browser-version { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: 3px; color: #DDE5F1; font: 600 11px var(--mono); }
+    .browser-version small { color: var(--muted); font: 10px var(--body); }
+    .facts { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 0 18px; margin: 2px 0 0; }
+    .fact { min-width: 0; padding: 14px 0 11px; border-bottom: 1px solid var(--line); }
+    .fact dd { margin: 5px 0 0; color: #E2E8F1; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+    .signals-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 15px; }
+    .signals-head strong { color: #C7D0DE; font-size: 10px; font-weight: 600; }
+    .signals-head span { color: var(--subtle); font-size: 9px; }
+    .signals { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 7px; margin-top: 8px; }
+    .signal { min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); }
+    .signal span { display: block; color: var(--muted); font-size: 10px; }
+    .signal strong { display: block; margin-top: 3px; color: #D7DFEA; font-size: 10px; font-weight: 600; overflow-wrap: anywhere; }
+    .metadata { display: grid; grid-template-columns: 1.35fr .75fr 1fr 1fr; margin-top: 14px; border: 1px solid rgba(170,190,225,.16); border-radius: 12px; background: rgba(14,22,36,.62); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+    .meta-item { min-width: 0; padding: 11px 14px; border-left: 1px solid var(--line); }
+    .meta-item:first-child { border-left: 0; }
+    .meta-item dd { display: flex; align-items: center; gap: 7px; min-width: 0; margin: 4px 0 0; color: #DDE5EF; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+    .meta-item dd code { color: #B9C7DA; font: 11px var(--mono); }
+    .meta-item .mini-copy { width: 23px; height: 23px; }
+    .scope-note { display: flex; align-items: center; gap: 8px; margin: 12px 2px 0; color: var(--subtle); font-size: 10px; }
+    .scope-note svg { width: 13px; height: 13px; flex: 0 0 auto; color: #8391A8; }
+    .toast { position: fixed; right: 22px; bottom: 20px; z-index: 5; padding: 9px 13px; border: 1px solid rgba(93,214,164,.28); border-radius: 7px; background: #12281F; color: #A9E8CD; font-size: 11px; opacity: 0; transform: translateY(6px); pointer-events: none; transition: opacity .15s ease,transform .15s ease; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    @media(max-width:900px) { .overview { grid-template-columns: minmax(250px,.82fr) minmax(0,1.18fr); } .facts { grid-template-columns: repeat(2,minmax(0,1fr)); } .signals { grid-template-columns: repeat(2,minmax(0,1fr)); } .metadata { grid-template-columns: repeat(2,minmax(0,1fr)); } .meta-item:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); } .meta-item:nth-child(4) { border-top: 1px solid var(--line); } }
+    @media(max-width:650px) { .wrap { width: min(calc(100% - 28px),var(--width)); } .context { height: 48px; } .brand { font-size: 13px; } .crumb { font-size: 10px; } .context-end { display: none; } main { padding-top: 22px; } .profile-head { align-items: flex-start; flex-direction: column; gap: 15px; padding-bottom: 17px; } .head-actions { width: 100%; } .head-actions .button { flex: 1; } .overview { grid-template-columns: 1fr; gap: 10px; } .network,.env { padding: 17px; } .facts { grid-template-columns: repeat(2,minmax(0,1fr)); column-gap: 14px; } .signals { grid-template-columns: repeat(2,minmax(0,1fr)); } .metadata { margin-top: 10px; } .meta-item { padding: 10px; } .scope-note { align-items: flex-start; line-height: 1.45; } }
+    @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior: auto!important; transition-duration: .01ms!important; } }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><filter id="logo-on-dark" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="-0.2439 0 0 0 1  -1.2439 1 0 0 1  -1.2439 0 1 0 1  0 0 0 1 0"/></filter></svg>
+  <div class="demo-note"><div class="wrap demo-note-inner"><span class="demo-dot" aria-hidden="true"></span><strong>Bản xem trước 3.0.7</strong><span>Thông tin bên dưới là dữ liệu minh họa, chưa kết nối API.</span></div></div>
+  <header class="context">
+    <div class="wrap context-inner">
+      <a class="brand" href="https://buglogin.com/" aria-label="BugLogin"><img src="https://kmediaz.com/img/bug-media-logo.png" alt="Bug Media"><span class="brand-sep" aria-hidden="true"></span><span>BugLogin</span></a>
+      <span class="crumb-sep" aria-hidden="true">/</span>
+      <span class="crumb">Profiles <span class="crumb-sep">/</span> <strong>Chi tiết</strong></span>
+      <div class="context-end"><span>Đóng trang này để quay lại trình duyệt</span><span class="key">ESC</span></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="profile-head" aria-labelledby="profile-name">
+      <div class="head-main">
+        <p class="eyebrow">Browser profile</p>
+        <h1 id="profile-name">TEST PROFILE 001</h1>
+        <div class="head-meta">
+          <span class="status"><i class="status-dot" aria-hidden="true"></i>Đang chạy · minh họa</span>
+          <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M7 7h.01M10 7h.01"/></svg>Windows x64</span>
+          <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 20V7l8-4 8 4v13H4Z"/><path d="M9 20v-6h6v6M8 9h.01M12 9h.01M16 9h.01"/></svg>Workspace BugLogin Team</span>
+        </div>
+      </div>
+      <div class="head-actions">
+        <button class="button" type="button" data-copy="https://buglogin.com/profileId=prf_demo_307" aria-label="Sao chép liên kết profile">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>Sao chép liên kết
+        </button>
+      </div>
+    </section>
+
+    <div class="overview">
+      <section class="panel network" aria-labelledby="network-title">
+        <h2 class="section-label" id="network-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Kết nối mạng</h2>
+        <div class="ip-line"><p class="ip">203.0.113.24</p><span class="country-flag" aria-label="Cờ Việt Nam minh họa, quốc gia chưa xác minh"><svg viewBox="0 0 30 20" role="img" aria-hidden="true"><rect width="30" height="20" fill="#DA251D"/><path d="m15 3.6 1.35 4.15h4.37l-3.53 2.56 1.35 4.15L15 11.9l-3.54 2.56 1.35-4.15L9.28 7.75h4.37L15 3.6Z" fill="#FFDF00"/></svg>VN · minh họa</span><button class="icon-button" type="button" data-copy="203.0.113.24" aria-label="Sao chép địa chỉ IP"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button></div>
+        <p class="ip-sub">IP mẫu dành riêng cho tài liệu · TEST-NET-3 · quốc gia chưa xác minh</p>
+        <div class="network-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><div><strong>Chưa xác minh kết nối</strong><span>Vị trí và trạng thái proxy chỉ xuất hiện sau khi phiên mạng được kiểm tra.</span></div></div>
+        <dl class="network-details">
+          <div><dt>Loại kết nối</dt><dd>HTTP proxy</dd></div>
+          <div><dt>Vị trí IP</dt><dd>Chưa có dữ liệu</dd></div>
+          <div><dt>Múi giờ</dt><dd>Asia/Ho_Chi_Minh</dd></div>
+          <div><dt>Ngôn ngữ</dt><dd>vi-VN</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel env" aria-labelledby="environment-title">
+        <div class="env-head">
+          <div><h2 id="environment-title">Môi trường trình duyệt</h2><p>Thông số fingerprint của profile</p></div>
+          <div class="browser-version">154.0.8037.57<small>Browser runtime</small></div>
+        </div>
+        <dl class="facts">
+          <div class="fact"><dt>Hệ điều hành</dt><dd>Windows x64</dd></div>
+          <div class="fact"><dt>Màn hình</dt><dd>1536 × 864</dd></div>
+          <div class="fact"><dt>CPU · Bộ nhớ</dt><dd>16 cores · 16 GB</dd></div>
+          <div class="fact"><dt>Múi giờ</dt><dd>Asia/Ho_Chi_Minh</dd></div>
+          <div class="fact"><dt>Ngôn ngữ</dt><dd>vi-VN</dd></div>
+          <div class="fact"><dt>User agent</dt><dd>Windows · Chromium</dd></div>
+        </dl>
+        <div class="signals-head"><strong>Tùy chỉnh fingerprint</strong><span>Giá trị minh họa</span></div>
+        <div class="signals" aria-label="Tùy chỉnh fingerprint minh họa">
+          <div class="signal"><span>Canvas</span><strong>Noise injected</strong></div>
+          <div class="signal"><span>WebGL</span><strong>Noise injected</strong></div>
+          <div class="signal"><span>AudioContext</span><strong>Noise injected</strong></div>
+          <div class="signal"><span>WebRTC</span><strong>Exit IP</strong></div>
+        </div>
+      </section>
+    </div>
+
+    <dl class="metadata" aria-label="Thông tin profile">
+      <div class="meta-item"><dt>Profile ID</dt><dd><code>prf_demo_307</code><button class="icon-button mini-copy" type="button" data-copy="prf_demo_307" aria-label="Sao chép Profile ID"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button></dd></div>
+      <div class="meta-item"><dt>Nhóm</dt><dd>Không có</dd></div>
+      <div class="meta-item"><dt>Lần mở gần nhất</dt><dd>24/10/2026 · 09:07</dd></div>
+      <div class="meta-item"><dt>Ngày tạo</dt><dd>22/10/2026</dd></div>
+    </dl>
+    <p class="scope-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3"/></svg>Trang profile chỉ hiển thị khi đăng nhập; máy chủ cần kiểm tra quyền thành viên trong workspace trước khi trả dữ liệu.</p>
+  </main>
+  <div class="toast" role="status" aria-live="polite">Đã sao chép</div>
+  <script>
+    const toast = document.querySelector('.toast');
+    let toastTimer;
+    document.querySelectorAll('[data-copy]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(button.dataset.copy);
+          toast.textContent = 'Đã sao chép';
+        } catch {
+          toast.textContent = 'Không thể sao chép trong ngữ cảnh này';
+        }
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
+      });
+    });
+  </script>
+</body>
+</html>

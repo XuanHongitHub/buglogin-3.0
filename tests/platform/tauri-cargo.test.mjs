@@ -1,18 +1,24 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   tauriCargoEnvironment,
   tauriCargoNeedsDesktopSidecar,
 } from "../../scripts/tauri-cargo.mjs";
 
-test("Tauri Cargo uses the selected build target for frontend assets", () => {
+test("Tauri Cargo keeps build outputs on target and embeds via a relative asset path", () => {
   const config = tauriCargoEnvironment(
     { TAURI_CONFIG: JSON.stringify({ bundle: { active: false } }) },
     "win32",
   );
 
   assert.equal(config.targetDir, "G:\\buglogin-target");
-  assert.equal(config.frontendDist, "G:\\buglogin-target\\desktop-dist");
+  assert.equal(config.frontendDist, "../.tauri-cargo-dist-test");
+  assert.equal(
+    new URL(config.frontendDist, "file:///workspace/src-tauri/").protocol,
+    "file:",
+  );
+  assert.equal(new URL("G:\\buglogin-target\\desktop-dist").protocol, "g:");
   assert.equal(config.env.CARGO_TARGET_DIR, config.targetDir);
   assert.equal(
     JSON.parse(config.env.TAURI_CONFIG).build.frontendDist,
@@ -21,8 +27,32 @@ test("Tauri Cargo uses the selected build target for frontend assets", () => {
   assert.equal(JSON.parse(config.env.TAURI_CONFIG).bundle.active, false);
 });
 
+test("Tauri release builds stage frontend assets behind a relative directory path", async () => {
+  const buildScript = await readFile("scripts/tauri-build.mjs", "utf8");
+  const stageScript = await readFile(
+    "scripts/stage-tauri-frontend.mjs",
+    "utf8",
+  );
+
+  assert.match(
+    buildScript,
+    /frontendStageConfigPath = `\.\.\/\$\{frontendStageName\}`/,
+  );
+  assert.match(buildScript, /frontendDist: frontendStageConfigPath/);
+  assert.match(buildScript, /stage-tauri-frontend\.mjs/);
+  assert.match(
+    stageScript,
+    /Staged Tauri frontend under a relative config path/,
+  );
+  assert.doesNotMatch(buildScript, /frontendDist:\s*frontendDist/);
+});
+
 test("Tauri Cargo rejects forbidden Windows target drives", () => {
-  for (const targetDir of ["C:\\buglogin-target", "E:\\buglogin-target", "F:\\buglogin-target"]) {
+  for (const targetDir of [
+    "C:\\buglogin-target",
+    "E:\\buglogin-target",
+    "F:\\buglogin-target",
+  ]) {
     assert.throws(
       () => tauriCargoEnvironment({ CARGO_TARGET_DIR: targetDir }, "win32"),
       /single target G:\\buglogin-target/,

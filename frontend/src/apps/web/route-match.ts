@@ -3,6 +3,7 @@ export type WebRoute =
   | { area: "login" }
   | { area: "recovery" }
   | { area: "device" }
+  | { area: "profile"; profileId: string }
   | { area: "account" }
   | { area: "operations" }
   | { area: "migration" }
@@ -22,6 +23,15 @@ export type WebRoute =
   | { area: "not-found" };
 
 export function matchWebRoute(path: string): WebRoute {
+  const profile = path.match(/^\/profileId=([^/]+)$/);
+  if (profile) {
+    try {
+      const profileId = decodeURIComponent(profile[1]);
+      if (profileId) return { area: "profile", profileId };
+    } catch {
+      return { area: "not-found" };
+    }
+  }
   if (
     path === "/" ||
     [

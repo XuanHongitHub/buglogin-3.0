@@ -257,7 +257,7 @@ impl RuntimeTargets {
                 profile.name.as_str(),
                 profile.id.as_str(),
             );
-            append_wayfern_default_start_page(&mut specification.args);
+            append_wayfern_default_start_page(&mut specification.args, profile.id.as_str());
         }
         let fingerprint_target =
             target_from_runtime_config(profile.runtime_config.as_ref(), "runtime")?;
@@ -352,13 +352,14 @@ pub(crate) fn profile_color_for_id(profile_id: &str) -> String {
     format!("#{red:02x}{green:02x}{blue:02x}")
 }
 
-fn append_wayfern_default_start_page(args: &mut Vec<String>) {
-    // The desktop launch path must never inherit a vendor landing page from
-    // runtime configuration. Wayfern handles this as its normal new-tab page.
+fn append_wayfern_default_start_page(args: &mut Vec<String>, profile_id: &str) {
+    // The first tab in a BugLogin-managed launch must point to BugLogin rather
+    // than a vendor landing page. New tabs created after launch continue to use
+    // the runtime NTP, which receives a BugLogin custom shortcut in Preferences.
     args.retain(|argument| argument.starts_with('-'));
     push_or_replace_arg(args, "--no-first-run".to_owned());
     push_or_replace_arg(args, "--no-default-browser-check".to_owned());
-    push_or_replace_arg(args, "chrome://newtab/".to_owned());
+    push_or_replace_arg(args, format!("https://buglogin.com/profileId={profile_id}"));
 }
 
 fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (u8, u8, u8) {
@@ -2960,17 +2961,21 @@ mod tests {
     }
 
     #[test]
-    fn wayfern_start_page_disables_first_run_and_opens_new_tab() {
+    fn wayfern_start_page_disables_first_run_and_opens_buglogin() {
         let mut args = vec![
             "--user-data-dir=C:\\BugLogin\\profile".to_owned(),
             "https://donutbrowser.com".to_owned(),
         ];
 
-        append_wayfern_default_start_page(&mut args);
+        append_wayfern_default_start_page(&mut args, "prf_test_001");
 
         assert!(args.iter().any(|arg| arg == "--no-first-run"));
         assert!(args.iter().any(|arg| arg == "--no-default-browser-check"));
-        assert!(args.iter().any(|arg| arg == "chrome://newtab/"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "https://buglogin.com/profileId=prf_test_001")
+        );
+        assert!(!args.iter().any(|arg| arg == "chrome://newtab/"));
         assert!(!args.iter().any(|arg| arg.contains("donutbrowser.com")));
     }
 

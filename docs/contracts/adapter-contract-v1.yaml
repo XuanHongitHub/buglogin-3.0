@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: 7103cdc459fb711628ced2d4ff0faab4fa00e1f80442f9302ef2a135bf9e719a
-projectionCount: 140
+sourceSha256: 4cd0c22b16766863af70104cff82ef3af61ef808101eb7ded43d64179bed1fa5
+projectionCount: 142
 projections:
   - commandId: runtime.catalog.get
     kind: query
@@ -143,6 +143,34 @@ projections:
       tauri: profile_get
       rest: profile.get
       mcp: profile_get
+  - commandId: profile.viewer.ticket.issue
+    kind: command
+    capability: profile.read
+    action: read
+    inputSchema: ProfileIdInput
+    outputSchema: ProfileViewerTicket
+    auth: required
+    audit: required
+    idempotency: none
+    timeoutMs: 30000
+    adapters:
+      - rest
+    names:
+      rest: profile.viewer.ticket.issue
+  - commandId: profile.viewer.ticket.redeem
+    kind: command
+    capability: profile.read
+    action: read
+    inputSchema: ProfileViewerTicketInput
+    outputSchema: ProfileViewerSessionResponse
+    auth: single-use-capability
+    audit: required
+    idempotency: none
+    timeoutMs: 30000
+    adapters:
+      - rest
+    names:
+      rest: profile.viewer.ticket.redeem
   - commandId: profile.binding.get
     kind: query
     capability: profile.read
@@ -3900,6 +3928,38 @@ rest:
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: profile.viewer.ticket.issue
+      commandId: profile.viewer.ticket.issue
+      kind: command
+      capability: profile.read
+      action: read
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileViewerTicket
+      auth: required
+      audit: required
+      idempotency: none
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: profile.viewer.ticket.redeem
+      commandId: profile.viewer.ticket.redeem
+      kind: command
+      capability: profile.read
+      action: read
+      inputSchema: ProfileViewerTicketInput
+      outputSchema: ProfileViewerSessionResponse
+      auth: single-use-capability
+      audit: required
+      idempotency: none
       timeoutMs: 30000
       security:
         authentication: bearer-token-or-session

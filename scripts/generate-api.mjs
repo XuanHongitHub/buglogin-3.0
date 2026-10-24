@@ -488,7 +488,11 @@ function normalizeCommand(command, defaults, index) {
     `${id}.idempotency`,
   );
   assertOneOf(audit, ["required", "metadata-only"], `${id}.audit`);
-  assertOneOf(auth, ["required", "optional-local", "public"], `${id}.auth`);
+  assertOneOf(
+    auth,
+    ["required", "optional-local", "public", "single-use-capability"],
+    `${id}.auth`,
+  );
   assertOneOf(
     idempotency,
     ["none", "required", "required-for-command-and-long-running-operation"],

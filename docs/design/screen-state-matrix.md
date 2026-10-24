@@ -117,6 +117,8 @@ Account-specific checks:
 
 Workspace-specific checks:
 
+- WSP-03 browser landing route `/profileId={id}` loads profile metadata through the authenticated, profile-authorized read API. The current IP/country panel reads the current site's Cloudflare trace directly; show loading/unavailable states and never present it as stored fingerprint data. Country flag appears only for a valid two-letter country code.
+
 - Effective-access views distinguish direct grants, team grants, inherited role, policy constraint, expiry, and revocation.
 - Cross-workspace stale data shows source workspace and freshness.
 - Bulk mutations report succeeded, failed, skipped, unchanged, and retryable subsets.

@@ -158,9 +158,6 @@ impl ProcessController for SystemProcessController {
         specification: &LaunchSpecification,
     ) -> Result<Box<dyn ManagedProcess>, Problem> {
         let executable = self.approved_executable(specification)?;
-        if specification.runtime == buglogin_domain::entities::Runtime::Wayfern {
-            crate::runtime::wayfern::hide_new_tab_shortcuts(&specification.profile_path)?;
-        }
         #[cfg(target_os = "windows")]
         return Ok(Box::new(PlatformManagedProcess::new(
             WindowsJobController::system()?.launch(

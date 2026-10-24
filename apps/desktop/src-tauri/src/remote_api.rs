@@ -125,6 +125,29 @@ pub struct FeedbackReceipt {
     pub id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileViewerTicket {
+    pub ticket: String,
+    pub expires_in: u64,
+}
+
+impl std::fmt::Debug for ProfileViewerTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfileViewerTicket")
+            .field("ticket", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+impl Drop for ProfileViewerTicket {
+    fn drop(&mut self) {
+        self.ticket.zeroize();
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FeedbackSubmission {
@@ -1498,6 +1521,23 @@ impl RemoteApiClient {
     ) -> Result<Versioned<Profile>, Problem> {
         self.get(&format!("/v1/profiles/{}", id.as_str()), correlation)
             .await
+    }
+
+    pub async fn issue_profile_viewer_ticket(
+        &self,
+        id: &ProfileId,
+        correlation: &str,
+    ) -> Result<ProfileViewerTicket, Problem> {
+        self.send(
+            Method::POST,
+            &format!("/v1/profiles/{}/viewer-tickets", id.as_str()),
+            Some(json!({})),
+            correlation,
+            None,
+            None,
+            &[],
+        )
+        .await
     }
 
     pub async fn profile_binding(

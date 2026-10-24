@@ -733,14 +733,18 @@ impl SyncManifest {
             .map(|file| file.path.as_str())
             .collect::<BTreeSet<_>>();
         let tombstones = self.tombstone_map();
+        let has_newer_fencing_token = self.fencing_token > previous.fencing_token;
         for previous_tombstone in &previous.tombstones {
             if previous_tombstone.retention_deadline_unix_ms <= observed_at_unix_ms {
                 continue;
             }
-            if objects.contains_key(previous_tombstone.key.as_str())
+            let key_is_live = objects.contains_key(previous_tombstone.key.as_str())
                 || (!previous_tombstone.object_retired
-                    && live_file_paths.contains(previous_tombstone.key.as_str()))
-            {
+                    && live_file_paths.contains(previous_tombstone.key.as_str()));
+            // A profile may legitimately recreate a deleted browser file. Only a
+            // writer holding a newer lease fence may retire that tombstone; older
+            // writers still cannot resurrect data deleted by a newer generation.
+            if key_is_live && !has_newer_fencing_token {
                 return Err(Problem::new(
                     "stale_manifest_resurrection",
                     "Live object conflicts with retained tombstone",
@@ -749,6 +753,9 @@ impl SyncManifest {
                 ));
             }
             if tombstones.get(previous_tombstone.key.as_str()) != Some(&previous_tombstone) {
+                if key_is_live && has_newer_fencing_token {
+                    continue;
+                }
                 return Err(Problem::new(
                     "missing_retained_tombstone",
                     "Retained tombstone is missing or changed",

@@ -23,6 +23,7 @@ pub mod profile_hosted;
 pub mod profile_listing;
 pub mod profile_proxy_assignment;
 pub(crate) mod profile_sync;
+pub(crate) mod profile_viewer;
 pub(crate) mod proxy_credentials;
 pub mod recovery;
 pub mod resources;

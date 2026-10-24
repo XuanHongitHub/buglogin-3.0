@@ -529,6 +529,68 @@ fn retained_tombstone_blocks_stale_resurrection() {
 }
 
 #[test]
+fn newer_fencing_token_can_legitimately_recreate_tombstoned_path() {
+    let tombstone = ManifestTombstone::new("profiles/p1", 1, 1_000, 3_000).unwrap();
+    let previous = SyncManifest::new_with_tombstones(
+        workspace(),
+        resource(),
+        4,
+        1,
+        None,
+        b"one",
+        vec![],
+        vec![tombstone],
+    )
+    .unwrap();
+    let recreated = SyncManifest::new(
+        workspace(),
+        resource(),
+        5,
+        2,
+        Some(1),
+        b"two",
+        vec![ManifestObject::new("profiles/p1", b"new data").unwrap()],
+    )
+    .unwrap();
+
+    assert!(recreated.validate_successor(&previous, 2_000).is_ok());
+}
+
+#[test]
+fn same_fence_cannot_drop_tombstone_and_recreate_path() {
+    let tombstone = ManifestTombstone::new("profiles/p1", 1, 1_000, 3_000).unwrap();
+    let previous = SyncManifest::new_with_tombstones(
+        workspace(),
+        resource(),
+        4,
+        1,
+        None,
+        b"one",
+        vec![],
+        vec![tombstone],
+    )
+    .unwrap();
+    let recreated = SyncManifest::new(
+        workspace(),
+        resource(),
+        4,
+        2,
+        Some(1),
+        b"two",
+        vec![ManifestObject::new("profiles/p1", b"stale data").unwrap()],
+    )
+    .unwrap();
+
+    assert_eq!(
+        recreated
+            .validate_successor(&previous, 2_000)
+            .unwrap_err()
+            .code,
+        "stale_manifest_resurrection"
+    );
+}
+
+#[test]
 fn coordinator_rejects_resurrection_during_tombstone_retention() {
     let tombstone = ManifestTombstone::new("profiles/p1", 1, 1_000, 3_000).unwrap();
     let previous = SyncManifest::new_with_tombstones(

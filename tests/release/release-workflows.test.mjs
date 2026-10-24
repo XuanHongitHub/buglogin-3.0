@@ -24,6 +24,17 @@ test("release workflows satisfy fail-closed static policy", async () => {
   assert.match(promotion, /QA_EVIDENCE_URL/);
 });
 
+test("desktop release contract prevents external frontend paths and surprise updates", async () => {
+  const contract = await readFile(
+    "docs/release/desktop-release-contract.md",
+    "utf8",
+  );
+  assert.match(contract, /Never pass its absolute/);
+  assert.match(contract, /Manual-check results must not enter the state\/effect/);
+  assert.match(contract, /until “Update now” is selected/);
+  assert.match(contract, /Missing Windows or macOS installed-app evidence/);
+});
+
 test("OSV dependency scanning does not require private-repository code scanning", async () => {
   const workflow = await readFile(".github/workflows/osv.yml", "utf8");
   assert.equal((workflow.match(/^\s+upload-sarif: false$/gm) ?? []).length, 2);
