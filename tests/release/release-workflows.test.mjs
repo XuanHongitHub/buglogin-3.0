@@ -52,6 +52,20 @@ test("release builds private signed artifacts without publishing an RC or stable
   assert.doesNotMatch(release, /git fetch --force --tags/);
 });
 
+test("macOS Gatekeeper assessment follows Apple notarization and stapling", async () => {
+  const signing = await readFile(".github/workflows/signing.yml", "utf8");
+  const notarization = signing.indexOf("xcrun notarytool submit");
+  const stapling = signing.indexOf('xcrun stapler staple "$DMG_PATH"');
+  const appAssessment = signing.indexOf(
+    'spctl --assess --type execute --verbose=2 "$APP_PATH"',
+  );
+  const dmgAssessment = signing.indexOf(
+    'spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"',
+  );
+  assert.ok(notarization >= 0 && stapling > notarization);
+  assert.ok(appAssessment > stapling && dmgAssessment > appAssessment);
+});
+
 test("release verifier rejects upstream repository locks and deployment", () => {
   assert.throws(
     () =>
