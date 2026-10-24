@@ -9,6 +9,7 @@ import { AppUpdateToast } from "@/components/app-update-toast";
 import { translateBackendError } from "@/lib/backend-errors";
 import { showToast } from "@/lib/toast-utils";
 import type { AppUpdateInfo, AppUpdateProgress } from "@/types";
+import { shouldPrepareAppUpdate } from "./app-update-lifecycle";
 
 function isUpdaterNotConfigured(error: unknown): boolean {
   const message =
@@ -38,6 +39,11 @@ export function useAppUpdateNotifications() {
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const autoDownloadedVersion = useRef<string | null>(null);
   const updateCheckRef = useRef<Promise<AppUpdateInfo | null> | null>(null);
+  const manualCheckInFlightRef = useRef(false);
+  const manualCheckGenerationRef = useRef(0);
+  const backgroundUpdateDuringManualCheckRef = useRef<AppUpdateInfo | null>(
+    null,
+  );
 
   const requestAppUpdateCheck = useCallback(() => {
     if (updateCheckRef.current) return updateCheckRef.current;
@@ -74,9 +80,18 @@ export function useAppUpdateNotifications() {
   const checkForAppUpdates = useCallback(async () => {
     if (!isClient || !autoUpdatePreferenceLoaded || !autoUpdatesEnabled) return;
 
+    const manualGeneration = manualCheckGenerationRef.current;
     try {
       setIsCheckingForUpdates(true);
       const update = await requestAppUpdateCheck();
+
+      if (
+        manualCheckInFlightRef.current ||
+        manualCheckGenerationRef.current !== manualGeneration
+      ) {
+        if (update) backgroundUpdateDuringManualCheckRef.current = update;
+        return;
+      }
 
       // Don't show update if this version was already dismissed
       if (update && update.new_version !== dismissedVersion) {
@@ -106,10 +121,15 @@ export function useAppUpdateNotifications() {
   const checkForAppUpdatesManual = useCallback(async () => {
     if (!isClient) return;
 
+    manualCheckGenerationRef.current += 1;
+    manualCheckInFlightRef.current = true;
+    backgroundUpdateDuringManualCheckRef.current = null;
     try {
       console.log("Triggering manual app update check...");
       setIsCheckingForUpdates(true);
-      const update = await requestAppUpdateCheck();
+      const checkedUpdate = await requestAppUpdateCheck();
+      const update =
+        backgroundUpdateDuringManualCheckRef.current ?? checkedUpdate;
       console.log("Manual check result:", update);
 
       // Always show manual check results, even if previously dismissed
@@ -136,6 +156,8 @@ export function useAppUpdateNotifications() {
         duration: 6000,
       });
     } finally {
+      manualCheckInFlightRef.current = false;
+      backgroundUpdateDuringManualCheckRef.current = null;
       setIsCheckingForUpdates(false);
     }
   }, [isClient, requestAppUpdateCheck, t]);
@@ -190,14 +212,37 @@ export function useAppUpdateNotifications() {
   }, [t]);
 
   const handleManualUpdate = useCallback(() => {
-    if (!updateInfo) return;
+    if (
+      !updateInfo ||
+      !shouldPrepareAppUpdate({
+        source: "manual",
+        updateAvailable: Boolean(updateInfo),
+        consented: true,
+        autoUpdatesEnabled,
+        isBusy: isUpdating,
+        updateReady,
+      })
+    )
+      return;
     autoDownloadedVersion.current = updateInfo.new_version;
     setManualUpdatePrompt(false);
     void handleAppUpdate(updateInfo);
-  }, [handleAppUpdate, updateInfo]);
+  }, [
+    autoUpdatesEnabled,
+    handleAppUpdate,
+    isUpdating,
+    updateInfo,
+    updateReady,
+  ]);
 
   const dismissAppUpdate = useCallback(() => {
     if (!isClient) return;
+
+    if (updateReady) {
+      void invoke("discard_prepared_app_update").catch((error) => {
+        console.error("Failed to discard prepared app update:", error);
+      });
+    }
 
     // Remember the dismissed version so we don't show it again
     if (updateInfo) {
@@ -207,8 +252,11 @@ export function useAppUpdateNotifications() {
 
     setUpdateInfo(null);
     setManualUpdatePrompt(false);
+    setUpdateReady(false);
+    setIsUpdating(false);
+    setUpdateProgress(null);
     toast.dismiss("app-update");
-  }, [isClient, updateInfo]);
+  }, [isClient, updateInfo, updateReady]);
 
   // Listen for app update events
   useEffect(() => {
@@ -218,6 +266,10 @@ export function useAppUpdateNotifications() {
       "app-update-available",
       (event) => {
         console.log("App update available:", event.payload);
+        if (manualCheckInFlightRef.current) {
+          backgroundUpdateDuringManualCheckRef.current = event.payload;
+          return;
+        }
         // A fresh backend check re-arms auto-download, so a version whose
         // earlier attempt failed (e.g. a transient checksum-fetch error) is
         // retried once per periodic check instead of staying blocked until
@@ -259,14 +311,18 @@ export function useAppUpdateNotifications() {
   // Background checks may download automatically. Manual checks are check-only
   // until the user selects Update now in the toast.
   useEffect(() => {
+    if (!updateInfo || updateInfo.manual_update_required || manualUpdatePrompt)
+      return;
     if (
+      !shouldPrepareAppUpdate({
+        source: "background",
+        updateAvailable: Boolean(updateInfo),
+        consented: false,
+        autoUpdatesEnabled,
+        isBusy: isUpdating,
+        updateReady,
+      }) ||
       !isClient ||
-      !autoUpdatesEnabled ||
-      !updateInfo ||
-      updateInfo.manual_update_required ||
-      manualUpdatePrompt ||
-      isUpdating ||
-      updateReady ||
       autoDownloadedVersion.current === updateInfo.new_version
     )
       return;

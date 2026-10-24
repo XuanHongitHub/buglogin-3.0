@@ -1,9 +1,16 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
+  LuArrowLeft,
   LuBan,
   LuCheck,
   LuClock,
@@ -25,6 +32,7 @@ import {
   LuUsers,
 } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
+import { ScopedAccountCreationPage } from "@/components/scoped-account-creation-page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -61,10 +69,13 @@ import type {
 import { RippleButton } from "./ui/ripple";
 
 interface MemberManagementDialogProps {
+  mode?: "page" | "dialog";
   isOpen: boolean;
   onClose: () => void;
   workspaceId: string;
   workspaceName?: string;
+  organizationName?: string;
+  onInvitePage?: () => void;
 }
 
 const desktopApi = createTauriDesktopApi();
@@ -78,10 +89,13 @@ export const ROLE_RANKS: Record<string, number> = {
 };
 
 export function MemberManagementDialog({
+  mode = "dialog",
   isOpen,
   onClose,
   workspaceId: propWorkspaceId,
   workspaceName = "Workspace Hiện Tại",
+  organizationName,
+  onInvitePage,
 }: MemberManagementDialogProps) {
   const { t } = useTranslation();
   const [workspaceId, setWorkspaceId] = useState(propWorkspaceId || "");
@@ -90,6 +104,9 @@ export function MemberManagementDialog({
   const [searchQuery, setSearchQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [isMaximized, setIsMaximized] = useState(false);
+  const [accountCreationMode, setAccountCreationMode] = useState<
+    "single" | "bulk" | null
+  >(null);
 
   const [currentUser, setCurrentUser] = useState<{
     id: string;
@@ -111,8 +128,6 @@ export function MemberManagementDialog({
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteUsername, setInviteUsername] = useState("");
-  const [inviteProvisioningAccountId, setInviteProvisioningAccountId] =
-    useState("");
   const [createInviteAccount, setCreateInviteAccount] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteRole, setInviteRole] = useState<MemberRole>("operator");
@@ -144,9 +159,6 @@ export function MemberManagementDialog({
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkEmailsText, setBulkEmailsText] = useState("");
   const [bulkCreateAccounts, setBulkCreateAccounts] = useState(false);
-  const [bulkAccountIds, setBulkAccountIds] = useState<Record<string, string>>(
-    {},
-  );
   const [bulkInputError, setBulkInputError] = useState<string | null>(null);
   const bulkEmailAnalysis = useMemo(
     () => analyzeBulkInvitationEmails(bulkEmailsText),
@@ -309,39 +321,7 @@ export function MemberManagementDialog({
 
     setIsInviting(true);
     setInviteError(null);
-    let accountCreated = false;
-    let accountProvisioningAttempted = false;
     try {
-      if (createInviteAccount) {
-        const accountId =
-          inviteProvisioningAccountId ||
-          `acct_${crypto.randomUUID().replaceAll("-", "")}`;
-        if (!inviteProvisioningAccountId)
-          setInviteProvisioningAccountId(accountId);
-        accountProvisioningAttempted = true;
-        const account = await desktopApi.createScopedPendingAccount(
-          {
-            workspaceId,
-            accountId,
-            username: inviteUsername.trim(),
-            email: inviteEmail.trim(),
-            role: inviteRole,
-          },
-          `acct-create-${crypto.randomUUID().replaceAll("-", "")}`,
-        );
-        accountCreated = true;
-        if (!account.member || account.member.status !== "active") {
-          throw new Error(
-            "API đã tạo identity nhưng chưa trả membership active; hãy cập nhật API rồi thử lại cùng account này.",
-          );
-        }
-        await loadMembers();
-        showSuccessToast(
-          `Đã tạo account và gán ${inviteRole} vào workspace. Email vẫn chờ xác minh trước khi đăng nhập.`,
-        );
-        setInviteModalOpen(false);
-        return;
-      }
       const expiresAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
       const invitation = await desktopApi.createMemberInvitation({
         workspaceId,
@@ -367,13 +347,8 @@ export function MemberManagementDialog({
     } catch (err) {
       console.error("Failed to invite member:", err);
       const detail = err instanceof Error ? err.message : JSON.stringify(err);
-      const message = accountCreated
-        ? `Account đã được tạo nhưng chưa gán xong member/role. Làm mới danh sách hoặc kiểm tra account trước khi thử lại. Chi tiết: ${detail}`
-        : accountProvisioningAttempted
-          ? `Chưa xác nhận được kết quả tạo account. Có thể identity đã được tạo; thử lại sẽ dùng cùng account ID. Chi tiết: ${detail}`
-          : detail;
-      setInviteError(message);
-      showErrorToast(message);
+      setInviteError(detail);
+      showErrorToast(detail);
     } finally {
       setIsInviting(false);
     }
@@ -641,40 +616,7 @@ export function MemberManagementDialog({
         total: entries.length,
       });
 
-      let accountCreated = false;
-      let accountProvisioningAttempted = false;
       try {
-        if (bulkCreateAccounts && username) {
-          const nonce = crypto.randomUUID().replaceAll("-", "");
-          const emailKey = email.trim().toLocaleLowerCase("en-US");
-          const accountId = bulkAccountIds[emailKey] || `acct_${nonce}`;
-          if (!bulkAccountIds[emailKey]) {
-            setBulkAccountIds((previous) => ({
-              ...previous,
-              [emailKey]: accountId,
-            }));
-          }
-          accountProvisioningAttempted = true;
-          const account = await desktopApi.createScopedPendingAccount(
-            {
-              workspaceId,
-              accountId,
-              username,
-              email,
-              role: bulkRole,
-            },
-            `acct-create-${crypto.randomUUID().replaceAll("-", "")}`,
-          );
-          accountCreated = true;
-          if (!account.member || account.member.status !== "active") {
-            throw new Error(
-              "API đã tạo identity nhưng chưa trả membership active; cần cập nhật API.",
-            );
-          }
-          accountCreated = true;
-          results.push({ email, username, accountCreated, status: "success" });
-          continue;
-        }
         const invitation = await desktopApi.createMemberInvitation({
           workspaceId,
           email,
@@ -689,7 +631,6 @@ export function MemberManagementDialog({
         results.push({
           email,
           username,
-          accountCreated,
           inviteCode,
           deepLink,
           status: "success",
@@ -697,24 +638,17 @@ export function MemberManagementDialog({
       } catch (err) {
         const detail =
           err instanceof Error ? err.message : "Không thể tạo lời mời.";
-        const message = accountCreated
-          ? `Account đã tạo nhưng chưa gán xong member/role: ${detail}`
-          : accountProvisioningAttempted
-            ? `Chưa xác nhận được kết quả tạo account; chạy lại dòng này sẽ dùng cùng account ID: ${detail}`
-            : detail;
         results.push({
           email,
           username,
-          accountCreated,
           status: "error",
-          error: message,
+          error: detail,
         });
       }
     }
 
     setBulkResults(results);
     setIsBulkProcessing(false);
-    if (bulkCreateAccounts) void loadMembers();
   };
 
   const handleCopyBulkResults = async () => {
@@ -792,8 +726,12 @@ export function MemberManagementDialog({
     }
   };
 
-  return (
-    <>
+  const MemberFrame = ({ children }: { children: ReactNode }) =>
+    mode === "page" ? (
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-background">
+        {children}
+      </div>
+    ) : (
       <Dialog open={isOpen} onOpenChange={onClose}>
         <DialogContent
           className={cn(
@@ -803,30 +741,85 @@ export function MemberManagementDialog({
               : "max-w-4xl max-h-[88vh]",
           )}
         >
-          <DialogHeader className="border-b border-border/50 pb-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs shrink-0">
-                  <LuUsers className="size-5" />
-                </div>
-                <div>
+          {children}
+        </DialogContent>
+      </Dialog>
+    );
+  const workspaceLabel = organizationName
+    ? `${organizationName} / ${workspaceName}`
+    : workspaceName;
+
+  if (accountCreationMode) {
+    return (
+      <ScopedAccountCreationPage
+        workspaceId={workspaceId}
+        workspaceName={workspaceName}
+        organizationName={organizationName}
+        initialMode={accountCreationMode}
+        onBack={() => setAccountCreationMode(null)}
+        onCreated={() => void loadMembers()}
+      />
+    );
+  }
+
+  return (
+    <>
+      <MemberFrame>
+        <DialogHeader className="border-b border-border/50 pb-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {mode === "page" && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={onClose}
+                  aria-label="Quay lại workspace"
+                >
+                  <LuArrowLeft className="size-4" />
+                </Button>
+              )}
+              <div className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs shrink-0">
+                <LuUsers className="size-5" />
+              </div>
+              <div>
+                {mode === "page" ? (
+                  <h1 className="text-base font-semibold">
+                    {t("members.title", {
+                      defaultValue: "Quản Lý Thành Viên & Phân Quyền",
+                    })}
+                  </h1>
+                ) : (
                   <DialogTitle className="text-base font-semibold">
                     {t("members.title", {
                       defaultValue: "Quản Lý Thành Viên & Phân Quyền",
                     })}
                   </DialogTitle>
-                  <DialogDescription className="text-xs text-muted-foreground mt-0.5">
+                )}
+                {mode === "page" ? (
+                  <p className="text-xs text-muted-foreground mt-0.5">
                     {t("members.subtitle", {
-                      workspaceName,
+                      workspaceName: workspaceLabel,
                       used: members.length,
                       max: 20,
-                      defaultValue: `Không gian: ${workspaceName} · Đã dùng: ${members.length} / 20 ghế thành viên`,
+                      defaultValue: `Không gian: ${workspaceLabel} · Đã dùng: ${members.length} / 20 ghế thành viên`,
+                    })}
+                  </p>
+                ) : (
+                  <DialogDescription className="text-xs text-muted-foreground mt-0.5">
+                    {t("members.subtitle", {
+                      workspaceName: workspaceLabel,
+                      used: members.length,
+                      max: 20,
+                      defaultValue: `Không gian: ${workspaceLabel} · Đã dùng: ${members.length} / 20 ghế thành viên`,
                     })}
                   </DialogDescription>
-                </div>
+                )}
               </div>
+            </div>
 
-              {/* Maximize / Minimize Fullscreen Toggle */}
+            {/* Maximize / Minimize Fullscreen Toggle */}
+            {mode === "dialog" && (
               <div className="flex items-center gap-2 pr-6">
                 <Button
                   variant="outline"
@@ -852,556 +845,547 @@ export function MemberManagementDialog({
                   )}
                 </Button>
               </div>
-            </div>
-          </DialogHeader>
-
-          <div className="space-y-3.5 py-1 text-xs">
-            {/* Role & Access Status Banner */}
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 p-2.5 text-xs">
-              <div className="flex items-center gap-2">
-                <LuShieldCheck className="size-4 text-primary shrink-0" />
-                <div>
-                  <span className="text-muted-foreground">
-                    {t("members.yourAccount", {
-                      defaultValue: "Tài khoản của bạn:",
-                    })}{" "}
-                  </span>
-                  <strong className="text-foreground">
-                    {currentUser.email || "Đang đăng nhập"}
-                  </strong>
-                  <span className="mx-1.5 text-muted-foreground">•</span>
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] font-mono border-primary/40 text-primary capitalize font-bold"
-                  >
-                    {t(`roles.${currentUser.role}`, {
-                      defaultValue: currentUser.role,
-                    })}
-                  </Badge>
-                  <span className="text-muted-foreground ml-2 hidden sm:inline">
-                    —{" "}
-                    {t("members.canManageLowerRoles", {
-                      defaultValue:
-                        "Chỉ có thể quản lý & phân quyền cho vai trò cấp dưới",
-                    })}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Toolbar: Search, Filter, Direct Provision, Bulk Provision, Invite */}
-            <div className="flex flex-wrap items-center justify-between gap-2.5">
-              <div className="flex items-center gap-2">
-                <div className="relative w-48 sm:w-60">
-                  <LuSearch className="absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
-                  <Input
-                    placeholder={t("members.searchPlaceholder", {
-                      defaultValue: "Tìm theo tên hoặc email...",
-                    })}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="h-8 pl-8 text-xs"
-                  />
-                </div>
-                <Select value={roleFilter} onValueChange={setRoleFilter}>
-                  <SelectTrigger className="h-8 w-36 text-xs">
-                    <SelectValue placeholder="Lọc vai trò..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all" className="text-xs">
-                      Tất cả vai trò
-                    </SelectItem>
-                    <SelectItem value="owner" className="text-xs">
-                      Owner
-                    </SelectItem>
-                    <SelectItem value="admin" className="text-xs">
-                      Admin
-                    </SelectItem>
-                    <SelectItem value="lead" className="text-xs">
-                      Lead — quản lý thành viên và đội nhóm cấp thấp hơn
-                    </SelectItem>
-                    <SelectItem value="operator" className="text-xs">
-                      Operator
-                    </SelectItem>
-                    <SelectItem value="member" className="text-xs">
-                      Member
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setBulkCreateAccounts(false);
-                    setBulkEmailsText("");
-                    setBulkInputError(null);
-                    setBulkRole(assignableRoles[0] || "operator");
-                    setBulkResults(null);
-                    setBulkModalOpen(true);
-                  }}
-                  disabled={currentUserRank <= 1}
-                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-                >
-                  <LuUsers className="size-3.5 text-primary" />
-                  <span>
-                    {t("members.bulkProvisionButton", {
-                      defaultValue: "Mời hàng loạt",
-                    })}
-                  </span>
-                </Button>
-
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setBulkCreateAccounts(true);
-                    setBulkEmailsText("");
-                    setBulkInputError(null);
-                    setBulkRole(assignableRoles[0] || "operator");
-                    setBulkResults(null);
-                    setBulkModalOpen(true);
-                  }}
-                  disabled={currentUserRank <= 1}
-                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-                >
-                  <LuUsers className="size-3.5" />
-                  <span>Tạo account hàng loạt</span>
-                </Button>
-
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setCreateInviteAccount(false);
-                    setGeneratedInvite(null);
-                    setInviteEmail("");
-                    setInviteUsername("");
-                    setInviteRole(assignableRoles[0] || "operator");
-                    setInviteModalOpen(true);
-                  }}
-                  disabled={currentUserRank <= 1}
-                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-                >
-                  <LuUserPlus className="size-3.5" />
-                  <span>
-                    {t("members.inviteButton", {
-                      defaultValue: "Mời Thành Viên",
-                    })}
-                  </span>
-                </Button>
-
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setCreateInviteAccount(true);
-                    setGeneratedInvite(null);
-                    setInviteEmail("");
-                    setInviteUsername("");
-                    setInviteProvisioningAccountId(
-                      `acct_${crypto.randomUUID().replaceAll("-", "")}`,
-                    );
-                    setInviteError(null);
-                    setInviteRole(assignableRoles[0] || "operator");
-                    setInviteModalOpen(true);
-                  }}
-                  disabled={currentUserRank <= 1}
-                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-                >
-                  <LuUserPlus className="size-3.5" />
-                  <span>Tạo tài khoản</span>
-                </Button>
-              </div>
-            </div>
-
-            {/* Members Table */}
-            <div className="rounded-lg border border-border overflow-hidden">
-              <div className="max-h-[260px] overflow-y-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-muted/50 border-b border-border sticky top-0 font-medium text-muted-foreground text-[11px]">
-                    <tr>
-                      <th className="py-2.5 px-3 w-8">
-                        <Checkbox
-                          checked={
-                            manageableMembers.length > 0 &&
-                            selectedMemberIds.size === manageableMembers.length
-                          }
-                          onCheckedChange={handleSelectAllManageable}
-                          disabled={manageableMembers.length === 0}
-                          aria-label="Select all manageable members"
-                        />
-                      </th>
-                      <th className="py-2.5 px-3">Thành viên & Email</th>
-                      <th className="py-2.5 px-3 w-36">Vai trò</th>
-                      <th className="py-2.5 px-3 w-28">Trạng thái</th>
-                      <th className="py-2.5 px-3 w-28 text-center">Thao tác</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border/60">
-                    {isLoading ? (
-                      <tr>
-                        <td
-                          colSpan={5}
-                          className="py-8 text-center text-muted-foreground"
-                        >
-                          {t("common.buttons.loading", {
-                            defaultValue: "Đang tải dữ liệu...",
-                          })}
-                        </td>
-                      </tr>
-                    ) : filteredMembers.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={5}
-                          className="py-8 text-center text-muted-foreground"
-                        >
-                          {t("members.noMembersFound", {
-                            defaultValue: "Không tìm thấy thành viên phù hợp",
-                          })}
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredMembers.map((member) => {
-                        const memberRank = ROLE_RANKS[member.role] ?? 0;
-                        const isSelf =
-                          member.id === currentUser.id ||
-                          member.accountId === currentUser.accountId;
-                        const isHigherOrEqual = memberRank >= currentUserRank;
-                        const canManage = !isSelf && !isHigherOrEqual;
-                        const isUpdating = updatingMemberId === member.id;
-                        const displayIdentity =
-                          member.identity?.username ??
-                          "Danh tính chưa được cấp quyền xem";
-                        const displayEmail = member.identity?.email ?? "—";
-                        const initials =
-                          member.identity?.username
-                            ?.slice(0, 2)
-                            .toUpperCase() ?? "?";
-
-                        return (
-                          <tr
-                            key={member.id}
-                            className={cn(
-                              "transition-colors hover:bg-muted/30",
-                              member.status === "suspended" &&
-                                "opacity-60 bg-muted/20",
-                            )}
-                          >
-                            <td className="py-2.5 px-3 w-8">
-                              <Checkbox
-                                checked={selectedMemberIds.has(member.id)}
-                                onCheckedChange={() =>
-                                  handleToggleSelectMember(member.id)
-                                }
-                                disabled={!canManage}
-                                aria-label={`Select ${member.accountId}`}
-                              />
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <div className="flex items-center gap-2.5">
-                                <div className="flex size-7 items-center justify-center rounded-full bg-primary/10 text-primary font-bold text-xs">
-                                  {initials}
-                                </div>
-                                <div>
-                                  <div className="font-semibold text-foreground text-xs flex items-center gap-1.5">
-                                    <span>{displayIdentity}</span>
-                                    {isSelf && (
-                                      <Badge
-                                        variant="outline"
-                                        className="text-[9px] py-0 h-4 border-primary/40 text-primary"
-                                      >
-                                        Bạn
-                                      </Badge>
-                                    )}
-                                  </div>
-                                  <div className="text-[11px] text-muted-foreground">
-                                    {displayEmail}
-                                  </div>
-                                  <div className="text-[10px] text-muted-foreground/50 font-mono">
-                                    {member.id}
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              {isSelf ? (
-                                <Badge className="bg-amber-500/15 text-amber-600 border-amber-300 text-[10px] gap-1 font-semibold">
-                                  <LuShieldCheck className="size-3" />
-                                  <span className="capitalize">
-                                    {t(`roles.${member.role}`, {
-                                      defaultValue: member.role,
-                                    })}
-                                  </span>
-                                </Badge>
-                              ) : !canManage ? (
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] font-medium capitalize"
-                                >
-                                  {t(`roles.${member.role}`, {
-                                    defaultValue: member.role,
-                                  })}
-                                </Badge>
-                              ) : (
-                                <Select
-                                  value={member.role}
-                                  onValueChange={(val) =>
-                                    void handleRoleChange(
-                                      member.id,
-                                      val as MemberRole,
-                                    )
-                                  }
-                                  disabled={isUpdating}
-                                >
-                                  <SelectTrigger className="h-7 text-xs">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {assignableRoles.map((r) => (
-                                      <SelectItem
-                                        key={r}
-                                        value={r}
-                                        className="text-xs capitalize"
-                                      >
-                                        {t(`roles.${r}`, { defaultValue: r })}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-3">
-                              {getStatusBadge(member.status)}
-                            </td>
-                            <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                              {isSelf ? (
-                                <span className="text-[11px] text-muted-foreground italic">
-                                  (Chính bạn)
-                                </span>
-                              ) : isHigherOrEqual ? (
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] text-muted-foreground border-border/80 font-normal"
-                                >
-                                  {t("members.protectedRole", {
-                                    defaultValue: "Vai trò được bảo vệ",
-                                  })}
-                                </Badge>
-                              ) : (
-                                <div className="flex items-center justify-end gap-1.5">
-                                  <LoadingButton
-                                    variant={
-                                      member.status === "suspended"
-                                        ? "outline"
-                                        : "ghost"
-                                    }
-                                    size="sm"
-                                    isLoading={isUpdating}
-                                    onClick={() =>
-                                      void handleToggleSuspend(member)
-                                    }
-                                    className={cn(
-                                      "h-7 px-2 text-[10px] cursor-pointer font-medium",
-                                      member.status === "suspended"
-                                        ? "text-emerald-600 hover:text-emerald-700"
-                                        : "text-muted-foreground hover:text-foreground",
-                                    )}
-                                  >
-                                    {member.status === "suspended" ? (
-                                      <>
-                                        <LuUserCheck className="size-3 mr-1 text-emerald-500" />
-                                        <span>Mở khóa</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <LuBan className="size-3 mr-1" />
-                                        <span>Khóa</span>
-                                      </>
-                                    )}
-                                  </LoadingButton>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => handleOpenOffboard(member)}
-                                    className="h-7 px-2 text-[10px] gap-1 cursor-pointer text-destructive hover:bg-destructive/10 font-medium"
-                                  >
-                                    <LuTrash2 className="size-3" />
-                                    <span>Thu hồi</span>
-                                  </Button>
-                                </div>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Floating Bulk Action Bar */}
-            {selectedMemberIds.size > 0 && (
-              <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-primary/40 bg-card p-2.5 shadow-md animate-in fade-in slide-in-from-bottom-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant="default" className="text-xs px-2.5 py-0.5">
-                    {t("members.bulkActions.selected", {
-                      count: selectedMemberIds.size,
-                    })}
-                  </Badge>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setSelectedMemberIds(new Set())}
-                    className="h-7 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
-                  >
-                    {t("members.bulkActions.clear", {
-                      defaultValue: "Bỏ chọn",
-                    })}
-                  </Button>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Select
-                    onValueChange={(role) =>
-                      void handleBulkChangeRole(role as MemberRole)
-                    }
-                  >
-                    <SelectTrigger className="h-7 w-32 text-xs">
-                      <SelectValue
-                        placeholder={t("members.bulkActions.changeRole", {
-                          defaultValue: "Đổi vai trò",
-                        })}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {assignableRoles.map((r) => (
-                        <SelectItem
-                          key={r}
-                          value={r}
-                          className="text-xs capitalize"
-                        >
-                          {t(`roles.${r}`, { defaultValue: r })}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  <LoadingButton
-                    variant="outline"
-                    size="sm"
-                    isLoading={isBulkExecuting}
-                    onClick={() => void handleBulkSuspend()}
-                    className="h-7 text-xs gap-1 cursor-pointer text-amber-600 hover:text-amber-700"
-                  >
-                    <LuBan className="size-3" />
-                    <span>
-                      {t("members.bulkActions.suspend", {
-                        defaultValue: "Khóa",
-                      })}
-                    </span>
-                  </LoadingButton>
-
-                  <LoadingButton
-                    variant="outline"
-                    size="sm"
-                    isLoading={isBulkExecuting}
-                    onClick={() => void handleBulkActivate()}
-                    className="h-7 text-xs gap-1 cursor-pointer text-emerald-600 hover:text-emerald-700"
-                  >
-                    <LuUserCheck className="size-3" />
-                    <span>
-                      {t("members.bulkActions.activate", {
-                        defaultValue: "Mở khóa",
-                      })}
-                    </span>
-                  </LoadingButton>
-                </div>
-              </div>
             )}
-            {bulkActionError ? (
-              <p role="alert" className="text-xs text-destructive">
-                {bulkActionError}
-              </p>
-            ) : null}
+          </div>
+        </DialogHeader>
 
-            {/* Role Permissions Summary */}
-            <div className="rounded-lg border border-border/70 bg-muted/15 p-3 space-y-2">
-              <div className="flex items-center gap-2 font-semibold text-foreground text-xs">
-                <LuInfo className="size-3.5 text-primary" />
-                <span>
-                  {t("members.rolePermissionsSummary", {
-                    defaultValue: "Tóm tắt quyền hạn các vai trò:",
+        <div className="space-y-3.5 py-1 text-xs">
+          {/* Role & Access Status Banner */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 p-2.5 text-xs">
+            <div className="flex items-center gap-2">
+              <LuShieldCheck className="size-4 text-primary shrink-0" />
+              <div>
+                <span className="text-muted-foreground">
+                  {t("members.yourAccount", {
+                    defaultValue: "Tài khoản của bạn:",
+                  })}{" "}
+                </span>
+                <strong className="text-foreground">
+                  {currentUser.email || "Đang đăng nhập"}
+                </strong>
+                <span className="mx-1.5 text-muted-foreground">•</span>
+                <Badge
+                  variant="outline"
+                  className="text-[10px] font-mono border-primary/40 text-primary capitalize font-bold"
+                >
+                  {t(`roles.${currentUser.role}`, {
+                    defaultValue: currentUser.role,
+                  })}
+                </Badge>
+                <span className="text-muted-foreground ml-2 hidden sm:inline">
+                  —{" "}
+                  {t("members.canManageLowerRoles", {
+                    defaultValue:
+                      "Chỉ có thể quản lý & phân quyền cho vai trò cấp dưới",
                   })}
                 </span>
-              </div>
-              <div className="grid grid-cols-4 gap-2 text-[11px] pt-1">
-                <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
-                  <div className="font-bold text-amber-500 flex items-center gap-1">
-                    <LuShieldCheck className="size-3" />
-                    <span>Owner</span>
-                  </div>
-                  <p className="text-muted-foreground text-[10px]">
-                    Toàn quyền tối cao: Quản trị thanh toán, phân quyền và xóa
-                    workspace.
-                  </p>
-                </div>
-
-                <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
-                  <div className="font-bold text-primary flex items-center gap-1">
-                    <LuShield className="size-3" />
-                    <span>Admin</span>
-                  </div>
-                  <p className="text-muted-foreground text-[10px]">
-                    Quản trị hồ sơ, phân chia nhóm, xem proxy và mời thành viên
-                    mới.
-                  </p>
-                </div>
-
-                <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
-                  <div className="font-bold text-emerald-500 flex items-center gap-1">
-                    <LuPlay className="size-3" />
-                    <span>Operator</span>
-                  </div>
-                  <p className="text-muted-foreground text-[10px]">
-                    Chỉ chạy/mở profiles trong nhóm. Dữ liệu proxy và cookie bị
-                    che.
-                  </p>
-                </div>
-
-                <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
-                  <div className="font-bold text-muted-foreground flex items-center gap-1">
-                    <LuUser className="size-3" />
-                    <span>Member</span>
-                  </div>
-                  <p className="text-muted-foreground text-[10px]">
-                    Chỉ nhìn thấy hồ sơ thuộc nhóm được Owner/Admin phân bổ cụ
-                    thể.
-                  </p>
-                </div>
               </div>
             </div>
           </div>
 
-          <DialogFooter className="border-t border-border/50 pt-3 flex items-center justify-between sm:justify-between">
-            <span className="text-xs text-muted-foreground">
-              Tổng số:{" "}
-              <strong className="text-foreground">{members.length}</strong> nhân
-              sự
-            </span>
-            <RippleButton
-              variant="outline"
-              size="sm"
-              onClick={onClose}
-              className="h-8 text-xs font-medium cursor-pointer"
+          {/* Toolbar: Search, Filter, Direct Provision, Bulk Provision, Invite */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2">
+              <div className="relative w-48 sm:w-60">
+                <LuSearch className="absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
+                <Input
+                  placeholder={t("members.searchPlaceholder", {
+                    defaultValue: "Tìm theo tên hoặc email...",
+                  })}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="h-8 pl-8 text-xs"
+                />
+              </div>
+              <Select value={roleFilter} onValueChange={setRoleFilter}>
+                <SelectTrigger className="h-8 w-36 text-xs">
+                  <SelectValue placeholder="Lọc vai trò..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all" className="text-xs">
+                    Tất cả vai trò
+                  </SelectItem>
+                  <SelectItem value="owner" className="text-xs">
+                    Owner
+                  </SelectItem>
+                  <SelectItem value="admin" className="text-xs">
+                    Admin
+                  </SelectItem>
+                  <SelectItem value="lead" className="text-xs">
+                    Lead — quản lý thành viên và đội nhóm cấp thấp hơn
+                  </SelectItem>
+                  <SelectItem value="operator" className="text-xs">
+                    Operator
+                  </SelectItem>
+                  <SelectItem value="member" className="text-xs">
+                    Member
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setBulkCreateAccounts(false);
+                  setBulkEmailsText("");
+                  setBulkInputError(null);
+                  setBulkRole(assignableRoles[0] || "operator");
+                  setBulkResults(null);
+                  setBulkModalOpen(true);
+                }}
+                disabled={currentUserRank <= 1}
+                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+              >
+                <LuUsers className="size-3.5 text-primary" />
+                <span>
+                  {t("members.bulkProvisionButton", {
+                    defaultValue: "Mời hàng loạt",
+                  })}
+                </span>
+              </Button>
+
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setAccountCreationMode("bulk")}
+                disabled={currentUserRank <= 1}
+                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+              >
+                <LuUsers className="size-3.5" />
+                <span>Tạo account hàng loạt</span>
+              </Button>
+
+              <Button
+                size="sm"
+                onClick={() => {
+                  if (mode === "page" && onInvitePage) {
+                    onInvitePage();
+                    return;
+                  }
+                  setCreateInviteAccount(false);
+                  setGeneratedInvite(null);
+                  setInviteEmail("");
+                  setInviteUsername("");
+                  setInviteRole(assignableRoles[0] || "operator");
+                  setInviteModalOpen(true);
+                }}
+                disabled={currentUserRank <= 1}
+                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+              >
+                <LuUserPlus className="size-3.5" />
+                <span>
+                  {t("members.inviteButton", {
+                    defaultValue: "Mời Thành Viên",
+                  })}
+                </span>
+              </Button>
+
+              <Button
+                size="sm"
+                onClick={() => setAccountCreationMode("single")}
+                disabled={currentUserRank <= 1}
+                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+              >
+                <LuUserPlus className="size-3.5" />
+                <span>Tạo tài khoản</span>
+              </Button>
+            </div>
+          </div>
+
+          {/* Members Table */}
+          <div className="rounded-lg border border-border overflow-hidden">
+            <div
+              className={
+                mode === "page"
+                  ? "max-h-[calc(100vh-360px)] overflow-y-auto"
+                  : "max-h-[260px] overflow-y-auto"
+              }
             >
-              {t("common.buttons.close", { defaultValue: "Đóng" })}
-            </RippleButton>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              <table className="w-full text-left text-xs">
+                <thead className="bg-muted/50 border-b border-border sticky top-0 font-medium text-muted-foreground text-[11px]">
+                  <tr>
+                    <th className="py-2.5 px-3 w-8">
+                      <Checkbox
+                        checked={
+                          manageableMembers.length > 0 &&
+                          selectedMemberIds.size === manageableMembers.length
+                        }
+                        onCheckedChange={handleSelectAllManageable}
+                        disabled={manageableMembers.length === 0}
+                        aria-label="Select all manageable members"
+                      />
+                    </th>
+                    <th className="py-2.5 px-3">Thành viên & Email</th>
+                    <th className="py-2.5 px-3 w-36">Vai trò</th>
+                    <th className="py-2.5 px-3 w-28">Trạng thái</th>
+                    <th className="py-2.5 px-3 w-28 text-center">Thao tác</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/60">
+                  {isLoading ? (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="py-8 text-center text-muted-foreground"
+                      >
+                        {t("common.buttons.loading", {
+                          defaultValue: "Đang tải dữ liệu...",
+                        })}
+                      </td>
+                    </tr>
+                  ) : filteredMembers.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="py-8 text-center text-muted-foreground"
+                      >
+                        {t("members.noMembersFound", {
+                          defaultValue: "Không tìm thấy thành viên phù hợp",
+                        })}
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredMembers.map((member) => {
+                      const memberRank = ROLE_RANKS[member.role] ?? 0;
+                      const isSelf =
+                        member.id === currentUser.id ||
+                        member.accountId === currentUser.accountId;
+                      const isHigherOrEqual = memberRank >= currentUserRank;
+                      const canManage = !isSelf && !isHigherOrEqual;
+                      const isUpdating = updatingMemberId === member.id;
+                      const displayIdentity =
+                        member.identity?.username ??
+                        "Danh tính chưa được cấp quyền xem";
+                      const displayEmail = member.identity?.email ?? "—";
+                      const initials =
+                        member.identity?.username?.slice(0, 2).toUpperCase() ??
+                        "?";
+
+                      return (
+                        <tr
+                          key={member.id}
+                          className={cn(
+                            "transition-colors hover:bg-muted/30",
+                            member.status === "suspended" &&
+                              "opacity-60 bg-muted/20",
+                          )}
+                        >
+                          <td className="py-2.5 px-3 w-8">
+                            <Checkbox
+                              checked={selectedMemberIds.has(member.id)}
+                              onCheckedChange={() =>
+                                handleToggleSelectMember(member.id)
+                              }
+                              disabled={!canManage}
+                              aria-label={`Select ${member.accountId}`}
+                            />
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="flex size-7 items-center justify-center rounded-full bg-primary/10 text-primary font-bold text-xs">
+                                {initials}
+                              </div>
+                              <div>
+                                <div className="font-semibold text-foreground text-xs flex items-center gap-1.5">
+                                  <span>{displayIdentity}</span>
+                                  {isSelf && (
+                                    <Badge
+                                      variant="outline"
+                                      className="text-[9px] py-0 h-4 border-primary/40 text-primary"
+                                    >
+                                      Bạn
+                                    </Badge>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-muted-foreground">
+                                  {displayEmail}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground/50 font-mono">
+                                  {member.id}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            {isSelf ? (
+                              <Badge className="bg-amber-500/15 text-amber-600 border-amber-300 text-[10px] gap-1 font-semibold">
+                                <LuShieldCheck className="size-3" />
+                                <span className="capitalize">
+                                  {t(`roles.${member.role}`, {
+                                    defaultValue: member.role,
+                                  })}
+                                </span>
+                              </Badge>
+                            ) : !canManage ? (
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] font-medium capitalize"
+                              >
+                                {t(`roles.${member.role}`, {
+                                  defaultValue: member.role,
+                                })}
+                              </Badge>
+                            ) : (
+                              <Select
+                                value={member.role}
+                                onValueChange={(val) =>
+                                  void handleRoleChange(
+                                    member.id,
+                                    val as MemberRole,
+                                  )
+                                }
+                                disabled={isUpdating}
+                              >
+                                <SelectTrigger className="h-7 text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {assignableRoles.map((r) => (
+                                    <SelectItem
+                                      key={r}
+                                      value={r}
+                                      className="text-xs capitalize"
+                                    >
+                                      {t(`roles.${r}`, { defaultValue: r })}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            {getStatusBadge(member.status)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                            {isSelf ? (
+                              <span className="text-[11px] text-muted-foreground italic">
+                                (Chính bạn)
+                              </span>
+                            ) : isHigherOrEqual ? (
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] text-muted-foreground border-border/80 font-normal"
+                              >
+                                {t("members.protectedRole", {
+                                  defaultValue: "Vai trò được bảo vệ",
+                                })}
+                              </Badge>
+                            ) : (
+                              <div className="flex items-center justify-end gap-1.5">
+                                <LoadingButton
+                                  variant={
+                                    member.status === "suspended"
+                                      ? "outline"
+                                      : "ghost"
+                                  }
+                                  size="sm"
+                                  isLoading={isUpdating}
+                                  onClick={() =>
+                                    void handleToggleSuspend(member)
+                                  }
+                                  className={cn(
+                                    "h-7 px-2 text-[10px] cursor-pointer font-medium",
+                                    member.status === "suspended"
+                                      ? "text-emerald-600 hover:text-emerald-700"
+                                      : "text-muted-foreground hover:text-foreground",
+                                  )}
+                                >
+                                  {member.status === "suspended" ? (
+                                    <>
+                                      <LuUserCheck className="size-3 mr-1 text-emerald-500" />
+                                      <span>Mở khóa</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <LuBan className="size-3 mr-1" />
+                                      <span>Khóa</span>
+                                    </>
+                                  )}
+                                </LoadingButton>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleOpenOffboard(member)}
+                                  className="h-7 px-2 text-[10px] gap-1 cursor-pointer text-destructive hover:bg-destructive/10 font-medium"
+                                >
+                                  <LuTrash2 className="size-3" />
+                                  <span>Thu hồi</span>
+                                </Button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Floating Bulk Action Bar */}
+          {selectedMemberIds.size > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-primary/40 bg-card p-2.5 shadow-md animate-in fade-in slide-in-from-bottom-2">
+              <div className="flex items-center gap-2">
+                <Badge variant="default" className="text-xs px-2.5 py-0.5">
+                  {t("members.bulkActions.selected", {
+                    count: selectedMemberIds.size,
+                  })}
+                </Badge>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedMemberIds(new Set())}
+                  className="h-7 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                >
+                  {t("members.bulkActions.clear", {
+                    defaultValue: "Bỏ chọn",
+                  })}
+                </Button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Select
+                  onValueChange={(role) =>
+                    void handleBulkChangeRole(role as MemberRole)
+                  }
+                >
+                  <SelectTrigger className="h-7 w-32 text-xs">
+                    <SelectValue
+                      placeholder={t("members.bulkActions.changeRole", {
+                        defaultValue: "Đổi vai trò",
+                      })}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {assignableRoles.map((r) => (
+                      <SelectItem
+                        key={r}
+                        value={r}
+                        className="text-xs capitalize"
+                      >
+                        {t(`roles.${r}`, { defaultValue: r })}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                <LoadingButton
+                  variant="outline"
+                  size="sm"
+                  isLoading={isBulkExecuting}
+                  onClick={() => void handleBulkSuspend()}
+                  className="h-7 text-xs gap-1 cursor-pointer text-amber-600 hover:text-amber-700"
+                >
+                  <LuBan className="size-3" />
+                  <span>
+                    {t("members.bulkActions.suspend", {
+                      defaultValue: "Khóa",
+                    })}
+                  </span>
+                </LoadingButton>
+
+                <LoadingButton
+                  variant="outline"
+                  size="sm"
+                  isLoading={isBulkExecuting}
+                  onClick={() => void handleBulkActivate()}
+                  className="h-7 text-xs gap-1 cursor-pointer text-emerald-600 hover:text-emerald-700"
+                >
+                  <LuUserCheck className="size-3" />
+                  <span>
+                    {t("members.bulkActions.activate", {
+                      defaultValue: "Mở khóa",
+                    })}
+                  </span>
+                </LoadingButton>
+              </div>
+            </div>
+          )}
+          {bulkActionError ? (
+            <p role="alert" className="text-xs text-destructive">
+              {bulkActionError}
+            </p>
+          ) : null}
+
+          {/* Role Permissions Summary */}
+          <div className="rounded-lg border border-border/70 bg-muted/15 p-3 space-y-2">
+            <div className="flex items-center gap-2 font-semibold text-foreground text-xs">
+              <LuInfo className="size-3.5 text-primary" />
+              <span>
+                {t("members.rolePermissionsSummary", {
+                  defaultValue: "Tóm tắt quyền hạn các vai trò:",
+                })}
+              </span>
+            </div>
+            <div className="grid grid-cols-4 gap-2 text-[11px] pt-1">
+              <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
+                <div className="font-bold text-amber-500 flex items-center gap-1">
+                  <LuShieldCheck className="size-3" />
+                  <span>Owner</span>
+                </div>
+                <p className="text-muted-foreground text-[10px]">
+                  Toàn quyền tối cao: Quản trị thanh toán, phân quyền và xóa
+                  workspace.
+                </p>
+              </div>
+
+              <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
+                <div className="font-bold text-primary flex items-center gap-1">
+                  <LuShield className="size-3" />
+                  <span>Admin</span>
+                </div>
+                <p className="text-muted-foreground text-[10px]">
+                  Quản trị hồ sơ, phân chia nhóm, xem proxy và mời thành viên
+                  mới.
+                </p>
+              </div>
+
+              <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
+                <div className="font-bold text-emerald-500 flex items-center gap-1">
+                  <LuPlay className="size-3" />
+                  <span>Operator</span>
+                </div>
+                <p className="text-muted-foreground text-[10px]">
+                  Chỉ chạy/mở profiles trong nhóm. Dữ liệu proxy và cookie bị
+                  che.
+                </p>
+              </div>
+
+              <div className="rounded border border-border/50 bg-background/50 p-2 space-y-1">
+                <div className="font-bold text-muted-foreground flex items-center gap-1">
+                  <LuUser className="size-3" />
+                  <span>Member</span>
+                </div>
+                <p className="text-muted-foreground text-[10px]">
+                  Chỉ nhìn thấy hồ sơ thuộc nhóm được Owner/Admin phân bổ cụ
+                  thể.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter className="border-t border-border/50 pt-3 flex items-center justify-between sm:justify-between">
+          <span className="text-xs text-muted-foreground">
+            Tổng số:{" "}
+            <strong className="text-foreground">{members.length}</strong> nhân
+            sự
+          </span>
+          <RippleButton
+            variant="outline"
+            size="sm"
+            onClick={onClose}
+            className="h-8 text-xs font-medium cursor-pointer"
+          >
+            {t("common.buttons.close", { defaultValue: "Đóng" })}
+          </RippleButton>
+        </DialogFooter>
+      </MemberFrame>
 
       {/* SUB-MODAL: Invite Member */}
       <Dialog open={inviteModalOpen} onOpenChange={setInviteModalOpen}>

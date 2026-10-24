@@ -132,6 +132,38 @@ impl CredentialService {
         })
     }
 
+    pub(crate) fn validate_initial_password(password: &str) -> Result<(), Problem> {
+        validate_password(password)
+    }
+
+    /// Compare a candidate credential to the stored verifier without recording a login
+    /// success/failure, changing lockout state, or advancing credential versions. This is
+    /// reserved for validating an idempotent account-provision replay.
+    pub(crate) fn matches_password_without_recording_attempt(
+        &self,
+        account_id: &AccountId,
+        password: &str,
+    ) -> Result<bool, Problem> {
+        validate_password(password)?;
+        let _verification_slot = acquire_password_verification_slot(&PASSWORD_VERIFICATION_SLOTS)?;
+        let Some((record, _revision)) = self.store.load_versioned::<PasswordRecord>(
+            TENANT,
+            RECORD_TYPE,
+            account_id.as_str(),
+        )?
+        else {
+            return Ok(false);
+        };
+        validate_password_record_owner(&record, account_id)?;
+        Ok(match &record.legacy_scrypt {
+            Some(legacy) => verify_legacy_scrypt(password, legacy),
+            None => record
+                .password_phc
+                .as_deref()
+                .is_some_and(|phc| verify_password(phc, password)),
+        })
+    }
+
     pub fn authenticate(
         &self,
         identifier: &str,
@@ -194,7 +226,10 @@ impl CredentialService {
             self.record_failure(&record, revision, now, &operation_id)?;
             return Err(invalid_credentials());
         }
-        if identity.verification != IdentityVerification::Verified {
+        if !matches!(
+            identity.verification,
+            IdentityVerification::Verified | IdentityVerification::AdminProvisioned
+        ) {
             return Err(invalid_credentials());
         }
 
@@ -802,6 +837,49 @@ mod tests {
                 .1,
             1,
             "a rejected pending identity must not record successful login or upgrade credentials"
+        );
+    }
+
+    #[test]
+    fn admin_provisioned_identity_can_login_without_claiming_email_verified() {
+        let (identities, credentials) = service();
+        let account_id = AccountId::new("acct_admin_provisioned").unwrap();
+        let identity = AccountIdentity::admin_provisioned(
+            account_id.clone(),
+            "provisioned",
+            "provisioned@example.com",
+            "2026-10-24T00:00:00Z",
+        )
+        .unwrap();
+        identities.create(&identity).unwrap();
+        credentials
+            .set_initial_password(&account_id, "provisioned-password-123", 100)
+            .unwrap();
+
+        assert_eq!(
+            retry_if_password_capacity_is_busy(|| {
+                credentials.authenticate("provisioned@example.com", "provisioned-password-123", 101)
+            })
+            .unwrap(),
+            account_id
+        );
+        assert_eq!(
+            identities.load(&account_id).unwrap().unwrap().verification,
+            IdentityVerification::AdminProvisioned
+        );
+        assert_eq!(
+            identity
+                .verify(1, "2026-10-24T00:01:00Z")
+                .unwrap()
+                .verification,
+            IdentityVerification::Verified
+        );
+        assert_eq!(
+            credentials
+                .authenticate("provisioned", "wrong-password-123", 102)
+                .unwrap_err()
+                .code,
+            "invalid_credentials"
         );
     }
 

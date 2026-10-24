@@ -17,7 +17,7 @@ use buglogin_domain::{
         AccountId, GrantId, MemberId, OrganizationId, ProfileId, ResourceId, TeamId, WorkspaceId,
     },
     organization::{Organization, OrganizationPolicy},
-    permissions::{Action, Capability, Principal, ResourceScope},
+    permissions::{Action, Capability, Principal, ResourceScope, Role},
     profile::{ProfileCloneInput, ProfileShareInput, ProfileShareRevokeInput},
     team::Team,
     workspace::Workspace,
@@ -84,6 +84,13 @@ pub struct McpRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AuditEventsListInput {
     workspace_id: WorkspaceId,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiagnosticErrorsListInput {
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -187,6 +194,25 @@ pub trait McpExecutionPolicy {
         self.audit(audit)
     }
 
+    fn complete_idempotency_with_audit_and_puts(
+        &mut self,
+        principal: &Principal,
+        command: &CommandMetadata,
+        result: &Result<Value, Problem>,
+        audit: AuditRecord,
+        additional_puts: Vec<buglogin_storage::control::ControlPut>,
+    ) -> Result<(), Problem> {
+        if !additional_puts.is_empty() {
+            return Err(Problem::new(
+                "atomic_mutation_unavailable",
+                "Atomic additional records are unavailable for this command",
+                503,
+                "mcp",
+            ));
+        }
+        self.complete_idempotency_with_audit(principal, command, result, audit)
+    }
+
     fn abandon_idempotency_with_audit(&mut self, audit: AuditRecord) -> Result<(), Problem> {
         self.abandon_idempotency()?;
         self.audit(audit)
@@ -201,9 +227,10 @@ pub trait McpExecutionPolicy {
     where
         Self: Sized,
         E: McpExecutor,
-        F: FnOnce(&mut Self, Result<Value, Problem>) -> Result<Value, Problem>,
+        F: FnOnce(&mut Self, &mut E, Result<Value, Problem>) -> Result<Value, Problem>,
     {
-        complete(self, executor.execute(request))
+        let result = executor.execute(request);
+        complete(self, executor, result)
     }
 }
 
@@ -217,6 +244,10 @@ pub trait McpExecutor: Send {
 
     async fn execute_async(&mut self, request: ExecutionRequest<'_>) -> Result<Value, Problem> {
         self.execute(request)
+    }
+
+    fn take_additional_control_puts(&mut self) -> Vec<buglogin_storage::control::ControlPut> {
+        Vec::new()
     }
 }
 
@@ -370,62 +401,67 @@ where
         let policy = &mut self.policy;
         let executor = &mut self.executor;
         let error_correlation_id = correlation_id.clone();
-        policy.execute_and_complete(executor, execution_request, |policy, result| match result {
-            Ok(value) => {
-                if let Err(error) = reject_mcp_output_secrets(command, &value) {
-                    policy.complete_idempotency_with_audit(
+        policy.execute_and_complete(executor, execution_request, |policy, executor, result| {
+            match result {
+                Ok(value) => {
+                    if let Err(error) = reject_mcp_output_secrets(command, &value) {
+                        let _ = executor.take_additional_control_puts();
+                        policy.complete_idempotency_with_audit(
+                            &principal,
+                            command,
+                            &Err(error.clone()),
+                            AuditRecord {
+                                actor_id: actor_id.clone(),
+                                command_id: command.id.as_str(),
+                                correlation_id: correlation_id.clone(),
+                                scope: scope.clone(),
+                                outcome: AuditOutcome::Denied,
+                                metadata: BTreeMap::from([(
+                                    "output_policy".to_owned(),
+                                    "rejected".to_owned(),
+                                )]),
+                            },
+                        )?;
+                        return Err(error);
+                    }
+                    policy.complete_idempotency_with_audit_and_puts(
                         &principal,
                         command,
-                        &Err(error.clone()),
+                        &Ok(value.clone()),
                         AuditRecord {
-                            actor_id: actor_id.clone(),
+                            actor_id,
                             command_id: command.id.as_str(),
-                            correlation_id: correlation_id.clone(),
-                            scope: scope.clone(),
-                            outcome: AuditOutcome::Denied,
-                            metadata: BTreeMap::from([(
-                                "output_policy".to_owned(),
-                                "rejected".to_owned(),
-                            )]),
+                            correlation_id,
+                            scope,
+                            outcome: AuditOutcome::Succeeded,
+                            metadata: BTreeMap::new(),
                         },
+                        executor.take_additional_control_puts(),
                     )?;
-                    return Err(error);
+                    Ok(value)
                 }
-                policy.complete_idempotency_with_audit(
-                    &principal,
-                    command,
-                    &Ok(value.clone()),
-                    AuditRecord {
+                Err(error) => {
+                    let _ = executor.take_additional_control_puts();
+                    let audit = AuditRecord {
                         actor_id,
                         command_id: command.id.as_str(),
-                        correlation_id,
+                        correlation_id: error_correlation_id,
                         scope,
-                        outcome: AuditOutcome::Succeeded,
+                        outcome: AuditOutcome::Failed,
                         metadata: BTreeMap::new(),
-                    },
-                )?;
-                Ok(value)
-            }
-            Err(error) => {
-                let audit = AuditRecord {
-                    actor_id,
-                    command_id: command.id.as_str(),
-                    correlation_id: error_correlation_id,
-                    scope,
-                    outcome: AuditOutcome::Failed,
-                    metadata: BTreeMap::new(),
-                };
-                if should_abandon_mcp_claim(&error) {
-                    policy.abandon_idempotency_with_audit(audit)?;
-                } else {
-                    policy.complete_idempotency_with_audit(
-                        &principal,
-                        command,
-                        &Err(error.clone()),
-                        audit,
-                    )?;
+                    };
+                    if should_abandon_mcp_claim(&error) {
+                        policy.abandon_idempotency_with_audit(audit)?;
+                    } else {
+                        policy.complete_idempotency_with_audit(
+                            &principal,
+                            command,
+                            &Err(error.clone()),
+                            audit,
+                        )?;
+                    }
+                    Err(error)
                 }
-                Err(error)
             }
         })
     }
@@ -530,7 +566,7 @@ where
                     actor_id,
                     command_id: command.id.as_str(),
                     correlation_id: request.correlation_id,
-                    scope,
+                    scope: scope.clone(),
                     outcome: AuditOutcome::Succeeded,
                     metadata: BTreeMap::new(),
                 })?;
@@ -873,7 +909,7 @@ fn tool_metadata(command: &CommandMetadata) -> ToolMetadata {
 
 fn mcp_input_schema_for_command(command: &CommandMetadata) -> Option<Value> {
     if command.id.as_str() == "profile.launch" {
-        return Some(serde_json::json!({
+        let schema = serde_json::json!({
             "type": "object",
             "required": ["profileId"],
             "properties": {
@@ -889,14 +925,17 @@ fn mcp_input_schema_for_command(command: &CommandMetadata) -> Option<Value> {
                     "maxLength": 128,
                     "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
                 },
-                "profilesRoot": { "type": "string", "minLength": 1 },
-                "extraArgs": { "type": "array", "items": { "type": "string" } }
             },
             "additionalProperties": false
+        });
+        let name = command.input_schema.as_str();
+        return Some(serde_json::json!({
+            "$ref": format!("#/$defs/{name}"),
+            "$defs": { (name): schema }
         }));
     }
     if command.id.as_str() == "profile.stop" {
-        return Some(serde_json::json!({
+        let schema = serde_json::json!({
             "type": "object",
             "required": ["profileId"],
             "properties": {
@@ -914,6 +953,11 @@ fn mcp_input_schema_for_command(command: &CommandMetadata) -> Option<Value> {
                 }
             },
             "additionalProperties": false
+        });
+        let name = command.input_schema.as_str();
+        return Some(serde_json::json!({
+            "$ref": format!("#/$defs/{name}"),
+            "$defs": { (name): schema }
         }));
     }
     crate::commands::registry::mcp_input_schema(command.input_schema)
@@ -1102,6 +1146,163 @@ fn problem(code: &str, title: &str, status: u16) -> Problem {
     Problem::new(code, title, status, "mcp")
 }
 
+const AUTO_DIAGNOSTIC_SCHEMA: &str = "buglogin.desktop-operational-error/1";
+
+fn list_auto_desktop_diagnostics(state: &ApiState, input: &Value) -> Result<Value, Problem> {
+    let query: DiagnosticErrorsListInput =
+        serde_json::from_value(input.clone()).map_err(serialization_problem)?;
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit)
+        || query
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 64)
+    {
+        return Err(problem("invalid_input", "Invalid page parameters", 400));
+    }
+
+    let accounts = state
+        .control_persistence
+        .list::<buglogin_domain::account::Account>("control", "account")?;
+    let tenant_ids = accounts
+        .into_iter()
+        .map(|account| account.id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let stored = state
+        .control_persistence
+        .list_versioned_for_tenants::<Value>(&tenant_ids, "support_feedback")?;
+    let records = stored
+        .into_iter()
+        .filter_map(|(tenant_id, record_id, record, _)| {
+            project_auto_desktop_diagnostic(&tenant_id, &record_id, &record)
+        })
+        .collect::<Vec<_>>();
+    page_auto_desktop_diagnostics(records, query.cursor.as_deref(), limit)
+}
+
+fn page_auto_desktop_diagnostics(
+    mut records: Vec<Value>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Value, Problem> {
+    if !(1..=100).contains(&limit)
+        || cursor.is_some_and(|value| value.is_empty() || value.len() > 64)
+    {
+        return Err(problem("invalid_input", "Invalid page parameters", 400));
+    }
+    records.sort_by(|left, right| {
+        left["submittedAtMs"]
+            .as_u64()
+            .cmp(&right["submittedAtMs"].as_u64())
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+            .then_with(|| left["accountId"].as_str().cmp(&right["accountId"].as_str()))
+    });
+
+    let start = match cursor {
+        Some(cursor) => records
+            .iter()
+            .position(|record| record["id"].as_str() == Some(cursor))
+            .map(|position| position + 1)
+            .ok_or_else(|| problem("invalid_cursor", "Page cursor is invalid", 400))?,
+        None => 0,
+    };
+    let end = start.saturating_add(limit).min(records.len());
+    let items = records[start..end].to_vec();
+    let next_cursor = (end < records.len())
+        .then(|| items.last().and_then(|record| record["id"].as_str()))
+        .flatten();
+    Ok(serde_json::json!({ "items": items, "nextCursor": next_cursor }))
+}
+
+fn require_platform_admin(principal: &Principal) -> Result<(), Problem> {
+    if principal.roles.contains(&Role::PlatformAdmin) {
+        Ok(())
+    } else {
+        Err(problem("forbidden", "Permission denied", 403))
+    }
+}
+
+fn project_auto_desktop_diagnostic(
+    tenant_id: &str,
+    record_id: &str,
+    record: &Value,
+) -> Option<Value> {
+    if record.get("kind").and_then(Value::as_str) != Some("bug")
+        || record.get("includeLogs").and_then(Value::as_bool) != Some(true)
+        || record.get("accountId").and_then(Value::as_str) != Some(tenant_id)
+        || record.get("id").and_then(Value::as_str) != Some(record_id)
+        || !is_feedback_id(record_id)
+    {
+        return None;
+    }
+    let submitted_at_ms = record.get("submittedAtMs")?.as_u64()?;
+    let logs = record.get("logs")?.as_str()?;
+    let raw_diagnostic: Value = serde_json::from_str(logs).ok()?;
+    let diagnostic = project_diagnostic_schema(&raw_diagnostic)?;
+    Some(serde_json::json!({
+        "id": record_id,
+        "accountId": tenant_id,
+        "submittedAtMs": submitted_at_ms,
+        "diagnostic": diagnostic,
+    }))
+}
+
+fn project_diagnostic_schema(value: &Value) -> Option<Value> {
+    let app_version = value.get("appVersion")?.as_str()?;
+    let os = value.get("os")?.as_str()?;
+    let architecture = value.get("architecture")?.as_str()?;
+    let operation = value.get("operation")?.as_str()?;
+    let error_code = value.get("errorCode")?.as_str()?;
+    let status = value.get("status")?.as_u64()?;
+    if value.get("schema")?.as_str()? != AUTO_DIAGNOSTIC_SCHEMA
+        || app_version.is_empty()
+        || app_version.len() > 64
+        || app_version.chars().any(char::is_control)
+        || !matches!(os, "windows" | "macos" | "linux")
+        || !matches!(architecture, "x86_64" | "aarch64" | "x86" | "arm" | "arm64")
+        || operation.is_empty()
+        || operation.len() > 64
+        || !operation.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
+        || !is_safe_diagnostic_error_code(error_code)
+        || status > 999
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "schema": AUTO_DIAGNOSTIC_SCHEMA,
+        "appVersion": app_version,
+        "os": os,
+        "architecture": architecture,
+        "operation": operation,
+        "errorCode": error_code,
+        "status": status,
+    }))
+}
+
+fn is_safe_diagnostic_error_code(error_code: &str) -> bool {
+    let legacy_hash = error_code.len() == 70
+        && error_code.starts_with("error-")
+        && error_code[6..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    let machine_code = (2..=64).contains(&error_code.len())
+        && error_code.as_bytes()[0].is_ascii_lowercase()
+        && error_code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    legacy_hash || machine_code
+}
+
+fn is_feedback_id(value: &str) -> bool {
+    value.len() == 36
+        && value.starts_with("fbk_")
+        && value[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn with_correlation_id(mut error: Problem, correlation_id: &str) -> Problem {
     error.correlation_id = correlation_id.to_owned();
     error
@@ -1223,6 +1424,16 @@ fn sha256_hash(value: &serde_json::Value) -> String {
     format!("{:x}", Sha256::digest(&bytes))
 }
 
+fn idempotency_hash_input(command_id: &str, input: &Value) -> Value {
+    let mut canonical = input.clone();
+    if command_id == "account.create.scoped"
+        && let Some(object) = canonical.as_object_mut()
+    {
+        object.remove("initialPassword");
+    }
+    canonical
+}
+
 fn required_id<T, E>(
     input: &Value,
     field: &str,
@@ -1255,7 +1466,9 @@ fn resolve_scope(
     input: &Value,
 ) -> Result<ResourceScope, Problem> {
     match command.id.as_str() {
-        "system.health.get" | "runtime.catalog.get" => Ok(ResourceScope::global()),
+        "system.health.get" | "runtime.catalog.get" | "diagnostics.errors.list" => {
+            Ok(ResourceScope::global())
+        }
         "account.get" | "organization.list" | "profile.list" | "proxy.parse" => principal
             .account_id
             .clone()
@@ -1516,6 +1729,7 @@ impl ProductionMcpPolicy {
         result: &Result<Value, Problem>,
         audit_allowed: bool,
         detail: Value,
+        additional_puts: Vec<buglogin_storage::control::ControlPut>,
     ) -> Result<(), Problem> {
         let Some(claim) = self.claim.as_ref().cloned() else {
             return Ok(());
@@ -1532,19 +1746,71 @@ impl ProductionMcpPolicy {
                 serde_json::to_value(error).map_err(serialization_problem)?,
             ),
         };
-        self.state.complete_mcp_idempotency(
-            claim,
-            command.id.as_str(),
-            actor,
-            audit_allowed,
-            matches!(
-                command.kind,
-                crate::commands::CommandKind::Command | crate::commands::CommandKind::Operation
-            ),
-            detail,
-            status,
-            body,
-        )?;
+        let apply_mutations = matches!(
+            command.kind,
+            crate::commands::CommandKind::Command | crate::commands::CommandKind::Operation
+        );
+        if additional_puts.is_empty() {
+            self.state.complete_mcp_idempotency(
+                claim,
+                command.id.as_str(),
+                actor,
+                audit_allowed,
+                apply_mutations,
+                detail,
+                status,
+                body,
+            )?;
+        } else {
+            if !apply_mutations || status >= 400 {
+                return Err(Problem::new(
+                    "atomic_mutation_invalid",
+                    "Additional records require a successful mutation command",
+                    500,
+                    "mcp",
+                ));
+            }
+            let aggregate = self.state.control_aggregate()?;
+            let value = serde_json::to_value(aggregate).map_err(serialization_problem)?;
+            let revision = self.state.control_revision()?;
+            let mut puts = vec![buglogin_storage::control::ControlPut {
+                tenant_id: "control".into(),
+                record_type: "control_state".into(),
+                record_id: "primary".into(),
+                expected_revision: Some(revision),
+                value,
+            }];
+            puts.extend(additional_puts);
+            let completion = self.state.control_persistence.complete_idempotency(
+                buglogin_storage::control::CompleteControlCommand {
+                    claim,
+                    command_id: command.id.as_str().into(),
+                    expected_revisions: BTreeMap::new(),
+                    puts,
+                    deletes: Vec::new(),
+                    apply_mutations: true,
+                    audit: buglogin_storage::control::ControlAuditEntry {
+                        tenant_id: "control".into(),
+                        command_id: command.id.as_str().into(),
+                        actor_id: actor,
+                        allowed: audit_allowed,
+                        detail,
+                    },
+                    response: buglogin_storage::control::HttpResponse {
+                        status,
+                        headers: BTreeMap::new(),
+                        body,
+                    },
+                },
+            );
+            match completion {
+                Ok(_) => self.state.reload_control_aggregate()?,
+                Err(error) => {
+                    self.state.reload_control_aggregate()?;
+                    return Err(error);
+                }
+            }
+        }
         self.claim = None;
         Ok(())
     }
@@ -1560,7 +1826,7 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
     where
         Self: Sized,
         E: McpExecutor,
-        F: FnOnce(&mut Self, Result<Value, Problem>) -> Result<Value, Problem>,
+        F: FnOnce(&mut Self, &mut E, Result<Value, Problem>) -> Result<Value, Problem>,
     {
         let is_mutation = matches!(
             request.command.kind,
@@ -1583,11 +1849,11 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             };
             if let Err(error) = self.state.refresh_control_aggregate() {
                 drop(snapshot);
-                return complete(self, Err(error));
+                return complete(self, executor, Err(error));
             }
             let result = executor.execute(request);
             drop(snapshot);
-            return complete(self, result);
+            return complete(self, executor, result);
         }
 
         let snapshot_gate = std::sync::Arc::clone(&self.state.control_snapshot_gate);
@@ -1620,7 +1886,8 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             }
         };
 
-        complete(self, executor.execute_in_transaction(request))
+        let result = executor.execute_in_transaction(request);
+        complete(self, executor, result)
     }
 
     fn authenticate(
@@ -1758,6 +2025,9 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
         if !command.auth_required || command.id.as_str() == "profile.list" {
             return Ok(());
         }
+        if command.id.as_str() == "diagnostics.errors.list" {
+            require_platform_admin(principal)?;
+        }
         let grants = self.state.grants()?;
         let capability = Capability::new(command.capability)
             .map_err(|_| Problem::new("invalid_capability", "Invalid capability", 500, "mcp"))?;
@@ -1863,7 +2133,18 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             .as_ref()
             .map(|id| id.as_str())
             .unwrap_or("anonymous");
-        let input_hash = sha256_hash(input);
+        if command.id.as_str() == "account.create.scoped" {
+            // Never persist a plaintext password or a fast digest derived from it as the
+            // MCP idempotency input hash. The replay path binds the supplied password to
+            // the durable Argon2 verifier instead.
+            let password = input
+                .get("initialPassword")
+                .and_then(Value::as_str)
+                .ok_or_else(|| problem("invalid_input", "initialPassword is required", 400))?;
+            crate::services::credentials::CredentialService::validate_initial_password(password)?;
+        }
+        let idempotency_input = idempotency_hash_input(command.id.as_str(), input);
+        let input_hash = sha256_hash(&idempotency_input);
         let operation_id = format!(
             "mcp_{}",
             &sha256_hash(&serde_json::json!({
@@ -1904,6 +2185,27 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
                     })?;
                     Ok(IdempotencyClaim::ReplayError(error))
                 } else {
+                    if command.id.as_str() == "account.create.scoped" {
+                        let account_id = required_id(input, "accountId", AccountId::from_str)?;
+                        let password = input
+                            .get("initialPassword")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                problem("invalid_input", "initialPassword is required", 400)
+                            })?;
+                        let credentials = crate::services::credentials::CredentialService::new(
+                            self.state.control_persistence.clone(),
+                        )?;
+                        if !credentials
+                            .matches_password_without_recording_attempt(&account_id, password)?
+                        {
+                            return Err(problem(
+                                "idempotency_conflict",
+                                "Idempotency key was already used with a different initial password",
+                                409,
+                            ));
+                        }
+                    }
                     Ok(IdempotencyClaim::Replay(result.response.body))
                 }
             }
@@ -1922,6 +2224,7 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             result,
             true,
             serde_json::json!({ "adapter": "mcp" }),
+            Vec::new(),
         )
     }
 
@@ -1955,6 +2258,7 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
                 result,
                 audit_allowed,
                 detail,
+                Vec::new(),
             );
         }
         // The audit service is part of ControlAggregate. Append the event
@@ -1964,7 +2268,55 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             self.state.reload_control_aggregate()?;
             return Err(error);
         }
-        self.persist_idempotency_result(principal, command, result, audit_allowed, detail)
+        self.persist_idempotency_result(
+            principal,
+            command,
+            result,
+            audit_allowed,
+            detail,
+            Vec::new(),
+        )
+    }
+
+    fn complete_idempotency_with_audit_and_puts(
+        &mut self,
+        principal: &Principal,
+        command: &CommandMetadata,
+        result: &Result<Value, Problem>,
+        audit: AuditRecord,
+        additional_puts: Vec<buglogin_storage::control::ControlPut>,
+    ) -> Result<(), Problem> {
+        let detail = serde_json::json!({
+            "adapter": "mcp",
+            "correlationId": audit.correlation_id.clone(),
+            "scope": audit.scope.clone(),
+            "outcome": format!("{:?}", audit.outcome),
+            "metadata": audit.metadata.clone(),
+        });
+        let audit_allowed = audit.outcome != AuditOutcome::Denied;
+        if additional_puts.is_empty() {
+            return self.complete_idempotency_with_audit(principal, command, result, audit);
+        }
+        if audit.outcome != AuditOutcome::Succeeded {
+            return Err(Problem::new(
+                "atomic_mutation_invalid",
+                "Additional records require a successful mutation command",
+                500,
+                "mcp",
+            ));
+        }
+        if let Err(error) = self.append_audit_event(audit) {
+            self.state.reload_control_aggregate()?;
+            return Err(error);
+        }
+        self.persist_idempotency_result(
+            principal,
+            command,
+            result,
+            audit_allowed,
+            detail,
+            additional_puts,
+        )
     }
 
     fn abandon_idempotency(&mut self) -> Result<(), Problem> {
@@ -2114,6 +2466,7 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
 pub struct ProductionMcpExecutor {
     state: crate::http::ApiState,
     transaction_guarded: Cell<bool>,
+    additional_control_puts: Vec<buglogin_storage::control::ControlPut>,
 }
 
 impl ProductionMcpExecutor {
@@ -2121,6 +2474,7 @@ impl ProductionMcpExecutor {
         Self {
             state,
             transaction_guarded: Cell::new(false),
+            additional_control_puts: Vec::new(),
         }
     }
 }
@@ -2270,6 +2624,10 @@ impl McpExecutor for ProductionMcpExecutor {
                         query.limit.unwrap_or(50),
                     )?;
                 Ok(serde_json::to_value(page).map_err(serialization_problem)?)
+            }
+            "diagnostics.errors.list" => {
+                require_platform_admin(&principal)?;
+                list_auto_desktop_diagnostics(state, &input)
             }
             "proxy.parse" => {
                 let text = input
@@ -2493,6 +2851,11 @@ impl McpExecutor for ProductionMcpExecutor {
                     .get("email")
                     .and_then(Value::as_str)
                     .ok_or_else(|| problem("invalid_input", "email is required", 400))?;
+                let initial_password = input
+                    .get("initialPassword")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "initialPassword is required", 400))?;
+                let initial_password = zeroize::Zeroizing::new(initial_password.to_owned());
                 let role: buglogin_domain::member::MemberRole =
                     serde_json::from_value(input.get("role").cloned().unwrap_or(Value::Null))
                         .map_err(serialization_problem)?;
@@ -2529,29 +2892,26 @@ impl McpExecutor for ProductionMcpExecutor {
                         Some(organization)
                     }
                 };
-                let actor_id = principal.account_id.as_ref().ok_or_else(|| {
-                    Problem::new("account_missing", "Account is missing", 401, "identity")
-                })?;
                 let created_at = crate::clock::rfc3339(&request.correlation_id)?;
-                let provisioning_key =
-                    crate::services::account_provisioning::scoped_account_idempotency_key(
-                        &workspace_id,
-                        &account_id,
-                    );
-                let pending =
+                let (pending, mut account_puts) =
                     crate::services::account_provisioning::AccountProvisioningService::new(
                         state.control_persistence.clone(),
                     )
-                    .create_pending_scoped(
+                    .prepare_admin_provisioned_scoped(
                         account_id.clone(),
                         username,
                         email,
-                        actor_id,
-                        &provisioning_key,
                         &created_at,
-                        &workspace_id,
-                        &role,
                     )?;
+                let credential_put = crate::services::credentials::CredentialService::new(
+                    state.control_persistence.clone(),
+                )?
+                .prepare_initial_password_put(
+                    &pending.account.id,
+                    initial_password.as_str(),
+                    unix_time_seconds(&request.correlation_id)?,
+                )?;
+                account_puts.push(credential_put);
                 let member = buglogin_domain::member::Member {
                     id: crate::services::account_provisioning::scoped_member_id(
                         &workspace_id,
@@ -2578,14 +2938,17 @@ impl McpExecutor for ProductionMcpExecutor {
                 } else {
                     members.provision_active(&principal, &grants, member)?
                 };
-                Ok(serde_json::json!({
+                let response = serde_json::json!({
                     "account": pending.account,
                     "identity": pending.identity,
                     "member": member,
                     "replayed": pending.replayed,
-                    "onboardingStatus": "pending_verification",
-                    "loginEnabled": false
-                }))
+                    "onboardingStatus": "admin_provisioned",
+                    "loginEnabled": true
+                });
+                reject_mcp_output_secrets(request.command, &response)?;
+                self.additional_control_puts.extend(account_puts);
+                Ok(response)
             }
             "account.status.update" => {
                 let account_id = required_id(&input, "accountId", AccountId::from_str)?;
@@ -4525,6 +4888,10 @@ impl McpExecutor for ProductionMcpExecutor {
             .unwrap_or(100);
         crate::http::read_workspace_events(&self.state, auth, workspace_id, after, limit).await
     }
+
+    fn take_additional_control_puts(&mut self) -> Vec<buglogin_storage::control::ControlPut> {
+        std::mem::take(&mut self.additional_control_puts)
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -4685,10 +5052,11 @@ mod scope_tests {
     use crate::commands::CommandRegistry;
     use buglogin_domain::{
         audit::{AuditOutcome, AuditResource},
-        ids::{AccountId, ResourceId},
+        ids::{AccountId, MemberId, ResourceId},
         permissions::{Effect, Grant, Role},
         profile::{ProfileArchiveState, ProfileResource},
     };
+    use std::collections::BTreeSet;
 
     #[test]
     fn mcp_boundary_applies_request_correlation_to_service_problems() {
@@ -4700,6 +5068,240 @@ mod scope_tests {
         assert_eq!(error.correlation_id, "mcp-request-0001");
         assert_eq!(error.instance.as_deref(), Some("service-instance"));
         assert_eq!(error.code, "proxy_in_use");
+    }
+
+    #[test]
+    fn only_redacted_desktop_diagnostic_records_are_projected() {
+        let id = format!("fbk_{}", "a".repeat(32));
+        let diagnostic = serde_json::json!({
+            "schema": AUTO_DIAGNOSTIC_SCHEMA,
+            "appVersion": "3.0.7",
+            "os": "windows",
+            "architecture": "x86_64",
+            "operation": "profile.stop",
+            "errorCode": format!("error-{}", "b".repeat(64)),
+            "status": 409,
+            "unexpectedSecret": "must be dropped",
+        });
+        let record = serde_json::json!({
+            "id": id,
+            "accountId": "acct_diagnostic_reader",
+            "kind": "bug",
+            "message": "message must be dropped",
+            "replyTo": "person@example.test",
+            "includeLogs": true,
+            "logs": diagnostic.to_string(),
+            "submittedAtMs": 1234,
+        });
+
+        let projected = project_auto_desktop_diagnostic("acct_diagnostic_reader", &id, &record)
+            .expect("valid operational diagnostics should be readable");
+        let encoded = projected.to_string();
+        assert_eq!(projected["diagnostic"].as_object().unwrap().len(), 7);
+        assert!(!encoded.contains("message must be dropped"));
+        assert!(!encoded.contains("person@example.test"));
+        assert!(!encoded.contains("must be dropped"));
+
+        let manual_feedback = serde_json::json!({
+            "id": id,
+            "accountId": "acct_diagnostic_reader",
+            "kind": "bug",
+            "includeLogs": true,
+            "logs": "{\"schema\":\"user-provided-log\"}",
+            "submittedAtMs": 1234,
+        });
+        assert!(
+            project_auto_desktop_diagnostic("acct_diagnostic_reader", &id, &manual_feedback,)
+                .is_none()
+        );
+
+        let mut classified = diagnostic.clone();
+        classified["errorCode"] = serde_json::json!("resource_not_found");
+        let classified_record = serde_json::json!({
+            "id": id,
+            "accountId": "acct_diagnostic_reader",
+            "kind": "bug",
+            "includeLogs": true,
+            "logs": classified.to_string(),
+            "submittedAtMs": 1234,
+        });
+        let projected =
+            project_auto_desktop_diagnostic("acct_diagnostic_reader", &id, &classified_record)
+                .expect("safe machine error codes should be readable");
+        assert_eq!(projected["diagnostic"]["errorCode"], "resource_not_found");
+
+        classified["errorCode"] = serde_json::json!("C:\\Users\\person\\secret.txt");
+        let unsafe_record = serde_json::json!({
+            "id": id,
+            "accountId": "acct_diagnostic_reader",
+            "kind": "bug",
+            "includeLogs": true,
+            "logs": classified.to_string(),
+            "submittedAtMs": 1234,
+        });
+        assert!(
+            project_auto_desktop_diagnostic("acct_diagnostic_reader", &id, &unsafe_record)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn diagnostic_error_pages_are_bounded_and_cursor_stable() {
+        let record = |id: &str, submitted_at_ms| {
+            serde_json::json!({
+                "id": id,
+                "accountId": "acct_diagnostic_reader",
+                "submittedAtMs": submitted_at_ms,
+                "diagnostic": {},
+            })
+        };
+        let records = vec![
+            record(&format!("fbk_{}", "2".repeat(32)), 200),
+            record(&format!("fbk_{}", "1".repeat(32)), 100),
+        ];
+        let first = page_auto_desktop_diagnostics(records.clone(), None, 1).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        assert_eq!(first["items"][0]["submittedAtMs"], 100);
+        let cursor = first["nextCursor"].as_str().unwrap();
+        let second = page_auto_desktop_diagnostics(records, Some(cursor), 1).unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+        assert_eq!(second["items"][0]["submittedAtMs"], 200);
+        assert!(second["nextCursor"].is_null());
+        assert!(page_auto_desktop_diagnostics(Vec::new(), None, 101).is_err());
+    }
+
+    #[test]
+    fn diagnostic_error_read_requires_platform_admin_role() {
+        let member = Principal::default();
+        assert_eq!(require_platform_admin(&member).unwrap_err().status, 403);
+        let admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        assert!(require_platform_admin(&admin).is_ok());
+    }
+
+    #[test]
+    fn diagnostics_mcp_authorization_requires_platform_admin_even_with_global_scope() {
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let command = CommandRegistry::get("diagnostics.errors.list").unwrap();
+        let scope = ResourceScope::global();
+        let mut policy = ProductionMcpPolicy::new(state);
+        assert_eq!(
+            policy
+                .authorize(&Principal::default(), command, &scope)
+                .unwrap_err()
+                .status,
+            403
+        );
+        let admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        assert!(policy.authorize(&admin, command, &scope).is_ok());
+    }
+
+    #[test]
+    fn diagnostics_query_reads_only_auto_reports_from_feedback_storage() {
+        use buglogin_storage::control::{ControlAuditEntry, ControlPut, ExecuteControlCommand};
+
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(crate::http::FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "diagnostics-reader".into(),
+                email: "diagnostics-reader@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("valid diagnostics owner password".into()),
+                organization_name: "Diagnostics Org".into(),
+                workspace_name: "Diagnostics Workspace".into(),
+                max_workspaces: 5,
+                max_profiles: 100,
+                max_members: 10,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let report_id = format!("fbk_{}", "a".repeat(32));
+        let auto_logs = serde_json::json!({
+            "schema": AUTO_DIAGNOSTIC_SCHEMA,
+            "appVersion": "3.0.7",
+            "os": "windows",
+            "architecture": "x86_64",
+            "operation": "profile.stop",
+            "errorCode": format!("error-{}", "b".repeat(64)),
+            "status": 409,
+        })
+        .to_string();
+        for (index, (id, logs)) in [
+            (report_id.as_str(), auto_logs.as_str()),
+            (
+                "fbk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "{\"schema\":\"manual\"}",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tenant_id = owner.account_id.as_str().to_owned();
+            state
+                .control_persistence
+                .execute(ExecuteControlCommand {
+                    tenant_id: tenant_id.clone(),
+                    command_id: "feedback.submit".into(),
+                    idempotency_key: format!("diagnostic-seed-{index:08}"),
+                    expected_revisions: BTreeMap::new(),
+                    puts: vec![ControlPut {
+                        tenant_id: tenant_id.clone(),
+                        record_type: "support_feedback".into(),
+                        record_id: id.into(),
+                        expected_revision: Some(0),
+                        value: serde_json::json!({
+                            "id": id,
+                            "accountId": tenant_id,
+                            "kind": "bug",
+                            "message": "freeform content is never returned",
+                            "replyTo": "person@example.test",
+                            "includeLogs": true,
+                            "logs": logs,
+                            "submittedAtMs": 1234 + index as u64,
+                        }),
+                    }],
+                    deletes: Vec::new(),
+                    audit: ControlAuditEntry {
+                        tenant_id: tenant_id.clone(),
+                        command_id: "feedback.submit".into(),
+                        actor_id: tenant_id,
+                        allowed: true,
+                        detail: serde_json::json!({ "feedbackId": id }),
+                    },
+                    response: buglogin_storage::control::HttpResponse {
+                        status: 201,
+                        headers: BTreeMap::new(),
+                        body: serde_json::json!({ "id": id }),
+                    },
+                })
+                .unwrap();
+        }
+
+        let result =
+            list_auto_desktop_diagnostics(&state, &serde_json::json!({ "limit": 10 })).unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["id"], report_id);
+        assert_eq!(
+            result["items"][0]["diagnostic"]["operation"],
+            "profile.stop"
+        );
+        let encoded = result.to_string();
+        assert!(!encoded.contains("freeform content"));
+        assert!(!encoded.contains("person@example.test"));
     }
 
     #[test]
@@ -5241,6 +5843,7 @@ struct OrganizationInput {
 #[cfg(test)]
 mod input_fixture_tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn every_mcp_input_schema_has_a_valid_fixture_and_rejects_null() {
@@ -5286,6 +5889,12 @@ mod input_fixture_tests {
     #[test]
     fn profile_launch_mcp_schema_requires_profile_scope_without_host_paths() {
         let command = CommandRegistry::get("profile.launch").expect("profile launch command");
+        let advertised = tool_metadata(command).input_schema;
+        assert_eq!(
+            advertised["$ref"],
+            format!("#/$defs/{}", command.input_schema.as_str())
+        );
+        assert!(advertised["$defs"][command.input_schema.as_str()].is_object());
         let input = serde_json::json!({
             "profileId": "prf_mcp_launch",
             "targetDeviceId": "dev_0123456789abcdef0123456789abcdef",
@@ -5301,12 +5910,329 @@ mod input_fixture_tests {
             )
             .is_err()
         );
+        assert!(
+            validate_mcp_input(
+                command,
+                &serde_json::json!({"profileId": "prf_mcp_launch", "profilesRoot": "C:/private"})
+            )
+            .is_err(),
+            "host filesystem paths must remain unavailable to hosted MCP callers"
+        );
 
         let stop = CommandRegistry::get("profile.stop").expect("profile stop command");
+        assert!(tool_metadata(stop).input_schema["$ref"].is_string());
         validate_mcp_input(
             stop,
             &serde_json::json!({"profileId": "prf_mcp_launch", "targetDeviceId": "dev_0123456789abcdef0123456789abcdef"}),
         )
         .expect("stop can target the same owned desktop device");
+    }
+
+    fn scoped_account_test_state() -> (
+        crate::http::ApiState,
+        crate::http::FirstOwnerBootstrapResult,
+        Principal,
+    ) {
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(crate::http::FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "mcp-atomic-owner".into(),
+                email: "mcp-atomic-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("valid mcp atomic owner password".into()),
+                organization_name: "MCP Atomic Org".into(),
+                workspace_name: "MCP Atomic Workspace".into(),
+                max_workspaces: 5,
+                max_profiles: 100,
+                max_members: 10,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let principal = Principal {
+            account_id: Some(owner.account_id.clone()),
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        (state, owner, principal)
+    }
+
+    fn scoped_account_input(owner: &crate::http::FirstOwnerBootstrapResult) -> Value {
+        serde_json::json!({
+            "workspaceId": owner.workspace_id,
+            "accountId": "acct_mcp_atomic_target",
+            "username": "mcp-atomic-target",
+            "email": "mcp-atomic-target@example.test",
+            "role": "member",
+            "initialPassword": "mcp-atomic-password-123"
+        })
+    }
+
+    fn scoped_account_request<'a>(
+        command: &'a CommandMetadata,
+        owner: &crate::http::FirstOwnerBootstrapResult,
+        principal: Principal,
+        input: Value,
+    ) -> ExecutionRequest<'a> {
+        ExecutionRequest {
+            command,
+            correlation_id: "mcp-account-atomicity-test".into(),
+            principal,
+            scope: ResourceScope::workspace(owner.workspace_id.clone()),
+            input,
+            idempotency_key: Some("mcp-account-atomicity-key".into()),
+            coordination_auth: None,
+            bearer_token: None,
+        }
+    }
+
+    #[test]
+    fn mcp_scoped_account_and_membership_commit_atomically() {
+        let (state, owner, principal) = scoped_account_test_state();
+        let account_id = AccountId::from_str("acct_mcp_atomic_target").unwrap();
+        let command = CommandRegistry::get("account.create.scoped").unwrap();
+        let input = scoped_account_input(&owner);
+        let replay_input = input.clone();
+        let mut changed_password_input = replay_input.clone();
+        changed_password_input["initialPassword"] =
+            Value::String("mcp-changed-password-456".into());
+        let idempotency_projection = idempotency_hash_input(command.id.as_str(), &replay_input);
+        assert_eq!(
+            idempotency_projection,
+            idempotency_hash_input(command.id.as_str(), &changed_password_input)
+        );
+        assert!(
+            !idempotency_projection
+                .to_string()
+                .contains("mcp-atomic-password-123")
+        );
+        let scope = ResourceScope::workspace(owner.workspace_id.clone());
+        let mut policy = ProductionMcpPolicy::new(state.clone());
+        assert!(matches!(
+            policy
+                .claim_idempotency(
+                    &principal,
+                    command,
+                    &scope,
+                    "mcp-account-atomicity-key",
+                    &input,
+                )
+                .unwrap(),
+            IdempotencyClaim::Execute
+        ));
+
+        let mut executor = ProductionMcpExecutor::new(state.clone());
+        let response = executor
+            .execute(scoped_account_request(
+                command,
+                &owner,
+                principal.clone(),
+                input,
+            ))
+            .expect("MCP scoped account creation should succeed");
+        assert_eq!(response["identity"]["verification"], "admin_provisioned");
+        assert_eq!(response["onboardingStatus"], "admin_provisioned");
+        assert_eq!(response["loginEnabled"], true);
+        assert!(!response.to_string().contains("mcp-atomic-password-123"));
+        assert!(
+            state
+                .control_persistence
+                .load::<buglogin_domain::account::Account>(
+                    "control",
+                    "account",
+                    account_id.as_str()
+                )
+                .unwrap()
+                .is_none(),
+            "prepared account records must remain uncommitted before membership and idempotency completion"
+        );
+        let additional_puts = executor.take_additional_control_puts();
+        assert!(!additional_puts.is_empty());
+        assert!(
+            !serde_json::to_string(&additional_puts)
+                .unwrap()
+                .contains("mcp-atomic-password-123")
+        );
+
+        policy
+            .complete_idempotency_with_audit_and_puts(
+                &principal,
+                command,
+                &Ok(response),
+                AuditRecord {
+                    actor_id: Some(owner.account_id.as_str().into()),
+                    command_id: command.id.as_str(),
+                    correlation_id: "mcp-account-atomicity-test".into(),
+                    scope: scope.clone(),
+                    outcome: AuditOutcome::Succeeded,
+                    metadata: BTreeMap::new(),
+                },
+                additional_puts,
+            )
+            .expect("account and membership should commit with idempotency result");
+
+        assert!(matches!(
+            policy
+                .claim_idempotency(
+                    &principal,
+                    command,
+                    &scope,
+                    "mcp-account-atomicity-key",
+                    &replay_input,
+                )
+                .unwrap(),
+            IdempotencyClaim::Replay(_)
+        ));
+        assert_eq!(
+            policy
+                .claim_idempotency(
+                    &principal,
+                    command,
+                    &scope,
+                    "mcp-account-atomicity-key",
+                    &changed_password_input,
+                )
+                .unwrap_err()
+                .code,
+            "idempotency_conflict"
+        );
+        let password_record = state
+            .control_persistence
+            .load::<Value>("identity", "account_password", account_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(password_record["failedAttempts"], 0);
+
+        assert!(
+            state
+                .control_persistence
+                .load::<buglogin_domain::account::Account>(
+                    "control",
+                    "account",
+                    account_id.as_str()
+                )
+                .unwrap()
+                .is_some()
+        );
+        let credential = state
+            .control_persistence
+            .load::<Value>("identity", "account_password", account_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(
+            credential["passwordPhc"]
+                .as_str()
+                .unwrap()
+                .starts_with("$argon2id$")
+        );
+        assert!(!credential.to_string().contains("mcp-atomic-password-123"));
+        assert_eq!(
+            crate::services::credentials::CredentialService::new(state.control_persistence.clone())
+                .unwrap()
+                .authenticate("mcp-atomic-target", "mcp-atomic-password-123", 1)
+                .unwrap(),
+            account_id
+        );
+        let members = state.members.read().unwrap().active_members();
+        assert!(members.iter().any(|member| {
+            member.account_id == account_id && member.workspace_id == owner.workspace_id
+        }));
+    }
+
+    #[test]
+    fn mcp_scoped_account_membership_failure_leaves_no_account_puts() {
+        use buglogin_storage::control::{ControlAuditEntry, ControlPut, ExecuteControlCommand};
+
+        let (state, owner, principal) = scoped_account_test_state();
+        let account_id = AccountId::from_str("acct_mcp_atomic_target").unwrap();
+        let mut seeded_members = crate::services::members::MemberService::default();
+        seeded_members
+            .provision_active(
+                &principal,
+                &[],
+                buglogin_domain::member::Member {
+                    id: MemberId::from_str("mem_mcp_atomic_existing").unwrap(),
+                    account_id: account_id.clone(),
+                    workspace_id: owner.workspace_id.clone(),
+                    team_id: None,
+                    role: buglogin_domain::member::MemberRole::Admin,
+                    status: buglogin_domain::member::MemberStatus::Active,
+                    invite_expires_at: None,
+                },
+            )
+            .unwrap();
+        let (mut aggregate, revision) = state
+            .control_persistence
+            .load_versioned::<Value>("control", "control_state", "primary")
+            .unwrap()
+            .unwrap();
+        aggregate["members"] = serde_json::to_value(seeded_members).unwrap();
+        state
+            .control_persistence
+            .execute(ExecuteControlCommand {
+                tenant_id: "control".into(),
+                command_id: "test.seed.membership-conflict".into(),
+                idempotency_key: "test-mcp-membership-conflict".into(),
+                expected_revisions: BTreeMap::new(),
+                puts: vec![ControlPut {
+                    tenant_id: "control".into(),
+                    record_type: "control_state".into(),
+                    record_id: "primary".into(),
+                    expected_revision: Some(revision),
+                    value: aggregate,
+                }],
+                deletes: Vec::new(),
+                audit: ControlAuditEntry {
+                    tenant_id: "control".into(),
+                    command_id: "test.seed.membership-conflict".into(),
+                    actor_id: owner.account_id.as_str().into(),
+                    allowed: true,
+                    detail: serde_json::json!({}),
+                },
+                response: buglogin_storage::control::HttpResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    body: serde_json::json!({}),
+                },
+            })
+            .unwrap();
+        state.reload_control_aggregate().unwrap();
+        let member_count_before = state.members.read().unwrap().active_members().len();
+
+        let command = CommandRegistry::get("account.create.scoped").unwrap();
+        let input = scoped_account_input(&owner);
+        let mut executor = ProductionMcpExecutor::new(state.clone());
+        let error = executor
+            .execute(scoped_account_request(command, &owner, principal, input))
+            .expect_err("conflicting active membership must abort scoped account creation");
+        assert_eq!(error.status, 409);
+        assert!(executor.take_additional_control_puts().is_empty());
+        assert!(
+            state
+                .control_persistence
+                .load::<buglogin_domain::account::Account>(
+                    "control",
+                    "account",
+                    account_id.as_str()
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .control_persistence
+                .load::<Value>("identity", "account_password", account_id.as_str())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state.members.read().unwrap().active_members().len(),
+            member_count_before,
+            "the existing membership must remain unchanged when creation fails"
+        );
     }
 }

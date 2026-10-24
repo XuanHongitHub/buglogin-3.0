@@ -1,9 +1,7 @@
 //! Safe account onboarding for administrator-driven provisioning.
 //!
-//! This creates an active account record with a `Pending` identity only. It deliberately
-//! accepts no password, issues no session/token, and does not claim the account can log in.
-//! Credential authentication rejects pending identities until a supported verification flow
-//! marks the identity verified.
+//! This supports both pending invite/onboarding identities and direct administrative
+//! provisioning. Direct provisioning remains distinct from email verification.
 
 use buglogin_domain::{
     account::{Account, AccountIdentity, AccountStatus, IdentityVerification},
@@ -11,7 +9,9 @@ use buglogin_domain::{
     ids::{AccountId, MemberId, WorkspaceId},
     member::MemberRole,
 };
-use buglogin_storage::control::{ControlAuditEntry, ExecuteControlCommand, HttpResponse};
+use buglogin_storage::control::{
+    ControlAuditEntry, ControlPut, ExecuteControlCommand, HttpResponse,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -101,6 +101,86 @@ impl AccountProvisioningService {
             created_at,
             Some((workspace_id, requested_role)),
         )
+    }
+
+    /// Prepare the account and identity records for a caller-owned atomic command.
+    ///
+    /// Scoped account creation also changes the workspace aggregate. The HTTP handler must
+    /// persist these puts in the same control-store command as that aggregate update; this
+    /// method intentionally performs validation and constructs records without committing.
+    pub fn prepare_pending_scoped(
+        &self,
+        account_id: AccountId,
+        username: &str,
+        email: &str,
+        created_at: &str,
+    ) -> Result<(PendingAccountProvisioning, Vec<ControlPut>), Problem> {
+        let identity = AccountIdentity::new(account_id.clone(), username, email, created_at)?;
+        let account = Account::new(account_id.clone(), created_at);
+        if self
+            .store
+            .load::<Account>(CONTROL_TENANT, "account", account_id.as_str())?
+            .is_some()
+        {
+            return Err(account_exists());
+        }
+
+        let mut puts = self.identities.prepare_create_puts(&identity)?;
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: "account".into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(0),
+            value: serde_json::to_value(&account).map_err(|_| corrupt())?,
+        });
+
+        Ok((
+            PendingAccountProvisioning {
+                account,
+                identity,
+                replayed: false,
+            },
+            puts,
+        ))
+    }
+
+    /// Prepare a direct administrator-provisioned identity and account records for an
+    /// atomic workspace-member + credential commit owned by the REST or MCP caller.
+    pub fn prepare_admin_provisioned_scoped(
+        &self,
+        account_id: AccountId,
+        username: &str,
+        email: &str,
+        created_at: &str,
+    ) -> Result<(PendingAccountProvisioning, Vec<ControlPut>), Problem> {
+        let identity =
+            AccountIdentity::admin_provisioned(account_id.clone(), username, email, created_at)?;
+        let account = Account::new(account_id.clone(), created_at);
+        if self
+            .store
+            .load::<Account>(CONTROL_TENANT, "account", account_id.as_str())?
+            .is_some()
+        {
+            return Err(account_exists());
+        }
+
+        let mut puts = self.identities.prepare_create_puts(&identity)?;
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: "account".into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(0),
+            value: serde_json::to_value(&account).map_err(|_| corrupt())?,
+        });
+
+        Ok((
+            PendingAccountProvisioning {
+                account,
+                identity,
+                replayed: false,
+            },
+            puts,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

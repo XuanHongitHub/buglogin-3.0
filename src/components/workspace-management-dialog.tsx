@@ -23,6 +23,7 @@ import {
 import { CreateInviteModal } from "@/components/create-invite-modal";
 import { LoadingButton } from "@/components/loading-button";
 import { MemberManagementDialog } from "@/components/member-management-dialog";
+import { ScopedAccountCreationPage } from "@/components/scoped-account-creation-page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -43,6 +44,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { WorkspaceDetailPage } from "@/components/workspace-detail-page";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
@@ -90,6 +92,15 @@ export function WorkspaceManagementDialog({
   const [editingWs, setEditingWs] = useState<Workspace | null>(null);
   const [inviteWs, setInviteWs] = useState<Workspace | null>(null);
   const [membersWs, setMembersWs] = useState<Workspace | null>(null);
+  const [accountWorkspace, setAccountWorkspace] = useState<Workspace | null>(
+    null,
+  );
+  const [detailWorkspace, setDetailWorkspace] = useState<Workspace | null>(
+    null,
+  );
+  const [detailInitialTab, setDetailInitialTab] = useState<
+    "overview" | "members" | "groups" | "profiles"
+  >("overview");
   const workspaceRequestRef = useRef(0);
 
   // Form states for Create Workspace
@@ -183,9 +194,11 @@ export function WorkspaceManagementDialog({
         }),
       );
       onWorkspaceSwitched(workspaceId);
+      return true;
     } catch (err) {
       console.error("Failed to switch workspace:", err);
       showErrorToast(String(err));
+      return false;
     } finally {
       setSwitchingId(null);
     }
@@ -493,49 +506,55 @@ export function WorkspaceManagementDialog({
       >
         {/* Top Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 border-b border-border/50 bg-muted/20">
-          <div className="flex items-center gap-2">
-            <span className="text-muted-foreground font-medium text-xs">
-              Tổ chức:
-            </span>
-            {organizations.length > 0 ? (
-              <Select
-                value={selectedOrgId}
-                onValueChange={(organizationId) => {
-                  workspaceRequestRef.current += 1;
-                  setWorkspaces([]);
-                  setWorkspaceLoadError(null);
-                  setSelectedOrgId(organizationId);
-                  setPage(0);
-                }}
-              >
-                <SelectTrigger className="h-8 w-52 text-xs">
-                  <SelectValue placeholder="Chọn tổ chức..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {organizations.map((org) => (
-                    <SelectItem key={org.id} value={org.id} className="text-xs">
-                      {org.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <Badge variant="outline" className="text-xs py-1">
-                Cá nhân & Nhóm mặc định
-              </Badge>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setCreateOrgOpen(true)}
-              className="h-8 text-xs gap-1 cursor-pointer"
-            >
-              <LuPlus className="size-3" />
-              <span>
-                {t("workspaces.addOrg", { defaultValue: "Thêm Org" })}
+          {!isPageMode && (
+            <div className="flex items-center gap-2">
+              <span className="text-muted-foreground font-medium text-xs">
+                Tổ chức:
               </span>
-            </Button>
-          </div>
+              {organizations.length > 0 ? (
+                <Select
+                  value={selectedOrgId}
+                  onValueChange={(organizationId) => {
+                    workspaceRequestRef.current += 1;
+                    setWorkspaces([]);
+                    setWorkspaceLoadError(null);
+                    setSelectedOrgId(organizationId);
+                    setPage(0);
+                  }}
+                >
+                  <SelectTrigger className="h-8 w-52 text-xs">
+                    <SelectValue placeholder="Chọn tổ chức..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {organizations.map((org) => (
+                      <SelectItem
+                        key={org.id}
+                        value={org.id}
+                        className="text-xs"
+                      >
+                        {org.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Badge variant="outline" className="text-xs py-1">
+                  Cá nhân & Nhóm mặc định
+                </Badge>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCreateOrgOpen(true)}
+                className="h-8 text-xs gap-1 cursor-pointer"
+              >
+                <LuPlus className="size-3" />
+                <span>
+                  {t("workspaces.addOrg", { defaultValue: "Thêm Org" })}
+                </span>
+              </Button>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-2">
             {/* Filter Pills */}
@@ -656,7 +675,7 @@ export function WorkspaceManagementDialog({
                 <th className="py-2.5 px-3 w-24">Thành viên</th>
                 <th className="py-2.5 px-3 w-24">Ngoại tuyến</th>
                 <th className="py-2.5 px-3 w-24 text-center">Trạng thái</th>
-                <th className="py-2.5 px-3 w-28 text-center">Thao tác</th>
+                <th className="py-2.5 px-3 w-64 text-center">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
@@ -763,7 +782,45 @@ export function WorkspaceManagementDialog({
                         )}
                       </td>
                       <td className="py-2.5 px-3 text-center">
-                        <div className="flex items-center justify-center gap-1">
+                        <div className="flex flex-wrap items-center justify-center gap-1">
+                          {isPageMode && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setDetailInitialTab("overview");
+                                setDetailWorkspace(ws);
+                              }}
+                              className="h-7 px-2 text-xs"
+                              title="Mở chi tiết workspace"
+                            >
+                              Mở workspace
+                            </Button>
+                          )}
+                          {isPageMode && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setDetailInitialTab("groups");
+                                setDetailWorkspace(ws);
+                              }}
+                              className="h-7 px-2 text-xs"
+                              title="Mở nhóm trong workspace này"
+                            >
+                              Mở groups
+                            </Button>
+                          )}
+                          {isPageMode && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setAccountWorkspace(ws)}
+                              className="h-7 px-2 text-xs"
+                            >
+                              Tạo account
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="sm"
@@ -776,11 +833,19 @@ export function WorkspaceManagementDialog({
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => setMembersWs(ws)}
-                            className="h-7 w-7 p-0 cursor-pointer"
+                            onClick={() => {
+                              if (isPageMode) {
+                                setDetailInitialTab("members");
+                                setDetailWorkspace(ws);
+                              } else {
+                                setMembersWs(ws);
+                              }
+                            }}
+                            className="h-7 gap-1 px-2 text-xs cursor-pointer"
                             title="Quản lý thành viên & phân quyền"
                           >
-                            <LuUsers className="size-3 text-muted-foreground hover:text-foreground" />
+                            <LuUsers className="size-3" />
+                            <span>Thành viên</span>
                           </Button>
                           <Button
                             variant="outline"
@@ -1157,6 +1222,53 @@ export function WorkspaceManagementDialog({
     </>
   );
 
+  if (mode === "page" && detailWorkspace) {
+    return (
+      <WorkspaceDetailPage
+        organizationId={detailWorkspace.organizationId}
+        organizationName={
+          organizations.find((org) => org.id === detailWorkspace.organizationId)
+            ?.name ?? "Organization"
+        }
+        workspaceId={detailWorkspace.id}
+        workspaceName={detailWorkspace.name}
+        initialTab={detailInitialTab}
+        onBack={() => setDetailWorkspace(null)}
+      />
+    );
+  }
+
+  if (mode === "page" && membersWs) {
+    return (
+      <MemberManagementDialog
+        mode="page"
+        isOpen={true}
+        onClose={() => setMembersWs(null)}
+        workspaceId={membersWs.id}
+        workspaceName={membersWs.name}
+        organizationName={
+          organizations.find((org) => org.id === membersWs.organizationId)?.name
+        }
+      />
+    );
+  }
+
+  if (mode === "page" && accountWorkspace) {
+    return (
+      <ScopedAccountCreationPage
+        workspaceId={accountWorkspace.id}
+        workspaceName={accountWorkspace.name}
+        organizationName={
+          organizations.find(
+            (org) => org.id === accountWorkspace.organizationId,
+          )?.name
+        }
+        onBack={() => setAccountWorkspace(null)}
+        onCreated={() => void loadWorkspaces()}
+      />
+    );
+  }
+
   if (mode === "page") {
     return (
       <div className="flex flex-1 flex-col overflow-hidden bg-background">
@@ -1202,8 +1314,56 @@ export function WorkspaceManagementDialog({
         </div>
 
         {/* Scrollable Page Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-5">
-          {renderTableContent(true)}
+        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden sm:grid-cols-[minmax(190px,240px)_minmax(0,1fr)]">
+          <aside className="flex max-h-48 min-h-0 flex-col border-b border-border/60 bg-muted/10 p-3 sm:max-h-none sm:border-b-0 sm:border-r">
+            <div className="flex items-center justify-between gap-2 px-2 pb-2">
+              <h2 className="text-xs font-semibold">Organizations</h2>
+              <Badge variant="outline" className="text-[10px]">
+                {organizations.length}
+              </Badge>
+            </div>
+            <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+              {organizations.map((organization) => (
+                <Button
+                  key={organization.id}
+                  type="button"
+                  variant={
+                    selectedOrgId === organization.id ? "secondary" : "ghost"
+                  }
+                  className="h-auto min-h-9 w-full justify-start whitespace-normal px-2.5 py-2 text-left text-xs"
+                  aria-pressed={selectedOrgId === organization.id}
+                  onClick={() => {
+                    workspaceRequestRef.current += 1;
+                    setWorkspaces([]);
+                    setWorkspaceLoadError(null);
+                    setSelectedOrgId(organization.id);
+                    setPage(0);
+                  }}
+                >
+                  <LuBuilding2 className="mr-2 size-3.5 shrink-0" />
+                  <span className="truncate">{organization.name}</span>
+                </Button>
+              ))}
+              {organizations.length === 0 && !isLoading && (
+                <p className="px-2 py-3 text-xs text-muted-foreground">
+                  Chưa có organization.
+                </p>
+              )}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setCreateOrgOpen(true)}
+              className="mt-3 w-full gap-1.5 text-xs"
+            >
+              <LuPlus className="size-3.5" />
+              Tạo organization
+            </Button>
+          </aside>
+          <div className="min-h-0 overflow-y-auto px-4 py-4 md:px-6">
+            {renderTableContent(true)}
+          </div>
         </div>
 
         {renderSubModals()}

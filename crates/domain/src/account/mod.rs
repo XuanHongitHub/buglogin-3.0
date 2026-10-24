@@ -6,6 +6,9 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 pub enum IdentityVerification {
     Pending,
+    /// Provisioned by an authorized administrator with an initial credential. This permits
+    /// credential login but does not assert that control of the email address was verified.
+    AdminProvisioned,
     Verified,
 }
 
@@ -48,6 +51,17 @@ impl AccountIdentity {
         })
     }
 
+    pub fn admin_provisioned(
+        account_id: AccountId,
+        username: impl Into<String>,
+        email: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Result<Self, Problem> {
+        let mut identity = Self::new(account_id, username, email, created_at)?;
+        identity.verification = IdentityVerification::AdminProvisioned;
+        Ok(identity)
+    }
+
     pub fn verify(
         &self,
         expected_revision: u64,
@@ -58,6 +72,17 @@ impl AccountIdentity {
         }
         if self.verification == IdentityVerification::Verified {
             return Ok(self.clone());
+        }
+        if !matches!(
+            self.verification,
+            IdentityVerification::Pending | IdentityVerification::AdminProvisioned
+        ) {
+            return Err(Problem::new(
+                "identity_verification_not_pending",
+                "Only a pending email identity can be verified",
+                409,
+                "identity",
+            ));
         }
         let mut next = self.clone();
         next.verification = IdentityVerification::Verified;

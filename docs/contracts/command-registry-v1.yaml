@@ -35,6 +35,16 @@ commands:
     input: FeedbackSubmission
     output: FeedbackReceipt
     idempotency: required
+  - id: diagnostics.errors.list
+    kind: query
+    capability: CAP-DIAG-001
+    action: read
+    adapters: [mcp]
+    input: DiagnosticErrorsListInput
+    output: DiagnosticErrorPage
+    preconditions: [platform-admin-role, automatic-diagnostic-schema-only, bounded-pagination]
+    audit: metadata-only
+    idempotency: none
   - id: operation.get
     kind: query
     capability: operation.read
@@ -738,7 +748,7 @@ commands:
     action: create
     adapters: [tauri, rest, mcp]
     input: AccountCreatePendingInput
-    output: PendingAccountProvisioningReceipt
+    output: AccountProvisioningReceipt
     idempotency: required
     tauri: account_create
     rest: account.create
@@ -755,7 +765,7 @@ commands:
     action: create
     adapters: [tauri, rest, mcp]
     input: WorkspaceAccountCreateInput
-    output: PendingAccountProvisioningReceipt
+    output: AccountProvisioningReceipt
     idempotency: required
     tauri: account_create_scoped
     rest: account.create.scoped

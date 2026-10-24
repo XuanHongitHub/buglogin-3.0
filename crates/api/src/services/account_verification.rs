@@ -92,7 +92,7 @@ impl AccountVerificationService {
         if identity.account_id != *account_id || identity.revision != identity_revision {
             return Err(corrupt());
         }
-        if identity.verification != IdentityVerification::Pending {
+        if identity.verification == IdentityVerification::Verified {
             return Err(identity_already_verified());
         }
 
@@ -243,7 +243,10 @@ impl AccountVerificationService {
         if identity.account_id != index.account_id || identity.revision != identity_revision {
             return Err(corrupt());
         }
-        if identity.verification != IdentityVerification::Pending {
+        if !matches!(
+            identity.verification,
+            IdentityVerification::Pending | IdentityVerification::AdminProvisioned
+        ) {
             return Err(invalid_token());
         }
 
@@ -254,9 +257,17 @@ impl AccountVerificationService {
             Some(identity_revision),
             &verified,
         )?;
-        let password_put =
-            self.credentials
-                .prepare_initial_password_put(&index.account_id, password, now)?;
+        let password_put = match identity.verification {
+            IdentityVerification::Pending => {
+                self.credentials
+                    .prepare_initial_password_put(&index.account_id, password, now)?
+            }
+            IdentityVerification::AdminProvisioned => {
+                self.credentials
+                    .password_reset_put(&index.account_id, password, now)?
+            }
+            IdentityVerification::Verified => return Err(invalid_token()),
+        };
         let mut expected_revisions = BTreeMap::new();
         expected_revisions.insert(
             record_key("account_identity", index.account_id.as_str()),
@@ -562,6 +573,86 @@ mod tests {
                 .load::<Value>(TENANT, CHALLENGE_RECORD, account_id.as_str())
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn admin_provisioned_identity_can_verify_email_and_replace_initial_password() {
+        let (store, verification, account_id, actor) = fixture();
+        let (mut identity, revision) = store
+            .load_versioned::<AccountIdentity>(TENANT, "account_identity", account_id.as_str())
+            .unwrap()
+            .unwrap();
+        identity.verification = IdentityVerification::AdminProvisioned;
+        identity.revision = identity.revision.checked_add(1).unwrap();
+        store
+            .execute(ExecuteControlCommand {
+                tenant_id: TENANT.into(),
+                command_id: "test.account.admin-provisioned".into(),
+                idempotency_key: "test-account-admin-provisioned".into(),
+                expected_revisions: BTreeMap::new(),
+                puts: vec![
+                    put(
+                        "account_identity",
+                        account_id.as_str(),
+                        Some(revision),
+                        &identity,
+                    )
+                    .unwrap(),
+                ],
+                deletes: vec![],
+                audit: ControlAuditEntry {
+                    tenant_id: TENANT.into(),
+                    command_id: "test.account.admin-provisioned".into(),
+                    actor_id: actor.as_str().into(),
+                    allowed: true,
+                    detail: json!({}),
+                },
+                response: HttpResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: Value::Null,
+                },
+            })
+            .unwrap();
+        let credentials = CredentialService::new(store.clone()).unwrap();
+        credentials
+            .set_initial_password(&account_id, "admin-provided-password-123", 100)
+            .unwrap();
+
+        let challenge = verification.issue(&account_id, &actor, 101).unwrap();
+        verification
+            .complete(
+                &challenge.token,
+                "user-chosen-password-456",
+                102,
+                "2026-10-23T00:01:42Z",
+            )
+            .unwrap();
+        assert_eq!(
+            credentials
+                .authenticate("verify-user@example.com", "user-chosen-password-456", 103)
+                .unwrap(),
+            account_id
+        );
+        assert_eq!(
+            credentials
+                .authenticate(
+                    "verify-user@example.com",
+                    "admin-provided-password-123",
+                    104
+                )
+                .unwrap_err()
+                .code,
+            "invalid_credentials"
+        );
+        assert_eq!(
+            store
+                .load::<AccountIdentity>(TENANT, "account_identity", account_id.as_str())
+                .unwrap()
+                .unwrap()
+                .verification,
+            IdentityVerification::Verified
         );
     }
 

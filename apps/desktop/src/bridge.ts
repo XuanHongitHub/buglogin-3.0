@@ -4,6 +4,7 @@ import {
   type Account,
   type AccountAdminRecord,
   type AccountCreatePendingInput,
+  type AccountProvisioningReceipt,
   type AccountStatusUpdateCommandInput,
   type AccountView,
   type ApiToken,
@@ -43,7 +44,6 @@ import {
   type OrganizationIdInput,
   type OrganizationRecord,
   type OrganizationUpdateInput,
-  type PendingAccountProvisioningReceipt,
   type ProfileDeleteInput,
   type ProfileExtensionGroupSetInput,
   type ProfileGroupsReplaceInput,
@@ -160,11 +160,11 @@ export interface DesktopApi {
   createPendingAccount(
     input: AccountCreatePendingInput,
     idempotencyKey?: string,
-  ): Promise<PendingAccountProvisioningReceipt>;
+  ): Promise<AccountProvisioningReceipt>;
   createScopedPendingAccount(
     input: WorkspaceAccountCreateInput,
     idempotencyKey?: string,
-  ): Promise<PendingAccountProvisioningReceipt>;
+  ): Promise<AccountProvisioningReceipt>;
   updateAccountStatus(input: AccountStatusUpdateCommandInput): Promise<Account>;
   subscribeEvents(
     input: EventFilterInput,
@@ -561,14 +561,14 @@ export function createTauriDesktopApi(
     listAccounts: () =>
       call<Page<AccountAdminRecord>>(invokeNames.accountList, {}),
     createPendingAccount: (input, idempotencyKey) =>
-      call<PendingAccountProvisioningReceipt>(
+      call<AccountProvisioningReceipt>(
         invokeNames.accountCreate,
         input,
         true,
         idempotencyKey,
       ),
     createScopedPendingAccount: (input, idempotencyKey) =>
-      call<PendingAccountProvisioningReceipt>(
+      call<AccountProvisioningReceipt>(
         invokeNames.accountCreateScoped,
         input,
         true,

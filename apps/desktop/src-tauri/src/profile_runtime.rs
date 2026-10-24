@@ -208,8 +208,13 @@ impl ProfileRuntimeHandle {
     }
 
     pub async fn stop(&self, profile_id: ProfileId) -> Result<(), Problem> {
-        let _ = self.stop_for_sync(profile_id.clone()).await?;
-        self.complete_stop(profile_id).await
+        match self.stop_for_sync(profile_id.clone()).await {
+            Ok(_) => self.complete_stop(profile_id).await,
+            Err(error) if error.code == "profile_not_running" => {
+                self.complete_stop(profile_id).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn stop_for_sync(&self, profile_id: ProfileId) -> Result<StopReceipt, Problem> {
@@ -249,6 +254,19 @@ impl ProfileRuntimeHandle {
             .await
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
+    }
+
+    pub async fn finish_sync_result<T>(
+        &self,
+        profile_id: ProfileId,
+        result: Result<T, Problem>,
+    ) -> Result<T, Problem> {
+        if result.is_err() {
+            // Sync failed after the process was stopped. Preserve its files and
+            // recovery markers, but do not retain the local runtime lock.
+            let _ = self.complete_stop(profile_id).await;
+        }
+        result
     }
 
     pub async fn write_authority(
@@ -634,8 +652,13 @@ impl<C: ProcessController> ProfileRuntime<C> {
     }
 
     async fn stop(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
-        let _ = self.stop_for_sync(profile_id).await?;
-        self.complete_stop(profile_id).await
+        match self.stop_for_sync(profile_id).await {
+            Ok(_) => self.complete_stop(profile_id).await,
+            Err(error) if error.code == "profile_not_running" => {
+                self.complete_stop(profile_id).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn stop_for_sync(&mut self, profile_id: &ProfileId) -> Result<StopReceipt, Problem> {
@@ -740,15 +763,19 @@ impl<C: ProcessController> ProfileRuntime<C> {
     }
 
     async fn complete_stop(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
-        let lease = self
-            .running
-            .get(profile_id)
-            .and_then(|running| running.lease.clone());
-        if let Some(lease) = lease.as_ref() {
-            release(self.coordination.clone(), lease).await?;
-        }
-        self.running.remove(profile_id);
+        let running = self.running.remove(profile_id);
         self.unexpectedly_stopped.remove(profile_id);
+        let Some(lease) = running.and_then(|running| running.lease) else {
+            return Ok(());
+        };
+        if let Err(error) = release(self.coordination.clone(), &lease).await
+            && !lease_ownership_lost(&error)
+        {
+            // The browser is already stopped. Keep the local files, but never
+            // retain a local runtime lock just because the API could not
+            // acknowledge release; the remote lease expires on its own.
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1121,6 +1148,7 @@ mod tests {
         renew_error_code: Mutex<Option<&'static str>>,
         lease_expires_at_ms: std::sync::atomic::AtomicU64,
         release_failures: AtomicUsize,
+        release_error_code: Mutex<Option<&'static str>>,
         manifests: Mutex<BTreeMap<ResourceId, SyncManifest>>,
     }
 
@@ -1134,6 +1162,7 @@ mod tests {
                 renew_error_code: Mutex::new(None),
                 lease_expires_at_ms: std::sync::atomic::AtomicU64::new(60_001),
                 release_failures: AtomicUsize::new(0),
+                release_error_code: Mutex::new(None),
                 manifests: Mutex::new(BTreeMap::new()),
             }
         }
@@ -1211,6 +1240,9 @@ mod tests {
                 .is_ok()
             {
                 return Err(unavailable());
+            }
+            if let Some(code) = *self.release_error_code.lock().unwrap() {
+                return Err(Problem::new(code, "Lease release rejected", 409, "test"));
             }
             Ok(())
         }
@@ -1432,6 +1464,10 @@ mod tests {
             .stop(ProfileId::from_str("prf_runtime_1").unwrap())
             .await
             .unwrap();
+        handle
+            .stop(ProfileId::from_str("prf_runtime_1").unwrap())
+            .await
+            .expect("stopping an already stopped profile is idempotent");
         assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
@@ -1465,6 +1501,98 @@ mod tests {
         assert!(stopped.was_launched);
         handle.complete_stop(profile_id.clone()).await.unwrap();
         assert!(handle.running_profiles().await.unwrap().is_empty());
+
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_lease_release_clears_stopped_local_runtime_lock() {
+        let path = profile_path("stale-lease-stop");
+        fs::write(path.join("profile-data"), b"keep local profile data").unwrap();
+        let controller = TestController::default();
+        let backend = Arc::new(TestCoordination::new(Arc::new(Mutex::new(Vec::new()))));
+        *backend.release_error_code.lock().unwrap() = Some("lease_not_owner");
+        let handle = spawn_profile_runtime(controller, Some(managed_coordination(backend)));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        handle.launch(request(&path, true)).await.unwrap();
+        handle.stop_for_sync(profile_id.clone()).await.unwrap();
+
+        handle
+            .complete_stop(profile_id.clone())
+            .await
+            .expect("a lost remote lease must not leave the local profile locked");
+        handle
+            .complete_stop(profile_id.clone())
+            .await
+            .expect("completing cleanup again must be idempotent");
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert_eq!(
+            fs::read(path.join("profile-data")).unwrap(),
+            b"keep local profile data"
+        );
+
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_lease_release_still_clears_local_lock_and_preserves_profile_data() {
+        let path = profile_path("release-network-failure");
+        fs::write(path.join("profile-data"), b"keep local profile data").unwrap();
+        let controller = TestController::default();
+        let backend = Arc::new(TestCoordination::new(Arc::new(Mutex::new(Vec::new()))));
+        backend.release_failures.store(2, Ordering::SeqCst);
+        let handle = spawn_profile_runtime(controller, Some(managed_coordination(backend)));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        handle.launch(request(&path, true)).await.unwrap();
+        handle.stop_for_sync(profile_id.clone()).await.unwrap();
+
+        let error = handle.complete_stop(profile_id.clone()).await.unwrap_err();
+        assert_eq!(error.code, "profile_runtime_unavailable");
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert_eq!(
+            fs::read(path.join("profile-data")).unwrap(),
+            b"keep local profile data"
+        );
+
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_sync_releases_runtime_lock_and_keeps_dirty_profile_files() {
+        let path = profile_path("sync-failure-cleanup");
+        fs::create_dir_all(path.join("Default")).unwrap();
+        fs::write(path.join("Default/Cookies"), b"dirty cookie data").unwrap();
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let handle = spawn_profile_runtime(
+            controller,
+            Some(managed_coordination(Arc::new(TestCoordination::new(
+                log.clone(),
+            )))),
+        );
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        handle.launch(request(&path, true)).await.unwrap();
+        handle.stop_for_sync(profile_id.clone()).await.unwrap();
+
+        let injected = Problem::new(
+            "injected_sync_failure",
+            "Injected sync failure",
+            503,
+            "test",
+        );
+        let result: Result<(), Problem> = handle
+            .finish_sync_result(profile_id.clone(), Err(injected))
+            .await;
+        assert_eq!(result.unwrap_err().code, "injected_sync_failure");
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert_eq!(
+            fs::read(path.join("Default/Cookies")).unwrap(),
+            b"dirty cookie data"
+        );
+        assert!(log.lock().unwrap().contains(&"release"));
 
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
@@ -1768,26 +1896,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lease_release_failure_keeps_cleanup_pending_and_retries() {
+    async fn lease_release_failure_clears_local_lock_after_bounded_retry() {
         let path = profile_path("release-failure");
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log.clone()));
-        // release() retries one retryable failure with the same idempotency key;
-        // fail both bounded attempts to leave cleanup pending for stop() to retry.
+        // release() retries one retryable failure with the same idempotency key.
+        // If both bounded attempts fail, the stopped browser must still unlock
+        // locally; the server lease expires and the profile files remain intact.
         backend.release_failures.store(2, Ordering::SeqCst);
         let mut runtime = runtime(controller, managed_coordination(backend));
         let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
         runtime.launch(request(&path, true)).await.unwrap();
 
         runtime.stop(&profile_id).await.unwrap_err();
-        assert!(runtime.authority(&profile_id).is_some());
+        assert!(runtime.authority(&profile_id).is_none());
         runtime.stop(&profile_id).await.unwrap();
 
         assert!(runtime.authority(&profile_id).is_none());
         assert_eq!(
             *log.lock().unwrap(),
-            vec!["acquire", "launch", "stop", "release", "release", "release"]
+            vec!["acquire", "launch", "stop", "release", "release"]
         );
         fs::remove_dir_all(path).unwrap();
     }

@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::future::Future;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 
@@ -49,6 +51,10 @@ fn init_db() -> Result<Connection, rusqlite::Error> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             seen_tips TEXT NOT NULL,
             auto_show INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS dismissed_browser_updates (
+            id TEXT PRIMARY KEY,
+            dismissed_at INTEGER NOT NULL
         );
         "#,
     )?;
@@ -317,6 +323,54 @@ pub async fn set_team_member_access(
 // App & Browser Updates
 // -------------------------------------------------------------
 
+#[derive(Default)]
+struct PreparedAppUpdateStore {
+    prepared: Option<PreparedAppUpdate>,
+}
+
+struct PreparedAppUpdate {
+    version: String,
+    bytes: Vec<u8>,
+}
+
+impl PreparedAppUpdateStore {
+    fn replace(&mut self, version: String, bytes: Vec<u8>) {
+        self.prepared = Some(PreparedAppUpdate { version, bytes });
+    }
+
+    fn take(&mut self, version: &str) -> Result<PreparedAppUpdate, String> {
+        match self.prepared.take() {
+            Some(prepared) if prepared.version == version => Ok(prepared),
+            Some(prepared) => {
+                self.prepared = Some(prepared);
+                Err("app_update_prepared_version_mismatch".to_owned())
+            }
+            None => Err("app_update_not_prepared".to_owned()),
+        }
+    }
+
+    fn restore(&mut self, prepared: PreparedAppUpdate) {
+        self.prepared = Some(prepared);
+    }
+
+    fn clear(&mut self) {
+        self.prepared = None;
+    }
+}
+
+fn prepared_app_update_store() -> &'static Mutex<PreparedAppUpdateStore> {
+    static STORE: OnceLock<Mutex<PreparedAppUpdateStore>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(PreparedAppUpdateStore::default()))
+}
+
+async fn shutdown_before_update_install<T>(
+    shutdown: impl Future<Output = Result<(), String>>,
+    install: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    shutdown.await?;
+    install()
+}
+
 #[tauri::command]
 pub async fn check_for_app_updates(app: AppHandle) -> Result<Option<Value>, String> {
     let updater = configured_app_updater(&app)?;
@@ -345,12 +399,10 @@ pub async fn check_for_app_updates(app: AppHandle) -> Result<Option<Value>, Stri
     })))
 }
 
-#[tauri::command]
 pub async fn check_for_app_updates_manual(app: AppHandle) -> Result<Option<Value>, String> {
     check_for_app_updates(app).await
 }
 
-#[tauri::command]
 pub async fn download_and_prepare_app_update(
     app: AppHandle,
     update_info: Value,
@@ -369,8 +421,8 @@ pub async fn download_and_prepare_app_update(
 
     let downloaded = std::sync::atomic::AtomicU64::new(0);
     let progress_app = app.clone();
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             move |chunk_bytes, content_length| {
                 let total = downloaded
                     .fetch_add(chunk_bytes as u64, std::sync::atomic::Ordering::Relaxed)
@@ -391,6 +443,10 @@ pub async fn download_and_prepare_app_update(
         )
         .await
         .map_err(|error| error.to_string())?;
+    prepared_app_update_store()
+        .lock()
+        .map_err(|_| "app_update_state_unavailable".to_owned())?
+        .replace(requested_version.to_owned(), bytes);
     app.emit("app-update-ready", requested_version)
         .map_err(|error| error.to_string())?;
     Ok(json!({ "ready": true, "version": requested_version }))
@@ -418,68 +474,389 @@ fn configured_app_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updat
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-pub async fn restart_application(app: AppHandle) -> Result<(), String> {
+pub async fn restart_application(
+    app: AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let prepared = {
+        let version = {
+            // Only one prepared package is retained. Read its version without moving the bytes
+            // so an unrelated restart request cannot discard it.
+            let store = prepared_app_update_store()
+                .lock()
+                .map_err(|_| "app_update_state_unavailable".to_owned())?;
+            store
+                .prepared
+                .as_ref()
+                .map(|prepared| prepared.version.clone())
+                .ok_or_else(|| "app_update_not_prepared".to_owned())?
+        };
+        prepared_app_update_store()
+            .lock()
+            .map_err(|_| "app_update_state_unavailable".to_owned())?
+            .take(&version)?
+    };
+
+    let updater = match configured_app_updater(&app) {
+        Ok(updater) => updater,
+        Err(error) => {
+            prepared_app_update_store()
+                .lock()
+                .map_err(|_| "app_update_state_unavailable".to_owned())?
+                .restore(prepared);
+            return Err(error);
+        }
+    };
+    let update = match updater.check().await {
+        Ok(Some(update)) if update.version == prepared.version => update,
+        Ok(_) => {
+            prepared_app_update_store()
+                .lock()
+                .map_err(|_| "app_update_state_unavailable".to_owned())?
+                .restore(prepared);
+            return Err("app_update_release_changed".to_owned());
+        }
+        Err(error) => {
+            prepared_app_update_store()
+                .lock()
+                .map_err(|_| "app_update_state_unavailable".to_owned())?
+                .restore(prepared);
+            return Err(error.to_string());
+        }
+    };
+
+    if let Err(error) = update.verify(&prepared.bytes) {
+        prepared_app_update_store()
+            .lock()
+            .map_err(|_| "app_update_state_unavailable".to_owned())?
+            .restore(prepared);
+        return Err(error.to_string());
+    }
+
+    let install_result = shutdown_before_update_install(
+        async {
+            state
+                .shutdown()
+                .await
+                .map_err(|error| format!("{}: {}", error.code, error.title))
+        },
+        || {
+            update
+                .install(&prepared.bytes)
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await;
+    if let Err(error) = install_result {
+        prepared_app_update_store()
+            .lock()
+            .map_err(|_| "app_update_state_unavailable".to_owned())?
+            .restore(prepared);
+        return Err(error);
+    }
+
+    // The Windows updater installer exits the process and restarts it after replacement. On
+    // macOS the signed bundle is replaced in place, so explicitly relaunch only after install.
+    #[cfg(not(target_os = "windows"))]
     app.restart();
+
+    Ok(())
+}
+
+pub fn discard_prepared_app_update() -> Result<(), String> {
+    prepared_app_update_store()
+        .lock()
+        .map_err(|_| "app_update_state_unavailable".to_owned())?
+        .clear();
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn check_browser_exists(
-    _browser: String,
-    _version: Option<String>,
+    state: tauri::State<'_, DesktopState>,
+    browser_str: String,
+    version: Option<String>,
 ) -> Result<bool, String> {
-    Ok(true)
+    let runtime = browser_runtime(&browser_str)?;
+    let installed = state
+        .runtime_installed_versions_get(&runtime, "browser-installed-check")
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    Ok(match version {
+        Some(version) => installed.iter().any(|installed| installed == &version),
+        None => !installed.is_empty(),
+    })
+}
+
+pub async fn download_browser(
+    app: AppHandle,
+    state: tauri::State<'_, DesktopState>,
+    browser_str: String,
+    version: Option<String>,
+) -> Result<(), String> {
+    let runtime = browser_runtime(&browser_str)?;
+    let version = version
+        .filter(|version| !version.trim().is_empty())
+        .ok_or_else(|| "runtime_version_required: A browser version is required".to_owned())?;
+    let installed = state
+        .runtime_installed_versions_get(&runtime, "browser-download")
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    if installed.iter().any(|installed| installed == &version) {
+        return Ok(());
+    }
+    crate::install_verified_runtime(app, state.inner(), runtime, &version, "browser-download")
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("{}: {}", error.code, error.title))
 }
 
 #[tauri::command]
-pub async fn download_browser(_browser: String, _version: Option<String>) -> Result<(), String> {
-    Ok(())
+pub async fn check_for_browser_updates(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<Value>, String> {
+    let runtime = browser_runtime("wayfern")?;
+    let installed = state
+        .runtime_installed_versions_get(&runtime, "browser-update-check")
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    let Some(current_version) = newest_version(&installed).cloned() else {
+        return Ok(Vec::new());
+    };
+    let versions = available_browser_versions(state.inner(), &runtime).await?;
+    let Some(new_version) = newest_update_version(&versions, &installed).cloned() else {
+        return Ok(Vec::new());
+    };
+    let notification = json!({
+        "id": format!("wayfern:{current_version}:{new_version}"),
+        "browser": "wayfern",
+        "current_version": current_version,
+        "new_version": new_version,
+        "affected_profiles": [],
+        "timestamp": now_secs(),
+        "is_rolling_release": false,
+    });
+    let notification_id = notification["id"]
+        .as_str()
+        .ok_or_else(|| "notification_id_invalid: Update notification identifier is invalid")?;
+    if is_browser_update_dismissed(notification_id)? {
+        return Ok(Vec::new());
+    }
+    Ok(vec![notification])
 }
 
 #[tauri::command]
-pub async fn check_for_browser_updates() -> Result<Value, String> {
+pub async fn get_version_update_status() -> Result<(Option<i64>, u64), String> {
+    // The old periodic updater is not a background job in the active runtime
+    // architecture. `None, 0` means no completed check is recorded and a
+    // check can run now; do not report fake progress or a fabricated timestamp.
+    Ok((None, 0))
+}
+
+#[tauri::command]
+pub async fn trigger_manual_version_update(
+    app: AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<Value>, String> {
+    let runtime = browser_runtime("wayfern")?;
+    let installed = state
+        .runtime_installed_versions_get(&runtime, "browser-manual-update")
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    let versions = available_browser_versions(state.inner(), &runtime).await?;
+    let Some(latest) = newest_update_version(&versions, &installed).cloned() else {
+        return Ok(vec![json!({
+            "browser": "wayfern",
+            "new_versions_count": 0,
+            "total_versions_count": versions.len(),
+            "updated_successfully": true,
+        })]);
+    };
+
+    let result = crate::install_verified_runtime(
+        app,
+        state.inner(),
+        runtime,
+        &latest,
+        "browser-manual-update",
+    )
+    .await;
+    match result {
+        Ok(_) => Ok(vec![json!({
+            "browser": "wayfern",
+            "new_versions_count": 1,
+            "total_versions_count": versions.len(),
+            "updated_successfully": true,
+        })]),
+        Err(error) => Ok(vec![json!({
+            "browser": "wayfern",
+            "new_versions_count": 1,
+            "total_versions_count": versions.len(),
+            "updated_successfully": false,
+            "error": format!("{}: {}", error.code, error.title),
+        })]),
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_browser_versions_with_count(
+    state: tauri::State<'_, DesktopState>,
+    browser_str: String,
+) -> Result<Value, String> {
+    let runtime = browser_runtime(&browser_str)?;
+    let versions = available_browser_versions(state.inner(), &runtime).await?;
+    let installed = state
+        .runtime_installed_versions_get(&runtime, "browser-version-list")
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    let new_versions_count = versions
+        .iter()
+        .filter(|version| {
+            !installed.iter().any(|installed| installed == *version)
+                && newest_version(&installed)
+                    .is_none_or(|current| compare_versions(version, current).is_gt())
+        })
+        .count();
     Ok(json!({
-        "updates": [],
-        "has_updates": false,
+        "versions": versions,
+        "new_versions_count": new_versions_count,
+        "total_versions_count": versions.len(),
     }))
 }
 
 #[tauri::command]
-pub async fn get_version_update_status() -> Result<Value, String> {
-    Ok(json!({
-        "is_updating": false,
-        "progress": 100,
-        "status": "idle",
-    }))
+pub async fn complete_browser_update_with_auto_update(
+    state: tauri::State<'_, DesktopState>,
+    browser: String,
+    new_version: String,
+) -> Result<Vec<String>, String> {
+    let runtime = browser_runtime(&browser)?;
+    let installed = state
+        .runtime_installed_versions_get(&runtime, "browser-update-complete")
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    if !installed.iter().any(|installed| installed == &new_version) {
+        return Err(format!(
+            "runtime_not_installed: Browser version {new_version} is not installed"
+        ));
+    }
+    // Profiles pin their runtime version and are switched by an explicit user
+    // action. Installing a catalog release does not silently mutate profiles.
+    Ok(Vec::new())
 }
 
 #[tauri::command]
-pub async fn trigger_manual_version_update() -> Result<(), String> {
+pub async fn dismiss_update_notification(notification_id: String) -> Result<(), String> {
+    let notification_id = notification_id.trim();
+    if notification_id.is_empty() || notification_id.len() > 256 {
+        return Err("notification_id_invalid: Update notification identifier is invalid".into());
+    }
+    let conn = init_db().map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO dismissed_browser_updates (id, dismissed_at) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
+        params![notification_id, now_secs()],
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn fetch_browser_versions_with_count() -> Result<Vec<Value>, String> {
-    Ok(vec![
-        json!({ "version": "134.0.6998.35", "count": 1, "release_type": "stable" }),
-        json!({ "version": "133.0.6943.53", "count": 0, "release_type": "stable" }),
-        json!({ "version": "132.0.6834.110", "count": 0, "release_type": "stable" }),
-    ])
+pub async fn clear_all_version_cache_and_refetch(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let conn = init_db().map_err(|error| error.to_string())?;
+    conn.execute("DELETE FROM dismissed_browser_updates", [])
+        .map_err(|error| error.to_string())?;
+    drop(conn);
+    state
+        .runtime_catalog_get("browser-version-cache-refetch")
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("{}: {}", error.code, error.title))
 }
 
-#[tauri::command]
-pub async fn complete_browser_update_with_auto_update() -> Result<(), String> {
-    Ok(())
+fn is_browser_update_dismissed(notification_id: &str) -> Result<bool, String> {
+    let conn = init_db().map_err(|error| error.to_string())?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dismissed_browser_updates WHERE id = ?1)",
+        [notification_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-pub async fn dismiss_update_notification() -> Result<(), String> {
-    Ok(())
+fn browser_runtime(browser: &str) -> Result<buglogin_domain::entities::Runtime, String> {
+    match browser.trim().to_ascii_lowercase().as_str() {
+        "wayfern" => Ok(buglogin_domain::entities::Runtime::Wayfern),
+        _ => Err(format!(
+            "runtime_not_supported: Browser runtime `{browser}` is not supported"
+        )),
+    }
 }
 
-#[tauri::command]
-pub async fn clear_all_version_cache_and_refetch() -> Result<(), String> {
-    Ok(())
+async fn available_browser_versions(
+    state: &DesktopState,
+    runtime: &buglogin_domain::entities::Runtime,
+) -> Result<Vec<String>, String> {
+    let correlation_id = "browser-version-catalog";
+    let (platform, architecture) =
+        crate::runtime_install::current_platform_architecture(correlation_id)
+            .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    let catalog = state
+        .runtime_catalog_get(correlation_id)
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    let verifier = crate::runtime_config::pinned_runtime_verifier(correlation_id)
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    let releases = catalog
+        .verify(&verifier)
+        .map_err(|error| format!("{}: {}", error.code, error.title))?;
+    let mut versions = releases
+        .into_iter()
+        .filter_map(|release| {
+            let release = release.release();
+            (release.runtime == *runtime
+                && release.platform == platform
+                && release.architecture == architecture)
+                .then(|| release.version.clone())
+        })
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| compare_versions(right, left));
+    versions.dedup();
+    Ok(versions)
+}
+
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = left
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect::<Vec<_>>();
+    let right_parts = right
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect::<Vec<_>>();
+    let width = left_parts.len().max(right_parts.len());
+    (0..width)
+        .map(|index| {
+            left_parts
+                .get(index)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&right_parts.get(index).copied().unwrap_or(0))
+        })
+        .find(|ordering| !ordering.is_eq())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+fn newest_version(versions: &[String]) -> Option<&String> {
+    versions
+        .iter()
+        .max_by(|left, right| compare_versions(left, right))
+}
+
+fn newest_update_version<'a>(versions: &'a [String], installed: &[String]) -> Option<&'a String> {
+    let latest = newest_version(versions)?;
+    if installed.iter().any(|version| version == latest)
+        || newest_version(installed)
+            .is_some_and(|current| !compare_versions(latest, current).is_gt())
+    {
+        return None;
+    }
+    Some(latest)
 }
 
 // -------------------------------------------------------------
@@ -723,7 +1100,11 @@ pub async fn has_acknowledged_trial_expiration() -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_totp_at;
+    use super::{
+        PreparedAppUpdateStore, browser_runtime, compare_versions, compute_totp_at,
+        newest_update_version, shutdown_before_update_install,
+    };
+    use std::sync::{Arc, Mutex};
 
     // RFC 6238 appendix B (SHA-1, secret "12345678901234567890"), 6-digit truncation.
     const RFC_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -757,5 +1138,77 @@ mod tests {
     #[test]
     fn totp_rejects_secrets_that_are_not_base32() {
         assert!(compute_totp_at("not-base32!", 59).is_err());
+    }
+
+    #[test]
+    fn browser_runtime_rejects_unapproved_engines() {
+        assert_eq!(
+            browser_runtime("wayfern").unwrap(),
+            buglogin_domain::entities::Runtime::Wayfern
+        );
+        assert!(
+            browser_runtime("chrome")
+                .unwrap_err()
+                .contains("runtime_not_supported")
+        );
+    }
+
+    #[test]
+    fn browser_versions_are_compared_numerically_and_skip_installed_versions() {
+        let available = vec![
+            "154.0.8037.57".to_owned(),
+            "155.0.8059.79".to_owned(),
+            "155.0.8059.8".to_owned(),
+        ];
+        let installed = vec!["154.0.8037.57".to_owned(), "155.0.8059.8".to_owned()];
+
+        assert!(compare_versions("155.0.8059.79", "155.0.8059.8").is_gt());
+        assert_eq!(
+            newest_update_version(&available, &installed).map(String::as_str),
+            Some("155.0.8059.79")
+        );
+        let latest_installed = vec!["155.0.8059.79".to_owned()];
+        assert!(newest_update_version(&available, &latest_installed).is_none());
+    }
+
+    #[test]
+    fn prepared_update_store_preserves_only_the_matching_release() {
+        let mut store = PreparedAppUpdateStore::default();
+        store.replace("3.0.8".to_owned(), vec![1, 2, 3]);
+
+        assert_eq!(
+            store.take("3.0.7").err().as_deref(),
+            Some("app_update_prepared_version_mismatch")
+        );
+        let prepared = store.take("3.0.8").expect("matching package retained");
+        assert_eq!(prepared.bytes, vec![1, 2, 3]);
+        store.restore(prepared);
+        store.clear();
+        assert_eq!(
+            store.take("3.0.8").err().as_deref(),
+            Some("app_update_not_prepared")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_install_waits_for_managed_runtime_shutdown() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let shutdown_order = order.clone();
+        let install_order = order.clone();
+
+        shutdown_before_update_install(
+            async move {
+                shutdown_order.lock().unwrap().push("shutdown");
+                Ok(())
+            },
+            move || {
+                install_order.lock().unwrap().push("install");
+                Ok::<_, String>(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*order.lock().unwrap(), vec!["shutdown", "install"]);
     }
 }
