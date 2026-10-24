@@ -70,7 +70,10 @@ use crate::{
     proxy_bridge::{ProxyBridgeHandle, ProxyBridgeSpec},
     proxy_credential_vault::ProxyCredentialVault,
     proxy_store::{ImportedProxy, ProxyImportReport},
-    remote_api::{ApiTokenPage, CreatedApiToken, DeviceSessionTokens, RemoteApiClient},
+    remote_api::{
+        ApiTokenPage, BugLabSsoStartResponse, CreatedApiToken, DeviceSessionTokens,
+        FeedbackReceipt, FeedbackSubmission, RemoteApiClient,
+    },
     sync_key_vault::SyncKeyVault,
     wayfern_fingerprint::{
         apply_or_generate as apply_wayfern_fingerprint, clear_stale_cdp_marker,
@@ -2058,6 +2061,56 @@ impl ProductionDesktopState {
                 correlation_id,
             )
             .await?;
+        self.install_session_tokens(token, correlation_id).await
+    }
+
+    pub async fn start_buglab_sso(
+        &self,
+        correlation_id: &str,
+    ) -> Result<BugLabSsoStartResponse, Problem> {
+        if self.client.has_token()? {
+            return Err(Problem::new(
+                "already_authenticated",
+                "Sign out before starting another sign-in",
+                409,
+                correlation_id,
+            ));
+        }
+        self.client
+            .buglab_sso_start(&self.device_id, correlation_id)
+            .await
+    }
+
+    pub async fn complete_buglab_sso(
+        &self,
+        state: Zeroizing<String>,
+        provider_token: Zeroizing<String>,
+        correlation_id: &str,
+    ) -> Result<DesktopAuthStatus, Problem> {
+        self.refresh_session_if_needed(correlation_id).await?;
+        if self.client.has_token()? {
+            self.ensure_authenticated_coordination(correlation_id)
+                .await?;
+            if self.client.has_token()? {
+                return Ok(DesktopAuthStatus::Authenticated);
+            }
+        }
+        let _login_guard = self.auth_refresh_gate.lock().await;
+        if self.client.has_token()? {
+            return Ok(DesktopAuthStatus::Authenticated);
+        }
+        let token = self
+            .client
+            .buglab_sso_complete(state.as_str(), provider_token.as_str(), correlation_id)
+            .await?;
+        self.install_session_tokens(token, correlation_id).await
+    }
+
+    async fn install_session_tokens(
+        &self,
+        token: DeviceSessionTokens,
+        correlation_id: &str,
+    ) -> Result<DesktopAuthStatus, Problem> {
         let version = self.persist_session(&token, correlation_id)?;
         self.client
             .replace_refreshed_token(token.access_token.clone())?;
@@ -6377,6 +6430,38 @@ fn invalid_proxy_mutation_response(correlation_id: &str) -> Problem {
 }
 
 impl DesktopState {
+    pub async fn submit_feedback(
+        &self,
+        submission: FeedbackSubmission,
+        idempotency_key: &str,
+        correlation_id: &str,
+    ) -> Result<FeedbackReceipt, Problem> {
+        match self {
+            Self::Production(state) => {
+                state.refresh_session_if_needed(correlation_id).await?;
+                if !state.client.has_token()? {
+                    return Err(Problem::new(
+                        "authentication_required",
+                        "Sign in to send feedback",
+                        401,
+                        correlation_id,
+                    ));
+                }
+                state
+                    .client
+                    .submit_feedback(submission, idempotency_key, correlation_id)
+                    .await
+            }
+            Self::Local(_) => Err(Problem::new(
+                "feedback_hosted_authority_required",
+                "Feedback submission requires the signed-in BugLogin API",
+                409,
+                correlation_id,
+            )),
+            Self::Unavailable(problem) => Err(problem.clone()),
+        }
+    }
+
     pub async fn integration_status(
         &self,
         correlation_id: &str,
@@ -6722,6 +6807,34 @@ impl DesktopState {
             Self::Production(state) => {
                 state
                     .login_with_credentials(identifier, password, correlation_id)
+                    .await
+            }
+            Self::Unavailable(problem) => Err(problem.clone()),
+        }
+    }
+
+    pub async fn start_buglab_sso(
+        &self,
+        correlation_id: &str,
+    ) -> Result<BugLabSsoStartResponse, Problem> {
+        match self {
+            Self::Local(_) => Err(auth_not_applicable(correlation_id)),
+            Self::Production(state) => state.start_buglab_sso(correlation_id).await,
+            Self::Unavailable(problem) => Err(problem.clone()),
+        }
+    }
+
+    pub async fn complete_buglab_sso(
+        &self,
+        state: Zeroizing<String>,
+        token: Zeroizing<String>,
+        correlation_id: &str,
+    ) -> Result<DesktopAuthStatus, Problem> {
+        match self {
+            Self::Local(_) => Err(auth_not_applicable(correlation_id)),
+            Self::Production(production) => {
+                production
+                    .complete_buglab_sso(state, token, correlation_id)
                     .await
             }
             Self::Unavailable(problem) => Err(problem.clone()),

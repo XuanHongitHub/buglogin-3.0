@@ -113,8 +113,7 @@ use crate::{
 #[cfg(test)]
 use buglogin_storage::control::ControlIdempotencyClaimToken;
 use buglogin_storage::control::{
-    ControlAuditEntry, ControlDelete, ControlPut, ControlRecordKey, ExecuteControlCommand,
-    HttpResponse,
+    ControlAuditEntry, ControlPut, ControlRecordKey, ExecuteControlCommand, HttpResponse,
 };
 use serde_json::json;
 use zeroize::Zeroize;
@@ -132,6 +131,7 @@ mod auth_workspace_profile_e2e;
 mod control;
 mod control_import;
 pub(crate) mod package_upload;
+mod sso;
 mod sync_import;
 
 const CONTROL_TENANT: &str = "control";
@@ -381,6 +381,21 @@ pub struct OperatorPasswordResetResult {
     pub account_id: AccountId,
     pub revoked_sessions: usize,
     pub revoked_api_tokens: usize,
+}
+
+pub struct OperatorPlatformAdminProvisionInput {
+    pub username: String,
+    pub email: String,
+    pub password: zeroize::Zeroizing<String>,
+    pub organization_name: String,
+    pub workspace_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorPlatformAdminProvisionResult {
+    pub account_id: AccountId,
+    pub organization_id: OrganizationId,
+    pub workspace_id: WorkspaceId,
 }
 
 pub struct LocalDevAdminProvisionInput {
@@ -966,6 +981,226 @@ impl ApiState {
         self.reset_platform_admin_password(account_id, password, "production_operator", false)
     }
 
+    /// Provision an additional login-capable platform administrator through the
+    /// production-only operator path. The identity is marked verified under the
+    /// operator-attestation exception; this does not claim mailbox verification.
+    pub fn operator_create_platform_admin(
+        &self,
+        mut input: OperatorPlatformAdminProvisionInput,
+    ) -> Result<OperatorPlatformAdminProvisionResult, Problem> {
+        if self.local_account_provisioning {
+            input.password.zeroize();
+            return Err(problem(
+                "hosted_identity_required",
+                "Operator administrator provisioning requires hosted identity storage",
+                409,
+            ));
+        }
+
+        let _mutation = self
+            .control_mutation
+            .lock()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        let (mut aggregate, aggregate_revision) = self
+            .control_persistence
+            .load_versioned::<ControlAggregate>(
+                CONTROL_TENANT,
+                CONTROL_STATE_TYPE,
+                CONTROL_STATE_ID,
+            )?
+            .ok_or_else(|| {
+                problem(
+                    "control_state_unavailable",
+                    "Control state unavailable",
+                    503,
+                )
+            })?;
+
+        const OPERATOR_PROVISION_RECORD: &str = "platform_admin_operator_provision";
+        const OPERATOR_PROVISION_ID: &str = "owner_account";
+        if self
+            .control_persistence
+            .load::<serde_json::Value>(
+                CONTROL_TENANT,
+                OPERATOR_PROVISION_RECORD,
+                OPERATOR_PROVISION_ID,
+            )?
+            .is_some()
+        {
+            input.password.zeroize();
+            return Err(problem(
+                "operator_admin_already_provisioned",
+                "The one-time production owner administrator was already provisioned",
+                409,
+            ));
+        }
+
+        let account_id = AccountId::new(random_bootstrap_id("acct")?)
+            .map_err(|_| problem("invalid_account", "Account ID is invalid", 500))?;
+        let organization_id = OrganizationId::new(random_bootstrap_id("org")?)
+            .map_err(|_| problem("invalid_organization", "Organization ID is invalid", 500))?;
+        let workspace_id = WorkspaceId::new(random_bootstrap_id("ws")?)
+            .map_err(|_| problem("invalid_workspace", "Workspace ID is invalid", 500))?;
+        let member_id = MemberId::new(random_bootstrap_id("member")?)
+            .map_err(|_| problem("invalid_member", "Member ID is invalid", 500))?;
+        let current = checked_now("production-admin-provision")?;
+        let created_at = migration_timestamp()?;
+        let identity = AccountIdentity::new(
+            account_id.clone(),
+            input.username,
+            input.email,
+            created_at.clone(),
+        )?
+        .verify(1, created_at.clone())?;
+        let mut puts = self.identity_persistence.prepare_create_puts(&identity)?;
+        puts.push(self.credentials.prepare_initial_password_put(
+            &account_id,
+            input.password.as_str(),
+            current,
+        )?);
+        input.password.zeroize();
+
+        let platform_principal = Principal {
+            account_id: Some(account_id.clone()),
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        let organization = Organization {
+            id: organization_id.clone(),
+            account_id: account_id.clone(),
+            name: input.organization_name,
+            created_at: created_at.clone(),
+        };
+        aggregate.workspaces.add_organization(
+            &platform_principal,
+            &[],
+            organization,
+            OrganizationPolicy {
+                max_workspaces: 10,
+                offline_entitled: false,
+            },
+        )?;
+        let workspace = Workspace {
+            id: workspace_id.clone(),
+            organization_id: organization_id.clone(),
+            name: input.workspace_name,
+            policy: WorkspacePolicy {
+                max_profiles: 1_000,
+                max_members: 100,
+                max_storage_bytes: 10 * 1024 * 1024 * 1024,
+                offline_entitled: false,
+            },
+            created_at: created_at.clone(),
+        };
+        aggregate.workspaces.create_workspace(
+            &platform_principal,
+            &[],
+            &organization_id,
+            workspace,
+        )?;
+        let expires_at = current.checked_add(600).ok_or_else(|| {
+            problem(
+                "admin_provision_expiry_invalid",
+                "Administrator invitation expiry is invalid",
+                500,
+            )
+        })?;
+        aggregate.members.invite(
+            &platform_principal,
+            &[],
+            Member {
+                id: member_id.clone(),
+                account_id: account_id.clone(),
+                workspace_id: workspace_id.clone(),
+                team_id: None,
+                role: MemberRole::Owner,
+                status: MemberStatus::Invited,
+                invite_expires_at: Some(expires_at),
+            },
+            current,
+        )?;
+        aggregate
+            .members
+            .activate(&platform_principal, &[], &workspace_id, &member_id, current)?;
+        aggregate.platform_admin_accounts.insert(account_id.clone());
+
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: "account".into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(0),
+            value: serde_json::to_value(Account::new(account_id.clone(), created_at.clone()))
+                .map_err(|_| problem("account_record_invalid", "Account record is invalid", 500))?,
+        });
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: CONTROL_STATE_TYPE.into(),
+            record_id: CONTROL_STATE_ID.into(),
+            expected_revision: Some(aggregate_revision),
+            value: serde_json::to_value(&aggregate)
+                .map_err(|_| problem("control_state_invalid", "Control state is invalid", 500))?,
+        });
+        puts.push(ControlPut {
+            tenant_id: CONTROL_TENANT.into(),
+            record_type: OPERATOR_PROVISION_RECORD.into(),
+            record_id: OPERATOR_PROVISION_ID.into(),
+            expected_revision: Some(0),
+            value: json!({
+                "accountId": account_id,
+                "provisionedAt": created_at,
+                "verificationMethod": "operator-attested-owner",
+            }),
+        });
+        self.control_persistence.execute(ExecuteControlCommand {
+            tenant_id: CONTROL_TENANT.into(),
+            command_id: "identity.production_operator_admin_provision".into(),
+            idempotency_key: random_bootstrap_id("operator-admin")?,
+            expected_revisions: BTreeMap::from([(
+                ControlRecordKey {
+                    tenant_id: CONTROL_TENANT.into(),
+                    record_type: CONTROL_STATE_TYPE.into(),
+                    record_id: CONTROL_STATE_ID.into(),
+                },
+                aggregate_revision,
+            )]),
+            puts,
+            deletes: vec![],
+            audit: ControlAuditEntry {
+                tenant_id: CONTROL_TENANT.into(),
+                command_id: "identity.production_operator_admin_provision".into(),
+                actor_id: "production_operator".into(),
+                allowed: true,
+                detail: json!({
+                    "accountId": account_id,
+                    "organizationId": organization_id,
+                    "workspaceId": workspace_id,
+                    "memberId": member_id,
+                    "identityVerification": "verified",
+                    "verificationMethod": "operator-attested-owner",
+                    "mailboxOwnershipClaimed": false,
+                    "credentialIssued": true,
+                    "sessionIssued": false,
+                }),
+            },
+            response: HttpResponse {
+                status: 201,
+                headers: Default::default(),
+                body: json!({
+                    "accountId": account_id,
+                    "organizationId": organization_id,
+                    "workspaceId": workspace_id,
+                }),
+            },
+        })?;
+        self.reload_control_aggregate()?;
+
+        Ok(OperatorPlatformAdminProvisionResult {
+            account_id,
+            organization_id,
+            workspace_id,
+        })
+    }
+
     pub fn dev_reset_platform_admin_password(
         &self,
         account_id: &AccountId,
@@ -1357,248 +1592,6 @@ impl ApiState {
             .collect::<Result<Vec<_>, _>>()?;
         admins.sort_by(|left, right| left.account_id.cmp(&right.account_id));
         Ok(admins)
-    }
-
-    pub fn operator_cleanup_production_data_preserving_admin(
-        &self,
-        account_id: &AccountId,
-        apply: bool,
-    ) -> Result<serde_json::Value, Problem> {
-        if self.local_account_provisioning {
-            return Err(problem(
-                "hosted_identity_required",
-                "Production data cleanup requires hosted identity storage",
-                409,
-            ));
-        }
-        let _mutation = self
-            .control_mutation
-            .lock()
-            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
-        let (current, revision) = self
-            .control_persistence
-            .load_versioned::<ControlAggregate>(
-                CONTROL_TENANT,
-                CONTROL_STATE_TYPE,
-                CONTROL_STATE_ID,
-            )?
-            .ok_or_else(|| {
-                problem(
-                    "control_state_unavailable",
-                    "Control state unavailable",
-                    503,
-                )
-            })?;
-        if !current.platform_admin_accounts.contains(account_id)
-            || self.account_persistence.load(account_id)?.is_none()
-            || self.identity_persistence.load(account_id)?.is_none()
-        {
-            return Err(problem(
-                "active_admin_identity_required",
-                "Target must be an existing platform administrator with an identity",
-                409,
-            ));
-        }
-
-        let current_value = serde_json::to_value(&current).map_err(|_| {
-            problem(
-                "control_serialization_failed",
-                "Control state serialization failed",
-                500,
-            )
-        })?;
-        let mut next: serde_json::Value = serde_json::to_value(ControlAggregate::default())
-            .map_err(|_| {
-                problem(
-                    "control_serialization_failed",
-                    "Control state serialization failed",
-                    500,
-                )
-            })?;
-        next["platform_admin_accounts"] = serde_json::json!([account_id.as_str()]);
-
-        let source_orgs = current_value
-            .pointer("/workspaces/organizations")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| problem("control_state_corrupt", "Workspace state is invalid", 500))?;
-        let retained_orgs = source_orgs
-            .iter()
-            .filter(|(_, org)| {
-                org.pointer("/organization/accountId")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(account_id.as_str())
-            })
-            .map(|(id, org)| (id.clone(), org.clone()))
-            .collect::<serde_json::Map<_, _>>();
-        if retained_orgs.is_empty() {
-            return Err(problem(
-                "admin_workspace_missing",
-                "Platform administrator has no owned organization",
-                409,
-            ));
-        }
-        let retained_org_count = retained_orgs.len();
-        let retained_workspace_ids = retained_orgs
-            .values()
-            .filter_map(|org| org.get("workspaces").and_then(serde_json::Value::as_object))
-            .flat_map(|workspaces| workspaces.keys().cloned())
-            .collect::<BTreeSet<_>>();
-        if retained_workspace_ids.is_empty() {
-            return Err(problem(
-                "admin_workspace_missing",
-                "Platform administrator has no owned workspace",
-                409,
-            ));
-        }
-        next["workspaces"]["organizations"] = serde_json::Value::Object(retained_orgs);
-
-        let source_members = current_value
-            .pointer("/members/members")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| problem("control_state_corrupt", "Membership state is invalid", 500))?;
-        let retained_members = source_members
-            .iter()
-            .filter(|(_, member)| {
-                member.get("accountId").and_then(serde_json::Value::as_str)
-                    == Some(account_id.as_str())
-                    && member
-                        .get("workspaceId")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|id| retained_workspace_ids.contains(id))
-            })
-            .map(|(id, member)| (id.clone(), member.clone()))
-            .collect::<serde_json::Map<_, _>>();
-        if retained_members.is_empty() {
-            return Err(problem(
-                "admin_membership_missing",
-                "Platform administrator has no membership in the retained workspace",
-                409,
-            ));
-        }
-        let retained_member_count = retained_members.len();
-        next["members"]["members"] = serde_json::Value::Object(retained_members);
-        let next_aggregate: ControlAggregate = serde_json::from_value(next).map_err(|_| {
-            problem(
-                "control_state_corrupt",
-                "Retained admin state is invalid",
-                500,
-            )
-        })?;
-
-        let mut deletes = Vec::<ControlDelete>::new();
-        let mut counts = BTreeMap::<String, usize>::new();
-        let record_sets = [
-            ("control", "account", Some("record_id")),
-            ("identity", "account_identity", Some("record_id")),
-            ("identity", "account_identity_email", Some("account_id")),
-            ("identity", "account_identity_username", Some("account_id")),
-            ("identity", "account_password", Some("record_id")),
-            ("identity", "api_token", Some("account_id")),
-            ("identity", "device_encryption_key", Some("account_id")),
-            ("identity", "session", None),
-            ("identity", "session_family", None),
-            ("identity", "device_refresh", None),
-            ("identity", "device_authorization", None),
-            ("identity", "device_user_code", None),
-            ("identity", "recovery_token", None),
-            ("identity", "recovery_rate", None),
-        ];
-        for (tenant, record_type, keep_rule) in record_sets {
-            for (id, value, record_revision) in self
-                .control_persistence
-                .list_versioned::<serde_json::Value>(tenant, record_type)?
-            {
-                let belongs_to_admin = match keep_rule {
-                    Some("record_id") => id == account_id.as_str(),
-                    Some("account_id") => {
-                        value.get("accountId").and_then(serde_json::Value::as_str)
-                            == Some(account_id.as_str())
-                    }
-                    _ => false,
-                };
-                if !belongs_to_admin {
-                    deletes.push(ControlDelete {
-                        tenant_id: tenant.into(),
-                        record_type: record_type.into(),
-                        record_id: id,
-                        expected_revision: Some(record_revision),
-                    });
-                    *counts.entry(format!("{tenant}/{record_type}")).or_default() += 1;
-                }
-            }
-        }
-        for (id, _value, record_revision) in self
-            .control_persistence
-            .list_versioned::<serde_json::Value>(CONTROL_TENANT, "migration_import")?
-        {
-            deletes.push(ControlDelete {
-                tenant_id: CONTROL_TENANT.into(),
-                record_type: "migration_import".into(),
-                record_id: id,
-                expected_revision: Some(record_revision),
-            });
-            *counts.entry("control/migration_import".into()).or_default() += 1;
-        }
-        // Keep only the control aggregate's platform admin and owner workspace graph.
-        let source_member_count = source_members.len();
-        let aggregate_removed = serde_json::json!({
-            "organizations": source_orgs.len().saturating_sub(retained_org_count),
-            "members": source_member_count.saturating_sub(retained_member_count),
-            "profiles": current_value.pointer("/profiles").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
-            "profileResources": current_value.pointer("/profile_resources").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
-            "syncManifests": current_value.pointer("/sync_manifests").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
-            "grants": current_value.get("grants").and_then(serde_json::Value::as_array).map_or(0, Vec::len),
-            "groups": current_value.pointer("/groups/groups").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
-            "teams": current_value.pointer("/teams/teams").and_then(serde_json::Value::as_object).map_or(0, serde_json::Map::len),
-        });
-        let planned = serde_json::json!({
-            "applied": apply,
-            "accountId": account_id,
-            "organizationsRetained": retained_org_count,
-            "workspacesRetained": retained_workspace_ids.len(),
-            "membersRetained": next_aggregate.members.active_for_account(account_id).len(),
-            "aggregateRecordsCleared": aggregate_removed,
-            "recordsDeleted": counts,
-            "sessionsRevoked": true,
-        });
-        if !apply {
-            return Ok(planned);
-        }
-
-        let command = ExecuteControlCommand {
-            tenant_id: CONTROL_TENANT.into(),
-            command_id: "production.database.cleanup_preserve_platform_admin".into(),
-            idempotency_key: format!("production-cleanup-{}-rev-{revision}", account_id.as_str()),
-            expected_revisions: Default::default(),
-            puts: vec![ControlPut {
-                tenant_id: CONTROL_TENANT.into(),
-                record_type: CONTROL_STATE_TYPE.into(),
-                record_id: CONTROL_STATE_ID.into(),
-                expected_revision: Some(revision),
-                value: serde_json::to_value(&next_aggregate).map_err(|_| {
-                    problem(
-                        "control_serialization_failed",
-                        "Control state serialization failed",
-                        500,
-                    )
-                })?,
-            }],
-            deletes,
-            audit: ControlAuditEntry {
-                tenant_id: CONTROL_TENANT.into(),
-                command_id: "production.database.cleanup_preserve_platform_admin".into(),
-                actor_id: account_id.as_str().into(),
-                allowed: true,
-                detail: planned.clone(),
-            },
-            response: HttpResponse {
-                status: 200,
-                headers: Default::default(),
-                body: planned.clone(),
-            },
-        };
-        self.control_persistence.execute(command)?;
-        Ok(planned)
     }
 
     pub fn grants(&self) -> Result<Vec<Grant>, Problem> {
@@ -5477,54 +5470,29 @@ impl ApiAuthorizationAuthority {
                 )
             })?
             .clone();
-        const CAPABILITIES: [&str; 15] = control_import::MEMBERSHIP_CAPABILITIES;
-        const ALL: [Action; 7] = [
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Delete,
-            Action::Execute,
-            Action::Share,
-            Action::Manage,
-        ];
-        const OPERATE: [Action; 5] = [
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Execute,
-            Action::Share,
-        ];
-        const USE: [Action; 2] = [Action::Read, Action::Execute];
         for member in members {
             if materialized.contains(&member.id) {
                 continue;
             }
-            let actions: &[Action] = match member.role {
-                MemberRole::Owner | MemberRole::Admin => &ALL,
-                MemberRole::Operator => &OPERATE,
-                MemberRole::Member => &USE,
-            };
-            for capability_name in CAPABILITIES {
-                let capability = Capability::new(capability_name).map_err(|_| {
+            for (capability_name, action) in control_import::role_default_pairs(&member.role) {
+                let capability = Capability::new(capability_name.clone()).map_err(|_| {
                     Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
                 })?;
-                for action in actions {
-                    grants.push(Grant {
-                        id: GrantId::new(format!(
-                            "membership:{}:{capability_name}:{action:?}",
-                            member.id.as_str()
-                        ))
-                        .map_err(|_| {
-                            Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
-                        })?,
-                        account_id: Some(member.account_id.clone()),
-                        member_id: None,
-                        capability: capability.clone(),
-                        action: *action,
-                        scope: ResourceScope::workspace(member.workspace_id.clone()),
-                        effect: Effect::Allow,
-                    });
-                }
+                grants.push(Grant {
+                    id: GrantId::new(format!(
+                        "membership:{}:{capability_name}:{action:?}",
+                        member.id.as_str()
+                    ))
+                    .map_err(|_| {
+                        Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
+                    })?,
+                    account_id: Some(member.account_id.clone()),
+                    member_id: None,
+                    capability,
+                    action,
+                    scope: ResourceScope::workspace(member.workspace_id.clone()),
+                    effect: Effect::Allow,
+                });
             }
         }
         Ok(grants)
@@ -5876,6 +5844,14 @@ pub fn router(state: ApiState) -> Router {
             post(desktop_login).layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
         )
         .route(
+            "/v1/auth/sso/buglab/start",
+            post(sso::start).layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/auth/sso/buglab/complete",
+            post(sso::complete).layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
+        )
+        .route(
             "/v1/auth/recovery/request",
             post(request_recovery).layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
         )
@@ -5922,6 +5898,10 @@ pub fn router(state: ApiState) -> Router {
             "/v1/auth/device/encryption-key",
             put(register_device_encryption_key)
                 .layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/feedback",
+            post(submit_feedback).layer(DefaultBodyLimit::max(160 * 1024)),
         )
         .route("/v1/auth/refresh", post(refresh_token))
         .route("/v1/auth/logout", post(logout))
@@ -6062,6 +6042,140 @@ const WEB_SESSION_COOKIE: &str = "__Host-buglogin_session";
 const WEB_CSRF_COOKIE: &str = "__Host-buglogin_csrf";
 const WEB_SESSION_SECONDS: u64 = 12 * 60 * 60;
 const AUTH_JSON_BODY_LIMIT_BYTES: usize = 8 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FeedbackSubmissionInput {
+    kind: String,
+    message: String,
+    include_logs: bool,
+    logs: Option<String>,
+    email: Option<String>,
+    locale: String,
+}
+
+async fn submit_feedback(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<FeedbackSubmissionInput>,
+) -> Result<Response, Response> {
+    let idempotency_key = required_idempotency(&headers)?.to_owned();
+    let principal = authenticate(&state, &headers)?;
+    let account_id = principal.account_id.ok_or_else(|| {
+        response(problem(
+            "authentication_required",
+            "Sign in to send feedback",
+            401,
+        ))
+    })?;
+    let account_id = require_active_account(&state, account_id)?;
+    let valid_kind = matches!(input.kind.as_str(), "bug" | "idea" | "praise" | "other");
+    let invalid_email = input.email.as_ref().is_some_and(|email| {
+        email.len() > 254
+            || email.trim() != email
+            || !email.contains('@')
+            || !email
+                .rsplit('@')
+                .next()
+                .is_some_and(|domain| domain.contains('.'))
+    });
+    if invalid_email {
+        return Err(response(problem(
+            "FEEDBACK_EMAIL_INVALID",
+            "The feedback reply address is invalid",
+            400,
+        )));
+    }
+    if input
+        .logs
+        .as_ref()
+        .is_some_and(|logs| logs.len() > 128 * 1024)
+        || input.include_logs != input.logs.is_some()
+    {
+        return Err(response(problem(
+            "FEEDBACK_LOGS_UNREADABLE",
+            "Feedback logs could not be attached",
+            400,
+        )));
+    }
+    if !valid_kind
+        || input.message.trim().is_empty()
+        || input.message.chars().count() > 5_000
+        || input.locale.trim().is_empty()
+        || input.locale.len() > 32
+    {
+        return Err(response(problem(
+            "FEEDBACK_INVALID",
+            "Feedback fields are invalid",
+            400,
+        )));
+    }
+
+    if let Some(replay) = state
+        .control_persistence
+        .replay(account_id.as_str(), &idempotency_key)
+        .map_err(response)?
+    {
+        return Ok((
+            StatusCode::from_u16(replay.response.status).unwrap_or(StatusCode::OK),
+            Json(replay.response.body),
+        )
+            .into_response());
+    }
+
+    let idempotency_digest =
+        Sha256::digest(format!("{}:{idempotency_key}", account_id.as_str()).as_bytes());
+    let id = format!(
+        "fbk_{}",
+        idempotency_digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let now = request_now(&headers)?;
+    let command_id = "feedback.submit";
+    let body = json!({ "id": id });
+    state
+        .control_persistence
+        .execute(ExecuteControlCommand {
+            tenant_id: account_id.as_str().to_owned(),
+            command_id: command_id.into(),
+            idempotency_key,
+            expected_revisions: BTreeMap::new(),
+            puts: vec![ControlPut {
+                tenant_id: account_id.as_str().to_owned(),
+                record_type: "support_feedback".into(),
+                record_id: id.clone(),
+                expected_revision: Some(0),
+                value: json!({
+                    "id": id,
+                    "accountId": account_id,
+                    "kind": input.kind,
+                    "message": input.message,
+                    "includeLogs": input.include_logs,
+                    "logs": input.logs,
+                    "replyTo": input.email,
+                    "locale": input.locale,
+                    "submittedAtMs": now,
+                }),
+            }],
+            deletes: vec![],
+            audit: ControlAuditEntry {
+                tenant_id: account_id.as_str().to_owned(),
+                command_id: command_id.into(),
+                actor_id: account_id.as_str().to_owned(),
+                allowed: true,
+                detail: json!({ "feedbackId": id, "kind": input.kind }),
+            },
+            response: HttpResponse {
+                status: StatusCode::CREATED.as_u16(),
+                headers: BTreeMap::new(),
+                body: body.clone(),
+            },
+        })
+        .map_err(response)?;
+    Ok((StatusCode::CREATED, Json(body)).into_response())
+}
 
 async fn create_api_token(
     State(state): State<ApiState>,
@@ -10468,6 +10582,7 @@ mod persistence_tests {
             ConcurrentRemoteChunkStore, MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore,
         },
     };
+    use serde_json::Value;
 
     use std::{
         fs,
@@ -10478,6 +10593,172 @@ mod persistence_tests {
         },
         time::Duration,
     };
+
+    #[tokio::test]
+    async fn feedback_submission_is_authenticated_durable_and_idempotent() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "feedback-owner".into(),
+                email: "feedback-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("valid feedback owner password".into()),
+                organization_name: "Feedback Org".into(),
+                workspace_name: "Feedback Workspace".into(),
+                max_workspaces: 5,
+                max_profiles: 100,
+                max_members: 10,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let request = || {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            );
+            headers.insert(
+                "idempotency-key",
+                HeaderValue::from_static("feedback-request-0001"),
+            );
+            headers.insert(
+                "x-correlation-id",
+                HeaderValue::from_static("fbk_0123456789abcdef0123456789abcdef"),
+            );
+            headers
+        };
+        let input = || FeedbackSubmissionInput {
+            kind: "bug".into(),
+            message: "A reproducible feedback report".into(),
+            include_logs: false,
+            logs: None,
+            email: None,
+            locale: "en".into(),
+        };
+
+        let (first, replay) = tokio::join!(
+            submit_feedback(State(state.clone()), request(), Json(input())),
+            submit_feedback(State(state.clone()), request(), Json(input())),
+        );
+        let first = first.unwrap();
+        let replay = replay.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        let stored = state
+            .control_persistence
+            .list::<Value>(owner.account_id.as_str(), "support_feedback")
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0]["message"], "A reproducible feedback report");
+    }
+
+    #[tokio::test]
+    async fn feedback_rejects_inactive_account_with_explained_forbidden_response() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "inactive-feedback-owner".into(),
+                email: "inactive-feedback-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("valid feedback owner password".into()),
+                organization_name: "Feedback Org".into(),
+                workspace_name: "Feedback Workspace".into(),
+                max_workspaces: 5,
+                max_profiles: 100,
+                max_members: 10,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let (account, revision) = state
+            .account_persistence
+            .load_versioned(&owner.account_id)
+            .unwrap()
+            .unwrap();
+        let account = account
+            .transition_status(revision, AccountStatus::Suspended, "2026-10-24T00:00:01Z")
+            .unwrap();
+        let account_put = state
+            .account_persistence
+            .prepare_import_put(&account, revision)
+            .unwrap();
+        state
+            .control_persistence
+            .execute(ExecuteControlCommand {
+                tenant_id: "control".into(),
+                command_id: "account.status.test".into(),
+                idempotency_key: "feedback-test-suspend-account".into(),
+                expected_revisions: BTreeMap::new(),
+                puts: vec![account_put],
+                deletes: vec![],
+                audit: ControlAuditEntry {
+                    tenant_id: "control".into(),
+                    command_id: "account.status.test".into(),
+                    actor_id: "test".into(),
+                    allowed: true,
+                    detail: json!({ "accountId": owner.account_id }),
+                },
+                response: HttpResponse {
+                    status: StatusCode::OK.as_u16(),
+                    headers: BTreeMap::new(),
+                    body: json!({ "status": "suspended" }),
+                },
+            })
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("inactive-feedback-request-0001"),
+        );
+        headers.insert(
+            "x-correlation-id",
+            HeaderValue::from_static("inactive-feedback-correlation"),
+        );
+        let response = submit_feedback(
+            State(state.clone()),
+            headers,
+            Json(FeedbackSubmissionInput {
+                kind: "bug".into(),
+                message: "A report from an inactive account".into(),
+                include_logs: false,
+                logs: None,
+                email: None,
+                locale: "en".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "account_inactive");
+        assert_eq!(problem["title"], "Account is not active");
+        assert!(
+            state
+                .control_persistence
+                .list::<Value>(owner.account_id.as_str(), "support_feedback")
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn web_and_desktop_login_reject_pending_identity_generically() {
@@ -10741,6 +11022,93 @@ mod persistence_tests {
         let serialized = serde_json::to_value(&admins).unwrap();
         assert!(serialized[0].get("password").is_none());
         assert!(serialized[0].get("token").is_none());
+    }
+
+    #[test]
+    fn operator_admin_provision_is_atomic_verified_and_keeps_existing_tenants() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "existing-owner".into(),
+                email: "existing-owner@example.com".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("initial owner password 2026".into()),
+                organization_name: "Existing Organization".into(),
+                workspace_name: "Existing Workspace".into(),
+                max_workspaces: 10,
+                max_profiles: 1_000,
+                max_members: 100,
+                max_storage_bytes: 10 * 1024 * 1024 * 1024,
+            })
+            .unwrap();
+
+        let created = state
+            .operator_create_platform_admin(OperatorPlatformAdminProvisionInput {
+                username: "new-owner".into(),
+                email: "new-owner@example.com".into(),
+                password: zeroize::Zeroizing::new("new admin password 2026".into()),
+                organization_name: "New Owner Organization".into(),
+                workspace_name: "New Owner Workspace".into(),
+            })
+            .unwrap();
+
+        let admins = state.operator_list_platform_admins().unwrap();
+        assert_eq!(admins.len(), 2);
+        assert!(admins.iter().any(|admin| {
+            admin.account_id == created.account_id
+                && admin.email.as_deref() == Some("new-owner@example.com")
+                && admin.status == AccountStatus::Active
+                && admin.identity_available
+        }));
+        assert_eq!(
+            state
+                .credentials
+                .authenticate("new-owner@example.com", "new admin password 2026", now())
+                .unwrap(),
+            created.account_id
+        );
+        let aggregate = state.control_aggregate().unwrap();
+        let platform_principal = Principal {
+            account_id: Some(created.account_id.clone()),
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        assert!(
+            aggregate
+                .workspaces
+                .get_workspace_record(
+                    &platform_principal,
+                    &[],
+                    &created.organization_id,
+                    &created.workspace_id,
+                )
+                .is_ok()
+        );
+        assert!(
+            aggregate
+                .platform_admin_accounts
+                .contains(&owner.account_id)
+        );
+        assert!(
+            aggregate
+                .platform_admin_accounts
+                .contains(&created.account_id)
+        );
+        let repeated = state
+            .operator_create_platform_admin(OperatorPlatformAdminProvisionInput {
+                username: "another-owner".into(),
+                email: "another-owner@example.com".into(),
+                password: zeroize::Zeroizing::new("another admin password 2026".into()),
+                organization_name: "Another Organization".into(),
+                workspace_name: "Another Workspace".into(),
+            })
+            .unwrap_err();
+        assert_eq!(repeated.code, "operator_admin_already_provisioned");
     }
 
     #[test]

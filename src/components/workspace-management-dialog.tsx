@@ -1,7 +1,7 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuArrowUpDown,
@@ -12,10 +12,10 @@ import {
   LuHardDrive,
   LuPencil,
   LuPlus,
+  LuRefreshCw,
   LuSearch,
   LuSend,
   LuShieldCheck,
-  LuTrash2,
   LuTriangleAlert,
   LuUsers,
   LuWifiOff,
@@ -78,6 +78,9 @@ export function WorkspaceManagementDialog({
   const [selectedOrgId, setSelectedOrgId] = useState<string>("");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(
+    null,
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [switchingId, setSwitchingId] = useState<string | null>(null);
 
@@ -85,11 +88,9 @@ export function WorkspaceManagementDialog({
   const [createWsOpen, setCreateWsOpen] = useState(false);
   const [createOrgOpen, setCreateOrgOpen] = useState(false);
   const [editingWs, setEditingWs] = useState<Workspace | null>(null);
-  const [deletingWs, setDeletingWs] = useState<Workspace | null>(null);
-  const [deleteConfirmName, setDeleteConfirmName] = useState("");
-  const [isDeletingWs, setIsDeletingWs] = useState(false);
   const [inviteWs, setInviteWs] = useState<Workspace | null>(null);
   const [membersWs, setMembersWs] = useState<Workspace | null>(null);
+  const workspaceRequestRef = useRef(0);
 
   // Form states for Create Workspace
   const [wsName, setWsName] = useState("");
@@ -125,47 +126,43 @@ export function WorkspaceManagementDialog({
     try {
       const orgPage = await desktopApi.listOrganizations();
       setOrganizations(orgPage.items);
-      if (orgPage.items.length > 0 && !selectedOrgId) {
-        setSelectedOrgId(orgPage.items[0].id);
-      }
+      setSelectedOrgId((current) =>
+        orgPage.items.some((organization) => organization.id === current)
+          ? current
+          : (orgPage.items[0]?.id ?? ""),
+      );
     } catch (err) {
-      console.warn("Could not list organizations, fallback to available:", err);
+      console.error("Failed to load organizations:", err);
+      showErrorToast(String(err));
     }
-  }, [selectedOrgId]);
+  }, []);
 
   // Load workspaces for the selected organization
   const loadWorkspaces = useCallback(async () => {
+    const requestId = ++workspaceRequestRef.current;
     setIsLoading(true);
     try {
-      if (selectedOrgId) {
-        const wsPage = await desktopApi.listWorkspaces(selectedOrgId);
-        setWorkspaces(wsPage.items);
-      } else {
-        // Fallback to get_available_workspaces if no org loaded
-        const available = await invoke<Array<any>>("get_available_workspaces");
-        const mapped: Workspace[] = available.map((w: any) => ({
-          id: w.id,
-          organizationId: w.organizationId || "org_default",
-          name: w.name,
-          policy: w.policy ?? {
-            maxProfiles: 0,
-            maxMembers: 0,
-            maxStorageBytes: 0,
-            offlineEntitled: false,
-          },
-          createdAt: w.createdAt || new Date().toISOString(),
-        }));
-        setWorkspaces(mapped);
+      if (!selectedOrgId) {
+        setWorkspaces([]);
+        setWorkspaceLoadError(null);
+        return;
       }
+      const wsPage = await desktopApi.listWorkspaces(selectedOrgId);
+      if (requestId !== workspaceRequestRef.current) return;
+      setWorkspaces(wsPage.items);
+      setWorkspaceLoadError(null);
     } catch (err) {
+      if (requestId !== workspaceRequestRef.current) return;
       console.error("Failed to load workspaces:", err);
+      setWorkspaces([]);
+      setWorkspaceLoadError(err instanceof Error ? err.message : String(err));
       showErrorToast(
         t("workspaces.loadFailed", {
           defaultValue: "Không thể tải danh sách không gian làm việc",
         }),
       );
     } finally {
-      setIsLoading(false);
+      if (requestId === workspaceRequestRef.current) setIsLoading(false);
     }
   }, [selectedOrgId, t]);
 
@@ -307,37 +304,6 @@ export function WorkspaceManagementDialog({
       showErrorToast(String(err));
     } finally {
       setIsUpdatingWs(false);
-    }
-  };
-
-  const handleDeleteWorkspace = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!deletingWs || deleteConfirmName !== deletingWs.name) return;
-
-    setIsDeletingWs(true);
-    try {
-      await desktopApi.updateWorkspace({
-        organizationId: deletingWs.organizationId,
-        workspaceId: deletingWs.id,
-        update: {
-          name: `[Archived] ${deletingWs.name}`,
-        },
-      });
-
-      showSuccessToast(
-        t("workspaces.deleted", {
-          defaultValue: `Đã giải tán workspace "${deletingWs.name}"`,
-        }),
-      );
-      setDeletingWs(null);
-      setEditingWs(null);
-      setDeleteConfirmName("");
-      void loadWorkspaces();
-    } catch (err) {
-      console.error("Failed to delete workspace:", err);
-      showErrorToast(String(err));
-    } finally {
-      setIsDeletingWs(false);
     }
   };
 
@@ -532,7 +498,16 @@ export function WorkspaceManagementDialog({
               Tổ chức:
             </span>
             {organizations.length > 0 ? (
-              <Select value={selectedOrgId} onValueChange={setSelectedOrgId}>
+              <Select
+                value={selectedOrgId}
+                onValueChange={(organizationId) => {
+                  workspaceRequestRef.current += 1;
+                  setWorkspaces([]);
+                  setWorkspaceLoadError(null);
+                  setSelectedOrgId(organizationId);
+                  setPage(0);
+                }}
+              >
                 <SelectTrigger className="h-8 w-52 text-xs">
                   <SelectValue placeholder="Chọn tổ chức..." />
                 </SelectTrigger>
@@ -629,6 +604,19 @@ export function WorkspaceManagementDialog({
               />
             </div>
             <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void loadWorkspaces()}
+              disabled={isLoading || !selectedOrgId}
+              className="h-8 gap-1.5 text-xs"
+            >
+              <LuRefreshCw
+                className={cn("size-3", isLoading && "animate-spin")}
+              />
+              Làm mới
+            </Button>
+            <Button
               size="sm"
               onClick={() => setCreateWsOpen(true)}
               className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
@@ -644,6 +632,21 @@ export function WorkspaceManagementDialog({
         </div>
 
         {/* Workspaces Table */}
+        {workspaceLoadError ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <span>Không tải được workspace. {workspaceLoadError}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void loadWorkspaces()}
+              disabled={isLoading}
+              className="h-7 text-xs"
+            >
+              Thử lại
+            </Button>
+          </div>
+        ) : null}
         <div className={cn("overflow-y-auto", !isPageMode && "max-h-[300px]")}>
           <table className="w-full text-left text-xs">
             <thead className="bg-muted/50 border-b border-border sticky top-0 font-medium text-muted-foreground text-[11px]">
@@ -1096,29 +1099,15 @@ export function WorkspaceManagementDialog({
                 </span>
               </div>
 
-              {/* Danger Zone */}
-              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 space-y-2">
-                <div className="font-semibold text-red-600 dark:text-red-400 text-xs flex items-center gap-1.5">
-                  <LuTriangleAlert className="size-3.5" />
-                  <span>KHU VỰC NGUY HIỂM (DANGER ZONE)</span>
+              <div className="rounded-lg border border-border/60 p-3 space-y-1.5">
+                <div className="font-medium text-xs flex items-center gap-1.5">
+                  <LuTriangleAlert className="size-3.5 text-muted-foreground" />
+                  <span>Xóa workspace</span>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Giải tán không gian làm việc này. Dữ liệu hồ sơ sẽ được chuyển
-                  vào lưu trữ an toàn.
+                  API chưa hỗ trợ xóa hoặc lưu trữ workspace. Đổi tên không xóa
+                  dữ liệu nên thao tác này chưa được cung cấp.
                 </p>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => {
-                    setDeletingWs(editingWs);
-                    setDeleteConfirmName("");
-                  }}
-                  className="h-7 px-3 text-xs cursor-pointer"
-                >
-                  <LuTrash2 className="size-3 mr-1" />
-                  <span>Xóa / Giải Tán Workspace Này...</span>
-                </Button>
               </div>
 
               <DialogFooter className="border-t border-border/50 pt-3">
@@ -1139,83 +1128,6 @@ export function WorkspaceManagementDialog({
                   className="h-8 text-xs font-medium cursor-pointer"
                 >
                   Lưu Cập Nhật
-                </LoadingButton>
-              </DialogFooter>
-            </form>
-          )}
-        </DialogContent>
-      </Dialog>
-
-      {/* SUB-MODAL: Delete Workspace (Section 14.3) */}
-      <Dialog
-        open={!!deletingWs}
-        onOpenChange={(open) => !open && setDeletingWs(null)}
-      >
-        <DialogContent className="max-w-md p-6">
-          <DialogHeader className="border-b border-border/50 pb-3">
-            <DialogTitle className="text-base font-semibold text-red-600 flex items-center gap-2">
-              <LuTriangleAlert className="size-4" />
-              <span>CẢNH BÁO: XÓA KHÔNG GIAN LÀM VIỆC</span>
-            </DialogTitle>
-            <DialogDescription className="text-xs text-muted-foreground">
-              Bạn đang chuẩn bị xóa vĩnh viễn Workspace:{" "}
-              <strong>"{deletingWs?.name}"</strong>
-            </DialogDescription>
-          </DialogHeader>
-
-          {deletingWs && (
-            <form
-              onSubmit={(e) => void handleDeleteWorkspace(e)}
-              className="space-y-4 py-2 text-xs"
-            >
-              <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 space-y-1.5 text-xs text-muted-foreground">
-                <div className="font-semibold text-foreground">
-                  Tài nguyên bị ảnh hưởng:
-                </div>
-                <div>
-                  • Toàn bộ Profile trình duyệt trong Workspace này sẽ được bảo
-                  vệ lưu trữ
-                </div>
-                <div>• Thành viên và Operator sẽ bị thu hồi quyền truy cập</div>
-                <div>• Proxy gán riêng sẽ được trả về kho tự do</div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-xs font-medium text-foreground">
-                  Để xác nhận, vui lòng nhập chính xác tên Workspace bên dưới:
-                </Label>
-                <div className="font-mono text-xs text-primary font-semibold select-all bg-muted/40 p-1.5 rounded">
-                  {deletingWs.name}
-                </div>
-                <Input
-                  placeholder={`Nhập lại "${deletingWs.name}"`}
-                  value={deleteConfirmName}
-                  onChange={(e) => setDeleteConfirmName(e.target.value)}
-                  required
-                  className="h-9 text-xs"
-                />
-              </div>
-
-              <DialogFooter className="border-t border-border/50 pt-3 flex items-center justify-between sm:justify-between">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setDeletingWs(null)}
-                  className="h-8 text-xs cursor-pointer"
-                >
-                  Hủy Bỏ
-                </Button>
-                <LoadingButton
-                  type="submit"
-                  variant="destructive"
-                  size="sm"
-                  isLoading={isDeletingWs}
-                  disabled={deleteConfirmName !== deletingWs.name}
-                  className="h-8 text-xs font-semibold cursor-pointer"
-                >
-                  <LuTrash2 className="size-3 mr-1" />
-                  <span>Tôi hiểu rủi ro, Xóa Workspace</span>
                 </LoadingButton>
               </DialogFooter>
             </form>

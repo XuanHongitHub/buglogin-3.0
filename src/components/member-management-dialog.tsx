@@ -23,7 +23,6 @@ import {
   LuUserCheck,
   LuUserPlus,
   LuUsers,
-  LuZap,
 } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
 import { Badge } from "@/components/ui/badge";
@@ -46,13 +45,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  getActiveUserEmail,
-  resolveHumanIdentity,
-} from "@/lib/identity-display";
+import { getActiveUserEmail } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
+import { analyzeBulkAccountRows, analyzeBulkInvitationEmails } from "../../apps/desktop/src/member-invitation-input";
 import type {
   Member,
   MemberRole,
@@ -72,7 +69,7 @@ const desktopApi = createTauriDesktopApi();
 export const ROLE_RANKS: Record<string, number> = {
   owner: 4,
   admin: 3,
-  manager: 2,
+  lead: 2,
   operator: 1,
   member: 0,
 };
@@ -93,23 +90,34 @@ export function MemberManagementDialog({
 
   const [currentUser, setCurrentUser] = useState<{
     id: string;
+    accountId: string;
     email: string;
     role: string;
+    platformAdmin: boolean;
+    organizationOwner: boolean;
   }>({
     id: "",
+    accountId: "",
     email: "",
     role: "member",
+    platformAdmin: false,
+    organizationOwner: false,
   });
 
   // Invite modal state
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteUsername, setInviteUsername] = useState("");
+  const [inviteProvisioningAccountId, setInviteProvisioningAccountId] = useState("");
+  const [createInviteAccount, setCreateInviteAccount] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteRole, setInviteRole] = useState<MemberRole>("operator");
   const [isInviting, setIsInviting] = useState(false);
   const [generatedInvite, setGeneratedInvite] = useState<{
     code: string;
     deepLink: string;
     expiresAt: string;
+    createdPendingAccount?: boolean;
   } | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -126,10 +134,22 @@ export function MemberManagementDialog({
     new Set(),
   );
   const [isBulkExecuting, setIsBulkExecuting] = useState(false);
+  const [bulkActionError, setBulkActionError] = useState<string | null>(null);
 
   // Bulk Provision Modal state
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkEmailsText, setBulkEmailsText] = useState("");
+  const [bulkCreateAccounts, setBulkCreateAccounts] = useState(false);
+  const [bulkAccountIds, setBulkAccountIds] = useState<Record<string, string>>({});
+  const [bulkInputError, setBulkInputError] = useState<string | null>(null);
+  const bulkEmailAnalysis = useMemo(
+    () => analyzeBulkInvitationEmails(bulkEmailsText),
+    [bulkEmailsText],
+  );
+  const bulkAccountAnalysis = useMemo(
+    () => analyzeBulkAccountRows(bulkEmailsText),
+    [bulkEmailsText],
+  );
   const [bulkRole, setBulkRole] = useState<MemberRole>("operator");
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{
@@ -138,16 +158,26 @@ export function MemberManagementDialog({
   }>({ current: 0, total: 0 });
   const [bulkResults, setBulkResults] = useState<Array<{
     email: string;
+    username?: string;
+    accountCreated?: boolean;
     inviteCode?: string;
     deepLink?: string;
     status: "success" | "error";
     error?: string;
   }> | null>(null);
   const [bulkCopiedAll, setBulkCopiedAll] = useState(false);
+  const bulkSuccessCount =
+    bulkResults?.filter((result) => result.status === "success").length ?? 0;
+  const bulkFailureCount =
+    bulkResults?.filter((result) => result.status === "error").length ?? 0;
 
-  const currentUserRank = ROLE_RANKS[currentUser.role] ?? 0;
+  const currentUserRank = currentUser.platformAdmin
+    ? Number.POSITIVE_INFINITY
+    : currentUser.organizationOwner
+      ? ROLE_RANKS.owner
+      : ROLE_RANKS[currentUser.role] ?? 0;
   const assignableRoles: MemberRole[] = (
-    ["admin", "operator", "member"] as MemberRole[]
+    ["owner", "admin", "lead", "operator", "member"] as MemberRole[]
   ).filter((r) => (ROLE_RANKS[r] ?? 0) < currentUserRank);
 
   // Resolve workspace if needed
@@ -174,7 +204,7 @@ export function MemberManagementDialog({
   }, [propWorkspaceId]);
 
   const loadMembers = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!workspaceId) return false;
     setIsLoading(true);
     try {
       const [page, account] = await Promise.all([
@@ -187,17 +217,16 @@ export function MemberManagementDialog({
           (member) => member.accountId === account.accountId,
         );
         const activeEmail = getActiveUserEmail();
-        const resolved = resolveHumanIdentity(
-          account.accountId,
-          membership?.role ?? "member",
-          0,
-        );
         setCurrentUser({
           id: membership?.id ?? account.accountId,
-          email: activeEmail || resolved.email,
+          accountId: account.accountId,
+          email: membership?.identity?.email ?? activeEmail,
           role: membership?.role ?? "member",
+          platformAdmin: account.platformAdmin,
+          organizationOwner: account.managedWorkspaceIds.includes(workspaceId),
         });
       }
+      return true;
     } catch (err) {
       console.error("Failed to load members:", err);
       showErrorToast(
@@ -205,6 +234,7 @@ export function MemberManagementDialog({
           defaultValue: "Không thể tải danh sách thành viên",
         }),
       );
+      return false;
     } finally {
       setIsLoading(false);
     }
@@ -272,7 +302,32 @@ export function MemberManagementDialog({
     if (!inviteEmail.trim() || !workspaceId) return;
 
     setIsInviting(true);
+    setInviteError(null);
+    let accountCreated = false;
+    let accountProvisioningAttempted = false;
     try {
+      if (createInviteAccount) {
+        const accountId = inviteProvisioningAccountId || `acct_${crypto.randomUUID().replaceAll("-", "")}`;
+        if (!inviteProvisioningAccountId) setInviteProvisioningAccountId(accountId);
+        accountProvisioningAttempted = true;
+        const account = await desktopApi.createScopedPendingAccount({
+          workspaceId,
+          accountId,
+          username: inviteUsername.trim(),
+          email: inviteEmail.trim(),
+          role: inviteRole,
+        }, `acct-create-${crypto.randomUUID().replaceAll("-", "")}`);
+        accountCreated = true;
+        if (!account.member || account.member.status !== "active") {
+          throw new Error("API đã tạo identity nhưng chưa trả membership active; hãy cập nhật API rồi thử lại cùng account này.");
+        }
+        await loadMembers();
+        showSuccessToast(
+          `Đã tạo account và gán ${inviteRole} vào workspace. Email vẫn chờ xác minh trước khi đăng nhập.`,
+        );
+        setInviteModalOpen(false);
+        return;
+      }
       const expiresAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
       const invitation = await desktopApi.createMemberInvitation({
         workspaceId,
@@ -295,10 +350,16 @@ export function MemberManagementDialog({
           defaultValue: "Đã tạo lời mời thành viên thành công",
         }),
       );
-      void loadMembers();
     } catch (err) {
       console.error("Failed to invite member:", err);
-      showErrorToast(err instanceof Error ? err.message : JSON.stringify(err));
+      const detail = err instanceof Error ? err.message : JSON.stringify(err);
+      const message = accountCreated
+        ? `Account đã được tạo nhưng chưa gán xong member/role. Làm mới danh sách hoặc kiểm tra account trước khi thử lại. Chi tiết: ${detail}`
+        : accountProvisioningAttempted
+          ? `Chưa xác nhận được kết quả tạo account. Có thể identity đã được tạo; thử lại sẽ dùng cùng account ID. Chi tiết: ${detail}`
+        : detail;
+      setInviteError(message);
+      showErrorToast(message);
     } finally {
       setIsInviting(false);
     }
@@ -340,12 +401,7 @@ export function MemberManagementDialog({
         workspaceId,
         memberId: offboardMember.id,
       });
-      const displayName = resolveHumanIdentity(
-        offboardMember.accountId,
-        offboardMember.role,
-        undefined,
-        t,
-      ).displayName;
+      const displayName = offboardMember.identity?.username ?? "thành viên";
       showSuccessToast(`Đã tạm ngưng quyền thành viên của ${displayName}.`);
       setOffboardMember(null);
       void loadMembers();
@@ -364,8 +420,10 @@ export function MemberManagementDialog({
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      list = list.filter(
-        (m) => m.accountId.toLowerCase().includes(q) || m.id.includes(q),
+      list = list.filter((m) =>
+        [m.identity?.username, m.identity?.email, m.accountId, m.id]
+          .filter(Boolean)
+          .some((value) => value?.toLowerCase().includes(q)),
       );
     }
     return list;
@@ -375,7 +433,7 @@ export function MemberManagementDialog({
     return filteredMembers.filter((m) => {
       const memberRank = ROLE_RANKS[m.role] ?? 0;
       const isSelf =
-        m.id === currentUser.id || m.accountId === currentUser.email;
+        m.id === currentUser.id || m.accountId === currentUser.accountId;
       return !isSelf && memberRank < currentUserRank;
     });
   }, [filteredMembers, currentUser, currentUserRank]);
@@ -403,7 +461,8 @@ export function MemberManagementDialog({
   const handleBulkChangeRole = async (newRole: MemberRole) => {
     if (!workspaceId || selectedMemberIds.size === 0) return;
     setIsBulkExecuting(true);
-    let count = 0;
+    setBulkActionError(null);
+    const failedIds: string[] = [];
     try {
       for (const memberId of selectedMemberIds) {
         try {
@@ -412,14 +471,27 @@ export function MemberManagementDialog({
             memberId,
             role: newRole,
           });
-          count++;
-        } catch (e) {
-          console.warn(`Failed to update role for ${memberId}:`, e);
+        } catch {
+          failedIds.push(memberId);
         }
       }
-      showSuccessToast(t("members.bulkActions.roleUpdated", { count }));
-      setSelectedMemberIds(new Set());
-      void loadMembers();
+      const refreshed = await loadMembers();
+      setSelectedMemberIds(
+        new Set(refreshed ? failedIds : [...selectedMemberIds]),
+      );
+      if (failedIds.length > 0 || !refreshed) {
+        const summary = !refreshed
+          ? "Đã gửi thay đổi nhưng không làm mới được danh sách. Hãy tải lại trước khi thao tác tiếp."
+          : `${selectedMemberIds.size - failedIds.length} thành công, ${failedIds.length} thất bại. Các thành viên lỗi vẫn được chọn để thử lại.`;
+        setBulkActionError(summary);
+        showErrorToast(summary);
+      } else {
+        showSuccessToast(
+          t("members.bulkActions.roleUpdated", {
+            count: selectedMemberIds.size,
+          }),
+        );
+      }
     } finally {
       setIsBulkExecuting(false);
     }
@@ -428,19 +500,33 @@ export function MemberManagementDialog({
   const handleBulkSuspend = async () => {
     if (!workspaceId || selectedMemberIds.size === 0) return;
     setIsBulkExecuting(true);
-    let count = 0;
+    setBulkActionError(null);
+    const failedIds: string[] = [];
     try {
       for (const memberId of selectedMemberIds) {
         try {
           await desktopApi.suspendMember({ workspaceId, memberId });
-          count++;
-        } catch (e) {
-          console.warn(`Failed to suspend ${memberId}:`, e);
+        } catch {
+          failedIds.push(memberId);
         }
       }
-      showSuccessToast(t("members.bulkActions.suspendedCount", { count }));
-      setSelectedMemberIds(new Set());
-      void loadMembers();
+      const refreshed = await loadMembers();
+      setSelectedMemberIds(
+        new Set(refreshed ? failedIds : [...selectedMemberIds]),
+      );
+      if (failedIds.length > 0 || !refreshed) {
+        const summary = !refreshed
+          ? "Đã gửi thay đổi nhưng không làm mới được danh sách. Hãy tải lại trước khi thao tác tiếp."
+          : `${selectedMemberIds.size - failedIds.length} thành công, ${failedIds.length} thất bại. Các thành viên lỗi vẫn được chọn để thử lại.`;
+        setBulkActionError(summary);
+        showErrorToast(summary);
+      } else {
+        showSuccessToast(
+          t("members.bulkActions.suspendedCount", {
+            count: selectedMemberIds.size,
+          }),
+        );
+      }
     } finally {
       setIsBulkExecuting(false);
     }
@@ -449,47 +535,125 @@ export function MemberManagementDialog({
   const handleBulkActivate = async () => {
     if (!workspaceId || selectedMemberIds.size === 0) return;
     setIsBulkExecuting(true);
-    let count = 0;
+    setBulkActionError(null);
+    const failedIds: string[] = [];
     try {
       for (const memberId of selectedMemberIds) {
         try {
           await desktopApi.activateMember({ workspaceId, memberId });
-          count++;
-        } catch (e) {
-          console.warn(`Failed to activate ${memberId}:`, e);
+        } catch {
+          failedIds.push(memberId);
         }
       }
-      showSuccessToast(t("members.bulkActions.activatedCount", { count }));
-      setSelectedMemberIds(new Set());
-      void loadMembers();
+      const refreshed = await loadMembers();
+      setSelectedMemberIds(
+        new Set(refreshed ? failedIds : [...selectedMemberIds]),
+      );
+      if (failedIds.length > 0 || !refreshed) {
+        const summary = !refreshed
+          ? "Đã gửi thay đổi nhưng không làm mới được danh sách. Hãy tải lại trước khi thao tác tiếp."
+          : `${selectedMemberIds.size - failedIds.length} thành công, ${failedIds.length} thất bại. Các thành viên lỗi vẫn được chọn để thử lại.`;
+        setBulkActionError(summary);
+        showErrorToast(summary);
+      } else {
+        showSuccessToast(
+          t("members.bulkActions.activatedCount", {
+            count: selectedMemberIds.size,
+          }),
+        );
+      }
     } finally {
       setIsBulkExecuting(false);
     }
   };
 
   const handleCreateBulkInvitations = async () => {
-    const rawList = bulkEmailsText
-      .split(/[\n,;]+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+    setBulkInputError(null);
+    const entryCount = bulkCreateAccounts
+      ? bulkAccountAnalysis.entryCount
+      : bulkEmailAnalysis.entryCount;
+    if (!workspaceId || entryCount === 0) return;
+    if (bulkCreateAccounts && (
+      bulkAccountAnalysis.invalidLines.length > 0 ||
+      bulkAccountAnalysis.duplicateLines.length > 0 ||
+      bulkAccountAnalysis.exceedsLimit
+    )) {
+      setBulkInputError(
+        `Kiểm tra dòng không hợp lệ: ${bulkAccountAnalysis.invalidLines.join(", ") || "—"}; trùng: ${bulkAccountAnalysis.duplicateLines.join(", ") || "—"}; tối đa 100 dòng.`,
+      );
+      return;
+    }
+    if (!bulkCreateAccounts && (
+      bulkEmailAnalysis.invalid.length > 0 ||
+      bulkEmailAnalysis.duplicates.length > 0 ||
+      bulkEmailAnalysis.exceedsLimit
+    )) {
+      const reasons = [
+        bulkEmailAnalysis.invalid.length > 0 &&
+          `${bulkEmailAnalysis.invalid.length} email không hợp lệ`,
+        bulkEmailAnalysis.duplicates.length > 0 &&
+          `${bulkEmailAnalysis.duplicates.length} email bị trùng`,
+        bulkEmailAnalysis.exceedsLimit && "tối đa 100 email mỗi lần",
+      ].filter(Boolean);
+      setBulkInputError(`Chưa tạo lời mời: ${reasons.join("; ")}.`);
+      return;
+    }
 
-    if (rawList.length === 0 || !workspaceId) return;
-
+    const entries = bulkCreateAccounts
+      ? bulkAccountAnalysis.rows
+      : bulkEmailAnalysis.emails.map((email, index) => ({
+          line: index + 1,
+          email,
+          username: undefined,
+        }));
     setIsBulkProcessing(true);
-    setBulkProgress({ current: 0, total: rawList.length });
+    setBulkProgress({ current: 0, total: entries.length });
     const results: Array<{
       email: string;
+      username?: string;
+      accountCreated?: boolean;
       inviteCode?: string;
       deepLink?: string;
       status: "success" | "error";
       error?: string;
     }> = [];
 
-    for (let i = 0; i < rawList.length; i++) {
-      const email = rawList[i];
-      setBulkProgress({ current: i + 1, total: rawList.length });
+    for (let i = 0; i < entries.length; i++) {
+      const { email, username } = entries[i];
+      setBulkProgress({
+        current: i + 1,
+        total: entries.length,
+      });
 
+      let accountCreated = false;
+      let accountProvisioningAttempted = false;
       try {
+        if (bulkCreateAccounts && username) {
+          const nonce = crypto.randomUUID().replaceAll("-", "");
+          const emailKey = email.trim().toLocaleLowerCase("en-US");
+          const accountId = bulkAccountIds[emailKey] || `acct_${nonce}`;
+          if (!bulkAccountIds[emailKey]) {
+            setBulkAccountIds((previous) => ({ ...previous, [emailKey]: accountId }));
+          }
+          accountProvisioningAttempted = true;
+          const account = await desktopApi.createScopedPendingAccount(
+            {
+              workspaceId,
+              accountId,
+              username,
+              email,
+              role: bulkRole,
+            },
+            `acct-create-${crypto.randomUUID().replaceAll("-", "")}`,
+          );
+          accountCreated = true;
+          if (!account.member || account.member.status !== "active") {
+            throw new Error("API đã tạo identity nhưng chưa trả membership active; cần cập nhật API.");
+          }
+          accountCreated = true;
+          results.push({ email, username, accountCreated, status: "success" });
+          continue;
+        }
         const invitation = await desktopApi.createMemberInvitation({
           workspaceId,
           email,
@@ -501,23 +665,29 @@ export function MemberManagementDialog({
         }
         const inviteCode = `${invitation.invitationId}.${invitation.code}`;
         const deepLink = `buglogin://invite?invitationId=${encodeURIComponent(invitation.invitationId)}&code=${encodeURIComponent(invitation.code)}`;
-        results.push({ email, inviteCode, deepLink, status: "success" });
+        results.push({ email, username, accountCreated, inviteCode, deepLink, status: "success" });
       } catch (err) {
-        const message =
+        const detail =
           err instanceof Error ? err.message : "Không thể tạo lời mời.";
-        results.push({ email, status: "error", error: message });
+        const message = accountCreated
+          ? `Account đã tạo nhưng chưa gán xong member/role: ${detail}`
+          : accountProvisioningAttempted
+            ? `Chưa xác nhận được kết quả tạo account; chạy lại dòng này sẽ dùng cùng account ID: ${detail}`
+            : detail;
+        results.push({ email, username, accountCreated, status: "error", error: message });
       }
     }
 
     setBulkResults(results);
     setIsBulkProcessing(false);
-    void loadMembers();
+    if (bulkCreateAccounts) void loadMembers();
   };
 
   const handleCopyBulkResults = async () => {
     if (!bulkResults) return;
     const lines = bulkResults.map((r) => {
       if (r.status === "error") return `${r.email}\tError: ${r.error}`;
+      if (bulkCreateAccounts) return `${r.username}\t${r.email}\t${bulkRole}\tTạo account; email chờ xác minh`;
       return `${r.email}\tCode: ${r.inviteCode}\tLink: ${r.deepLink}`;
     });
     try {
@@ -534,17 +704,21 @@ export function MemberManagementDialog({
 
   const handleExportBulkCsv = () => {
     if (!bulkResults) return;
-    const header = "Email,InviteCode,DeepLink,Role,Status";
+    const header = bulkCreateAccounts
+      ? "Username,Email,Role,Status"
+      : "Email,InviteCode,DeepLink,Role,Status";
     const rows = bulkResults.map((r) => {
-      return `"${r.email}","${r.inviteCode || ""}","${r.deepLink || ""}","${bulkRole}","${r.status}"`;
+      return bulkCreateAccounts
+        ? `"${r.username || ""}","${r.email}","${bulkRole}","${r.status === "success" ? "created_pending_verification" : r.error || "error"}"`
+        : `"${r.email}","${r.inviteCode || ""}","${r.deepLink || ""}","${bulkRole}","${r.status}"`;
     });
-    const csvContent = `data:text/csv;charset=utf-8,\uFEFF${[header, ...rows].join("\n")}`;
-    const encodedUri = encodeURI(csvContent);
+    const csvContent = [header, ...rows].join("\n");
+    const encodedUri = `data:text/csv;charset=utf-8,%EF%BB%BF${encodeURIComponent(csvContent)}`;
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
     link.setAttribute(
       "download",
-      `buglogin-invitations-${new Date().toISOString().slice(0, 10)}.csv`,
+      `buglogin-${bulkCreateAccounts ? "accounts" : "invitations"}-${new Date().toISOString().slice(0, 10)}.csv`,
     );
     document.body.appendChild(link);
     link.click();
@@ -708,6 +882,9 @@ export function MemberManagementDialog({
                     <SelectItem value="admin" className="text-xs">
                       Admin
                     </SelectItem>
+                    <SelectItem value="lead" className="text-xs">
+                      Lead — quản lý thành viên và đội nhóm cấp thấp hơn
+                    </SelectItem>
                     <SelectItem value="operator" className="text-xs">
                       Operator
                     </SelectItem>
@@ -723,23 +900,9 @@ export function MemberManagementDialog({
                   size="sm"
                   variant="outline"
                   onClick={() => {
-                    setInviteEmail("");
-                    setInviteRole(assignableRoles[0] || "operator");
-                    setGeneratedInvite(null);
-                    setInviteModalOpen(true);
-                  }}
-                  disabled={currentUserRank <= 1}
-                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-                >
-                  <LuZap className="size-3.5 text-primary" />
-                  <span>Mời thành viên</span>
-                </Button>
-
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
+                    setBulkCreateAccounts(false);
                     setBulkEmailsText("");
+                    setBulkInputError(null);
                     setBulkRole(assignableRoles[0] || "operator");
                     setBulkResults(null);
                     setBulkModalOpen(true);
@@ -750,16 +913,36 @@ export function MemberManagementDialog({
                   <LuUsers className="size-3.5 text-primary" />
                   <span>
                     {t("members.bulkProvisionButton", {
-                      defaultValue: "Tạo Hàng Loạt",
+                      defaultValue: "Mời hàng loạt",
                     })}
                   </span>
                 </Button>
 
                 <Button
                   size="sm"
+                  variant="outline"
                   onClick={() => {
+                    setBulkCreateAccounts(true);
+                    setBulkEmailsText("");
+                    setBulkInputError(null);
+                    setBulkRole(assignableRoles[0] || "operator");
+                    setBulkResults(null);
+                    setBulkModalOpen(true);
+                  }}
+                  disabled={currentUserRank <= 1}
+                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+                >
+                  <LuUsers className="size-3.5" />
+                  <span>Tạo account hàng loạt</span>
+                </Button>
+
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setCreateInviteAccount(false);
                     setGeneratedInvite(null);
                     setInviteEmail("");
+                    setInviteUsername("");
                     setInviteRole(assignableRoles[0] || "operator");
                     setInviteModalOpen(true);
                   }}
@@ -772,6 +955,25 @@ export function MemberManagementDialog({
                       defaultValue: "Mời Thành Viên",
                     })}
                   </span>
+                </Button>
+
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setCreateInviteAccount(true);
+                    setGeneratedInvite(null);
+                    setInviteEmail("");
+                    setInviteUsername("");
+                    setInviteProvisioningAccountId(`acct_${crypto.randomUUID().replaceAll("-", "")}`);
+                    setInviteError(null);
+                    setInviteRole(assignableRoles[0] || "operator");
+                    setInviteModalOpen(true);
+                  }}
+                  disabled={currentUserRank <= 1}
+                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+                >
+                  <LuUserPlus className="size-3.5" />
+                  <span>Tạo tài khoản</span>
                 </Button>
               </div>
             </div>
@@ -827,16 +1029,18 @@ export function MemberManagementDialog({
                         const memberRank = ROLE_RANKS[member.role] ?? 0;
                         const isSelf =
                           member.id === currentUser.id ||
-                          member.accountId === currentUser.email;
+                          member.accountId === currentUser.accountId;
                         const isHigherOrEqual = memberRank >= currentUserRank;
                         const canManage = !isSelf && !isHigherOrEqual;
                         const isUpdating = updatingMemberId === member.id;
-
-                        const resolved = resolveHumanIdentity(
-                          member.accountId,
-                          member.role,
-                          members.indexOf(member),
-                        );
+                        const displayIdentity =
+                          member.identity?.username ??
+                          "Danh tính chưa được cấp quyền xem";
+                        const displayEmail = member.identity?.email ?? "—";
+                        const initials =
+                          member.identity?.username
+                            ?.slice(0, 2)
+                            .toUpperCase() ?? "?";
 
                         return (
                           <tr
@@ -860,11 +1064,11 @@ export function MemberManagementDialog({
                             <td className="py-2.5 px-3">
                               <div className="flex items-center gap-2.5">
                                 <div className="flex size-7 items-center justify-center rounded-full bg-primary/10 text-primary font-bold text-xs">
-                                  {resolved.initials}
+                                  {initials}
                                 </div>
                                 <div>
                                   <div className="font-semibold text-foreground text-xs flex items-center gap-1.5">
-                                    <span>{resolved.displayName}</span>
+                                    <span>{displayIdentity}</span>
                                     {isSelf && (
                                       <Badge
                                         variant="outline"
@@ -875,10 +1079,10 @@ export function MemberManagementDialog({
                                     )}
                                   </div>
                                   <div className="text-[11px] text-muted-foreground">
-                                    {resolved.email}
+                                    {displayEmail}
                                   </div>
                                   <div className="text-[10px] text-muted-foreground/50 font-mono">
-                                    {resolved.shortId}
+                                    {member.id}
                                   </div>
                                 </div>
                               </div>
@@ -1080,6 +1284,11 @@ export function MemberManagementDialog({
                 </div>
               </div>
             )}
+            {bulkActionError ? (
+              <p role="alert" className="text-xs text-destructive">
+                {bulkActionError}
+              </p>
+            ) : null}
 
             {/* Role Permissions Summary */}
             <div className="rounded-lg border border-border/70 bg-muted/15 p-3 space-y-2">
@@ -1163,17 +1372,18 @@ export function MemberManagementDialog({
           <DialogHeader className="border-b border-border/50 pb-3">
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
               <LuUserPlus className="size-4 text-primary" />
-              <span>
-                {t("members.inviteModalTitle", {
-                  defaultValue: "Mời Thành Viên Vào Không Gian Làm Việc",
-                })}
-              </span>
+              <span>{createInviteAccount ? "Tạo tài khoản trong workspace" : t("members.inviteModalTitle", { defaultValue: "Mời Thành Viên Vào Không Gian Làm Việc" })}</span>
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              {t("members.inviteModalDesc", {
+              {createInviteAccount ? "Tạo identity BugLogin và gán member/role vào workspace hiện tại." : t("members.inviteModalDesc", {
                 defaultValue:
                   "Tạo liên kết hoặc mã mời để gửi trực tiếp cho thành viên tham gia.",
               })}
+              <span className="mt-1 block">
+                {createInviteAccount
+                  ? "Identity được tạo ở trạng thái chờ xác minh email; không cấp mật khẩu và chưa thể đăng nhập. Role được kiểm tra lại ở API."
+                  : "Chỉ người có account đang hoạt động và email đã xác minh mới dùng được mã mời. Luồng này không tạo account hoặc mật khẩu."}
+              </span>
             </DialogDescription>
           </DialogHeader>
 
@@ -1182,9 +1392,13 @@ export function MemberManagementDialog({
               onSubmit={(e) => void handleCreateInvite(e)}
               className="space-y-4 py-2 text-xs"
             >
+              {createInviteAccount && <div className="space-y-1.5">
+                <Label className="text-xs font-medium">Tên tài khoản</Label>
+                <Input value={inviteUsername} onChange={(e) => setInviteUsername(e.target.value)} minLength={3} maxLength={64} required placeholder="nguyen.van.a" className="h-9 text-xs" />
+              </div>}
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">
-                  Email nhận lời mời
+                  {createInviteAccount ? "Email tài khoản" : "Email nhận lời mời"}
                 </Label>
                 <Input
                   type="email"
@@ -1195,6 +1409,7 @@ export function MemberManagementDialog({
                   className="h-9 text-xs"
                 />
               </div>
+              {inviteError && <p role="alert" className="text-xs text-destructive">{inviteError}</p>}
 
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">
@@ -1208,15 +1423,17 @@ export function MemberManagementDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="admin" className="text-xs">
-                      Admin — Toàn quyền quản trị profile và nhóm
-                    </SelectItem>
-                    <SelectItem value="operator" className="text-xs">
-                      Operator — Mở profile, che dữ liệu nhạy cảm
-                    </SelectItem>
-                    <SelectItem value="member" className="text-xs">
-                      Member — Chỉ chạy profile thuộc nhóm được chỉ định
-                    </SelectItem>
+                    {assignableRoles.map((role) => (
+                      <SelectItem key={role} value={role} className="text-xs">
+                        {role === "admin"
+                          ? "Admin — quản trị workspace"
+                          : role === "lead"
+                            ? "Lead — quản lý member và team cấp thấp hơn"
+                            : role === "operator"
+                              ? "Operator — tạo/cập nhật và chạy tài nguyên được cấp"
+                              : "Member — đọc và chạy tài nguyên được cấp"}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -1235,10 +1452,10 @@ export function MemberManagementDialog({
                   type="submit"
                   size="sm"
                   isLoading={isInviting}
-                  disabled={!inviteEmail.trim()}
+                  disabled={!inviteEmail.trim() || (createInviteAccount && inviteUsername.trim().length < 3)}
                   className="h-8 text-xs font-medium cursor-pointer"
                 >
-                  {t("members.inviteButton", { defaultValue: "Sinh Mã Mời" })}
+                  {createInviteAccount ? "Tạo account & gán role" : t("members.inviteButton", { defaultValue: "Sinh Mã Mời" })}
                 </LoadingButton>
               </DialogFooter>
             </form>
@@ -1340,16 +1557,21 @@ export function MemberManagementDialog({
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
               <LuUsers className="size-4 text-primary" />
               <span>
-                {t("members.bulkModal.title", {
+                {bulkCreateAccounts ? "Tạo tài khoản hàng loạt" : t("members.bulkModal.title", {
                   defaultValue: "Mời thành viên hàng loạt",
                 })}
               </span>
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              {t("members.bulkModal.desc", {
+              {bulkCreateAccounts ? "Tạo tối đa 100 identity và gán role vào workspace hiện tại." : t("members.bulkModal.desc", {
                 defaultValue:
                   "Nhập danh sách email để tạo lời mời dùng một lần.",
               })}
+              <span className="mt-1 block">
+                {bulkCreateAccounts
+                  ? "Dòng theo định dạng username,email. Identity chờ xác minh email và chưa thể đăng nhập; API kiểm tra quyền role cho từng account."
+                  : "Người nhận phải có account BugLogin đang hoạt động với email đã xác minh; thao tác này không tạo account hay mật khẩu."}
+              </span>
             </DialogDescription>
           </DialogHeader>
 
@@ -1357,7 +1579,7 @@ export function MemberManagementDialog({
             <div className="space-y-4 py-2 text-xs">
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">
-                  {t("members.bulkModal.emailsLabel", {
+                    {bulkCreateAccounts ? "Danh sách username,email (mỗi dòng một tài khoản):" : t("members.bulkModal.emailsLabel", {
                     defaultValue:
                       "Danh sách email (mỗi dòng một email hoặc phân cách bằng dấu phẩy):",
                   })}
@@ -1365,8 +1587,11 @@ export function MemberManagementDialog({
                 <textarea
                   rows={5}
                   value={bulkEmailsText}
-                  onChange={(e) => setBulkEmailsText(e.target.value)}
-                  placeholder={t("members.bulkModal.emailsPlaceholder", {
+                  onChange={(e) => {
+                    setBulkEmailsText(e.target.value);
+                    setBulkInputError(null);
+                  }}
+                  placeholder={bulkCreateAccounts ? "username01,staff01@example.com\nusername02,staff02@example.com" : t("members.bulkModal.emailsPlaceholder", {
                     defaultValue:
                       "staff01@alphamedia.vn\nstaff02@alphamedia.vn\nstaff03@alphamedia.vn",
                   })}
@@ -1374,16 +1599,14 @@ export function MemberManagementDialog({
                   disabled={isBulkProcessing}
                 />
                 <span className="text-[11px] text-muted-foreground">
-                  Số lượng phát hiện:{" "}
-                  <strong>
-                    {
-                      bulkEmailsText
-                        .split(/[\n,;]+/)
-                        .map((s) => s.trim())
-                        .filter((s) => s.length > 0).length
-                    }
-                  </strong>{" "}
-                  email
+                  {bulkCreateAccounts
+                    ? `${bulkAccountAnalysis.rows.length} hợp lệ · ${bulkAccountAnalysis.invalidLines.length} không hợp lệ · ${bulkAccountAnalysis.duplicateLines.length} trùng · tối đa 100`
+                    : `${bulkEmailAnalysis.emails.length} hợp lệ · ${bulkEmailAnalysis.invalid.length} không hợp lệ · ${bulkEmailAnalysis.duplicates.length} trùng · tối đa 100`}
+                  {bulkInputError && (
+                    <span role="alert" className="block text-destructive">
+                      {bulkInputError}
+                    </span>
+                  )}
                 </span>
               </div>
 
@@ -1417,8 +1640,8 @@ export function MemberManagementDialog({
 
                 <div className="space-y-1.5">
                   <Label className="text-xs font-medium">Phương thức</Label>
-                  <p className="h-9 flex items-center text-muted-foreground">
-                    Gửi lời mời dùng một lần
+                    <p className="h-9 flex items-center text-muted-foreground">
+                    {bulkCreateAccounts ? "Tạo identity + gán member role" : "Gửi lời mời dùng một lần"}
                   </p>
                 </div>
               </div>
@@ -1469,46 +1692,50 @@ export function MemberManagementDialog({
                   size="sm"
                   isLoading={isBulkProcessing}
                   onClick={() => void handleCreateBulkInvitations()}
-                  disabled={
-                    bulkEmailsText
-                      .split(/[\n,;]+/)
-                      .map((s) => s.trim())
-                      .filter((s) => s.length > 0).length === 0
-                  }
+                  disabled={(bulkCreateAccounts ? bulkAccountAnalysis.entryCount : bulkEmailAnalysis.entryCount) === 0}
                   className="h-8 text-xs font-medium cursor-pointer"
                 >
                   {t("members.bulkModal.startButton", {
-                    count: bulkEmailsText
-                      .split(/[\n,;]+/)
-                      .map((s) => s.trim())
-                      .filter((s) => s.length > 0).length,
-                    defaultValue: `Tạo ${
-                      bulkEmailsText
-                        .split(/[\n,;]+/)
-                        .map((s) => s.trim())
-                        .filter((s) => s.length > 0).length
-                    } lời mời`,
+                    count: bulkCreateAccounts ? bulkAccountAnalysis.rows.length : bulkEmailAnalysis.emails.length,
+                    defaultValue: bulkCreateAccounts
+                      ? `Tạo ${bulkAccountAnalysis.rows.length} tài khoản`
+                      : `Tạo ${bulkEmailAnalysis.emails.length} lời mời`,
                   })}
                 </LoadingButton>
               </DialogFooter>
             </div>
           ) : (
             <div className="space-y-4 py-2 text-xs">
-              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-1 text-emerald-600 dark:text-emerald-400">
+              <div
+                role="status"
+                className={cn(
+                  "rounded-lg border p-3 space-y-1",
+                  bulkFailureCount === 0
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                    : bulkSuccessCount > 0
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                      : "border-destructive/30 bg-destructive/10 text-destructive",
+                )}
+              >
                 <div className="font-semibold flex items-center gap-1.5">
-                  <LuCheck className="size-4" />
+                  {bulkFailureCount === 0 ? (
+                    <LuCheck className="size-4" />
+                  ) : (
+                    <LuInfo className="size-4" />
+                  )}
                   <span>
-                    {t("members.bulkModal.summaryTitle", {
-                      defaultValue: "Kết quả mời thành viên",
-                    })}
+                    {bulkFailureCount === 0
+                      ? (bulkCreateAccounts ? "Đã tạo account và gán workspace" : "Đã tạo đủ lời mời")
+                      : bulkSuccessCount > 0
+                        ? "Đã xử lý một phần"
+                        : (bulkCreateAccounts ? "Không tạo được account" : "Không tạo được lời mời")}
                   </span>
                 </div>
                 <p className="text-[11px] opacity-90">
-                  {t("members.bulkModal.successCount", {
-                    count: bulkResults.filter((r) => r.status === "success")
-                      .length,
-                    defaultValue: `Đã tạo thành công ${bulkResults.filter((r) => r.status === "success").length} lời mời`,
-                  })}
+                  {bulkSuccessCount} thành công · {bulkFailureCount} thất bại.
+                  {bulkCreateAccounts
+                    ? "Identity đang chờ xác minh email nên chưa thể đăng nhập; kiểm tra lỗi trước khi thử lại."
+                    : "Mã mời chỉ hiển thị một lần; kiểm tra lỗi trước khi gửi lại."}
                 </p>
               </div>
 
@@ -1517,20 +1744,23 @@ export function MemberManagementDialog({
                   <thead className="bg-muted/50 border-b border-border sticky top-0 text-[11px] font-medium text-muted-foreground">
                     <tr>
                       <th className="py-2 px-3">Email</th>
-                      <th className="py-2 px-3">Mã mời / Liên kết</th>
+                      <th className="py-2 px-3">{bulkCreateAccounts ? "Kết quả cấp quyền" : "Mã mời / Liên kết"}</th>
                       <th className="py-2 px-3 w-20 text-center">Trạng thái</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/60">
-                    {bulkResults.map((res, idx) => (
-                      <tr key={idx} className="hover:bg-muted/20">
+                    {bulkResults.map((res) => (
+                      <tr
+                        key={res.email.toLocaleLowerCase("en-US")}
+                        className="hover:bg-muted/20"
+                      >
                         <td className="py-1.5 px-3 font-mono text-[11px]">
                           {res.email}
                         </td>
                         <td className="py-1.5 px-3 font-mono text-[11px]">
                           {res.status === "success" ? (
                             <span className="text-muted-foreground">
-                              {res.inviteCode}
+                              {bulkCreateAccounts ? `${res.username} · ${bulkRole} · chờ xác minh` : res.inviteCode}
                             </span>
                           ) : (
                             <span className="text-destructive text-[10px]">
@@ -1578,7 +1808,7 @@ export function MemberManagementDialog({
                             defaultValue: "Đã chép",
                           })
                         : t("members.bulkModal.copyCredentials", {
-                            defaultValue: "Sao chép toàn bộ",
+                            defaultValue: bulkCreateAccounts ? "Sao chép danh sách account" : "Sao chép mã mời",
                           })}
                     </span>
                   </Button>
@@ -1623,12 +1853,7 @@ export function MemberManagementDialog({
                 <LuShieldAlert className="size-4" />
                 <span>
                   Tạm ngưng thành viên:{" "}
-                  {
-                    resolveHumanIdentity(
-                      offboardMember.accountId,
-                      offboardMember.role,
-                    ).displayName
-                  }
+                  {offboardMember.identity?.username ?? "thành viên"}
                 </span>
               </DialogTitle>
               <DialogDescription className="text-xs text-muted-foreground">

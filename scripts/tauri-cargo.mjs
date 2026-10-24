@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBuildTargetDir } from "./build-target.mjs";
@@ -18,7 +17,7 @@ export function tauriCargoEnvironment(
     environment.CARGO_TARGET_DIR,
     platform,
   );
-  const frontendDist = "../dist";
+  const frontendDist = resolve(targetDir, "desktop-dist");
   let tauriConfig = {};
   const configured = environment.TAURI_CONFIG?.trim();
   if (configured) {
@@ -141,9 +140,7 @@ async function main(args) {
   }
 
   const config = tauriCargoEnvironment();
-  const frontendDistPath = resolve(repositoryRoot, "apps/desktop/dist");
-  const createdFrontendDist = !existsSync(frontendDistPath);
-  await mkdir(frontendDistPath, { recursive: true });
+  await mkdir(config.frontendDist, { recursive: true });
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
   let restoreSidecar = async () => {};
   let terminationSignal;
@@ -164,9 +161,6 @@ async function main(args) {
     console.error(`Could not run BugLogin Cargo check: ${error.message}`);
     process.exitCode = 1;
   } finally {
-    if (createdFrontendDist) {
-      await rm(frontendDistPath, { recursive: true, force: true });
-    }
     try {
       await restoreSidecar();
     } catch (error) {

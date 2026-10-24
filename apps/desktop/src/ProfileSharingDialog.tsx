@@ -28,7 +28,6 @@ import {
 import { Input } from "../../../src/components/ui/input.js";
 import { Label } from "../../../src/components/ui/label.js";
 import { formatError } from "../../../src/lib/error-utils.js";
-import { resolveHumanIdentity } from "../../../src/lib/identity-display.js";
 import {
   showErrorToast,
   showSuccessToast,
@@ -43,6 +42,15 @@ type RecipientKey = Awaited<
 >[number];
 type Grant = Awaited<ReturnType<DesktopApi["listGrants"]>>["items"][number];
 type Member = Awaited<ReturnType<DesktopApi["listMembers"]>>["items"][number];
+function displayMember(member?: Member | null) {
+  const username = member?.identity?.username;
+  return {
+    displayName: username ?? "Danh tính chưa được cấp quyền xem",
+    email: member?.identity?.email ?? "—",
+    initials: username?.slice(0, 2).toUpperCase() ?? "?",
+  };
+}
+
 type RotationRecipient = Awaited<
   ReturnType<DesktopApi["listProfileKeyRotationRecipients"]>
 >[number];
@@ -100,10 +108,17 @@ function renderRoleBadge(role?: string) {
       </span>
     );
   }
-  if (r === "manager" || r === "operator" || r === "lead") {
+  if (r === "lead") {
     return (
       <span className="text-[8px] px-1 py-0 h-3.5 inline-flex items-center font-bold tracking-tight border uppercase rounded bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shrink-0">
         LEAD
+      </span>
+    );
+  }
+  if (r === "operator") {
+    return (
+      <span className="text-[8px] px-1 py-0 h-3.5 inline-flex items-center font-bold tracking-tight border uppercase rounded bg-muted/80 text-muted-foreground/90 border-border/60 shrink-0">
+        OPERATOR
       </span>
     );
   }
@@ -153,7 +168,7 @@ export function ProfileSharingDialog({
   const [rotationBusyProfileId, setRotationBusyProfileId] = useState("");
   const [memberSearch, setMemberSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<
-    "all" | "owner" | "admin" | "operator" | "member"
+    "all" | "owner" | "admin" | "lead" | "operator" | "member"
   >("all");
   const [activeTab, setActiveTab] = useState<"grant" | "existing">("grant");
 
@@ -162,13 +177,7 @@ export function ProfileSharingDialog({
   const selectedMemberIsCurrentAccount =
     selectedMember?.accountId === currentAccountId;
   const selectedResolved = selectedMember
-    ? resolveHumanIdentity(
-        selectedMember.accountId,
-        selectedMember.role,
-        members.indexOf(selectedMember),
-        t,
-        selectedMemberIsCurrentAccount,
-      )
+    ? displayMember(selectedMember)
     : null;
 
   const hasPendingRotation = profiles.some(
@@ -191,28 +200,24 @@ export function ProfileSharingDialog({
     if (roleFilter !== "all") {
       list = list.filter((m) => {
         const r = (m.role || "").toLowerCase();
-        if (roleFilter === "operator")
-          return r === "operator" || r === "manager" || r === "lead";
+        if (roleFilter === "operator") return r === "operator";
+        if (roleFilter === "lead") return r === "lead";
         return r === roleFilter;
       });
     }
     if (!memberSearch.trim()) return list;
     const q = memberSearch.toLowerCase();
-    return list.filter((m, idx) => {
-      const resolved = resolveHumanIdentity(
-        m.accountId,
-        m.role,
-        idx,
-        t,
-        m.accountId === currentAccountId,
-      );
-      return (
-        resolved.displayName.toLowerCase().includes(q) ||
-        resolved.email.toLowerCase().includes(q) ||
-        (m.role || "").toLowerCase().includes(q)
-      );
+    return list.filter((member) => {
+      return [
+        member.identity?.username,
+        member.identity?.email,
+        member.role,
+        member.accountId,
+      ]
+        .filter(Boolean)
+        .some((value) => value?.toLowerCase().includes(q));
     });
-  }, [activeMembers, memberSearch, roleFilter, currentAccountId, t]);
+  }, [activeMembers, memberSearch, roleFilter]);
   const listedGrants = useMemo(
     () =>
       grants.flatMap(({ profile, grants: profileGrants }) => {
@@ -784,34 +789,34 @@ export function ProfileSharingDialog({
                       <LuFilter className="size-3" />
                       Lọc:
                     </span>
-                    {(["all", "admin", "operator", "member"] as const).map(
-                      (r) => {
-                        const label =
-                          r === "all"
-                            ? "Tất cả"
-                            : r === "admin"
-                              ? "Admin"
-                              : r === "operator"
-                                ? "Lead"
-                                : "Member";
-                        const active = roleFilter === r;
-                        return (
-                          <button
-                            key={r}
-                            type="button"
-                            onClick={() => setRoleFilter(r)}
-                            className={cn(
-                              "px-2 py-0.5 rounded-md font-medium transition-colors cursor-pointer shrink-0",
-                              active
-                                ? "bg-primary text-primary-foreground shadow-2xs font-semibold"
-                                : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground",
-                            )}
-                          >
-                            {label}
-                          </button>
-                        );
-                      },
-                    )}
+                    {(
+                      ["all", "admin", "lead", "operator", "member"] as const
+                    ).map((r) => {
+                      const label =
+                        r === "all"
+                          ? "Tất cả"
+                          : r === "admin"
+                            ? "Admin"
+                            : r === "operator"
+                              ? "Lead"
+                              : "Member";
+                      const active = roleFilter === r;
+                      return (
+                        <button
+                          key={r}
+                          type="button"
+                          onClick={() => setRoleFilter(r)}
+                          className={cn(
+                            "px-2 py-0.5 rounded-md font-medium transition-colors cursor-pointer shrink-0",
+                            active
+                              ? "bg-primary text-primary-foreground shadow-2xs font-semibold"
+                              : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground",
+                          )}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -822,15 +827,9 @@ export function ProfileSharingDialog({
                       Không tìm thấy thành viên phù hợp
                     </div>
                   ) : (
-                    filteredActiveMembers.map((member, idx) => {
+                    filteredActiveMembers.map((member) => {
                       const isSelf = member.accountId === currentAccountId;
-                      const resolved = resolveHumanIdentity(
-                        member.accountId,
-                        member.role,
-                        idx,
-                        t,
-                        isSelf,
-                      );
+                      const resolved = displayMember(member);
                       const isSelected = member.id === memberId;
                       const hasExistingGrant = membersWithExistingGrants.has(
                         member.id,
@@ -1182,18 +1181,11 @@ export function ProfileSharingDialog({
                           {t("profileSharing.rotationNoRecipients")}
                         </p>
                       ) : (
-                        review.recipients.map((recipient, recIdx) => {
+                        review.recipients.map((recipient) => {
                           const member = members.find(
                             (candidate) => candidate.id === recipient.memberId,
                           );
-                          const isSelf = member?.accountId === currentAccountId;
-                          const resolved = resolveHumanIdentity(
-                            member?.accountId ?? recipient.memberId,
-                            member?.role ?? "member",
-                            recIdx,
-                            t,
-                            isSelf,
-                          );
+                          const resolved = displayMember(member);
                           return (
                             <div
                               key={recipient.memberId}
@@ -1347,13 +1339,7 @@ export function ProfileSharingDialog({
                       (candidate) => candidate.id === grant.memberId,
                     );
                     const isSelf = member?.accountId === currentAccountId;
-                    const resolved = resolveHumanIdentity(
-                      member?.accountId ?? grant.memberId,
-                      member?.role ?? "member",
-                      members.indexOf(member as any),
-                      t,
-                      isSelf,
-                    );
+                    const resolved = displayMember(member);
                     const isOperate = grant.action === "execute";
 
                     return (

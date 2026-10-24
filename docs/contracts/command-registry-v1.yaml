@@ -27,6 +27,14 @@ commands:
     input: Empty
     output: Health
     audit: metadata-only
+  - id: feedback.submit
+    kind: command
+    capability: CAP-DIAG-001
+    action: create
+    adapters: [tauri, rest]
+    input: FeedbackSubmission
+    output: FeedbackReceipt
+    idempotency: required
   - id: operation.get
     kind: query
     capability: operation.read
@@ -496,6 +504,28 @@ commands:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     preconditions: [cryptographic-device-code-issuance]
+  - id: auth.sso.buglab.start
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: BugLabSsoStartInput
+    output: BugLabSsoStartResponse
+    audit: required
+    idempotency: required
+    preconditions: [configured-provider, device-bound-state, system-browser]
+  - id: auth.sso.buglab.complete
+    kind: command
+    capability: CAP-ID-001
+    action: create
+    auth: optional-local
+    adapters: [rest]
+    input: BugLabSsoCompleteInput
+    output: DeviceAuthTokenResponse
+    audit: required
+    idempotency: required
+    preconditions: [single-use-state, device-bound-session, server-side-token-exchange]
   - id: auth.login
     kind: command
     capability: CAP-ID-001
@@ -689,17 +719,29 @@ commands:
     kind: command
     capability: CAP-ADM-001
     action: create
-    adapters: [mcp]
+    adapters: [tauri, rest, mcp]
     input: AccountCreatePendingInput
     output: PendingAccountProvisioningReceipt
     idempotency: required
+    tauri: account_create
+    rest: account.create
   - id: account.list
     kind: query
     capability: CAP-ADM-001
     action: read
     adapters: [tauri, rest, mcp]
     input: Empty
-    output: AccountPage
+    output: AccountAdminPage
+  - id: account.create.scoped
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: WorkspaceAccountCreateInput
+    output: PendingAccountProvisioningReceipt
+    idempotency: required
+    tauri: account_create_scoped
+    rest: account.create.scoped
   - id: account.status.update
     kind: command
     capability: CAP-ADM-001
@@ -999,7 +1041,7 @@ commands:
   - id: member.activate
     kind: command
     capability: CAP-MEM-001
-    action: update
+    action: manage
     adapters: [tauri, rest, mcp]
     input: MemberIdInput
     output: Member

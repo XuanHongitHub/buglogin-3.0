@@ -581,6 +581,8 @@ impl AdapterState {
         if matches!(
             invoke_name,
             "account_list"
+                | "account_create"
+                | "account_create_scoped"
                 | "account_status_update"
                 | "organization_get"
                 | "organization_record_get"

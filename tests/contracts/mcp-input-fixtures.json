@@ -10,6 +10,13 @@
     "status": "suspended",
     "expectedRevision": 1
   },
+  "WorkspaceAccountCreateInput": {
+    "workspaceId": "ws_fixture_001",
+    "accountId": "acc_fixture_002",
+    "username": "mcp-pending-user",
+    "email": "mcp-pending-user@example.test",
+    "role": "member"
+  },
   "GroupListInput": { "workspaceId": "ws_fixture_001" },
   "GroupIdInput": {
     "workspaceId": "ws_fixture_001",

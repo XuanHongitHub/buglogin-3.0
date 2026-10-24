@@ -102,6 +102,9 @@ export function FeedbackDialog({
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLTextAreaElement>(null);
+  const submissionKeyRef = useRef<{ fingerprint: string; key: string } | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!isOpen || systemInfo) return;
@@ -164,13 +167,26 @@ export function FeedbackDialog({
     setSending(true);
     setError(null);
     try {
-      await invoke<FeedbackReceipt>("send_feedback", {
+      const payload = {
         kind,
-        message,
+        message: message.trim(),
         includeLogs,
-        email: accountEmail ? null : email.trim() || null,
+        email: accountEmail ?? (email.trim() || null),
         locale: i18n.language,
+      };
+      const fingerprint = JSON.stringify(payload);
+      const previous = submissionKeyRef.current;
+      const idempotencyKey =
+        previous?.fingerprint === fingerprint
+          ? previous.key
+          : `feedback-${crypto.randomUUID()}`;
+      submissionKeyRef.current = { fingerprint, key: idempotencyKey };
+      await invoke<FeedbackReceipt>("send_feedback", {
+        ...payload,
+        idempotencyKey,
+        correlationId: `feedback-${crypto.randomUUID()}`,
       });
+      submissionKeyRef.current = null;
       setSent({
         logs: includeLogs,
         replyTo: accountEmail ?? (email.trim() || null),

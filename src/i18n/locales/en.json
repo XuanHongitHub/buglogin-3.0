@@ -387,7 +387,8 @@
       "emptyFilteredHint": "No profiles match this group or search. Try another filter or create a new one.",
       "none": "None",
       "bot": "Bot",
-      "profileId": "ID"
+      "profileId": "ID",
+      "refresh": "Refresh profile list"
     },
     "actions": {
       "launch": "Launch",
@@ -545,6 +546,7 @@
     "version": {
       "browserLabel": "Browser version",
       "installed": "Installed",
+      "downloadingShort": "Downloading",
       "fetching": "Fetching available versions...",
       "fetchError": "Unable to load verified browser versions.",
       "errors": {
@@ -587,7 +589,7 @@
       "browser": "Browser Core",
       "network": "Network / Exit IP",
       "screen": "Screen Display",
-      "screenAuto": "Auto for this device",
+      "screenAuto": "Device default",
       "hardware": "CPU & Memory",
       "canvas": "Canvas",
       "webgl": "WebGL / GPU",
@@ -2689,6 +2691,7 @@
     "tablePreferencesLoadFailed": "Could not load the table settings. Try again.",
     "tablePreferencesSaveFailed": "Could not save the table settings. Try again.",
     "feedbackMessageEmpty": "Write a message first.",
+    "accountInactive": "This account is suspended or disabled and cannot send feedback.",
     "feedbackMessageTooLong": "The message is too long. The limit is {{max}} characters.",
     "feedbackEmailInvalid": "This email address does not look right.",
     "feedbackInvalid": "The feedback was not accepted. Check the message and try again.",
@@ -2792,7 +2795,9 @@
       "teamManager": "Team Management",
       "teamManagerHint": "Team roster and profile allocation",
       "platformAdmin": "Platform Administration",
-      "platformAdminHint": "Multi-tenant control and licensing"
+      "platformAdminHint": "Multi-tenant control and licensing",
+      "accountManagement": "Account management",
+      "accountManagementHint": "Requires account administration access"
     },
     "network": "Network",
     "integrations": "Integrations",
@@ -2810,6 +2815,7 @@
     "settings": "Settings",
     "integrations": "Integrations",
     "account": "Account",
+    "accountManagement": "Account management",
     "shortcuts": "Keyboard shortcuts"
   },
   "encryption": {
@@ -3036,12 +3042,10 @@
     "checkingUpdates": "Checking…",
     "upToDate": "BugLogin is up to date",
     "updateCheckFailed": "Could not check for updates",
+    "updateHint": "Keep BugLogin up to date",
     "updatesReleaseOnly": "Update checks are unavailable in this development build",
-    "updatesReleaseOnlyDescription": "Use a signed BugLogin release to check for and install updates. You can download the latest release from buglogin.com.",
+    "updatesReleaseOnlyDescription": "Use a signed BugLogin release to check for and install updates.",
     "portableBadge": "portable",
-    "licenseNotice": "Open-source anti-detect browser, licensed under AGPL-3.0.",
-    "website": "Website",
-    "github": "GitHub",
     "licenses": "Licenses",
     "searchLicenses": "Search licenses…",
     "noMatchingLicenses": "No matching licenses.",

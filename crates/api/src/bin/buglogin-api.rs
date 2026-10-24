@@ -23,6 +23,8 @@ use buglogin_sync::coordination::{LocalCoordination, RedisCoordination, RedisCoo
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
+const MAX_INLINE_RUNTIME_CONFIG_BYTES: usize = 24 * 1024;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let production = production_mode()?;
@@ -285,21 +287,88 @@ fn with_configured_migration_keys(state: ApiState) -> Result<ApiState, String> {
 }
 
 fn with_configured_runtime_catalog(state: ApiState) -> Result<ApiState, String> {
-    let catalog_path = env::var_os("BUGLOGIN_RUNTIME_CATALOG_PATH").map(PathBuf::from);
-    let trust_keys_path = env::var_os("BUGLOGIN_RUNTIME_TRUST_KEYS_PATH").map(PathBuf::from);
-    match (catalog_path, trust_keys_path) {
-        (None, None) => Ok(state),
-        (Some(_), None) | (None, Some(_)) => Err(
-            "BUGLOGIN_RUNTIME_CATALOG_PATH and BUGLOGIN_RUNTIME_TRUST_KEYS_PATH must be configured together".into(),
-        ),
-        (Some(catalog_path), Some(trust_keys_path)) => {
-            let catalog_bytes = read_bounded_config_file(&catalog_path, 2 * 1024 * 1024)?;
-            let trust_keys_bytes = read_bounded_config_file(&trust_keys_path, 64 * 1024)?;
-            let catalog = PublishedRuntimeCatalog::verify(&catalog_bytes, &trust_keys_bytes)
-                .map_err(|error| error.code)?;
-            Ok(state.with_runtime_catalog(catalog))
-        }
+    let catalog_json = optional_env_string("BUGLOGIN_RUNTIME_CATALOG_JSON")?;
+    let catalog_path = optional_env_path("BUGLOGIN_RUNTIME_CATALOG_PATH")?;
+    let trust_keys_json = optional_env_string("BUGLOGIN_RUNTIME_TRUST_KEYS_JSON")?;
+    let trust_keys_path = optional_env_path("BUGLOGIN_RUNTIME_TRUST_KEYS_PATH")?;
+
+    let catalog_source_count =
+        usize::from(catalog_json.is_some()) + usize::from(catalog_path.is_some());
+    let trust_source_count =
+        usize::from(trust_keys_json.is_some()) + usize::from(trust_keys_path.is_some());
+    if catalog_source_count == 0 && trust_source_count == 0 {
+        return Ok(state);
     }
+    if catalog_source_count != 1 || trust_source_count != 1 {
+        return Err(
+            "Configure exactly one runtime catalog source and one matching trust-key source".into(),
+        );
+    }
+
+    let catalog_bytes = match catalog_json {
+        Some(json) => bounded_inline_config(json, "BUGLOGIN_RUNTIME_CATALOG_JSON")?,
+        None => read_bounded_config_file(
+            &catalog_path.expect("one catalog source was validated"),
+            2 * 1024 * 1024,
+        )?,
+    };
+    let trust_keys_bytes = match trust_keys_json {
+        Some(json) => runtime_trust_keys_json_to_api_json(&json)?,
+        None => read_bounded_config_file(
+            &trust_keys_path.expect("one trust-key source was validated"),
+            64 * 1024,
+        )?,
+    };
+    let catalog = PublishedRuntimeCatalog::verify(&catalog_bytes, &trust_keys_bytes)
+        .map_err(|error| error.code)?;
+    Ok(state.with_runtime_catalog(catalog))
+}
+
+fn optional_env_string(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid Unicode")),
+    }
+}
+
+fn optional_env_path(name: &str) -> Result<Option<PathBuf>, String> {
+    optional_env_string(name).map(|value| value.map(PathBuf::from))
+}
+
+fn bounded_inline_config(value: String, name: &str) -> Result<Vec<u8>, String> {
+    let bytes = value.into_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_INLINE_RUNTIME_CONFIG_BYTES {
+        return Err(format!(
+            "{name} must be nonempty and no larger than {MAX_INLINE_RUNTIME_CONFIG_BYTES} bytes"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn runtime_trust_keys_json_to_api_json(value: &str) -> Result<Vec<u8>, String> {
+    let bytes = bounded_inline_config(value.to_owned(), "BUGLOGIN_RUNTIME_TRUST_KEYS_JSON")?;
+    let keys = serde_json::from_slice::<BTreeMap<String, String>>(&bytes).map_err(|_| {
+        "BUGLOGIN_RUNTIME_TRUST_KEYS_JSON must be a JSON object of key IDs to public keys"
+            .to_owned()
+    })?;
+    if keys.is_empty()
+        || keys.iter().any(|(key_id, public_key)| {
+            key_id.trim().is_empty()
+                || public_key.len() != 64
+                || !public_key.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(
+            "BUGLOGIN_RUNTIME_TRUST_KEYS_JSON contains an invalid Ed25519 public key".into(),
+        );
+    }
+    let api_keys = keys
+        .into_iter()
+        .map(|(key_id, public_key)| serde_json::json!({"keyId": key_id, "publicKey": public_key}))
+        .collect::<Vec<_>>();
+    serde_json::to_vec(&api_keys)
+        .map_err(|_| "BUGLOGIN_RUNTIME_TRUST_KEYS_JSON could not be encoded".into())
 }
 
 fn read_bounded_config_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -525,7 +594,10 @@ mod tests {
 
     use std::env;
 
-    use super::{bind_address, local_data_root, production_mode_from, validate_redis_url};
+    use super::{
+        bind_address, local_data_root, production_mode_from, runtime_trust_keys_json_to_api_json,
+        validate_redis_url,
+    };
 
     #[test]
     fn local_mode_keeps_loopback_default() {
@@ -567,5 +639,26 @@ mod tests {
         assert!(path.ends_with("BugLogin/API"));
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn inline_runtime_trust_map_converts_to_api_catalog_contract() {
+        let public_key = "ab".repeat(32);
+        let input = format!(r#"{{"runtime-key-1":"{public_key}"}}"#);
+
+        let converted: serde_json::Value =
+            serde_json::from_slice(&runtime_trust_keys_json_to_api_json(&input).unwrap()).unwrap();
+
+        assert_eq!(
+            converted,
+            serde_json::json!([{"keyId": "runtime-key-1", "publicKey": public_key}])
+        );
+    }
+
+    #[test]
+    fn inline_runtime_trust_map_rejects_invalid_public_keys() {
+        assert!(runtime_trust_keys_json_to_api_json(r#"{"runtime-key-1":"short"}"#).is_err());
+        assert!(runtime_trust_keys_json_to_api_json("[]").is_err());
+        assert!(runtime_trust_keys_json_to_api_json("{}").is_err());
     }
 }

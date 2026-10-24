@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, Bound};
 
 use buglogin_domain::{
     errors::Problem,
-    ids::{AccountId, MemberId, WorkspaceId},
+    ids::{AccountId, MemberId, TeamId, WorkspaceId},
     member::{Member, MemberRole, MemberStatus},
+    organization::Organization,
     permissions::{Action, Capability, Grant, Principal, ResourceScope, is_allowed},
 };
 
@@ -17,6 +18,172 @@ pub struct MemberService {
 }
 
 impl MemberService {
+    /// Create an already-active membership as part of administrator-driven account provisioning.
+    /// Unlike invitation redemption, this never creates an invitation that the account holder
+    /// must accept. The caller must still prove the account identity separately before login.
+    pub fn provision_active(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        member: Member,
+    ) -> Result<Member, Problem> {
+        authorize(principal, grants, &member.workspace_id, Action::Create)?;
+        if member.status != MemberStatus::Active || member.invite_expires_at.is_some() {
+            return Err(problem(
+                "invalid_account_provisioning_membership",
+                "Provisioned membership must be active and have no invitation expiry",
+                400,
+            ));
+        }
+        self.ensure_role_assignment_allowed(principal, &member.workspace_id, &member.role)?;
+
+        self.insert_active_membership(member)
+    }
+
+    pub fn authorize_org_owner_account_creation(
+        principal: &Principal,
+        grants: &[Grant],
+        organization: &Organization,
+        workspace_id: &WorkspaceId,
+        role: &MemberRole,
+    ) -> Result<(), Problem> {
+        authorize_org_owner(
+            principal,
+            grants,
+            organization,
+            workspace_id,
+            Action::Create,
+        )?;
+        if role == &MemberRole::Owner {
+            return Err(problem(
+                "role_escalation",
+                "Organization owners may assign only roles below Owner",
+                403,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn authorize_org_owner_access(
+        principal: &Principal,
+        grants: &[Grant],
+        organization: &Organization,
+        workspace_id: &WorkspaceId,
+    ) -> Result<(), Problem> {
+        authorize_org_owner(
+            principal,
+            grants,
+            organization,
+            workspace_id,
+            Action::Manage,
+        )
+    }
+
+    pub fn authorize_org_owner_member_action(
+        principal: &Principal,
+        grants: &[Grant],
+        organization: &Organization,
+        workspace_id: &WorkspaceId,
+        action: Action,
+    ) -> Result<(), Problem> {
+        authorize_org_owner(principal, grants, organization, workspace_id, action)
+    }
+
+    pub fn provision_active_as_org_owner(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization: &Organization,
+        member: Member,
+    ) -> Result<Member, Problem> {
+        Self::authorize_org_owner_account_creation(
+            principal,
+            grants,
+            organization,
+            &member.workspace_id,
+            &member.role,
+        )?;
+        if member.status != MemberStatus::Active || member.invite_expires_at.is_some() {
+            return Err(problem(
+                "invalid_account_provisioning_membership",
+                "Provisioned membership must be active and have no invitation expiry",
+                400,
+            ));
+        }
+        self.insert_active_membership(member)
+    }
+
+    pub fn list_as_org_owner(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization: &Organization,
+        workspace_id: &WorkspaceId,
+    ) -> Result<Vec<Member>, Problem> {
+        authorize_org_owner(principal, grants, organization, workspace_id, Action::Read)?;
+        Ok(self
+            .members
+            .values()
+            .filter(|member| &member.workspace_id == workspace_id)
+            .cloned()
+            .collect())
+    }
+
+    pub fn list_page_as_org_owner(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization: &Organization,
+        workspace_id: &WorkspaceId,
+        after: Option<&MemberId>,
+        limit: usize,
+    ) -> Result<(Vec<Member>, Option<MemberId>), Problem> {
+        if !(1..=100).contains(&limit) {
+            return Err(problem(
+                "invalid_page_limit",
+                "Page limit must be between 1 and 100",
+                400,
+            ));
+        }
+        authorize_org_owner(principal, grants, organization, workspace_id, Action::Read)?;
+        let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut rows = self
+            .members
+            .range((lower, Bound::Unbounded))
+            .filter(|(_, member)| &member.workspace_id == workspace_id)
+            .map(|(_, member)| member);
+        let items = rows.by_ref().take(limit).cloned().collect::<Vec<_>>();
+        let next_cursor = if rows.next().is_some() {
+            items.last().map(|member| member.id.clone())
+        } else {
+            None
+        };
+        Ok((items, next_cursor))
+    }
+
+    fn insert_active_membership(&mut self, member: Member) -> Result<Member, Problem> {
+        if let Some(existing) = self.members.values().find(|existing| {
+            existing.account_id == member.account_id && existing.workspace_id == member.workspace_id
+        }) {
+            if existing.id == member.id
+                && existing.role == member.role
+                && existing.status == MemberStatus::Active
+            {
+                return Ok(existing.clone());
+            }
+            return Err(problem(
+                "member_workspace_membership_exists",
+                "Account already has a membership in this workspace",
+                409,
+            ));
+        }
+        if self.members.contains_key(&member.id) {
+            return Err(problem("member_exists", "Member exists", 409));
+        }
+        self.members.insert(member.id.clone(), member.clone());
+        Ok(member)
+    }
+
     pub fn active_in_workspace(&self, id: &MemberId, workspace_id: &WorkspaceId) -> bool {
         self.members.get(id).is_some_and(|member| {
             &member.workspace_id == workspace_id && member.status == MemberStatus::Active
@@ -203,13 +370,16 @@ impl MemberService {
                     || principal.member_id.as_ref() == Some(id))
         });
         if !self_accept {
-            authorize(principal, grants, workspace_id, Action::Update)?;
+            authorize(principal, grants, workspace_id, Action::Manage)?;
         }
         let member = self
             .members
             .get(id)
             .filter(|member| &member.workspace_id == workspace_id)
             .ok_or_else(|| problem("member_not_found", "Member not found", 404))?;
+        if !self_accept {
+            self.ensure_actor_can_manage_role(principal, workspace_id, &member.role)?;
+        }
         if member.status != MemberStatus::Invited
             || member
                 .invite_expires_at
@@ -303,7 +473,7 @@ impl MemberService {
         requested_role: &MemberRole,
     ) -> Result<(), Problem> {
         if let Some(actor_role) = self.actor_role_in_workspace(principal, workspace_id)?
-            && role_rank(requested_role) > role_rank(&actor_role)
+            && role_rank(requested_role) >= role_rank(&actor_role)
         {
             return Err(problem(
                 "role_escalation",
@@ -321,7 +491,7 @@ impl MemberService {
         target_role: &MemberRole,
     ) -> Result<(), Problem> {
         if let Some(actor_role) = self.actor_role_in_workspace(principal, workspace_id)?
-            && role_rank(target_role) > role_rank(&actor_role)
+            && role_rank(target_role) >= role_rank(&actor_role)
         {
             return Err(problem(
                 "role_escalation",
@@ -410,7 +580,45 @@ impl MemberService {
     }
 
     pub fn can_manage(role: MemberRole) -> bool {
-        matches!(role, MemberRole::Owner | MemberRole::Admin)
+        matches!(
+            role,
+            MemberRole::Owner | MemberRole::Admin | MemberRole::Lead
+        )
+    }
+
+    pub(super) fn team_assignment_members(&self, workspace_id: &WorkspaceId) -> Vec<Member> {
+        self.members
+            .values()
+            .filter(|member| &member.workspace_id == workspace_id)
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn replace_team_ids(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        workspace_id: &WorkspaceId,
+        assignments: &BTreeMap<MemberId, Option<TeamId>>,
+    ) -> Result<(), Problem> {
+        authorize(principal, grants, workspace_id, Action::Manage)?;
+
+        for member_id in assignments.keys() {
+            let member = self
+                .members
+                .get(member_id)
+                .filter(|member| &member.workspace_id == workspace_id)
+                .ok_or_else(|| problem("member_not_found", "Member not found", 404))?;
+            self.ensure_actor_can_manage_role(principal, workspace_id, &member.role)?;
+        }
+
+        for (member_id, team_id) in assignments {
+            self.members
+                .get_mut(member_id)
+                .expect("team assignment target was validated")
+                .team_id = team_id.clone();
+        }
+        Ok(())
     }
 }
 
@@ -435,12 +643,86 @@ fn authorize(
     }
 }
 
+fn authorize_org_owner(
+    principal: &Principal,
+    grants: &[Grant],
+    organization: &Organization,
+    workspace_id: &WorkspaceId,
+    member_action: Action,
+) -> Result<(), Problem> {
+    if principal.token_scopes.as_ref().is_some_and(|scopes| {
+        let action_name = match member_action {
+            Action::Read => "read",
+            Action::Create => "create",
+            Action::Update => "update",
+            Action::Delete => "delete",
+            Action::Execute => "execute",
+            Action::Share => "share",
+            Action::Manage => "manage",
+        };
+        !scopes.contains(&format!("{CAPABILITY}:{action_name}"))
+            && !scopes.contains(&format!("{CAPABILITY}:*"))
+    }) {
+        return Err(problem("member_forbidden", "Member access denied", 403));
+    }
+    if principal.account_id.as_ref() != Some(&organization.account_id) {
+        return Err(problem(
+            "member_forbidden",
+            "Organization owner access denied",
+            403,
+        ));
+    }
+    let capability = Capability::new("CAP-ORG-001")
+        .map_err(|_| problem("invalid_capability", "Invalid capability", 500))?;
+    let scope = ResourceScope {
+        account_id: Some(organization.account_id.clone()),
+        organization_id: Some(organization.id.clone()),
+        workspace_id: Some(workspace_id.clone()),
+        ..ResourceScope::default()
+    };
+    let member_capability = Capability::new(CAPABILITY)
+        .map_err(|_| problem("invalid_capability", "Invalid capability", 500))?;
+    let member_scope = ResourceScope {
+        account_id: Some(organization.account_id.clone()),
+        organization_id: Some(organization.id.clone()),
+        workspace_id: Some(workspace_id.clone()),
+        ..ResourceScope::default()
+    };
+    let explicit_member_deny = grants.iter().any(|grant| {
+        grant.capability == member_capability
+            && grant.action == member_action
+            && grant.effect == buglogin_domain::permissions::Effect::Deny
+            && grant.scope.contains(&member_scope)
+            && grant
+                .account_id
+                .as_ref()
+                .is_none_or(|id| principal.account_id.as_ref() == Some(id))
+            && grant
+                .member_id
+                .as_ref()
+                .is_none_or(|id| principal.member_id.as_ref() == Some(id))
+    });
+    if explicit_member_deny {
+        return Err(problem("member_forbidden", "Member access denied", 403));
+    }
+    if is_allowed(principal, &capability, Action::Manage, &scope, grants) {
+        Ok(())
+    } else {
+        Err(problem(
+            "member_forbidden",
+            "Organization owner access denied",
+            403,
+        ))
+    }
+}
+
 fn role_rank(role: &MemberRole) -> u8 {
     match role {
         MemberRole::Member => 0,
         MemberRole::Operator => 1,
-        MemberRole::Admin => 2,
-        MemberRole::Owner => 3,
+        MemberRole::Lead => 2,
+        MemberRole::Admin => 3,
+        MemberRole::Owner => 4,
     }
 }
 
@@ -454,7 +736,7 @@ mod tests {
     use buglogin_domain::{
         ids::{AccountId, MemberId, WorkspaceId},
         member::{Member, MemberRole, MemberStatus},
-        permissions::{Principal, Role},
+        permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, Role},
     };
     use std::collections::BTreeSet;
 
@@ -530,5 +812,340 @@ mod tests {
             .unwrap();
         assert_eq!(unchanged.status, MemberStatus::Invited);
         assert_eq!(unchanged.role, MemberRole::Member);
+    }
+
+    #[test]
+    fn lead_manages_subordinate_roles_but_cannot_assign_admin_or_owner() {
+        let workspace = WorkspaceId::new("ws_lead_scope").unwrap();
+        let lead_account = AccountId::new("acct_lead_scope").unwrap();
+        let lead_id = MemberId::new("mem_lead_scope").unwrap();
+        let target_id = MemberId::new("mem_target_scope").unwrap();
+        let platform_admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        let mut members = MemberService::default();
+        let lead = Member {
+            id: lead_id,
+            account_id: lead_account.clone(),
+            workspace_id: workspace.clone(),
+            team_id: None,
+            role: MemberRole::Lead,
+            status: MemberStatus::Invited,
+            invite_expires_at: Some(100),
+        };
+        let target = Member {
+            id: target_id.clone(),
+            account_id: AccountId::new("acct_target_scope").unwrap(),
+            workspace_id: workspace.clone(),
+            team_id: None,
+            role: MemberRole::Member,
+            status: MemberStatus::Invited,
+            invite_expires_at: Some(100),
+        };
+        members.invite(&platform_admin, &[], lead, 1).unwrap();
+        members.invite(&platform_admin, &[], target, 1).unwrap();
+        members
+            .activate(
+                &platform_admin,
+                &[],
+                &workspace,
+                &MemberId::new("mem_lead_scope").unwrap(),
+                2,
+            )
+            .unwrap();
+        members
+            .activate(&platform_admin, &[], &workspace, &target_id, 2)
+            .unwrap();
+
+        let lead_principal = Principal {
+            account_id: Some(lead_account),
+            workspace_ids: BTreeSet::from([workspace.clone()]),
+            ..Principal::default()
+        };
+        let manage_members = Grant {
+            id: buglogin_domain::ids::GrantId::new("grant_lead_member_manage").unwrap(),
+            account_id: None,
+            member_id: None,
+            capability: Capability::new("CAP-MEM-001").unwrap(),
+            action: Action::Manage,
+            scope: ResourceScope::workspace(workspace.clone()),
+            effect: Effect::Allow,
+        };
+        assert!(MemberService::can_manage(MemberRole::Lead));
+        members
+            .set_role(
+                &lead_principal,
+                std::slice::from_ref(&manage_members),
+                &workspace,
+                &target_id,
+                MemberRole::Operator,
+            )
+            .unwrap();
+        assert_eq!(
+            members
+                .get_in_workspace(&platform_admin, &[], &target_id, &workspace)
+                .unwrap()
+                .role,
+            MemberRole::Operator
+        );
+        for forbidden_role in [MemberRole::Admin, MemberRole::Owner] {
+            assert_eq!(
+                members
+                    .set_role(
+                        &lead_principal,
+                        &[manage_members.clone()],
+                        &workspace,
+                        &target_id,
+                        forbidden_role,
+                    )
+                    .unwrap_err()
+                    .code,
+                "role_escalation"
+            );
+        }
+
+        let elevated_target_id = MemberId::new("mem_elevated_pending").unwrap();
+        members
+            .invite(
+                &platform_admin,
+                &[],
+                Member {
+                    id: elevated_target_id.clone(),
+                    account_id: AccountId::new("acct_elevated_pending").unwrap(),
+                    workspace_id: workspace.clone(),
+                    team_id: None,
+                    role: MemberRole::Admin,
+                    status: MemberStatus::Invited,
+                    invite_expires_at: Some(100),
+                },
+                3,
+            )
+            .unwrap();
+        assert_eq!(
+            members
+                .activate(
+                    &lead_principal,
+                    &[manage_members],
+                    &workspace,
+                    &elevated_target_id,
+                    4,
+                )
+                .unwrap_err()
+                .code,
+            "role_escalation"
+        );
+    }
+
+    #[test]
+    fn account_provisioning_activates_only_lower_roles_and_is_retry_safe() {
+        let workspace = WorkspaceId::new("ws_provision_scope").unwrap();
+        let platform_admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        let lead_account = AccountId::new("acct_provision_lead").unwrap();
+        let mut members = MemberService::default();
+        members
+            .provision_active(
+                &platform_admin,
+                &[],
+                Member {
+                    id: MemberId::new("mem_provision_lead").unwrap(),
+                    account_id: lead_account.clone(),
+                    workspace_id: workspace.clone(),
+                    team_id: None,
+                    role: MemberRole::Lead,
+                    status: MemberStatus::Active,
+                    invite_expires_at: None,
+                },
+            )
+            .unwrap();
+        let lead = Principal {
+            account_id: Some(lead_account),
+            workspace_ids: BTreeSet::from([workspace.clone()]),
+            ..Principal::default()
+        };
+        let grants = [
+            Grant {
+                id: buglogin_domain::ids::GrantId::new("grant_provision_create").unwrap(),
+                account_id: None,
+                member_id: None,
+                capability: Capability::new("CAP-MEM-001").unwrap(),
+                action: Action::Create,
+                scope: ResourceScope::workspace(workspace.clone()),
+                effect: Effect::Allow,
+            },
+            Grant {
+                id: buglogin_domain::ids::GrantId::new("grant_provision_manage").unwrap(),
+                account_id: None,
+                member_id: None,
+                capability: Capability::new("CAP-MEM-001").unwrap(),
+                action: Action::Manage,
+                scope: ResourceScope::workspace(workspace.clone()),
+                effect: Effect::Allow,
+            },
+        ];
+        let requested = Member {
+            id: MemberId::new("mem_provision_operator").unwrap(),
+            account_id: AccountId::new("acct_provision_operator").unwrap(),
+            workspace_id: workspace.clone(),
+            team_id: None,
+            role: MemberRole::Operator,
+            status: MemberStatus::Active,
+            invite_expires_at: None,
+        };
+        let created = members
+            .provision_active(&lead, &grants, requested.clone())
+            .unwrap();
+        assert_eq!(created, requested);
+        assert_eq!(
+            members
+                .provision_active(&lead, &grants, requested.clone())
+                .unwrap(),
+            requested
+        );
+
+        for role in [MemberRole::Lead, MemberRole::Admin, MemberRole::Owner] {
+            let error = members
+                .provision_active(
+                    &lead,
+                    &grants,
+                    Member {
+                        id: MemberId::new(format!("mem_forbidden_{role:?}").to_lowercase())
+                            .unwrap(),
+                        account_id: AccountId::new(
+                            format!("acct_forbidden_{role:?}").to_lowercase(),
+                        )
+                        .unwrap(),
+                        workspace_id: workspace.clone(),
+                        team_id: None,
+                        role,
+                        status: MemberStatus::Active,
+                        invite_expires_at: None,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "role_escalation");
+        }
+    }
+
+    #[test]
+    fn organization_owner_can_list_and_create_lower_workspace_members() {
+        use buglogin_domain::{
+            ids::{GrantId, OrganizationId},
+            organization::Organization,
+        };
+
+        let organization = Organization {
+            id: OrganizationId::new("org_owner_scope").unwrap(),
+            account_id: AccountId::new("acct_org_owner_scope").unwrap(),
+            name: "Owner Org".into(),
+            created_at: "2026-10-24T00:00:00Z".into(),
+        };
+        let workspace = WorkspaceId::new("ws_owner_scope").unwrap();
+        let owner = Principal {
+            account_id: Some(organization.account_id.clone()),
+            ..Principal::default()
+        };
+        let organization_manage = Grant {
+            id: GrantId::new("grant_org_owner_manage").unwrap(),
+            account_id: Some(organization.account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-ORG-001").unwrap(),
+            action: Action::Manage,
+            scope: ResourceScope {
+                account_id: Some(organization.account_id.clone()),
+                organization_id: Some(organization.id.clone()),
+                ..ResourceScope::default()
+            },
+            effect: Effect::Allow,
+        };
+        let mut members = MemberService::default();
+        let created = members
+            .provision_active_as_org_owner(
+                &owner,
+                std::slice::from_ref(&organization_manage),
+                &organization,
+                Member {
+                    id: MemberId::new("mem_org_owner_created").unwrap(),
+                    account_id: AccountId::new("acct_org_owner_created").unwrap(),
+                    workspace_id: workspace.clone(),
+                    team_id: None,
+                    role: MemberRole::Admin,
+                    status: MemberStatus::Active,
+                    invite_expires_at: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(created.role, MemberRole::Admin);
+        assert_eq!(
+            members
+                .list_as_org_owner(
+                    &owner,
+                    &[organization_manage.clone()],
+                    &organization,
+                    &workspace,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut owner_assignment = created.clone();
+        owner_assignment.id = MemberId::new("mem_org_owner_escalation").unwrap();
+        owner_assignment.account_id = AccountId::new("acct_org_owner_escalation").unwrap();
+        owner_assignment.role = MemberRole::Owner;
+        assert_eq!(
+            members
+                .provision_active_as_org_owner(
+                    &owner,
+                    &[organization_manage.clone()],
+                    &organization,
+                    owner_assignment,
+                )
+                .unwrap_err()
+                .code,
+            "role_escalation"
+        );
+
+        let explicit_deny = Grant {
+            id: GrantId::new("grant_org_owner_member_deny").unwrap(),
+            account_id: Some(organization.account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-MEM-001").unwrap(),
+            action: Action::Create,
+            scope: ResourceScope::workspace(workspace.clone()),
+            effect: Effect::Deny,
+        };
+        assert_eq!(
+            MemberService::authorize_org_owner_account_creation(
+                &owner,
+                &[organization_manage.clone(), explicit_deny],
+                &organization,
+                &workspace,
+                &MemberRole::Admin,
+            )
+            .unwrap_err()
+            .status,
+            403
+        );
+
+        let non_owner = Principal {
+            account_id: Some(AccountId::new("acct_not_org_owner").unwrap()),
+            ..Principal::default()
+        };
+        assert_eq!(
+            members
+                .list_as_org_owner(
+                    &non_owner,
+                    &[organization_manage],
+                    &organization,
+                    &workspace,
+                )
+                .unwrap_err()
+                .status,
+            403
+        );
     }
 }

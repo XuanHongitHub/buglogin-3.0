@@ -27,6 +27,7 @@ use serde_json::Value;
 
 use crate::clock::unix_time_seconds;
 use crate::commands::{Adapter, CommandMetadata, CommandRegistry};
+use crate::http::ApiState;
 use crate::services::{
     operations::reject_secrets,
     profile_creation::ProfileCreationService,
@@ -750,6 +751,90 @@ fn should_abandon_mcp_claim(error: &Problem) -> bool {
     matches!(error.status, 401 | 403) || error.code == "authorization_state_changed"
 }
 
+fn workspace_member_grants_for_execution(
+    state: &ApiState,
+    principal: &Principal,
+    grants: &[buglogin_domain::permissions::Grant],
+    workspace_id: &WorkspaceId,
+    action: buglogin_domain::permissions::Action,
+) -> Result<(Vec<buglogin_domain::permissions::Grant>, bool), Problem> {
+    let capability = Capability::new("CAP-MEM-001").map_err(|_| {
+        Problem::new(
+            "invalid_capability",
+            "Membership capability is invalid",
+            500,
+            "mcp",
+        )
+    })?;
+    let scope = ResourceScope::workspace(workspace_id.clone());
+    if buglogin_domain::permissions::is_allowed(principal, &capability, action, &scope, grants) {
+        return Ok((grants.to_vec(), false));
+    }
+    let organization = state
+        .workspaces
+        .read()
+        .map_err(|_| {
+            Problem::new(
+                "workspace_unavailable",
+                "Workspace service unavailable",
+                503,
+                "mcp",
+            )
+        })?
+        .managed_organization_for_workspace(principal, grants, workspace_id)?;
+    crate::services::members::MemberService::authorize_org_owner_member_action(
+        principal,
+        grants,
+        &organization,
+        workspace_id,
+        action,
+    )?;
+    let account_id = principal
+        .account_id
+        .clone()
+        .ok_or_else(|| Problem::new("account_missing", "Account is missing", 401, "mcp"))?;
+    let mut effective = grants.to_vec();
+    for derived_action in [
+        buglogin_domain::permissions::Action::Read,
+        buglogin_domain::permissions::Action::Manage,
+        action,
+    ] {
+        if !effective.iter().any(|grant| {
+            grant.capability == capability
+                && grant.action == derived_action
+                && grant.scope == scope
+                && grant.account_id.as_ref() == Some(&account_id)
+        }) {
+            let suffix = match derived_action {
+                buglogin_domain::permissions::Action::Read => "read",
+                buglogin_domain::permissions::Action::Create => "create",
+                buglogin_domain::permissions::Action::Update => "update",
+                buglogin_domain::permissions::Action::Delete => "delete",
+                buglogin_domain::permissions::Action::Execute => "execute",
+                buglogin_domain::permissions::Action::Share => "share",
+                buglogin_domain::permissions::Action::Manage => "manage",
+            };
+            effective.push(buglogin_domain::permissions::Grant {
+                id: buglogin_domain::ids::GrantId::new(format!(
+                    "derived_mcp_org_member_{}_{}",
+                    workspace_id.as_str(),
+                    suffix
+                ))
+                .map_err(|_| {
+                    Problem::new("invalid_grant", "Derived grant is invalid", 500, "mcp")
+                })?,
+                account_id: Some(account_id.clone()),
+                member_id: None,
+                capability: capability.clone(),
+                action: derived_action,
+                scope: scope.clone(),
+                effect: buglogin_domain::permissions::Effect::Allow,
+            });
+        }
+    }
+    Ok((effective, true))
+}
+
 pub fn tools() -> Vec<ToolMetadata> {
     CommandRegistry::all()
         .iter()
@@ -1177,6 +1262,11 @@ fn resolve_scope(
             .map(ResourceScope::account)
             .ok_or_else(|| problem("account_missing", "Account is missing", 401)),
         "account.list" | "account.create" => Ok(ResourceScope::global()),
+        "account.create.scoped" => Ok(ResourceScope::workspace(required_id(
+            input,
+            "workspaceId",
+            WorkspaceId::from_str,
+        )?)),
         "account.status.update" => Ok(ResourceScope::account(required_id(
             input,
             "accountId",
@@ -1697,6 +1787,64 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             &grants,
         ) {
             Ok(())
+        } else if command.id.as_str() == "account.create.scoped"
+            && let Some(workspace_id) = scope.workspace_id.as_ref()
+        {
+            let organization = self
+                .state
+                .workspaces
+                .read()
+                .map_err(|_| {
+                    Problem::new(
+                        "workspace_unavailable",
+                        "Workspace service unavailable",
+                        503,
+                        "mcp",
+                    )
+                })?
+                .managed_organization_for_workspace(principal, &grants, workspace_id)?;
+            crate::services::members::MemberService::authorize_org_owner_account_creation(
+                principal,
+                &grants,
+                &organization,
+                workspace_id,
+                &buglogin_domain::member::MemberRole::Admin,
+            )
+        } else if matches!(
+            command.id.as_str(),
+            "member.get"
+                | "member.list"
+                | "member.invite"
+                | "member.activate"
+                | "member.suspend"
+                | "member.role.update"
+        ) && let Some(workspace_id) = scope.workspace_id.as_ref()
+        {
+            let organization = self
+                .state
+                .workspaces
+                .read()
+                .map_err(|_| {
+                    Problem::new(
+                        "workspace_unavailable",
+                        "Workspace service unavailable",
+                        503,
+                        "mcp",
+                    )
+                })?
+                .managed_organization_for_workspace(principal, &grants, workspace_id)?;
+            let required_action = match command.id.as_str() {
+                "member.get" | "member.list" => Action::Read,
+                "member.invite" => Action::Create,
+                _ => Action::Manage,
+            };
+            crate::services::members::MemberService::authorize_org_owner_member_action(
+                principal,
+                &grants,
+                &organization,
+                workspace_id,
+                required_action,
+            )
         } else {
             Err(Problem::new("forbidden", "Permission denied", 403, "mcp"))
         }
@@ -2329,6 +2477,111 @@ impl McpExecutor for ProductionMcpExecutor {
                 Ok(serde_json::json!({
                     "account": pending.account,
                     "identity": pending.identity,
+                    "replayed": pending.replayed,
+                    "onboardingStatus": "pending_verification",
+                    "loginEnabled": false
+                }))
+            }
+            "account.create.scoped" => {
+                let workspace_id = required_id(&input, "workspaceId", WorkspaceId::from_str)?;
+                let account_id = required_id(&input, "accountId", AccountId::from_str)?;
+                let username = input
+                    .get("username")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "username is required", 400))?;
+                let email = input
+                    .get("email")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "email is required", 400))?;
+                let role: buglogin_domain::member::MemberRole =
+                    serde_json::from_value(input.get("role").cloned().unwrap_or(Value::Null))
+                        .map_err(serialization_problem)?;
+                let organization_owner_scope = match state
+                    .members
+                    .read()
+                    .map_err(|_| problem("member_unavailable", "Member state unavailable", 503))?
+                    .authorize_invitation(&principal, &grants, &workspace_id, &role)
+                {
+                    Ok(()) => None,
+                    Err(_) => {
+                        let organization = state
+                            .workspaces
+                            .read()
+                            .map_err(|_| {
+                                problem(
+                                    "workspace_unavailable",
+                                    "Workspace service unavailable",
+                                    503,
+                                )
+                            })?
+                            .managed_organization_for_workspace(
+                                &principal,
+                                &grants,
+                                &workspace_id,
+                            )?;
+                        crate::services::members::MemberService::authorize_org_owner_account_creation(
+                            &principal,
+                            &grants,
+                            &organization,
+                            &workspace_id,
+                            &role,
+                        )?;
+                        Some(organization)
+                    }
+                };
+                let actor_id = principal.account_id.as_ref().ok_or_else(|| {
+                    Problem::new("account_missing", "Account is missing", 401, "identity")
+                })?;
+                let created_at = crate::clock::rfc3339(&request.correlation_id)?;
+                let provisioning_key =
+                    crate::services::account_provisioning::scoped_account_idempotency_key(
+                        &workspace_id,
+                        &account_id,
+                    );
+                let pending =
+                    crate::services::account_provisioning::AccountProvisioningService::new(
+                        state.control_persistence.clone(),
+                    )
+                    .create_pending_scoped(
+                        account_id.clone(),
+                        username,
+                        email,
+                        actor_id,
+                        &provisioning_key,
+                        &created_at,
+                        &workspace_id,
+                        &role,
+                    )?;
+                let member = buglogin_domain::member::Member {
+                    id: crate::services::account_provisioning::scoped_member_id(
+                        &workspace_id,
+                        &account_id,
+                    )?,
+                    account_id: pending.account.id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    team_id: None,
+                    role,
+                    status: buglogin_domain::member::MemberStatus::Active,
+                    invite_expires_at: None,
+                };
+                let mut members = state
+                    .members
+                    .write()
+                    .map_err(|_| problem("member_unavailable", "Member state unavailable", 503))?;
+                let member = if let Some(organization) = organization_owner_scope.as_ref() {
+                    members.provision_active_as_org_owner(
+                        &principal,
+                        &grants,
+                        organization,
+                        member,
+                    )?
+                } else {
+                    members.provision_active(&principal, &grants, member)?
+                };
+                Ok(serde_json::json!({
+                    "account": pending.account,
+                    "identity": pending.identity,
+                    "member": member,
                     "replayed": pending.replayed,
                     "onboardingStatus": "pending_verification",
                     "loginEnabled": false
@@ -3084,13 +3337,34 @@ impl McpExecutor for ProductionMcpExecutor {
                 Ok(serde_json::to_value(record).map_err(serialization_problem)?)
             }
             "member.invite" => {
-                let _ws_id: WorkspaceId = serde_json::from_value(
+                let ws_id: WorkspaceId = serde_json::from_value(
                     input.get("workspaceId").cloned().unwrap_or(Value::Null),
                 )
                 .map_err(serialization_problem)?;
                 let member: Member =
                     serde_json::from_value(input.get("member").cloned().unwrap_or(Value::Null))
                         .map_err(serialization_problem)?;
+                if member.workspace_id != ws_id {
+                    return Err(problem(
+                        "tenant_mismatch",
+                        "Member workspace does not match input scope",
+                        403,
+                    ));
+                }
+                let (member_grants, organization_owner) = workspace_member_grants_for_execution(
+                    state,
+                    &principal,
+                    &grants,
+                    &ws_id,
+                    buglogin_domain::permissions::Action::Create,
+                )?;
+                if organization_owner && member.role == buglogin_domain::member::MemberRole::Owner {
+                    return Err(problem(
+                        "role_escalation",
+                        "Organization owner may invite only roles below Owner",
+                        403,
+                    ));
+                }
                 state
                     .members
                     .write()
@@ -3104,7 +3378,7 @@ impl McpExecutor for ProductionMcpExecutor {
                     })?
                     .invite(
                         &principal,
-                        &grants,
+                        &member_grants,
                         member.clone(),
                         unix_time_seconds(&request.correlation_id)?,
                     )?;
@@ -3122,6 +3396,13 @@ impl McpExecutor for ProductionMcpExecutor {
                         "mcp",
                     )
                 })?;
+                let (member_grants, _) = workspace_member_grants_for_execution(
+                    state,
+                    &principal,
+                    &grants,
+                    &ws_id,
+                    buglogin_domain::permissions::Action::Read,
+                )?;
                 let member = state
                     .members
                     .read()
@@ -3133,7 +3414,7 @@ impl McpExecutor for ProductionMcpExecutor {
                             "mcp",
                         )
                     })?
-                    .get_in_workspace(&principal, &grants, &id, &ws_id)?;
+                    .get_in_workspace(&principal, &member_grants, &id, &ws_id)?;
                 Ok(serde_json::to_value(member).map_err(serialization_problem)?)
             }
             "member.list" => {
@@ -3153,18 +3434,46 @@ impl McpExecutor for ProductionMcpExecutor {
                     .and_then(Value::as_u64)
                     .map_or(Ok(100_usize), |value| usize::try_from(value))
                     .map_err(|_| problem("invalid_page_limit", "Page limit is invalid", 400))?;
-                let (items, next_cursor) = state
-                    .members
-                    .read()
-                    .map_err(|_| {
-                        Problem::new(
-                            "member_unavailable",
-                            "Member service unavailable",
-                            503,
-                            "mcp",
-                        )
-                    })?
-                    .list_page(&principal, &grants, &ws_id, cursor.as_ref(), limit)?;
+                let member_service = state.members.read().map_err(|_| {
+                    Problem::new(
+                        "member_unavailable",
+                        "Member service unavailable",
+                        503,
+                        "mcp",
+                    )
+                })?;
+                let (items, next_cursor) = match member_service.list_page(
+                    &principal,
+                    &grants,
+                    &ws_id,
+                    cursor.as_ref(),
+                    limit,
+                ) {
+                    Ok(page) => page,
+                    Err(error) if error.status == 403 => {
+                        let organization = state
+                            .workspaces
+                            .read()
+                            .map_err(|_| {
+                                Problem::new(
+                                    "workspace_unavailable",
+                                    "Workspace service unavailable",
+                                    503,
+                                    "mcp",
+                                )
+                            })?
+                            .managed_organization_for_workspace(&principal, &grants, &ws_id)?;
+                        member_service.list_page_as_org_owner(
+                            &principal,
+                            &grants,
+                            &organization,
+                            &ws_id,
+                            cursor.as_ref(),
+                            limit,
+                        )?
+                    }
+                    Err(error) => return Err(error),
+                };
                 Ok(serde_json::json!({ "items": items, "nextCursor": next_cursor }))
             }
             "member.activate" => {
@@ -3174,10 +3483,29 @@ impl McpExecutor for ProductionMcpExecutor {
                 let workspace_id = request.scope.workspace_id.as_ref().ok_or_else(|| {
                     problem("workspace_missing", "Workspace scope is required", 400)
                 })?;
-                let member = HostedProfileService::activate_member(
+                let (member_grants, organization_owner) = workspace_member_grants_for_execution(
                     state,
                     &principal,
                     &grants,
+                    workspace_id,
+                    buglogin_domain::permissions::Action::Manage,
+                )?;
+                let target = state
+                    .members
+                    .read()
+                    .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
+                    .get_in_workspace(&principal, &member_grants, &id, workspace_id)?;
+                if organization_owner && target.role == buglogin_domain::member::MemberRole::Owner {
+                    return Err(problem(
+                        "role_escalation",
+                        "Organization owner cannot change a workspace Owner membership",
+                        403,
+                    ));
+                }
+                let member = HostedProfileService::activate_member(
+                    state,
+                    &principal,
+                    &member_grants,
                     workspace_id,
                     &id,
                 )?;
@@ -3190,10 +3518,29 @@ impl McpExecutor for ProductionMcpExecutor {
                 let workspace_id = request.scope.workspace_id.as_ref().ok_or_else(|| {
                     problem("workspace_missing", "Workspace scope is required", 400)
                 })?;
-                let member = HostedProfileService::suspend_member(
+                let (member_grants, organization_owner) = workspace_member_grants_for_execution(
                     state,
                     &principal,
                     &grants,
+                    workspace_id,
+                    buglogin_domain::permissions::Action::Manage,
+                )?;
+                let target = state
+                    .members
+                    .read()
+                    .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
+                    .get_in_workspace(&principal, &member_grants, &id, workspace_id)?;
+                if organization_owner && target.role == buglogin_domain::member::MemberRole::Owner {
+                    return Err(problem(
+                        "role_escalation",
+                        "Organization owner cannot change a workspace Owner membership",
+                        403,
+                    ));
+                }
+                let member = HostedProfileService::suspend_member(
+                    state,
+                    &principal,
+                    &member_grants,
                     workspace_id,
                     &id,
                 )?;
@@ -3209,6 +3556,28 @@ impl McpExecutor for ProductionMcpExecutor {
                 let role: buglogin_domain::member::MemberRole =
                     serde_json::from_value(input.get("role").cloned().unwrap_or(Value::Null))
                         .map_err(serialization_problem)?;
+                let (member_grants, organization_owner) = workspace_member_grants_for_execution(
+                    state,
+                    &principal,
+                    &grants,
+                    workspace_id,
+                    buglogin_domain::permissions::Action::Manage,
+                )?;
+                let target = state
+                    .members
+                    .read()
+                    .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
+                    .get_in_workspace(&principal, &member_grants, &id, workspace_id)?;
+                if organization_owner
+                    && (target.role == buglogin_domain::member::MemberRole::Owner
+                        || role == buglogin_domain::member::MemberRole::Owner)
+                {
+                    return Err(problem(
+                        "role_escalation",
+                        "Organization owner may manage only memberships below Owner",
+                        403,
+                    ));
+                }
                 state
                     .members
                     .write()
@@ -3220,7 +3589,7 @@ impl McpExecutor for ProductionMcpExecutor {
                             "mcp",
                         )
                     })?
-                    .set_role(&principal, &grants, workspace_id, &id, role.clone())?;
+                    .set_role(&principal, &member_grants, workspace_id, &id, role.clone())?;
                 Ok(serde_json::json!({ "memberId": id, "role": role }))
             }
             "resource.register" => {

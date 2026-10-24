@@ -1,0 +1,55 @@
+# Rust quality gate for the BugLogin 3.0 workspace.
+
+name: Lint Rust
+
+on:
+  workflow_call:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    paths-ignore:
+      - "src/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "yarn.lock"
+      - "README.md"
+      - ".github/workflows/lint-js.yml"
+      - ".github/workflows/osv.yml"
+      - "next.config.js"
+      - "tailwind.config.js"
+      - "tsconfig.json"
+      - "biome.json"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v7.0.0
+
+      - uses: ./.github/actions/setup-buglogin
+        with:
+          install-node-dependencies: false
+
+      - name: Install native Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Run current Rust workspace checks
+        shell: bash
+        run: bash scripts/ci/check-rust.sh
+
+      - name: Audit Rust dependencies
+        run: cargo audit --locked

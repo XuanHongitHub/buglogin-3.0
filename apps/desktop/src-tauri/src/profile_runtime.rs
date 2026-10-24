@@ -1065,6 +1065,7 @@ fn suppress_wayfern_top_sites(profile_path: &Path) -> Result<(), Problem> {
     }
     Ok(())
 }
+
 fn unavailable() -> Problem {
     Problem::new(
         "profile_runtime_unavailable",
@@ -1424,6 +1425,7 @@ mod tests {
         assert_eq!(fs::read(path.join("Default/Cookies")).unwrap(), b"keep");
         let _ = fs::remove_dir_all(path);
     }
+
     fn request(path: &Path, managed: bool) -> LaunchRequest {
         request_for(path, "prf_runtime_1", managed)
     }

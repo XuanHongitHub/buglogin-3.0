@@ -1,30 +1,28 @@
 "use client";
 
-import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuArrowRight,
   LuBan,
   LuBuilding2,
-  LuCheck,
-  LuCopy,
   LuCreditCard,
   LuCrown,
   LuHardDrive,
-  LuKey,
   LuLaptop,
   LuPencil,
   LuSearch,
   LuShield,
   LuShieldCheck,
   LuSlidersHorizontal,
-  LuTrash2,
   LuTriangleAlert,
   LuUserCheck,
   LuUsers,
 } from "react-icons/lu";
+import { CreateInviteModal } from "@/components/create-invite-modal";
+import { MemberManagementDialog } from "@/components/member-management-dialog";
 import { LoadingButton } from "@/components/loading-button";
+import { ResourceInventoryPanel } from "@/components/resource-inventory-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -45,10 +43,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  getActiveUserEmail,
-  resolveHumanIdentity,
-} from "@/lib/identity-display";
+import { getActiveUserEmail } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
@@ -58,35 +53,39 @@ const desktopApi = createTauriDesktopApi();
 export type HierarchicalRole =
   | "owner"
   | "admin"
-  | "manager"
+  | "lead"
   | "operator"
   | "member";
 
 export const ROLE_RANKS: Record<string, number> = {
   owner: 4,
   admin: 3,
-  manager: 2,
+  lead: 2,
   operator: 1,
   member: 0,
 };
 
 export interface OrgEmployee {
   id: string;
+  accountId: string;
+  workspaceId: string;
   name: string;
   email: string;
   role: HierarchicalRole;
   workspaces: string[];
   groupScope: string;
-  status: "active" | "suspended";
+  status: "invited" | "active" | "suspended";
 }
 
 export interface OrgWorkspaceItem {
   id: string;
+  organizationId: string;
   name: string;
-  profileCount: number;
+  profileCount: number | null;
   maxProfiles: number;
   memberCount: number;
   maxMembers: number;
+  maxStorageBytes: number;
   offlineEntitled: boolean;
   cloudSync: boolean;
 }
@@ -106,7 +105,7 @@ export function OrgManagementCenter({
 }: OrgManagementCenterProps) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<
-    "members" | "workspaces" | "security" | "billing"
+    "members" | "workspaces" | "resources" | "security" | "billing"
   >("members");
 
   const [employees, setEmployees] = useState<OrgEmployee[]>([]);
@@ -115,57 +114,39 @@ export function OrgManagementCenter({
     id: string;
     email: string;
     role: HierarchicalRole;
+    workspaceRoles: Record<string, HierarchicalRole>;
   }>({
-    id: "user_owner",
-    email: "admin@buglogin.internal",
-    role: "owner",
+    id: "",
+    email: "",
+    role: "member",
+    workspaceRoles: {},
   });
-  const [availableGroups, setAvailableGroups] = useState<
-    Array<{ id: string; name: string; profile_count: number }>
-  >([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchEmployeeQuery, setSearchEmployeeQuery] = useState("");
   const [workspaceFilter, setWorkspaceFilter] = useState("all");
 
   // Sub-modal states
   const [editOrgModalOpen, setEditOrgModalOpen] = useState(false);
-  const [transferOwnerModalOpen, setTransferOwnerModalOpen] = useState(false);
+  const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  const [accountManagementOpen, setAccountManagementOpen] = useState(false);
+  const [accountWorkspaceId, setAccountWorkspaceId] = useState("");
   const [editWsModal, setEditWsModal] = useState<OrgWorkspaceItem | null>(null);
   const [deleteWsModal, setDeleteWsModal] = useState<OrgWorkspaceItem | null>(
     null,
   );
-  const [resetPwdMember, setResetPwdMember] = useState<OrgEmployee | null>(
-    null,
-  );
-
-  // Security Policies State (Default Auto-Logout to 0 / Disabled)
-  const [require2FA, setRequire2FA] = useState(true);
-  const [autoLogoutMinutes, setAutoLogoutMinutes] = useState(0);
-  const [blockRawCookieForOperators, setBlockRawCookieForOperators] =
-    useState(true);
-  const [mandatoryAuditLog, setMandatoryAuditLog] = useState(true);
 
   // Form states for Submodals
-  const [orgBillingEmail, setOrgBillingEmail] = useState(
-    "admin@buglogin.internal",
-  );
-  const [orgName, setOrgName] = useState("BugLogin Organization");
-  const [transferTargetEmail, setTransferTargetEmail] = useState("");
-  const [transferMyPassword, setTransferMyPassword] = useState("");
-  const [transferConfirmationPhrase, setTransferConfirmationPhrase] =
-    useState("");
-  const [isTransferring, setIsTransferring] = useState(false);
+  const [orgBillingEmail] = useState("Chưa có dữ liệu billing");
+  const [orgName, setOrgName] = useState("Đang tải tổ chức…");
+  const [orgId, setOrgId] = useState<string | null>(null);
+  const [orgAccountId, setOrgAccountId] = useState("");
+  const [orgCreatedAt, setOrgCreatedAt] = useState("");
+  const [orgRevision, setOrgRevision] = useState(0);
+  const [orgPolicy, setOrgPolicy] = useState<{
+    maxWorkspaces: number;
+    offlineEntitled: boolean;
+  }>({ maxWorkspaces: 0, offlineEntitled: false });
 
-  // Reset password states
-  const [generatedTempPassword, setGeneratedTempPassword] = useState(
-    "Pass#89a2!BugLogin2026",
-  );
-  const [mustChangePasswordOnLogin, setMustChangePasswordOnLogin] =
-    useState(true);
-  const [forceLogoutAllSessions, setForceLogoutAllSessions] = useState(true);
-  const [copiedTempPwd, setCopiedTempPwd] = useState(false);
-
-  // Delete workspace verification
   const [deleteConfirmationName, setDeleteConfirmationName] = useState("");
   const [deleteHandleProfilesAction, setDeleteHandleProfilesAction] = useState<
     "archive" | "purge"
@@ -203,14 +184,35 @@ export function OrgManagementCenter({
     if (selectedWsIds.size === 0) return;
     setIsBulkWsExecuting(true);
     try {
-      setWorkspaces((prev) =>
-        prev.map((w) =>
-          selectedWsIds.has(w.id)
-            ? { ...w, maxProfiles: bulkMaxProfiles, maxMembers: bulkMaxMembers }
-            : w,
+      const targets = workspaces.filter((workspace) =>
+        selectedWsIds.has(workspace.id),
+      );
+      const results = await Promise.allSettled(
+        targets.map((workspace) =>
+          desktopApi.updateWorkspace({
+            organizationId: workspace.organizationId,
+            workspaceId: workspace.id,
+            update: {
+              name: workspace.name,
+              policy: {
+                maxProfiles: bulkMaxProfiles,
+                maxMembers: bulkMaxMembers,
+                maxStorageBytes: workspace.maxStorageBytes,
+                offlineEntitled: workspace.offlineEntitled,
+              },
+            },
+          }),
         ),
       );
-      const count = selectedWsIds.size;
+      await loadRealData();
+      const count = results.filter(
+        (result) => result.status === "fulfilled",
+      ).length;
+      const failed = results.length - count;
+      if (failed)
+        throw new Error(
+          `${count} workspace cập nhật được, ${failed} thất bại. Danh sách đã đồng bộ lại từ máy chủ.`,
+        );
       showSuccessToast(t("workspaces.bulkActions.quotaUpdated", { count }));
       setBulkWsQuotaModalOpen(false);
       setSelectedWsIds(new Set());
@@ -221,28 +223,14 @@ export function OrgManagementCenter({
     }
   };
 
-  const handleBulkArchiveWs = async () => {
-    if (selectedWsIds.size === 0) return;
-    setIsBulkWsExecuting(true);
-    try {
-      const idsToRemove = new Set(selectedWsIds);
-      setWorkspaces((prev) => prev.filter((w) => !idsToRemove.has(w.id)));
-      const count = idsToRemove.size;
-      showSuccessToast(t("workspaces.bulkActions.archived", { count }));
-      setSelectedWsIds(new Set());
-    } catch (e) {
-      showErrorToast(String(e));
-    } finally {
-      setIsBulkWsExecuting(false);
-    }
-  };
-
   const manageableEmployees = useMemo(() => {
     return employees.filter((emp) => {
+      const actorRole = currentUser.workspaceRoles[emp.workspaceId];
+      if (!actorRole) return false;
       const empRank = ROLE_RANKS[emp.role] ?? 0;
       const isSelf =
         emp.id === currentUser.id || emp.email === currentUser.email;
-      return !isSelf && empRank < (ROLE_RANKS[currentUser.role] ?? 4);
+      return !isSelf && empRank < ROLE_RANKS[actorRole];
     });
   }, [employees, currentUser]);
 
@@ -270,15 +258,30 @@ export function OrgManagementCenter({
     if (selectedEmpIds.size === 0) return;
     setIsBulkEmpExecuting(true);
     try {
-      setEmployees((prev) =>
-        prev.map((e) =>
-          selectedEmpIds.has(e.id) ? { ...e, role: newRole } : e,
+      const targets = employees.filter((e) => selectedEmpIds.has(e.id));
+      const results = await Promise.allSettled(
+        targets.map((member) =>
+          desktopApi.updateMemberRole({
+            workspaceId: member.workspaceId,
+            memberId: member.id,
+            role: newRole as HierarchicalRole,
+          }),
         ),
       );
+      await loadRealData();
+      const failed = results.filter(
+        (result) => result.status === "rejected",
+      ).length;
+      if (failed)
+        throw new Error(
+          `${failed} thành viên không cập nhật được; dữ liệu đã tải lại từ máy chủ.`,
+        );
       showSuccessToast(
         t("members.bulkActions.roleUpdated", { count: selectedEmpIds.size }),
       );
       setSelectedEmpIds(new Set());
+    } catch (error) {
+      showErrorToast(String(error));
     } finally {
       setIsBulkEmpExecuting(false);
     }
@@ -288,15 +291,29 @@ export function OrgManagementCenter({
     if (selectedEmpIds.size === 0) return;
     setIsBulkEmpExecuting(true);
     try {
-      setEmployees((prev) =>
-        prev.map((e) =>
-          selectedEmpIds.has(e.id) ? { ...e, status: "suspended" } : e,
+      const targets = employees.filter((e) => selectedEmpIds.has(e.id));
+      const results = await Promise.allSettled(
+        targets.map((member) =>
+          desktopApi.suspendMember({
+            workspaceId: member.workspaceId,
+            memberId: member.id,
+          }),
         ),
       );
+      await loadRealData();
+      const failed = results.filter(
+        (result) => result.status === "rejected",
+      ).length;
+      if (failed)
+        throw new Error(
+          `${failed} thành viên không đình chỉ được; dữ liệu đã tải lại từ máy chủ.`,
+        );
       showSuccessToast(
         t("members.bulkActions.suspendedCount", { count: selectedEmpIds.size }),
       );
       setSelectedEmpIds(new Set());
+    } catch (error) {
+      showErrorToast(String(error));
     } finally {
       setIsBulkEmpExecuting(false);
     }
@@ -306,15 +323,29 @@ export function OrgManagementCenter({
     if (selectedEmpIds.size === 0) return;
     setIsBulkEmpExecuting(true);
     try {
-      setEmployees((prev) =>
-        prev.map((e) =>
-          selectedEmpIds.has(e.id) ? { ...e, status: "active" } : e,
+      const targets = employees.filter((e) => selectedEmpIds.has(e.id));
+      const results = await Promise.allSettled(
+        targets.map((member) =>
+          desktopApi.activateMember({
+            workspaceId: member.workspaceId,
+            memberId: member.id,
+          }),
         ),
       );
+      await loadRealData();
+      const failed = results.filter(
+        (result) => result.status === "rejected",
+      ).length;
+      if (failed)
+        throw new Error(
+          `${failed} thành viên không kích hoạt được; dữ liệu đã tải lại từ máy chủ.`,
+        );
       showSuccessToast(
         t("members.bulkActions.activatedCount", { count: selectedEmpIds.size }),
       );
       setSelectedEmpIds(new Set());
+    } catch (error) {
+      showErrorToast(String(error));
     } finally {
       setIsBulkEmpExecuting(false);
     }
@@ -323,127 +354,123 @@ export function OrgManagementCenter({
   const loadRealData = useCallback(async () => {
     setIsLoading(true);
     try {
-      // 1. Fetch current account
-      let userRole: HierarchicalRole = "member";
-      const activeEmail = getActiveUserEmail();
-      let userEmail = activeEmail || "admin@buglogin.internal";
-      let userId = "user_owner";
-      try {
-        const acc = await desktopApi.getAccount();
-        if (acc?.accountId) {
-          userId = acc.accountId;
-          const resolved = resolveHumanIdentity(acc.accountId, userRole, 0);
-          userEmail = activeEmail || resolved.email;
-          setOrgBillingEmail(userEmail);
-        } else if (activeEmail) {
-          setOrgBillingEmail(activeEmail);
-        }
-      } catch (e) {
-        console.warn("Could not fetch account:", e);
-        if (activeEmail) {
-          setOrgBillingEmail(activeEmail);
-        }
-      }
-
-      // 2. Fetch available workspaces from SQLite
-      let loadedWorkspaces: OrgWorkspaceItem[] = [];
-      try {
-        const wsList = await invoke<Array<any>>("get_available_workspaces");
-        if (wsList && wsList.length > 0) {
-          loadedWorkspaces = wsList.map((w: any) => ({
-            id: w.id,
-            name: w.name,
-            profileCount:
-              typeof w.profileCount === "number" ? w.profileCount : 0,
-            maxProfiles:
-              typeof w.policy?.maxProfiles === "number"
-                ? w.policy.maxProfiles
-                : typeof w.maxProfiles === "number"
-                  ? w.maxProfiles
-                  : 0,
-            memberCount: typeof w.memberCount === "number" ? w.memberCount : 1,
-            maxMembers:
-              typeof w.policy?.maxMembers === "number"
-                ? w.policy.maxMembers
-                : typeof w.maxMembers === "number"
-                  ? w.maxMembers
-                  : 0,
-            offlineEntitled: w.policy?.offlineEntitled ?? false,
-            cloudSync: true,
-          }));
-        }
-      } catch (e) {
-        console.warn("Could not fetch workspaces:", e);
-      }
-
-      setWorkspaces(loadedWorkspaces);
-
-      // 4. Fetch real profile groups
-      try {
-        const groups = await invoke<
-          Array<{ id: string; name: string; profile_count: number }>
-        >("get_groups_with_profile_counts");
-        if (groups) {
-          setAvailableGroups(groups);
-        }
-      } catch (e) {
-        console.warn("Could not fetch groups:", e);
-      }
-
-      // 5. Fetch real members for active workspace
-      const activeWs = loadedWorkspaces[0];
-      let loadedMembers: OrgEmployee[] = [];
-      try {
-        const page = await desktopApi.listMembers(activeWs.id);
-        if (page?.items && page.items.length > 0) {
-          const ownMembership = page.items.find(
-            (member) => member.accountId === userId,
-          );
-          if (ownMembership && Object.hasOwn(ROLE_RANKS, ownMembership.role)) {
-            userRole = ownMembership.role as HierarchicalRole;
-          }
-          loadedMembers = page.items.map((m, idx) => {
-            const resolved = resolveHumanIdentity(m.accountId, m.role, idx);
-            return {
-              id: m.id,
-              name: resolved.displayName,
-              email: resolved.email,
-              role: (m.role as HierarchicalRole) || "operator",
-              workspaces: [activeWs.name],
-              groupScope: "Toàn bộ Profiles",
-              status: m.status === "suspended" ? "suspended" : "active",
-            };
-          });
-        }
-      } catch (e) {
-        console.warn("Could not fetch members:", e);
-      }
-
-      // Ensure logged in user is represented in member directory
-      if (
-        !loadedMembers.some((m) => m.email === userEmail || m.id === userId)
-      ) {
-        loadedMembers.unshift({
-          id: userId,
-          name: userEmail.split("@")[0] || "Quản trị viên",
-          email: userEmail,
-          role: userRole,
-          workspaces: [activeWs.name],
-          groupScope: "Toàn quyền (All)",
-          status: "active",
+      const [account, organizations] = await Promise.all([
+        desktopApi.getAccount(),
+        desktopApi.listOrganizations(),
+      ]);
+      const userId = account.accountId;
+      const userEmail = getActiveUserEmail() || "";
+      const primaryOrg = organizations.items[0] ?? null;
+      if (primaryOrg) {
+        const organizationRecord = await desktopApi.getOrganizationRecord({
+          organizationId: primaryOrg.id,
         });
+        setOrgId(primaryOrg.id);
+        setOrgAccountId(primaryOrg.accountId);
+        setOrgCreatedAt(primaryOrg.createdAt);
+        setOrgRevision(organizationRecord.revision);
+        setOrgPolicy(organizationRecord.policy);
+      } else {
+        setOrgId(null);
+        setOrgAccountId("");
+        setOrgCreatedAt("");
       }
-      setCurrentUser({ id: userId, email: userEmail, role: userRole });
-      setEmployees(loadedMembers);
-      if (loadedMembers.length > 1) {
-        setTransferTargetEmail(
-          loadedMembers.find((m) => m.id !== userId)?.email || "",
+      const workspacePages = await Promise.all(
+        organizations.items.map((org) => desktopApi.listWorkspaces(org.id)),
+      );
+      const allWorkspaces = workspacePages.flatMap((page) => page.items);
+      const memberPages = await Promise.all(
+        allWorkspaces.map(async (workspace) => ({
+          workspace,
+          page: await desktopApi.listMembers(workspace.id),
+        })),
+      );
+      const loadedWorkspaces: OrgWorkspaceItem[] = allWorkspaces.map(
+        (workspace, index) => ({
+          id: workspace.id,
+          organizationId: workspace.organizationId,
+          name: workspace.name,
+          profileCount: null,
+          maxProfiles: workspace.policy.maxProfiles,
+          memberCount: memberPages[index].page.items.length,
+          maxMembers: workspace.policy.maxMembers,
+          maxStorageBytes: workspace.policy.maxStorageBytes,
+          offlineEntitled: workspace.policy.offlineEntitled,
+          cloudSync: false,
+        }),
+      );
+      const loadedMembers: OrgEmployee[] = memberPages.flatMap(
+        ({ workspace, page }) =>
+          page.items.map((member) => {
+            const identity = member.identity;
+            const email = identity?.email ?? "";
+            return {
+              id: member.id,
+              accountId: member.accountId,
+              workspaceId: workspace.id,
+              name:
+                identity?.username ||
+                email ||
+                t("members.identityUnavailable", {
+                  defaultValue: "Chưa có thông tin định danh",
+                }),
+              email,
+              role: member.role as HierarchicalRole,
+              workspaces: [workspace.name],
+              groupScope: "—",
+              status: member.status,
+            };
+          }),
+      );
+      const ownMemberships = memberPages
+        .flatMap(({ page }) => page.items)
+        .filter(
+          (member) => member.accountId === userId && member.status === "active",
         );
-      }
+      const workspaceRoles = Object.fromEntries(
+        account.managedWorkspaceIds.map((managedWorkspaceId) => [
+          managedWorkspaceId,
+          "owner",
+        ]),
+      ) as Record<string, HierarchicalRole>;
+      Object.assign(
+        workspaceRoles,
+        Object.fromEntries(
+          ownMemberships
+            .filter(
+              (member) =>
+                !account.managedWorkspaceIds.includes(member.workspaceId),
+            )
+            .map((member) => [member.workspaceId, member.role]),
+        ),
+      );
+      const ownMembership = ownMemberships[0];
+      setWorkspaces(loadedWorkspaces);
+      setEmployees(loadedMembers);
+      setCurrentUser({
+        id: userId,
+        email: userEmail,
+        role: (ownMembership?.role as HierarchicalRole) ?? "member",
+        workspaceRoles,
+      });
+      const manageableWorkspaceIds = Object.keys(workspaceRoles);
+      setAccountWorkspaceId((current) =>
+        manageableWorkspaceIds.includes(current)
+          ? current
+          : manageableWorkspaceIds[0] ?? "",
+      );
+      setOrgName(
+        primaryOrg?.name ??
+          t("orgManagement.noOrganization", {
+            defaultValue: "Chưa có tổ chức",
+          }),
+      );
+    } catch (error) {
+      showErrorToast(`Không thể tải dữ liệu quản trị: ${String(error)}`);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (isOpen) {
@@ -474,111 +501,115 @@ export function OrgManagementCenter({
     });
   }, [employees, workspaceFilter, searchEmployeeQuery]);
 
-  const totalProfilesUsed = workspaces.reduce(
-    (acc, w) => acc + w.profileCount,
+  const totalProfilesUsed = workspaces.every(
+    (workspace) => workspace.profileCount !== null,
+  )
+    ? workspaces.reduce(
+        (acc, workspace) => acc + (workspace.profileCount ?? 0),
+        0,
+      )
+    : null;
+  const totalProfilesMax = workspaces.reduce(
+    (sum, workspace) => sum + workspace.maxProfiles,
     0,
   );
-  const totalProfilesMax = 5000;
-  const profilesPercent = Math.round(
-    (totalProfilesUsed / totalProfilesMax) * 100,
-  );
+  const profilesPercent =
+    totalProfilesUsed === null || totalProfilesMax === 0
+      ? 0
+      : Math.round((totalProfilesUsed / totalProfilesMax) * 100);
 
   const totalMembersUsed = employees.length;
-  const totalMembersMax = 50;
-  const membersPercent = Math.round((totalMembersUsed / totalMembersMax) * 100);
+  const totalMembersMax = workspaces.reduce(
+    (sum, workspace) => sum + workspace.maxMembers,
+    0,
+  );
+  const membersPercent =
+    totalMembersMax === 0
+      ? 0
+      : Math.round((totalMembersUsed / totalMembersMax) * 100);
 
   const totalWorkspacesUsed = workspaces.length;
-  const totalWorkspacesMax = 10;
-  const workspacesPercent = Math.round(
-    (totalWorkspacesUsed / totalWorkspacesMax) * 100,
-  );
 
-  const handleToggleEmployeeSuspend = (employeeId: string) => {
-    setEmployees((prev) =>
-      prev.map((emp) => {
-        if (emp.id === employeeId) {
-          const next = emp.status === "active" ? "suspended" : "active";
-          showSuccessToast(
-            next === "suspended"
-              ? `Đã tạm đình chỉ quyền của ${emp.name}`
-              : `Đã khôi phục quyền hoạt động cho ${emp.name}`,
-          );
-          return { ...emp, status: next };
-        }
-        return emp;
-      }),
-    );
-  };
-
-  const handleOpenResetPassword = (emp: OrgEmployee) => {
-    setResetPwdMember(emp);
-    const suffix = Math.random().toString(36).substring(2, 6).toUpperCase();
-    setGeneratedTempPassword(`Alpha#${suffix}!2026`);
-    setCopiedTempPwd(false);
-  };
-
-  const handleSaveResetPassword = () => {
-    if (!resetPwdMember) return;
-    showSuccessToast(
-      `Đã cập nhật mật khẩu mới cho ${resetPwdMember.email}. Mọi phiên đăng nhập cũ đã bị chấm dứt.`,
-    );
-    setResetPwdMember(null);
-  };
-
-  const handleConfirmTransferOwnership = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (transferConfirmationPhrase.trim() !== "CHUYEN NHUONG SO HUU") {
-      showErrorToast(
-        "Vui lòng gõ chính xác cụm từ xác nhận: CHUYEN NHUONG SO HUU",
-      );
-      return;
-    }
-    if (!transferMyPassword) {
-      showErrorToast("Vui lòng nhập mật khẩu xác thực quyền sở hữu");
-      return;
-    }
-
-    setIsTransferring(true);
+  const handleToggleEmployeeSuspend = async (employeeId: string) => {
+    const employee = employees.find((item) => item.id === employeeId);
+    if (!employee) return;
     try {
-      await new Promise((r) => setTimeout(r, 1000));
+      if (employee.status === "suspended")
+        await desktopApi.activateMember({
+          workspaceId: employee.workspaceId,
+          memberId: employee.id,
+        });
+      else
+        await desktopApi.suspendMember({
+          workspaceId: employee.workspaceId,
+          memberId: employee.id,
+        });
+      await loadRealData();
       showSuccessToast(
-        `Đã chuyển nhượng vai trò OWNER thành công sang ${transferTargetEmail}. Bạn hiện là Quản Trị Viên (Admin).`,
+        employee.status === "suspended"
+          ? "Đã kích hoạt thành viên"
+          : "Đã đình chỉ thành viên",
       );
-      setTransferOwnerModalOpen(false);
-      setTransferConfirmationPhrase("");
-      setTransferMyPassword("");
-    } catch (err) {
-      showErrorToast(String(err));
-    } finally {
-      setIsTransferring(false);
+    } catch (error) {
+      showErrorToast(String(error));
     }
   };
 
-  const handleDeleteWorkspace = () => {
-    if (!deleteWsModal) return;
-    if (deleteConfirmationName.trim() !== deleteWsModal.name) {
-      showErrorToast(
-        `Vui lòng nhập chính xác tên workspace: "${deleteWsModal.name}"`,
-      );
-      return;
-    }
-    setWorkspaces((prev) => prev.filter((w) => w.id !== deleteWsModal.id));
-    showSuccessToast(
-      `Đã xóa Workspace "${deleteWsModal.name}". ${deleteWsModal.profileCount} Profiles đã được xử lý theo phương án: ${deleteHandleProfilesAction}.`,
-    );
-    setDeleteWsModal(null);
-    setDeleteConfirmationName("");
-  };
-
-  const handleSaveWorkspaceEdit = () => {
+  const handleSaveWorkspaceEdit = async () => {
     if (!editWsModal) return;
-    setWorkspaces((prev) =>
-      prev.map((w) => (w.id === editWsModal.id ? editWsModal : w)),
+    try {
+      await desktopApi.updateWorkspace({
+        organizationId: editWsModal.organizationId,
+        workspaceId: editWsModal.id,
+        update: {
+          name: editWsModal.name,
+          policy: {
+            maxProfiles: editWsModal.maxProfiles,
+            maxMembers: editWsModal.maxMembers,
+            maxStorageBytes: editWsModal.maxStorageBytes,
+            offlineEntitled: editWsModal.offlineEntitled,
+          },
+        },
+      });
+      await loadRealData();
+      showSuccessToast(`Đã cập nhật workspace "${editWsModal.name}"`);
+      setEditWsModal(null);
+    } catch (error) {
+      showErrorToast(String(error));
+    }
+  };
+
+  const handleDeleteWorkspace = () =>
+    showErrorToast(
+      "Xóa workspace chưa có API; không có dữ liệu nào bị thay đổi.",
     );
-    showSuccessToast(
-      `Đã lưu cấu hình cập nhật cho Workspace "${editWsModal.name}"`,
-    );
-    setEditWsModal(null);
+
+  const handleSaveOrganization = async () => {
+    if (!orgId) return showErrorToast("Không có tổ chức để cập nhật.");
+    try {
+      await desktopApi.updateOrganization({
+        organizationId: orgId,
+        update: {
+          organization: {
+            id: orgId,
+            accountId: orgAccountId,
+            name: orgName.trim(),
+            createdAt: orgCreatedAt,
+          },
+          policy: orgPolicy,
+          expectedRevision: orgRevision,
+        },
+      });
+      const record = await desktopApi.getOrganizationRecord({
+        organizationId: orgId,
+      });
+      setOrgRevision(record.revision);
+      showSuccessToast("Đã cập nhật tên tổ chức.");
+      setEditOrgModalOpen(false);
+      await loadRealData();
+    } catch (error) {
+      showErrorToast(String(error));
+    }
   };
 
   const content = (
@@ -594,15 +625,10 @@ export function OrgManagementCenter({
               <h2 className="text-base font-bold text-foreground">
                 TRUNG TÂM QUẢN TRỊ DOANH NGHIỆP (ORGANIZATION SETTINGS)
               </h2>
-              <Badge className="bg-amber-500/10 text-amber-600 border-amber-500/30 text-[10px] font-bold">
-                PRO ENTERPRISE
-              </Badge>
             </div>
             <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
               <span>Tổ Chức:</span>
               <strong className="text-foreground">{orgName}</strong>
-              <span>•</span>
-              <span>Thời Hạn Gói: Còn 428 ngày (đến 2027-12-31)</span>
             </div>
           </div>
         </div>
@@ -644,8 +670,9 @@ export function OrgManagementCenter({
               <span>Profiles Cấp / Sử Dụng:</span>
             </span>
             <span className="font-bold text-foreground font-mono">
-              {totalProfilesUsed.toLocaleString()} /{" "}
-              {totalProfilesMax.toLocaleString()} ({profilesPercent}%)
+              {totalProfilesUsed === null
+                ? "Chưa có số liệu sử dụng"
+                : `${totalProfilesUsed.toLocaleString()} / ${totalProfilesMax.toLocaleString()} (${profilesPercent}%)`}
             </span>
           </div>
           <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
@@ -659,7 +686,9 @@ export function OrgManagementCenter({
           </div>
           <div className="text-[10px] text-muted-foreground flex justify-between">
             <span>
-              Còn {totalProfilesMax - totalProfilesUsed} profiles tự do
+              {totalProfilesUsed === null
+                ? "API chưa trả tổng số profile"
+                : `Còn ${totalProfilesMax - totalProfilesUsed} profiles`}
             </span>
             <span>Hạn mức tổ chức</span>
           </div>
@@ -696,19 +725,12 @@ export function OrgManagementCenter({
               <span>Không Gian Làm Việc:</span>
             </span>
             <span className="font-bold text-foreground font-mono">
-              {totalWorkspacesUsed} / {totalWorkspacesMax} Active (
-              {workspacesPercent}%)
+              {totalWorkspacesUsed} workspace
             </span>
           </div>
-          <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-            <div
-              className="h-full bg-primary rounded-full transition-all duration-300"
-              style={{ width: `${workspacesPercent}%` }}
-            />
-          </div>
           <div className="text-[10px] text-muted-foreground flex justify-between">
-            <span>Cách ly dữ liệu 100%</span>
-            <span>Môi trường phòng ban</span>
+            <span>Hạn mức chưa có trong API</span>
+            <span>Tổ chức hiện tại</span>
           </div>
         </div>
       </div>
@@ -741,6 +763,20 @@ export function OrgManagementCenter({
         >
           <LuBuilding2 className="size-3.5" />
           <span>Quản Lý Workspaces ({workspaces.length})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab("resources")}
+          className={cn(
+            "px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150 cursor-pointer flex items-center gap-1.5",
+            activeTab === "resources"
+              ? "bg-accent text-accent-foreground shadow-2xs"
+              : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+          )}
+        >
+          <LuHardDrive className="size-3.5" />
+          <span>Tài nguyên</span>
         </button>
 
         <button
@@ -801,15 +837,6 @@ export function OrgManagementCenter({
                 </p>
               </div>
             </div>
-            {availableGroups.length > 0 && (
-              <div className="text-[11px] text-muted-foreground font-medium">
-                Kho nhóm:{" "}
-                <strong className="text-foreground">
-                  {availableGroups.length}
-                </strong>{" "}
-                nhóm profiles
-              </div>
-            )}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -843,6 +870,48 @@ export function OrgManagementCenter({
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="flex items-center gap-2">
+              {Object.keys(currentUser.workspaceRoles).length > 0 && (
+                <Select
+                  value={accountWorkspaceId}
+                  onValueChange={setAccountWorkspaceId}
+                >
+                  <SelectTrigger className="h-8 w-[190px] text-xs">
+                    <SelectValue placeholder="Chọn workspace" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {workspaces
+                      .filter((workspace) => currentUser.workspaceRoles[workspace.id])
+                      .map((workspace) => (
+                        <SelectItem key={workspace.id} value={workspace.id} className="text-xs">
+                          {workspace.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setAccountManagementOpen(true)}
+                disabled={!accountWorkspaceId}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <LuUsers className="size-3.5" />
+                Tạo tài khoản
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setInviteModalOpen(true)}
+                disabled={workspaces.length === 0}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <LuUserCheck className="size-3.5" />
+                Mời thành viên và chọn quyền
+              </Button>
             </div>
           </div>
 
@@ -892,10 +961,14 @@ export function OrgManagementCenter({
                   </tr>
                 ) : (
                   filteredEmployees.map((emp) => {
-                    const currentUserRank = ROLE_RANKS[currentUser.role] ?? 4;
+                    const actorRole =
+                      currentUser.workspaceRoles[emp.workspaceId];
+                    const currentUserRank = actorRole
+                      ? ROLE_RANKS[actorRole]
+                      : -1;
                     const memberRank = ROLE_RANKS[emp.role] ?? 0;
                     const isSelf =
-                      emp.id === currentUser.id ||
+                      emp.accountId === currentUser.id ||
                       emp.email === currentUser.email;
                     const isHigherOrEqual = memberRank >= currentUserRank;
                     const canManage = !isSelf && !isHigherOrEqual;
@@ -936,16 +1009,15 @@ export function OrgManagementCenter({
                               className="border-primary text-primary text-[10px] font-semibold gap-1"
                             >
                               <LuShield className="size-3" />
-                              <span>Org Admin</span>
+                              <span>Workspace Admin</span>
                             </Badge>
                           )}
-                          {emp.role === "manager" && (
+                          {emp.role === "lead" && (
                             <Badge
                               variant="outline"
-                              className="border-blue-500 text-blue-500 text-[10px] font-semibold gap-1"
+                              className="text-[10px] font-semibold"
                             >
-                              <LuUsers className="size-3" />
-                              <span>Manager</span>
+                              Lead
                             </Badge>
                           )}
                           {emp.role === "operator" && (
@@ -977,6 +1049,10 @@ export function OrgManagementCenter({
                               <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
                               <span>Active</span>
                             </Badge>
+                          ) : emp.status === "invited" ? (
+                            <Badge variant="outline" className="text-[10px]">
+                              Chờ xác minh / mời
+                            </Badge>
                           ) : (
                             <Badge
                               variant="destructive"
@@ -991,28 +1067,26 @@ export function OrgManagementCenter({
                             <span className="text-[11px] text-muted-foreground italic">
                               (Tài khoản hiện tại)
                             </span>
-                          ) : isHigherOrEqual ? (
+                          ) : !actorRole || isHigherOrEqual ? (
                             <Badge
                               variant="outline"
                               className="text-[10px] text-muted-foreground border-border/80 font-normal"
                             >
-                              {t("members.protectedRole", {
-                                defaultValue: "Vai trò được bảo vệ",
-                              })}
+                              {!actorRole
+                                ? "Ngoài phạm vi quản lý"
+                                : t("members.protectedRole", {
+                                    defaultValue: "Vai trò được bảo vệ",
+                                  })}
                             </Badge>
                           ) : (
                             <div className="flex items-center justify-end gap-1.5">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleOpenResetPassword(emp)}
-                                className="h-7 px-2 text-[10px] gap-1 cursor-pointer font-medium"
-                                title="Đặt lại mật khẩu khởi tạo"
+                              <span
+                                className="text-[10px] text-muted-foreground"
+                                title="API khôi phục mật khẩu chưa hỗ trợ; dùng luồng khôi phục tài khoản."
                               >
-                                <LuKey className="size-3" />
-                                <span>Đổi mật khẩu</span>
-                              </Button>
+                                Đặt lại mật khẩu chưa hỗ trợ; liên hệ Platform
+                                Admin
+                              </span>
                               <Button
                                 type="button"
                                 variant={
@@ -1078,8 +1152,8 @@ export function OrgManagementCenter({
                     <SelectItem value="admin" className="text-xs">
                       Admin
                     </SelectItem>
-                    <SelectItem value="manager" className="text-xs">
-                      Manager
+                    <SelectItem value="lead" className="text-xs">
+                      Lead
                     </SelectItem>
                     <SelectItem value="operator" className="text-xs">
                       Operator
@@ -1157,9 +1231,10 @@ export function OrgManagementCenter({
               </thead>
               <tbody className="divide-y divide-border/40">
                 {workspaces.map((ws) => {
-                  const prfPercent = Math.round(
-                    (ws.profileCount / ws.maxProfiles) * 100,
-                  );
+                  const prfPercent =
+                    ws.profileCount === null || ws.maxProfiles === 0
+                      ? 0
+                      : Math.round((ws.profileCount / ws.maxProfiles) * 100);
                   return (
                     <tr
                       key={ws.id}
@@ -1176,14 +1251,13 @@ export function OrgManagementCenter({
                         <div className="font-semibold text-foreground">
                           {ws.name}
                         </div>
-                        <div className="font-mono text-[10px] text-muted-foreground">
-                          {ws.id}
-                        </div>
                       </td>
                       <td className="py-2.5 px-3 whitespace-nowrap min-w-[150px]">
                         <div className="flex justify-between font-mono text-[11px] mb-1">
                           <span>
-                            {ws.profileCount} / {ws.maxProfiles}
+                            {ws.profileCount === null
+                              ? `— / ${ws.maxProfiles}`
+                              : `${ws.profileCount} / ${ws.maxProfiles}`}
                           </span>
                           <span className="font-bold text-muted-foreground">
                             {prfPercent}%
@@ -1231,19 +1305,12 @@ export function OrgManagementCenter({
                             <LuPencil className="size-3" />
                             <span>Sửa</span>
                           </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => {
-                              setDeleteConfirmationName("");
-                              setDeleteWsModal(ws);
-                            }}
-                            className="h-7 px-2 text-[10px] gap-1 cursor-pointer text-destructive hover:bg-destructive/10 font-medium"
+                          <span
+                            className="text-[10px] text-muted-foreground"
+                            title="API xóa workspace chưa được hỗ trợ; liên hệ Platform Admin."
                           >
-                            <LuTrash2 className="size-3" />
-                            <span>Giải tán</span>
-                          </Button>
+                            Xóa chưa hỗ trợ
+                          </span>
                         </div>
                       </td>
                     </tr>
@@ -1294,166 +1361,31 @@ export function OrgManagementCenter({
                   </span>
                 </Button>
 
-                <LoadingButton
-                  variant="destructive"
-                  size="sm"
-                  isLoading={isBulkWsExecuting}
-                  onClick={() => void handleBulkArchiveWs()}
-                  className="h-7 text-xs gap-1 cursor-pointer"
-                >
-                  <LuTrash2 className="size-3" />
-                  <span>
-                    {t("workspaces.bulkActions.archive", {
-                      defaultValue: "Lưu trữ đã chọn",
-                    })}
-                  </span>
-                </LoadingButton>
+                <span className="text-[11px] text-muted-foreground">
+                  Lưu trữ workspace chưa có API; liên hệ Platform Admin.
+                </span>
               </div>
             </div>
           )}
         </div>
       )}
 
+      {activeTab === "resources" && <ResourceInventoryPanel />}
+
       {/* 6. Tab 3: Security Policies (Chính Sách Bảo Mật Bắt Buộc Toàn Công Ty) */}
       {activeTab === "security" && (
-        <div className="space-y-4">
-          <div className="rounded-lg border border-border/70 bg-card p-4 space-y-3">
-            <div className="font-semibold text-foreground text-xs flex items-center gap-2">
-              <LuShieldCheck className="size-4 text-primary" />
-              <span>
-                CHÍNH SÁCH BẢO MẬT BẮT BUỘC TOÀN CÔNG TY (Mục 13.2 & 14.6)
-              </span>
-            </div>
-
-            <div className="space-y-2.5 text-xs">
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-border/50 hover:bg-muted/20 cursor-pointer">
-                <Checkbox
-                  aria-label="Bắt buộc xác thực 2 bước (2FA) đối với Admin & Manager"
-                  checked={require2FA}
-                  onCheckedChange={(checked) => setRequire2FA(checked === true)}
-                />
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Bắt buộc xác thực 2 bước (2FA) đối với Admin & Manager
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Ngăn chặn chiếm đoạt tài khoản quản trị khi lộ mật khẩu máy
-                    trạm.
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-2.5 rounded-lg border border-border/50 bg-background">
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Tự động đăng xuất tài khoản khi không tương tác
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Mặc định tắt: Phiên làm việc được duy trì liên tục khi làm
-                    việc, chỉ kết thúc khi đăng xuất thủ công hoặc bị quản trị
-                    viên thu hồi.
-                  </div>
-                </div>
-                <Select
-                  value={String(autoLogoutMinutes)}
-                  onValueChange={(v) => setAutoLogoutMinutes(Number(v))}
-                >
-                  <SelectTrigger className="h-8 w-48 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="0" className="text-xs">
-                      Tắt (Duy trì phiên liên tục)
-                    </SelectItem>
-                    <SelectItem value="15" className="text-xs">
-                      15 phút
-                    </SelectItem>
-                    <SelectItem value="30" className="text-xs">
-                      30 phút
-                    </SelectItem>
-                    <SelectItem value="60" className="text-xs">
-                      60 phút (1 giờ)
-                    </SelectItem>
-                    <SelectItem value="120" className="text-xs">
-                      120 phút (2 giờ)
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-border/50 hover:bg-muted/20 cursor-pointer">
-                <Checkbox
-                  aria-label="Chặn toàn bộ hành vi xuất Cookie thô đối với vai trò Operator"
-                  checked={blockRawCookieForOperators}
-                  onCheckedChange={(checked) =>
-                    setBlockRawCookieForOperators(checked === true)
-                  }
-                />
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Chặn toàn bộ hành vi xuất Cookie thô đối với vai trò
-                    Operator (DLP Enforced)
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Nhân viên chỉ có thể mở trình duyệt đã đăng nhập sẵn; không
-                    thể copy cookie ra file văn bản mang đi.
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-border/50 hover:bg-muted/20 cursor-pointer">
-                <Checkbox
-                  aria-label="Ghi nhận Audit log cho mọi thao tác"
-                  checked={mandatoryAuditLog}
-                  onCheckedChange={(checked) =>
-                    setMandatoryAuditLog(checked === true)
-                  }
-                />
-                <div className="space-y-0.5">
-                  <div className="font-medium text-foreground">
-                    Ghi nhận nhật ký Audit đầy đủ cho mọi thao tác mở trình
-                    duyệt và thay đổi proxy
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Lưu trữ bất biến mã checksum SHA-256 đối soát khi phát hiện
-                    gian lận.
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Danger Zone: Transfer Ownership (Mục 14.7) */}
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <div>
-                <h5 className="font-bold text-destructive flex items-center gap-1.5 text-xs">
-                  <LuCrown className="size-4" />
-                  <span>
-                    KHU VỰC CHUYỂN GIAO QUYỀN LỰC CAO NHẤT (TRANSFER OWNERSHIP)
-                  </span>
-                </h5>
-                <p className="text-[11px] text-muted-foreground mt-0.5">
-                  Chuyển quyền OWNER của {orgName} cho một nhân sự khác trong
-                  ban điều hành.
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                onClick={() => setTransferOwnerModalOpen(true)}
-                className="h-8 text-xs cursor-pointer font-medium"
-              >
-                Chuyển Nhượng Quyền Sở Hữu...
-              </Button>
-            </div>
-          </div>
+        <div className="rounded-lg border border-border p-4 text-sm text-muted-foreground">
+          Chính sách bảo mật tổ chức chưa có API lưu trữ. Chưa áp dụng thay đổi
+          nào.
         </div>
       )}
-
       {/* 7. Tab 4: Billing & Tier Info */}
       {activeTab === "billing" && (
+        <div className="rounded-lg border border-border p-4 text-sm text-muted-foreground">
+          Thông tin billing và license chưa được cung cấp bởi API của tổ chức.
+        </div>
+      )}
+      {false && activeTab === "billing" && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="rounded-lg border border-border/70 bg-card p-4 space-y-3">
             <div className="font-semibold text-foreground text-xs flex items-center gap-2">
@@ -1609,6 +1541,24 @@ export function OrgManagementCenter({
         </DialogContent>
       </Dialog>
 
+      <CreateInviteModal
+        isOpen={inviteModalOpen}
+        onClose={() => setInviteModalOpen(false)}
+        onInviteCreated={() => void loadRealData()}
+      />
+
+      {accountManagementOpen && accountWorkspaceId && (
+        <MemberManagementDialog
+          isOpen={accountManagementOpen}
+          onClose={() => {
+            setAccountManagementOpen(false);
+            void loadRealData();
+          }}
+          workspaceId={accountWorkspaceId}
+          workspaceName={workspaces.find((workspace) => workspace.id === accountWorkspaceId)?.name}
+        />
+      )}
+
       {/* SUB-MODAL: Edit Organization */}
       <Dialog open={editOrgModalOpen} onOpenChange={setEditOrgModalOpen}>
         <DialogContent className="max-w-md p-6">
@@ -1618,7 +1568,7 @@ export function OrgManagementCenter({
               <span>Cài Đặt Tổ Chức</span>
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              Cập nhật thông tin nhận diện pháp nhân và email thanh toán
+              Cập nhật tên tổ chức trong hệ thống.
             </DialogDescription>
           </DialogHeader>
 
@@ -1628,18 +1578,6 @@ export function OrgManagementCenter({
               <Input
                 value={orgName}
                 onChange={(e) => setOrgName(e.target.value)}
-                className="h-8 text-xs"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label className="text-[11px] font-medium">
-                Email nhận thông báo bảo mật & hóa đơn: *
-              </Label>
-              <Input
-                type="email"
-                value={orgBillingEmail}
-                onChange={(e) => setOrgBillingEmail(e.target.value)}
                 className="h-8 text-xs"
               />
             </div>
@@ -1658,112 +1596,12 @@ export function OrgManagementCenter({
             <Button
               type="button"
               size="sm"
-              onClick={() => {
-                showSuccessToast("Đã lưu thông tin cài đặt tổ chức");
-                setEditOrgModalOpen(false);
-              }}
+              onClick={() => void handleSaveOrganization()}
               className="h-8 text-xs font-medium cursor-pointer"
             >
               Lưu Cài Đặt
             </Button>
           </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* SUB-MODAL: Transfer Ownership Modal (Mục 14.7) */}
-      <Dialog
-        open={transferOwnerModalOpen}
-        onOpenChange={setTransferOwnerModalOpen}
-      >
-        <DialogContent className="max-w-lg p-6">
-          <DialogHeader className="border-b border-border/50 pb-3">
-            <DialogTitle className="text-base font-semibold flex items-center gap-2 text-destructive">
-              <LuCrown className="size-4" />
-              <span>
-                Chuyển Nhượng Quyền Sở Hữu Tổ Chức (Transfer Ownership)
-              </span>
-            </DialogTitle>
-            <DialogDescription className="text-xs text-muted-foreground">
-              CẢNH BÁO QUAN TRỌNG: Sau khi hoàn tất, bạn sẽ trở thành Admin
-              thông thường và mất quyền thanh toán hoặc xóa tổ chức.
-            </DialogDescription>
-          </DialogHeader>
-
-          <form
-            onSubmit={(e) => void handleConfirmTransferOwnership(e)}
-            className="space-y-3 py-2 text-xs"
-          >
-            <div className="space-y-1">
-              <Label className="text-[11px] font-medium">
-                Chọn thành viên nhận quyền sở hữu mới:
-              </Label>
-              <Select
-                value={transferTargetEmail}
-                onValueChange={setTransferTargetEmail}
-              >
-                <SelectTrigger className="h-8 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="lead_hr@alphamedia.vn" className="text-xs">
-                    Tran Thi B (lead_hr@alphamedia.vn) - Org Admin
-                  </SelectItem>
-                  <SelectItem value="staff01@alphamedia.vn" className="text-xs">
-                    Le Van C (staff01@alphamedia.vn) - Team Manager
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1">
-              <Label className="text-[11px] font-medium">
-                Nhập mật khẩu hiện tại của bạn để xác thực:
-              </Label>
-              <Input
-                type="password"
-                placeholder="••••••••••••"
-                value={transferMyPassword}
-                onChange={(e) => setTransferMyPassword(e.target.value)}
-                required
-                className="h-8 text-xs"
-              />
-            </div>
-
-            <div className="space-y-1 pt-1">
-              <Label className="text-[11px] font-medium text-destructive">
-                Để xác nhận, vui lòng gõ đúng cụm từ: &quot;CHUYEN NHUONG SO
-                HUU&quot;
-              </Label>
-              <Input
-                placeholder="CHUYEN NHUONG SO HUU"
-                value={transferConfirmationPhrase}
-                onChange={(e) => setTransferConfirmationPhrase(e.target.value)}
-                required
-                className="h-8 text-xs font-mono font-bold"
-              />
-            </div>
-
-            <DialogFooter className="border-t border-border/50 pt-3">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setTransferOwnerModalOpen(false)}
-                className="h-8 text-xs cursor-pointer"
-              >
-                Hủy Bỏ
-              </Button>
-              <LoadingButton
-                type="submit"
-                variant="destructive"
-                size="sm"
-                isLoading={isTransferring}
-                className="h-8 text-xs font-medium cursor-pointer"
-              >
-                Xác Nhận Bàn Giao Quyền Owner
-              </LoadingButton>
-            </DialogFooter>
-          </form>
         </DialogContent>
       </Dialog>
 
@@ -1846,19 +1684,6 @@ export function OrgManagementCenter({
                     Cho phép mở Profile ngoại tuyến khi mất mạng (Offline
                     Entitled)
                   </span>
-                </div>
-                <div className="flex items-center gap-2 cursor-pointer">
-                  <Checkbox
-                    aria-label="Tự động đồng bộ đám mây an toàn"
-                    checked={editWsModal.cloudSync}
-                    onCheckedChange={(checked) =>
-                      setEditWsModal({
-                        ...editWsModal,
-                        cloudSync: checked === true,
-                      })
-                    }
-                  />
-                  <span>Tự động đồng bộ đám mây an toàn (E2EE Cloud Sync)</span>
                 </div>
               </div>
             </div>
@@ -1981,109 +1806,6 @@ export function OrgManagementCenter({
                 className="h-8 text-xs font-medium cursor-pointer"
               >
                 Tôi Hiểu Rủi Ro, Xóa Workspace Này
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
-
-      {/* SUB-MODAL: Reset Member Password (Mục 14.5) */}
-      {resetPwdMember && (
-        <Dialog open={true} onOpenChange={() => setResetPwdMember(null)}>
-          <DialogContent className="max-w-md p-6">
-            <DialogHeader className="border-b border-border/50 pb-3">
-              <DialogTitle className="text-base font-semibold flex items-center gap-2">
-                <LuKey className="size-4 text-primary" />
-                <span>Đặt Lại Mật Khẩu: {resetPwdMember.name}</span>
-              </DialogTitle>
-              <DialogDescription className="text-xs text-muted-foreground">
-                Tài khoản: {resetPwdMember.email}
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="space-y-3 py-2 text-xs">
-              <div className="space-y-1">
-                <Label className="text-[11px] font-medium">
-                  Mật khẩu mới được hệ thống sinh tự động:
-                </Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    readOnly
-                    value={generatedTempPassword}
-                    className="h-8 font-mono font-bold tracking-wider text-primary text-xs bg-muted/40"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(generatedTempPassword);
-                      setCopiedTempPwd(true);
-                      showSuccessToast("Đã sao chép mật khẩu mới");
-                      setTimeout(() => setCopiedTempPwd(false), 2000);
-                    }}
-                    className="h-8 px-2.5 text-xs gap-1 cursor-pointer font-medium"
-                  >
-                    {copiedTempPwd ? (
-                      <LuCheck className="size-3 text-emerald-500" />
-                    ) : (
-                      <LuCopy className="size-3" />
-                    )}
-                    <span>{copiedTempPwd ? "Đã chép" : "Copy"}</span>
-                  </Button>
-                </div>
-              </div>
-
-              <div className="space-y-1.5 pt-1">
-                <div className="flex items-center gap-2 cursor-pointer">
-                  <Checkbox
-                    aria-label="Bắt buộc nhân viên đổi mật khẩu ở lần đăng nhập tiếp theo"
-                    checked={mustChangePasswordOnLogin}
-                    onCheckedChange={(checked) =>
-                      setMustChangePasswordOnLogin(checked === true)
-                    }
-                  />
-                  <span>
-                    Bắt buộc nhân viên đổi mật khẩu ở lần đăng nhập tiếp theo
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 cursor-pointer">
-                  <Checkbox
-                    aria-label="Đăng xuất khỏi tất cả thiết bị khác ngay lập tức"
-                    checked={forceLogoutAllSessions}
-                    onCheckedChange={(checked) =>
-                      setForceLogoutAllSessions(checked === true)
-                    }
-                  />
-                  <span>
-                    Đăng xuất cưỡng chế khỏi tất cả thiết bị khác ngay lập tức
-                  </span>
-                </div>
-              </div>
-
-              <p className="text-[10px] text-muted-foreground">
-                Ghi chú: Hãy sao chép mật khẩu trên và gửi trực tiếp cho nhân
-                viên qua tin nhắn an toàn.
-              </p>
-            </div>
-
-            <DialogFooter className="border-t border-border/50 pt-3">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setResetPwdMember(null)}
-                className="h-8 text-xs cursor-pointer"
-              >
-                Hủy
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={handleSaveResetPassword}
-                className="h-8 text-xs font-medium cursor-pointer"
-              >
-                Cập Nhật Mật Khẩu Mới
               </Button>
             </DialogFooter>
           </DialogContent>

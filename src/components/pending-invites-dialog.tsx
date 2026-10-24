@@ -2,10 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { LuBell, LuBuilding2, LuCheck, LuInfo } from "react-icons/lu";
+import { LuBell, LuCheck, LuInfo } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -157,53 +155,15 @@ export function PendingInvitesDialog({
             </div>
           </form>
 
-          {/* Pending Invites List */}
           <div className="space-y-2 pt-1">
             <span className="font-semibold text-foreground text-xs">
-              Lời Mời Nhận Được Gần Đây:
+              Hộp thư lời mời
             </span>
-
-            <div className="rounded-lg border border-border/70 bg-muted/20 p-3 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="grid size-8 place-items-center rounded-lg bg-primary/10 text-primary">
-                    <LuBuilding2 className="size-4" />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-foreground text-xs">
-                      Shopee Ads Global Q4
-                    </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      Từ:{" "}
-                      <span className="text-foreground font-medium">
-                        founder@company.com
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] text-emerald-600 bg-emerald-500/10 border-emerald-500/30 font-semibold"
-                  >
-                    Operator
-                  </Badge>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      showSuccessToast(
-                        "Đã chấp nhận lời mời tham gia workspace",
-                      );
-                      onClose();
-                    }}
-                    className="h-7 px-2.5 text-xs font-medium cursor-pointer"
-                  >
-                    Chấp Nhận
-                  </Button>
-                </div>
-              </div>
-            </div>
+            <p className="rounded-lg border border-border/70 bg-muted/20 p-3 text-xs text-muted-foreground">
+              Chưa có API tải danh sách lời mời đang chờ. Dán mã hoặc liên kết
+              mời ở phía trên để xác minh và tham gia; không có lời mời mẫu nào
+              được hiển thị.
+            </p>
           </div>
 
           {/* Note Callout */}

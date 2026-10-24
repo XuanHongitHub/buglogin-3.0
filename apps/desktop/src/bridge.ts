@@ -2,6 +2,9 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import {
   type Account,
+  type AccountAdminRecord,
+  type AccountCreatePendingInput,
+  type WorkspaceAccountCreateInput,
   type AccountStatusUpdateCommandInput,
   type AccountView,
   type ApiToken,
@@ -41,6 +44,7 @@ import {
   type OrganizationIdInput,
   type OrganizationRecord,
   type OrganizationUpdateInput,
+  type PendingAccountProvisioningReceipt,
   type ProfileDeleteInput,
   type ProfileExtensionGroupSetInput,
   type ProfileGroupsReplaceInput,
@@ -152,7 +156,15 @@ export interface DesktopApi {
   }): Promise<{ token: string; tokenRecord: ApiToken }>;
   revokeApiToken(tokenId: string): Promise<void>;
   getAccount(): Promise<AccountView>;
-  listAccounts(): Promise<Page<Account>>;
+  listAccounts(): Promise<Page<AccountAdminRecord>>;
+  createPendingAccount(
+    input: AccountCreatePendingInput,
+    idempotencyKey?: string,
+  ): Promise<PendingAccountProvisioningReceipt>;
+  createScopedPendingAccount(
+    input: WorkspaceAccountCreateInput,
+    idempotencyKey?: string,
+  ): Promise<PendingAccountProvisioningReceipt>;
   updateAccountStatus(input: AccountStatusUpdateCommandInput): Promise<Account>;
   subscribeEvents(
     input: EventFilterInput,
@@ -161,6 +173,9 @@ export interface DesktopApi {
   ): Promise<() => Promise<void>>;
   authStatus(): Promise<DesktopAuthStatus>;
   login(identifier: string, password: string): Promise<DesktopAuthStatus>;
+  startBugLabSso(): Promise<number>;
+  completeBugLabSso(state: string, token: string): Promise<DesktopAuthStatus>;
+  currentDeepLinks(): Promise<string[]>;
   getRuntimeCatalog(): Promise<RuntimeCatalog>;
   logout(): Promise<DesktopAuthStatus>;
   listProfiles(
@@ -306,6 +321,8 @@ const invokeNames = {
   eventsStream: contractInvoke("events.stream"),
   accountGet: contractInvoke("account.get"),
   accountList: contractInvoke("account.list"),
+  accountCreate: contractInvoke("account.create"),
+  accountCreateScoped: contractInvoke("account.create.scoped"),
   accountStatusUpdate: contractInvoke("account.status.update"),
   authStatus: contractInvoke("desktop.auth.status"),
   authLogout: contractInvoke("desktop.auth.logout"),
@@ -429,10 +446,13 @@ export function createTauriDesktopApi(
     command: string,
     payload: Record<string, unknown>,
     idempotent = false,
+    idempotencyKeyOverride?: string,
   ) => {
     const correlationId = createRequestId("cor");
     // Retry the same mutation envelope so the API can replay its durable receipt.
-    const idempotencyKey = idempotent ? createRequestId("idem") : undefined;
+    const idempotencyKey = idempotent
+      ? (idempotencyKeyOverride ?? createRequestId("idem"))
+      : undefined;
     const maxAttempts = idempotent ? 2 : 1;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
@@ -538,7 +558,22 @@ export function createTauriDesktopApi(
       };
     },
     getAccount: () => call<AccountView>(invokeNames.accountGet, {}),
-    listAccounts: () => call<Page<Account>>(invokeNames.accountList, {}),
+    listAccounts: () =>
+      call<Page<AccountAdminRecord>>(invokeNames.accountList, {}),
+    createPendingAccount: (input, idempotencyKey) =>
+      call<PendingAccountProvisioningReceipt>(
+        invokeNames.accountCreate,
+        input,
+        true,
+        idempotencyKey,
+      ),
+    createScopedPendingAccount: (input, idempotencyKey) =>
+      call<PendingAccountProvisioningReceipt>(
+        invokeNames.accountCreateScoped,
+        input,
+        true,
+        idempotencyKey,
+      ),
     updateAccountStatus: (input) =>
       call<Account>(invokeNames.accountStatusUpdate, input, true),
     authStatus: () => callAuth(invokeNames.authStatus, false),
@@ -550,6 +585,37 @@ export function createTauriDesktopApi(
           password,
           correlationId,
         });
+      } catch (error) {
+        throw normalizeProblem(error, correlationId);
+      }
+    },
+    startBugLabSso: async () => {
+      const correlationId = createRequestId("cor");
+      try {
+        return await invoke<number>("desktop_auth_sso_start", {
+          correlationId,
+        });
+      } catch (error) {
+        throw normalizeProblem(error, correlationId);
+      }
+    },
+    completeBugLabSso: async (callbackState, token) => {
+      const correlationId = createRequestId("cor");
+      try {
+        const status = await invoke<DesktopAuthStatus>(
+          "desktop_auth_sso_complete",
+          { callbackState, token, correlationId },
+        );
+        authInvalidationDispatched = false;
+        return status;
+      } catch (error) {
+        throw normalizeProblem(error, correlationId);
+      }
+    },
+    currentDeepLinks: async () => {
+      const correlationId = createRequestId("cor");
+      try {
+        return await invoke<string[]>("desktop_deep_link_current", {});
       } catch (error) {
         throw normalizeProblem(error, correlationId);
       }

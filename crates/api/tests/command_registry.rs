@@ -16,8 +16,7 @@ fn registry_contains_every_v1_command_once() {
 
 #[test]
 fn generated_registry_matches_canonical_source_hash() {
-    let normalized_source = REGISTRY_SOURCE.replace("\r\n", "\n");
-    let source_hash = format!("{:x}", Sha256::digest(normalized_source.as_bytes()));
+    let source_hash = format!("{:x}", Sha256::digest(REGISTRY_SOURCE.as_bytes()));
     assert_eq!(CommandRegistry::source_sha256(), source_hash);
 }
 
@@ -34,6 +33,7 @@ fn every_registered_command_has_canonical_action() {
     let expected = [
         ("runtime.catalog.get", Action::Read),
         ("system.health.get", Action::Read),
+        ("feedback.submit", Action::Create),
         ("operation.get", Action::Read),
         ("events.stream", Action::Read),
         ("audit.events.list", Action::Read),
@@ -110,14 +110,8 @@ fn every_registered_command_has_canonical_action() {
         ("profile.blob.get", Action::Read),
         ("profile.blob.check", Action::Update),
         ("profile.blob.put", Action::Update),
-        ("runtime.dispatch.enqueue", Action::Execute),
-        ("runtime.dispatch.inbox", Action::Read),
-        ("runtime.dispatch.claim", Action::Execute),
-        ("runtime.dispatch.complete", Action::Execute),
-        ("runtime.dispatch.fail", Action::Execute),
         ("account.get", Action::Read),
         ("account.list", Action::Read),
-        ("account.create", Action::Create),
         ("account.status.update", Action::Manage),
         ("organization.list", Action::Read),
         ("organization.get", Action::Read),
@@ -391,10 +385,6 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
                 | "auth.desktop.login"
                 | "desktop.auth.login"
                 | "desktop.auth.logout"
-                | "runtime.dispatch.inbox"
-                | "runtime.dispatch.claim"
-                | "runtime.dispatch.complete"
-                | "runtime.dispatch.fail"
         ) {
             assert!(command.idempotency_required, "{}", command.id.as_str());
         }

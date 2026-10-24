@@ -1,0 +1,77 @@
+name: Publish Linux Repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.18.1). Leave empty for latest."
+        required: false
+        type: string
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  publish-repos:
+    if: >
+      github.repository == 'zhom/donutbrowser' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v7.0.0
+
+      - name: Determine release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -n "${INPUT_TAG:-}" ]]; then
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            # The Release workflow is triggered by a tag push (v*),
+            # so head_branch is the tag name
+            echo "tag=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG=$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install tools
+        run: |
+          # Mirror the local/Docker setup from CLAUDE.md exactly: the same apt
+          # packages and the same pip-installed awscli the working local run uses.
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev createrepo-c python3-pip
+          pip3 install --break-system-packages awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Publish DEB & RPM repositories to R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GitHub injects secrets verbatim. If a value was pasted with
+          # surrounding quotes or a trailing newline — the local .env wraps all
+          # four R2_* values in double quotes — it reaches the script malformed:
+          # e.g. an endpoint of https://"host" yields
+          # `Could not connect to the endpoint URL`, and a quoted key yields
+          # `Unauthorized`. The local run is unaffected because publish-repo.sh
+          # sources .env through bash, which strips the quotes; CI has no .env,
+          # so strip here. No-op when the secrets are already clean. The script
+          # itself is intentionally left untouched.
+          strip() { printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"; }
+          export R2_ACCESS_KEY_ID="$(strip "$R2_ACCESS_KEY_ID")"
+          export R2_SECRET_ACCESS_KEY="$(strip "$R2_SECRET_ACCESS_KEY")"
+          export R2_ENDPOINT_URL="$(strip "$R2_ENDPOINT_URL")"
+          export R2_BUCKET_NAME="$(strip "$R2_BUCKET_NAME")"
+          bash scripts/publish-repo.sh "${{ steps.tag.outputs.tag }}"

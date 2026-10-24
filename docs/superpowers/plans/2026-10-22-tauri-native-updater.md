@@ -51,29 +51,8 @@ Status: **active; release blocked pending API parity, native platform artifacts,
 - The first local Windows release package is still compiling under `G:\buglogin-target`; it must be rebuilt after the public trust key/catalog source update before it can be treated as current release evidence.
 - The first local Tauri v2 Windows build produced the signed NSIS installer `.exe` and `.exe.sig`, with no `.nsis.zip`. The release workflow/feed had incorrectly expected the legacy archive suffix. They now consume the actual v2 `.exe` plus detached `.exe.sig`; static release checks pass 15/15 and actionlint passes. The local artifact was built before the v155 trust-map update and is not the release candidate; a fresh build is required.
 
-## Windows frontend embedding regression — 2026-10-23
-
-- [x] Root cause confirmed from the installed 3.0.1 screenshot and Tauri's Windows path parsing: the release wrapper passed absolute `G:\\buglogin-target\\desktop-dist` as `frontendDist`, which Tauri interprets as a `G:` URL, leaving the app pointed at the build directory.
-- [x] Keep Vite output in `CARGO_TARGET_DIR`, stage its files temporarily to the ignored `apps/desktop/dist`, and configure Tauri with relative `../dist` so the HTML and assets are embedded. Cargo-check helper also uses relative `../dist`.
-- [ ] Run focused release policy/Cargo helper checks, build a Windows installer, install and launch it, and verify the BugLogin UI rather than a directory listing.
-- [ ] Record a new immutable version/tag and workflow run. Do not promote stable; macOS notarization, OS update smoke, and Packet C/D gates remain release blockers.
-
-## macOS signing workflow Bash compatibility — 2026-10-23
-
-- Run `39898547063` signed the macOS app and DMG, received Apple notarization status `Accepted`, and successfully stapled and validated the DMG. It then failed while collecting the updater bundle because the macOS runner's Bash 3.2 does not provide `mapfile`.
-- Replace Bash array discovery with direct checks and copies of `BugLogin.app.tar.gz` and its `.sig` file. Require the workflow policy to pin both paths and reject `mapfile`/`readarray` use.
-- Retest the release policy, then publish a new immutable RC tag `v3.0.3`. Keep stable promotion blocked pending Windows/macOS install/update smoke and Packet C/D gates.
-
 ## Development-build updater behavior — 2026-10-22
 
 - Root cause of the About toast `app_updater_not_configured`: local/debug builds intentionally do not embed the Tauri updater public key, so the Rust command correctly reports that updater checks are unavailable. The UI previously surfaced this expected dev state as an error.
 - Opening About no longer triggers a manual check; the user can press **Check for updates** to request one. That action shows a localized informational message for `app_updater_not_configured`; other network/feed/signature failures remain errors. Startup checking suppresses only the expected unconfigured-dev log. Rust also skips the three-hour background task when no updater key is embedded, and `build.rs` tracks updater key/endpoint environment changes to avoid stale Cargo artifacts.
 - Verification: desktop TypeScript typecheck, Biome lint with formatting disabled, Rust format check, Windows desktop `cargo check --all-targets`, and `git diff --check` passed. Native interaction in the running desktop has not yet been visually rechecked.
-
-## Landing page installer downloads — 2026-10-23
-
-- [x] Publish a checksummed immutable installer catalog alongside the updater feed: NSIS setup `.exe` for Windows and notarized `.dmg` for Apple Silicon macOS.
-- [x] Resolve stable installer links from the stable catalog and expose release candidates as explicitly labeled test downloads; never promote an RC from the landing page.
-- [x] Verify installer URL host, version, run ID, filename, and platform suffix before redirecting or promoting catalog metadata.
-- [ ] Verify published stable and RC catalog URLs with public HEAD requests after the corresponding release/promotion workflow runs.
-- Release note: remote tag `v3.0.4` is already fixed to `ce421bc9` and its signing workflow was cancelled before publication. Keep that tag unchanged; the corrected release candidate is version `3.0.5`.

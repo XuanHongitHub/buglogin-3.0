@@ -18,10 +18,6 @@ BugLogin 3.0 uses the existing DigitalOcean Spaces bucket `mavelnut-login` witho
 
 The update key pair is a release credential. The private key is only a protected GitHub environment secret, never generated or stored by application code. The public key is injected into the release build as a Tauri config overlay and is safe to publish. Local development builds have no update endpoint and must report updater unavailable without failing startup.
 
-### Windows asset embedding
-
-Tauri `build.frontendDist` must remain a relative directory path. On Windows, passing an absolute drive path such as `G:\\buglogin-target\\desktop-dist` is parsed as a URL with scheme `G:`; the packaged app then opens the build directory instead of embedding and serving `index.html`. The frontend build output stays under `CARGO_TARGET_DIR`; the Tauri build wrapper stages it temporarily at `apps/desktop/dist`, passes `../dist`, and removes that staging directory after packaging.
-
 ## Behavior
 
 - Check reports the current version and an update only when a configured signed endpoint returns a valid newer artifact.
@@ -35,7 +31,6 @@ Tauri `build.frontendDist` must remain a relative directory path. On Windows, pa
 - Protected release environment owns the updater private key; only signing jobs can read it.
 - Public key pin is embedded in each signed release. Key rotation requires a dual-key transition release and a tested revocation/rollback procedure.
 - The S3 stable `latest.json`, GitHub release assets, installer signatures, artifact checksums, SBOM, and provenance must refer to the same immutable version/artifacts.
-- Stable and RC `downloads.json` catalogs must reference only installer files covered by that release's checksums and provenance; the landing page labels RC downloads separately.
 - Windows/macOS clean install and previous-version-to-current-version update are required before stable promotion.
 - Until the updater key, Windows Authenticode credentials, Apple notarization credentials, and protected release environment are available, code may be validated but no production-ready release may be claimed.
 

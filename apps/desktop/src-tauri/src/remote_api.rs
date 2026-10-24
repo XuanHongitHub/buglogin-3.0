@@ -7,7 +7,7 @@ use std::{
 
 use crate::clock::unix_time_seconds;
 use crate::profile_runtime::DesktopSyncBackend;
-use crate::runtime_config::url_authority_has_userinfo;
+use crate::runtime_config::{is_production_api_host, url_authority_has_userinfo};
 use buglogin_api::services::connected_cookie_jobs::{
     ConnectedCookieFailureCode, ConnectedCookieJob, ConnectedCookieReceipt,
 };
@@ -119,6 +119,23 @@ pub struct ApiTokenPage {
     pub tokens: Vec<ApiTokenSummary>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackReceipt {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackSubmission {
+    pub kind: String,
+    pub message: String,
+    pub include_logs: bool,
+    pub logs: Option<String>,
+    pub email: Option<String>,
+    pub locale: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApiHealthResponse {
@@ -186,6 +203,26 @@ pub struct DeviceSessionTokens {
     pub refresh_token: String,
     pub token_type: String,
     pub expires_at: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BugLabSsoStartRequest<'a> {
+    device_id: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BugLabSsoStartResponse {
+    pub authorization_url: String,
+    pub expires_in: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BugLabSsoCompleteRequest<'a> {
+    state: &'a str,
+    token: &'a str,
 }
 
 #[derive(Serialize)]
@@ -299,6 +336,27 @@ struct ApiProblem {
 impl RemoteApiClient {
     pub fn new(base_url: &str, token: String) -> Result<Self, Problem> {
         Self::build(base_url, Some(token))
+    }
+
+    pub async fn submit_feedback(
+        &self,
+        payload: FeedbackSubmission,
+        idempotency_key: &str,
+        correlation: &str,
+    ) -> Result<FeedbackReceipt, Problem> {
+        self.send(
+            Method::POST,
+            "/v1/feedback",
+            Some(
+                serde_json::to_value(payload)
+                    .map_err(|_| client_problem("feedback_invalid", 400))?,
+            ),
+            correlation,
+            Some(idempotency_key),
+            None,
+            &[],
+        )
+        .await
     }
 
     pub fn new_unauthenticated(base_url: &str) -> Result<Self, Problem> {
@@ -847,6 +905,104 @@ impl RemoteApiClient {
             ));
         }
         Ok(token)
+    }
+
+    pub async fn buglab_sso_start(
+        &self,
+        device_id: &str,
+        correlation: &str,
+    ) -> Result<BugLabSsoStartResponse, Problem> {
+        let url = self
+            .base_url
+            .join("v1/auth/sso/buglab/start")
+            .map_err(|_| client_problem("api_url_invalid", 400))?;
+        let response = self
+            .http
+            .post(url)
+            .header("x-correlation-id", correlation)
+            .json(&BugLabSsoStartRequest { device_id })
+            .send()
+            .await
+            .map_err(|error| {
+                Problem::new(
+                    "api_unavailable",
+                    "BugLogin API is unavailable",
+                    503,
+                    correlation,
+                )
+                .retryable(error.is_connect() || error.is_timeout())
+            })?;
+        if !response.status().is_success() {
+            return Err(read_problem(response, correlation, false).await);
+        }
+        let body = read_bounded_auth_response(response)
+            .await
+            .map_err(|_| invalid_auth_response(correlation))?;
+        let result: BugLabSsoStartResponse =
+            serde_json::from_slice(&body).map_err(|_| invalid_auth_response(correlation))?;
+        let authorization_url = Url::parse(&result.authorization_url)
+            .map_err(|_| invalid_auth_response(correlation))?;
+        let query: std::collections::BTreeMap<_, _> =
+            authorization_url.query_pairs().into_owned().collect();
+        if authorization_url.scheme() != "https"
+            || authorization_url.host_str() != Some("id.buglab.vn")
+            || authorization_url.path() != "/sso/login"
+            || authorization_url.username() != ""
+            || authorization_url.password().is_some()
+            || authorization_url.fragment().is_some()
+            || query.len() != 3
+            || !query.contains_key("app")
+            || !query.contains_key("redirect_uri")
+            || !query.contains_key("state")
+            || !(1..=300).contains(&result.expires_in)
+        {
+            return Err(invalid_auth_response(correlation));
+        }
+        Ok(result)
+    }
+
+    pub async fn buglab_sso_complete(
+        &self,
+        state: &str,
+        token: &str,
+        correlation: &str,
+    ) -> Result<DeviceSessionTokens, Problem> {
+        let url = self
+            .base_url
+            .join("v1/auth/sso/buglab/complete")
+            .map_err(|_| client_problem("api_url_invalid", 400))?;
+        let response = self
+            .http
+            .post(url)
+            .header("x-correlation-id", correlation)
+            .json(&BugLabSsoCompleteRequest { state, token })
+            .send()
+            .await
+            .map_err(|error| {
+                Problem::new(
+                    "api_unavailable",
+                    "BugLogin API is unavailable",
+                    503,
+                    correlation,
+                )
+                .retryable(error.is_connect() || error.is_timeout())
+            })?;
+        if !response.status().is_success() {
+            return Err(read_problem(response, correlation, false).await);
+        }
+        let body = read_bounded_auth_response(response)
+            .await
+            .map_err(|_| invalid_auth_response(correlation))?;
+        let session: DeviceSessionTokens =
+            serde_json::from_slice(&body).map_err(|_| invalid_auth_response(correlation))?;
+        if session.access_token.is_empty()
+            || session.refresh_token.is_empty()
+            || session.token_type != "Bearer"
+            || session.expires_at <= unix_time_seconds(correlation)?
+        {
+            return Err(invalid_auth_response(correlation));
+        }
+        Ok(session)
     }
 
     pub async fn register_device_encryption_key(
@@ -1796,7 +1952,18 @@ impl RemoteApiClient {
         let result = match name {
             "system_health_get" => self.get::<Value>("/v1/health",correlation).await?,
             "account_get" => self.get::<Value>("/v1/account",correlation).await?,
-            "account_list" => json!({"items":self.get::<Vec<Value>>("/v1/accounts",correlation).await?,"nextCursor":Value::Null}),
+            "account_list" => self.get::<Value>("/v1/accounts",correlation).await?,
+            "account_create" => self.send::<Value>(Method::POST,"/v1/accounts",Some(payload),correlation,idem,None,&[]).await?,
+            "account_create_scoped" => {
+                let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
+                let body = json!({
+                    "accountId": payload.get("accountId").cloned().ok_or_else(|| bad_input("accountId", correlation))?,
+                    "username": payload.get("username").cloned().ok_or_else(|| bad_input("username", correlation))?,
+                    "email": payload.get("email").cloned().ok_or_else(|| bad_input("email", correlation))?,
+                    "role": payload.get("role").cloned().ok_or_else(|| bad_input("role", correlation))?,
+                });
+                self.send::<Value>(Method::POST,&format!("/v1/workspaces/{workspace_id}/accounts"),Some(body),correlation,idem,None,&[]).await?
+            },
             "account_status_update" => {
                 let account_id = AccountId::from_str(&path_arg(&payload, "accountId", correlation)?)
                     .map_err(|_| bad_input("accountId", correlation))?;
@@ -2002,6 +2169,14 @@ impl RemoteApiClient {
                     ResourceId::from_str(&cursor).map_err(|_| bad_input("cursor", correlation))?;
                     path.push_str("&cursor=");
                     path.push_str(&urlencoding(&cursor));
+                }
+                for key in ["search", "kind", "state"] {
+                    if let Some(value) = payload.get(key).and_then(Value::as_str) {
+                        path.push('&');
+                        path.push_str(key);
+                        path.push('=');
+                        path.push_str(&urlencoding(value));
+                    }
                 }
                 self.get::<Value>(&path, correlation).await?
             },
@@ -2552,6 +2727,15 @@ fn client_problem(code: &'static str, status: u16) -> Problem {
     Problem::new(code, "BugLogin API client error", status, "desktop-api")
 }
 
+fn invalid_auth_response(correlation: &str) -> Problem {
+    Problem::new(
+        "api_auth_response_invalid",
+        "BugLogin returned an invalid sign-in response",
+        502,
+        correlation,
+    )
+}
+
 fn validate_cookie_job_id(job_id: &str) -> Result<(), Problem> {
     let Some(suffix) = job_id.strip_prefix("job_") else {
         return Err(client_problem("cookie_job_id_invalid", 400));
@@ -2755,6 +2939,8 @@ fn command_id(name: &str) -> &str {
         "system_health_get" => "system.health.get",
         "account_get" => "account.get",
         "account_list" => "account.list",
+        "account_create" => "account.create",
+        "account_create_scoped" => "account.create.scoped",
         "account_status_update" => "account.status.update",
         "organization_list" => "organization.list",
         "organization_get" => "organization.get",
@@ -2853,7 +3039,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, canonical_workspace_update,
+        FeedbackSubmission, MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, canonical_workspace_update,
         legacy_workspace_update, manifest_commit_idempotency_key, optional_bool, optional_cursor,
         optional_page_limit, request_retry_safe,
     };
@@ -2934,6 +3120,60 @@ mod tests {
             .code,
             "invalid_command_input"
         );
+    }
+
+    #[tokio::test]
+    async fn feedback_submission_uses_authenticated_idempotent_api_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            let headers = headers.to_ascii_lowercase();
+            assert!(headers.starts_with("post /v1/feedback http/1.1"));
+            assert!(headers.contains("authorization: bearer feedback-test-token"));
+            assert!(headers.contains("idempotency-key: feedback-request-0001"));
+            assert!(headers.contains("x-correlation-id: feedback-correlation-0001"));
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap(),
+                json!({
+                    "kind": "bug",
+                    "message": "Profile sync stopped unexpectedly",
+                    "includeLogs": true,
+                    "logs": "redacted recent logs",
+                    "email": "user@example.test",
+                    "locale": "en"
+                })
+            );
+            let response_body = r#"{"id":"fbk_0123456789abcdef0123456789abcdef"}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "feedback-test-token".into())
+                .unwrap();
+        let receipt = client
+            .submit_feedback(
+                FeedbackSubmission {
+                    kind: "bug".into(),
+                    message: "Profile sync stopped unexpectedly".into(),
+                    include_logs: true,
+                    logs: Some("redacted recent logs".into()),
+                    email: Some("user@example.test".into()),
+                    locale: "en".into(),
+                },
+                "feedback-request-0001",
+                "feedback-correlation-0001",
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.id, "fbk_0123456789abcdef0123456789abcdef");
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -3521,6 +3761,17 @@ mod tests {
                 path: "/v1/accounts",
                 body: None,
                 idempotency_key: None,
+            },
+            Invocation {
+                name: "account_create",
+                command_id: "account.create",
+                payload: json!({"accountId":"acct_2","username":"alice","email":"alice@example.test"}),
+                method: "POST",
+                path: "/v1/accounts",
+                body: Some(
+                    json!({"accountId":"acct_2","username":"alice","email":"alice@example.test"}),
+                ),
+                idempotency_key: write_key("account-create"),
             },
             Invocation {
                 name: "account_status_update",

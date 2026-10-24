@@ -52,6 +52,9 @@ export function useBrowserDownload() {
   const [downloadingBrowsers, setDownloadingBrowsers] = useState<Set<string>>(
     new Set(),
   );
+  const [downloadingVersions, setDownloadingVersions] = useState<Set<string>>(
+    new Set(),
+  );
   const [downloadProgress, setDownloadProgress] =
     useState<DownloadProgress | null>(null);
   // Last non-terminal stage seen per browser-version. The backend's terminal
@@ -179,6 +182,7 @@ export function useBrowserDownload() {
       }
 
       setDownloadingBrowsers((prev) => new Set(prev).add(browserStr));
+      setDownloadingVersions((prev) => new Set(prev).add(downloadKey));
 
       const downloadTask = (async () => {
         try {
@@ -191,6 +195,11 @@ export function useBrowserDownload() {
           setDownloadingBrowsers((prev) => {
             const next = new Set(prev);
             next.delete(browserStr);
+            return next;
+          });
+          setDownloadingVersions((prev) => {
+            const next = new Set(prev);
+            next.delete(downloadKey);
             return next;
           });
           setDownloadProgress(null);
@@ -242,6 +251,11 @@ export function useBrowserDownload() {
           next.delete(browserStr);
           return next;
         });
+        setDownloadingVersions((prev) => {
+          const next = new Set(prev);
+          next.delete(downloadKey);
+          return next;
+        });
       }
     },
     [loadDownloadedVersions],
@@ -260,6 +274,12 @@ export function useBrowserDownload() {
       return downloadingBrowsers.has(browserStr);
     },
     [downloadingBrowsers],
+  );
+
+  const isVersionDownloading = useCallback(
+    (browserStr: string, version: string) =>
+      downloadingVersions.has(`${browserStr}:${version}`),
+    [downloadingVersions],
   );
 
   // Legacy isDownloading for backwards compatibility
@@ -291,6 +311,11 @@ export function useBrowserDownload() {
               setDownloadingBrowsers((prev) => {
                 if (prev.has(progress.browser)) return prev;
                 return new Set(prev).add(progress.browser);
+              });
+              setDownloadingVersions((prev) => {
+                const next = new Set(prev);
+                next.delete(`${progress.browser}:${progress.version}`);
+                return next;
               });
             } else {
               lastDownloadStageRef.current.delete(downloadKey);
@@ -342,6 +367,11 @@ export function useBrowserDownload() {
                 next.delete(progress.browser);
                 return next;
               });
+              setDownloadingVersions((prev) => {
+                const next = new Set(prev);
+                next.delete(`${progress.browser}:${progress.version}`);
+                return next;
+              });
               dismissToast(
                 `download-${browserName.toLowerCase()}-${progress.version}`,
               );
@@ -350,6 +380,11 @@ export function useBrowserDownload() {
               setDownloadingBrowsers((prev) => {
                 const next = new Set(prev);
                 next.delete(progress.browser);
+                return next;
+              });
+              setDownloadingVersions((prev) => {
+                const next = new Set(prev);
+                next.delete(`${progress.browser}:${progress.version}`);
                 return next;
               });
               dismissToast(
@@ -423,6 +458,7 @@ export function useBrowserDownload() {
     downloadedVersionsMap,
     isDownloading,
     isBrowserDownloading,
+    isVersionDownloading,
     downloadingBrowsers,
     downloadProgress,
     loadVersions,

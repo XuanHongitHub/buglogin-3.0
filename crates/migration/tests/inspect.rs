@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use buglogin_migration::inspect::{CutoverEligibility, MigrationClass, inspect_source};
 use buglogin_migration::package::{PackageMetadata, build_neutral_package};
-use buglogin_migration::snapshot::create_snapshot;
+use buglogin_migration::snapshot::{SourceSnapshot, create_snapshot};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const SECRET_CANARY: &str = "MIGRATION-SECRET-MUST-NOT-LEAK";

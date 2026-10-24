@@ -7,7 +7,7 @@ use buglogin_domain::{
     grant::ResourceGrant,
     ids::{GrantId, MemberId, ResourceId, WorkspaceId},
     permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, is_allowed},
-    resource::Resource,
+    resource::{Resource, ResourceKind, ResourceState},
 };
 
 const RESOURCE_CAPABILITY: &str = "CAP-RES-001";
@@ -88,6 +88,20 @@ impl ResourceService {
         after: Option<&ResourceId>,
         limit: usize,
     ) -> Result<(Vec<Resource>, Option<ResourceId>), Problem> {
+        self.list_page_filtered(principal, grants, workspace, after, limit, None, None, None)
+    }
+
+    pub fn list_page_filtered(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        workspace: &WorkspaceId,
+        after: Option<&ResourceId>,
+        limit: usize,
+        search: Option<&str>,
+        kind: Option<&ResourceKind>,
+        state: Option<&ResourceState>,
+    ) -> Result<(Vec<Resource>, Option<ResourceId>), Problem> {
         if !(1..=100).contains(&limit) {
             return Err(problem(
                 "invalid_page_limit",
@@ -97,10 +111,18 @@ impl ResourceService {
         }
         authorize_resource(principal, grants, workspace, None, Action::Read)?;
         let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let search = search.map(str::to_lowercase);
         let mut rows = self
             .resources
             .range((lower, Bound::Unbounded))
-            .filter(|(_, resource)| &resource.workspace_id == workspace)
+            .filter(|(_, resource)| {
+                &resource.workspace_id == workspace
+                    && kind.is_none_or(|kind| &resource.kind == kind)
+                    && state.is_none_or(|state| &resource.state == state)
+                    && search
+                        .as_ref()
+                        .is_none_or(|search| resource.display_name.to_lowercase().contains(search))
+            })
             .map(|(_, resource)| resource);
         let items = rows.by_ref().take(limit).cloned().collect::<Vec<_>>();
         let has_more = rows.next().is_some();
@@ -536,6 +558,48 @@ mod tests {
             .unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].id.as_str(), "res_two");
+        assert!(next_cursor.is_none());
+    }
+
+    #[test]
+    fn resource_page_filters_search_kind_and_state_before_pagination() {
+        let (mut service, workspace_id, _, _) = service_with_grants();
+        let filtered_id = resource("res_proxy_locked");
+        service.resources.insert(
+            filtered_id.clone(),
+            Resource {
+                id: filtered_id,
+                workspace_id: workspace_id.clone(),
+                kind: ResourceKind::Proxy,
+                state: ResourceState::Locked,
+                display_name: "North Proxy".into(),
+            },
+        );
+        let principal = principal("acct_one", &workspace_id);
+        let grants = [acl(
+            "acct_one",
+            "acl_resource_filter",
+            RESOURCE_CAPABILITY,
+            Action::Read,
+            &workspace_id,
+            None,
+        )];
+
+        let (items, next_cursor) = service
+            .list_page_filtered(
+                &principal,
+                &grants,
+                &workspace_id,
+                None,
+                1,
+                Some("nOrTh"),
+                Some(&ResourceKind::Proxy),
+                Some(&ResourceState::Locked),
+            )
+            .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id.as_str(), "res_proxy_locked");
         assert!(next_cursor.is_none());
     }
 

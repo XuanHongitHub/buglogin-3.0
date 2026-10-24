@@ -1,7 +1,6 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -177,12 +176,12 @@ export function AboutDialog({
           </div>
 
           <p className="text-center text-xs text-muted-foreground">
-            {t("about.licenseNotice")}
+            {t("about.updateHint")}
           </p>
 
-          <div className="flex gap-2">
+          <div className="flex">
             <Button
-              variant="outline"
+              variant="default"
               size="sm"
               disabled={isCheckingForUpdates}
               onClick={() => onCheckForUpdates?.()}
@@ -192,22 +191,6 @@ export function AboutDialog({
                   ? "about.checkingUpdates"
                   : "about.checkUpdates",
               )}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void openUrl("https://buglogin.com")}
-            >
-              {t("about.website")}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                void openUrl("https://github.com/XuanHongitHub/buglogin-3.0")
-              }
-            >
-              GitHub
             </Button>
           </div>
         </div>

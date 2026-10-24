@@ -1,0 +1,27 @@
+{
+  "schema": "buglogin.live-infra-evidence/1",
+  "generatedAt": "2026-07-23T02:21:33.417Z",
+  "strict": false,
+  "results": [
+    {
+      "service": "postgres",
+      "status": "skipped",
+      "reason": "BUGLOGIN_LIVE_POSTGRES_URL is missing"
+    },
+    {
+      "service": "redis",
+      "status": "skipped",
+      "reason": "BUGLOGIN_LIVE_REDIS_URL is missing"
+    },
+    {
+      "service": "s3",
+      "status": "skipped",
+      "reason": "BUGLOGIN_LIVE_S3_PROBE_URL is missing"
+    }
+  ],
+  "summary": {
+    "pass": 0,
+    "skipped": 3,
+    "blocked": 0
+  }
+}

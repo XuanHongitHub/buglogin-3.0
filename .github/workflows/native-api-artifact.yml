@@ -19,7 +19,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -33,8 +33,6 @@ jobs:
       - uses: ./.github/actions/setup-buglogin
         with:
           install-node-dependencies: false
-      - name: Verify desktop login contract
-        run: cargo test --locked -p buglogin-api --test http_auth desktop_login_issues_device_bound_tokens_and_rejects_bad_credentials_generically
       - name: Build native API and password reset operator
         run: cargo build --locked --release -p buglogin-api --bin buglogin-api --bin buglogin-admin-password-reset
       - name: Assemble provenance manifest

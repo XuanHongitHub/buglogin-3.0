@@ -1,7 +1,9 @@
 pub(crate) mod account_persistence;
 pub mod account_provisioning;
+pub mod account_verification;
 pub mod api_tokens;
 pub mod audit;
+pub(crate) mod buglab_sso;
 pub mod connected_cookie_jobs;
 pub(crate) mod control_persistence;
 pub(crate) mod credentials;

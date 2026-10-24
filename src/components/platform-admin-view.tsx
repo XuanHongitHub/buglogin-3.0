@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuArrowLeft,
-  LuBuilding2,
-  LuCpu,
   LuHardDrive,
   LuPlus,
   LuRefreshCw,
@@ -44,15 +42,11 @@ const desktopApi = createTauriDesktopApi();
 export interface TenantRecord {
   id: string;
   organizationId: string;
+  organizationName: string;
   policy: Workspace["policy"];
   name: string;
-  ownerEmail: string;
-  tier: "STARTER" | "PRO TEAM" | "ENTERPRISE" | "UNSPECIFIED";
-  profilesUsed: number | null;
   profilesMax: number;
-  membersUsed: number | null;
   membersMax: number;
-  status: "unknown";
 }
 
 interface PlatformAdminViewProps {
@@ -67,30 +61,17 @@ export function PlatformAdminView({
   const { t } = useTranslation();
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [tierFilter, setTierFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sortKey, setSortKey] = useState<keyof TenantRecord>("name");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
-  // System Hardware Stats
-  const [systemInfo, setSystemInfo] = useState<{
-    os: string;
-    appVersion: string;
-    totalMemGb: number;
-    cpuCores: number;
-  }>({
-    os: "Unavailable",
-    appVersion: "Unavailable",
-    totalMemGb: 0,
-    cpuCores: 0,
-  });
-
   // Quota adjust state
   const [adjustTenant, setAdjustTenant] = useState<TenantRecord | null>(null);
   const [newMaxProfiles, setNewMaxProfiles] = useState(0);
+  const [isSavingQuota, setIsSavingQuota] = useState(false);
 
   // Multi-select for bulk tenant actions
   const [selectedTenantIds, setSelectedTenantIds] = useState<Set<string>>(
@@ -102,88 +83,36 @@ export function PlatformAdminView({
   const loadPlatformData = useCallback(async () => {
     setIsLoading(true);
     try {
-      // 1. Use the registered system health command. The Donut-only
-      // get_system_info invoke is not part of the BugLogin desktop contract.
-      try {
-        const health = await desktopApi.getSystemHealth();
-        setSystemInfo((prev) => ({
-          ...prev,
-          appVersion: `${health.service} · ${health.status}`,
-          os: navigator.platform || "Unavailable",
-          cpuCores: navigator.hardwareConcurrency ?? 0,
-        }));
-      } catch (err) {
-        console.warn("Could not query system telemetry:", err);
-      }
-
-      // 2. Workspaces must be listed under their real organization IDs.
-      let loadedWorkspaces: Workspace[] = [];
-      try {
-        const organizations = await desktopApi.listOrganizations();
-        const workspacePages = await Promise.all(
-          organizations.items.map((organization) =>
-            desktopApi.listWorkspaces(organization.id),
-          ),
-        );
-        loadedWorkspaces = workspacePages.flatMap((page) => page.items ?? []);
-      } catch (err) {
-        console.warn("Could not load workspaces:", err);
-      }
-
-      // 3. Read usage using each workspace's authorized API scope.
-      if (loadedWorkspaces.length > 0) {
-        const mapped = await Promise.all(
-          loadedWorkspaces.map(async (ws): Promise<TenantRecord> => {
-            let profilesUsed: number | null = 0;
-            let membersUsed: number | null = 0;
-            try {
-              let cursor: string | undefined;
-              const seen = new Set<string>();
-              let pages = 0;
-              do {
-                const page = await desktopApi.listProfiles(false, {
-                  workspaceId: ws.id,
-                  limit: 100,
-                  ...(cursor ? { cursor } : {}),
-                });
-                profilesUsed += page.items.length;
-                cursor = page.nextCursor ?? undefined;
-                pages += 1;
-                if (cursor && (seen.has(cursor) || pages >= 1000)) {
-                  throw new Error("Profile usage pagination did not advance");
-                }
-                if (cursor) seen.add(cursor);
-              } while (cursor);
-            } catch (err) {
-              console.warn(`Could not load profile usage for ${ws.id}:`, err);
-              profilesUsed = null;
-            }
-            try {
-              membersUsed = (await desktopApi.listMembers(ws.id)).items.length;
-            } catch (err) {
-              console.warn(`Could not load member usage for ${ws.id}:`, err);
-              membersUsed = null;
-            }
-            return {
-              id: ws.id,
-              organizationId: ws.organizationId,
-              policy: ws.policy,
-              name: ws.name,
-              ownerEmail: "—",
-              tier: "UNSPECIFIED",
-              profilesUsed,
-              profilesMax: ws.policy.maxProfiles,
-              membersUsed,
-              membersMax: ws.policy.maxMembers,
-              status: "unknown",
-            };
+      const organizations = await desktopApi.listOrganizations();
+      const workspacePages = await Promise.all(
+        organizations.items.map((organization) =>
+          desktopApi.listWorkspaces(organization.id),
+        ),
+      );
+      const organizationNames = new Map(
+        organizations.items.map((organization) => [
+          organization.id,
+          organization.name,
+        ]),
+      );
+      const mapped = workspacePages.flatMap((page) =>
+        (page.items ?? []).map(
+          (workspace): TenantRecord => ({
+            id: workspace.id,
+            organizationId: workspace.organizationId,
+            organizationName:
+              organizationNames.get(workspace.organizationId) ?? "—",
+            policy: workspace.policy,
+            name: workspace.name,
+            profilesMax: workspace.policy.maxProfiles,
+            membersMax: workspace.policy.maxMembers,
           }),
-        );
-        setTenants(mapped);
-      } else {
-        setTenants([]);
-      }
+        ),
+      );
+      setTenants(mapped);
+      setLoadError(null);
     } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
       showErrorToast(`Lỗi đồng bộ dữ liệu quản trị: ${String(err)}`);
     } finally {
       setIsLoading(false);
@@ -197,18 +126,11 @@ export function PlatformAdminView({
   // Sorting & Filtering
   const filteredTenants = useMemo(() => {
     let result = tenants.filter((tenant) => {
-      if (tierFilter !== "all" && tenant.tier !== tierFilter) {
-        return false;
-      }
-      if (statusFilter !== "all" && tenant.status !== statusFilter) {
-        return false;
-      }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         if (
           !tenant.name.toLowerCase().includes(q) &&
-          !tenant.id.toLowerCase().includes(q) &&
-          !tenant.ownerEmail.toLowerCase().includes(q)
+          !tenant.organizationName.toLowerCase().includes(q)
         ) {
           return false;
         }
@@ -228,7 +150,7 @@ export function PlatformAdminView({
     });
 
     return result;
-  }, [tenants, tierFilter, statusFilter, searchQuery, sortKey, sortDirection]);
+  }, [tenants, searchQuery, sortKey, sortDirection]);
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filteredTenants.length / pageSize));
@@ -275,7 +197,7 @@ export function PlatformAdminView({
       const selected = tenants.filter((tenant) =>
         selectedTenantIds.has(tenant.id),
       );
-      let failed = 0;
+      const failedIds: string[] = [];
       for (const tenant of selected) {
         try {
           await desktopApi.updateWorkspace({
@@ -290,7 +212,7 @@ export function PlatformAdminView({
           });
           updated += 1;
         } catch (err) {
-          failed += 1;
+          failedIds.push(tenant.id);
           console.warn(
             `Failed to update quota for workspace ${tenant.id}:`,
             err,
@@ -298,13 +220,13 @@ export function PlatformAdminView({
         }
       }
       if (updated) await loadPlatformData();
-      if (failed === 0)
+      if (failedIds.length === 0)
         showSuccessToast(`Đã cập nhật quota cho ${updated} workspace.`);
       else
         showErrorToast(
-          `Đã cập nhật ${updated}/${selected.length} workspace; ${failed} thao tác thất bại.`,
+          `Đã cập nhật ${updated}/${selected.length} workspace; ${failedIds.length} thao tác thất bại. Các workspace lỗi vẫn được chọn để thử lại.`,
         );
-      setSelectedTenantIds(new Set());
+      setSelectedTenantIds(new Set(failedIds));
     } finally {
       setIsBulkExecuting(false);
     }
@@ -316,7 +238,13 @@ export function PlatformAdminView({
   };
 
   const handleSaveQuota = async () => {
-    if (!adjustTenant) return;
+    if (
+      !adjustTenant ||
+      !Number.isInteger(newMaxProfiles) ||
+      newMaxProfiles < 0
+    )
+      return;
+    setIsSavingQuota(true);
     try {
       await desktopApi.updateWorkspace({
         organizationId: adjustTenant.organizationId,
@@ -332,26 +260,14 @@ export function PlatformAdminView({
       await loadPlatformData();
     } catch (err) {
       showErrorToast(err instanceof Error ? err.message : JSON.stringify(err));
+    } finally {
+      setIsSavingQuota(false);
     }
   };
 
-  // Aggregates
-  const totalProfilesUsed = tenants.reduce(
-    (acc, t) => acc + (t.profilesUsed ?? 0),
-    0,
-  );
+  // These are configured policy limits, not live usage or billing entitlements.
   const totalProfilesMax = tenants.reduce((acc, t) => acc + t.profilesMax, 0);
-  const totalMembersUsed = tenants.reduce(
-    (acc, t) => acc + (t.membersUsed ?? 0),
-    0,
-  );
   const totalMembersMax = tenants.reduce((acc, t) => acc + t.membersMax, 0);
-  const profileUsageComplete = tenants.every(
-    (tenant) => tenant.profilesUsed !== null,
-  );
-  const memberUsageComplete = tenants.every(
-    (tenant) => tenant.membersUsed !== null,
-  );
 
   return (
     <div className="flex h-full flex-col min-h-0 bg-background overflow-hidden">
@@ -421,121 +337,52 @@ export function PlatformAdminView({
         </div>
       </div>
 
-      {/* 2. Platform Telemetry Metrics */}
+      {/* 2. Workspace policy overview (configured limits, not live usage) */}
       <div className="border-b border-border/50 bg-muted/20 px-6 py-3 shrink-0">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {/* Card 1: Profiles Quota */}
-          <div className="rounded-lg border border-border/70 bg-card p-3 space-y-1.5 shadow-2xs">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-muted-foreground font-medium flex items-center gap-1.5">
-                <LuHardDrive className="size-3.5 text-primary" />
-                <span>Dung Lượng Profiles:</span>
-              </span>
-              <span className="font-bold text-foreground font-mono">
-                {profileUsageComplete
-                  ? totalProfilesUsed.toLocaleString()
-                  : "—"}{" "}
-                / {totalProfilesMax.toLocaleString()}
-              </span>
+        {loadError && (
+          <div
+            role="status"
+            className="mb-3 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+          >
+            <span>
+              Không làm mới được dữ liệu. Đang giữ danh sách gần nhất.{" "}
+              {loadError}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void loadPlatformData()}
+              disabled={isLoading}
+            >
+              Thử lại
+            </Button>
+          </div>
+        )}
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-md border border-border/70 bg-card px-3 py-2.5">
+            <div className="text-xs text-muted-foreground">
+              Workspace hiển thị
             </div>
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full bg-primary rounded-full transition-all duration-300"
-                style={{
-                  width: profileUsageComplete
-                    ? `${Math.min(100, Math.round((totalProfilesUsed / Math.max(1, totalProfilesMax)) * 100))}%`
-                    : "0%",
-                }}
-              />
-            </div>
-            <div className="text-[10px] text-muted-foreground flex justify-between">
-              <span>Mức dùng theo workspace</span>
-              <span className="font-semibold text-foreground">
-                {profileUsageComplete
-                  ? `${Math.round((totalProfilesUsed / Math.max(1, totalProfilesMax)) * 100)}%`
-                  : "—"}
-              </span>
+            <div className="mt-1 font-mono text-sm font-semibold tabular-nums">
+              {tenants.length.toLocaleString()}
             </div>
           </div>
-
-          {/* Card 2: Team Members */}
-          <div className="rounded-lg border border-border/70 bg-card p-3 space-y-1.5 shadow-2xs">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-muted-foreground font-medium flex items-center gap-1.5">
-                <LuUsers className="size-3.5 text-primary" />
-                <span>Ghế Thành Viên (Seats):</span>
-              </span>
-              <span className="font-bold text-foreground font-mono">
-                {memberUsageComplete ? totalMembersUsed : "—"} /{" "}
-                {totalMembersMax}
-              </span>
+          <div className="rounded-md border border-border/70 bg-card px-3 py-2.5">
+            <div className="text-xs text-muted-foreground">
+              Tổng hạn mức profile đã cấu hình
             </div>
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-                style={{
-                  width: memberUsageComplete
-                    ? `${Math.min(100, Math.round((totalMembersUsed / Math.max(1, totalMembersMax)) * 100))}%`
-                    : "0%",
-                }}
-              />
-            </div>
-            <div className="text-[10px] text-muted-foreground flex justify-between">
-              <span>
-                {memberUsageComplete
-                  ? `Còn ${Math.max(0, totalMembersMax - totalMembersUsed)} ghế khả dụng`
-                  : "Mức dùng chưa tải đầy đủ"}
-              </span>
-              <span className="font-semibold text-foreground">
-                {memberUsageComplete
-                  ? `${Math.round((totalMembersUsed / Math.max(1, totalMembersMax)) * 100)}%`
-                  : "—"}
-              </span>
+            <div className="mt-1 flex items-center gap-2 font-mono text-sm font-semibold tabular-nums">
+              <LuHardDrive className="size-4 text-muted-foreground" />
+              {totalProfilesMax.toLocaleString()}
             </div>
           </div>
-
-          {/* Card 3: Active Tenancy */}
-          <div className="rounded-lg border border-border/70 bg-card p-3 space-y-1.5 shadow-2xs">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-muted-foreground font-medium flex items-center gap-1.5">
-                <LuBuilding2 className="size-3.5 text-primary" />
-                <span>Không Gian / Tổ Chức:</span>
-              </span>
-              <span className="font-bold text-foreground font-mono">
-                {tenants.length} workspace
-              </span>
+          <div className="rounded-md border border-border/70 bg-card px-3 py-2.5">
+            <div className="text-xs text-muted-foreground">
+              Tổng hạn mức thành viên đã cấu hình
             </div>
-            <div className="text-[10px] text-muted-foreground flex justify-between">
-              <span>Trạng thái workspace chưa thuộc API hiện tại</span>
-              <span className="font-semibold text-muted-foreground">
-                Chưa xác định
-              </span>
-            </div>
-          </div>
-
-          {/* Card 4: Hardware Kernel */}
-          <div className="rounded-lg border border-border/70 bg-card p-3 space-y-1.5 shadow-2xs">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-muted-foreground font-medium flex items-center gap-1.5">
-                <LuCpu className="size-3.5 text-primary" />
-                <span>Hạ Tầng Phần Cứng:</span>
-              </span>
-              <Badge
-                variant="outline"
-                className="text-[9px] font-mono py-0 h-4 bg-muted"
-              >
-                {systemInfo.os}
-              </Badge>
-            </div>
-            <div className="text-xs font-semibold text-foreground font-mono truncate">
-              {systemInfo.cpuCores || "—"} Cores ·{" "}
-              {systemInfo.totalMemGb || "—"}GB RAM
-            </div>
-            <div className="text-[10px] text-muted-foreground flex justify-between">
-              <span>{systemInfo.appVersion}</span>
-              <span className="text-muted-foreground font-medium">
-                Local device
-              </span>
+            <div className="mt-1 flex items-center gap-2 font-mono text-sm font-semibold tabular-nums">
+              <LuUsers className="size-4 text-muted-foreground" />
+              {totalMembersMax.toLocaleString()}
             </div>
           </div>
         </div>
@@ -551,7 +398,7 @@ export function PlatformAdminView({
                 <LuSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
                 <Input
                   type="search"
-                  placeholder="Tìm theo tên tổ chức, ID hoặc email chủ sở hữu…"
+                  placeholder="Tìm theo workspace hoặc tổ chức…"
                   value={searchQuery}
                   onChange={(e) => {
                     setSearchQuery(e.target.value);
@@ -563,46 +410,6 @@ export function PlatformAdminView({
             </div>
 
             <div className="flex items-center gap-2">
-              <Select
-                value={tierFilter}
-                onValueChange={(val) => {
-                  setTierFilter(val);
-                  setCurrentPage(1);
-                }}
-              >
-                <SelectTrigger className="h-8 w-36 text-xs bg-background">
-                  <SelectValue placeholder="Gói cước" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all" className="text-xs">
-                    Tất cả gói
-                  </SelectItem>
-                  <SelectItem value="UNSPECIFIED" className="text-xs">
-                    Chưa cấu hình gói
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-
-              <Select
-                value={statusFilter}
-                onValueChange={(val) => {
-                  setStatusFilter(val);
-                  setCurrentPage(1);
-                }}
-              >
-                <SelectTrigger className="h-8 w-36 text-xs bg-background">
-                  <SelectValue placeholder="Trạng thái" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all" className="text-xs">
-                    Tất cả trạng thái
-                  </SelectItem>
-                  <SelectItem value="unknown" className="text-xs">
-                    Chưa xác định
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-
               <Select
                 value={String(pageSize)}
                 onValueChange={(val) => {
@@ -657,44 +464,22 @@ export function PlatformAdminView({
                   </th>
                   <th
                     className="py-2.5 px-4 cursor-pointer select-none hover:text-foreground transition-colors"
-                    onClick={() => handleSort("tier")}
+                    onClick={() => handleSort("profilesMax")}
                   >
                     <div className="flex items-center gap-1.5">
-                      <span>Gói Cước</span>
-                      {sortKey === "tier" && (
+                      <span>Hạn mức profile</span>
+                      {sortKey === "profilesMax" && (
                         <span>{sortDirection === "asc" ? "▲" : "▼"}</span>
                       )}
                     </div>
                   </th>
                   <th
                     className="py-2.5 px-4 cursor-pointer select-none hover:text-foreground transition-colors"
-                    onClick={() => handleSort("profilesUsed")}
+                    onClick={() => handleSort("membersMax")}
                   >
                     <div className="flex items-center gap-1.5">
-                      <span>Dung Lượng Profiles</span>
-                      {sortKey === "profilesUsed" && (
-                        <span>{sortDirection === "asc" ? "▲" : "▼"}</span>
-                      )}
-                    </div>
-                  </th>
-                  <th
-                    className="py-2.5 px-4 cursor-pointer select-none hover:text-foreground transition-colors"
-                    onClick={() => handleSort("membersUsed")}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span>Thành Viên</span>
-                      {sortKey === "membersUsed" && (
-                        <span>{sortDirection === "asc" ? "▲" : "▼"}</span>
-                      )}
-                    </div>
-                  </th>
-                  <th
-                    className="py-2.5 px-4 cursor-pointer select-none hover:text-foreground transition-colors"
-                    onClick={() => handleSort("status")}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span>Trạng Thái</span>
-                      {sortKey === "status" && (
+                      <span>Hạn mức thành viên</span>
+                      {sortKey === "membersMax" && (
                         <span>{sortDirection === "asc" ? "▲" : "▼"}</span>
                       )}
                     </div>
@@ -706,120 +491,61 @@ export function PlatformAdminView({
                 {paginatedTenants.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={5}
                       className="py-12 text-center text-muted-foreground"
                     >
-                      Không tìm thấy tổ chức nào phù hợp với bộ lọc tìm kiếm.
+                      {isLoading
+                        ? "Đang tải workspace…"
+                        : "Không tìm thấy workspace nào phù hợp."}
                     </td>
                   </tr>
                 ) : (
-                  paginatedTenants.map((tenant) => {
-                    const profilePct =
-                      tenant.profilesUsed === null
-                        ? null
-                        : Math.round(
-                            (tenant.profilesUsed /
-                              Math.max(1, tenant.profilesMax)) *
-                              100,
-                          );
-                    return (
-                      <tr
-                        key={tenant.id}
-                        className={cn("transition-colors hover:bg-muted/30")}
-                      >
-                        <td className="py-3 px-3 w-8">
-                          <Checkbox
-                            checked={selectedTenantIds.has(tenant.id)}
-                            onCheckedChange={() =>
-                              handleToggleSelectTenant(tenant.id)
-                            }
-                            aria-label={`Select ${tenant.name}`}
-                          />
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="font-semibold text-foreground text-xs">
-                            {tenant.name}
-                          </div>
-                          <div className="text-[11px] text-muted-foreground flex items-center gap-2 mt-0.5">
-                            <span className="font-mono">{tenant.id}</span>
-                            <span>•</span>
-                            <span>{tenant.ownerEmail}</span>
-                          </div>
-                        </td>
-                        <td className="py-3 px-4">
-                          <Badge
+                  paginatedTenants.map((tenant) => (
+                    <tr
+                      key={tenant.id}
+                      className={cn("transition-colors hover:bg-muted/30")}
+                    >
+                      <td className="py-3 px-3 w-8">
+                        <Checkbox
+                          checked={selectedTenantIds.has(tenant.id)}
+                          onCheckedChange={() =>
+                            handleToggleSelectTenant(tenant.id)
+                          }
+                          aria-label={`Select ${tenant.name}`}
+                        />
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="font-semibold text-foreground text-xs">
+                          {tenant.name}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground flex items-center gap-2 mt-0.5">
+                          <span>{tenant.organizationName}</span>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="font-mono text-xs tabular-nums">
+                          {tenant.profilesMax.toLocaleString()}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="font-mono text-xs font-semibold text-foreground">
+                          {tenant.membersMax.toLocaleString()}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Button
                             variant="outline"
-                            className={cn(
-                              "text-[10px] font-bold font-mono tracking-wide",
-                              tenant.tier === "ENTERPRISE"
-                                ? "bg-amber-500/10 text-amber-600 border-amber-500/30"
-                                : tenant.tier === "PRO TEAM"
-                                  ? "bg-primary/10 text-primary border-primary/30"
-                                  : "bg-muted text-muted-foreground border-border",
-                            )}
+                            size="sm"
+                            onClick={() => handleOpenAdjustQuota(tenant)}
+                            className="h-7 px-2.5 text-[11px] font-medium cursor-pointer"
                           >
-                            {tenant.tier}
-                          </Badge>
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="flex items-center justify-between text-[11px] mb-1 font-mono">
-                            <span className="font-semibold text-foreground">
-                              {tenant.profilesUsed === null
-                                ? "—"
-                                : tenant.profilesUsed.toLocaleString()}{" "}
-                              / {tenant.profilesMax.toLocaleString()}
-                            </span>
-                            <span className="text-[10px] text-muted-foreground">
-                              {profilePct === null ? "—" : `${profilePct}%`}
-                            </span>
-                          </div>
-                          <div className="h-1.5 w-36 rounded-full bg-muted overflow-hidden">
-                            <div
-                              className={cn(
-                                "h-full rounded-full transition-all duration-300",
-                                profilePct !== null && profilePct >= 90
-                                  ? "bg-amber-500"
-                                  : "bg-primary",
-                              )}
-                              style={{
-                                width: `${Math.min(100, profilePct ?? 0)}%`,
-                              }}
-                            />
-                          </div>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="font-mono text-xs font-semibold text-foreground">
-                            {tenant.membersUsed === null
-                              ? "—"
-                              : tenant.membersUsed}{" "}
-                            / {tenant.membersMax} ghế
-                          </span>
-                        </td>
-                        <td className="py-3 px-4">
-                          <Badge
-                            className={cn(
-                              "text-[10px] font-semibold",
-                              "bg-muted text-muted-foreground border-border",
-                            )}
-                          >
-                            Trạng thái chưa có
-                          </Badge>
-                        </td>
-                        <td className="py-3 px-4 text-right whitespace-nowrap">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleOpenAdjustQuota(tenant)}
-                              className="h-7 px-2.5 text-[11px] font-medium cursor-pointer"
-                            >
-                              Sửa Quota
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
+                            Sửa Quota
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>
@@ -953,18 +679,18 @@ export function PlatformAdminView({
               <Input
                 type="number"
                 step={100}
-                min={adjustTenant?.profilesUsed ?? 10}
+                min={0}
                 value={newMaxProfiles}
                 onChange={(e) => setNewMaxProfiles(Number(e.target.value))}
                 className="h-9 text-xs"
               />
             </div>
             <p className="text-[11px] text-muted-foreground">
-              Hiện tại đang dùng:{" "}
+              Hạn mức profile hiện tại:{" "}
               <strong className="text-foreground">
-                {adjustTenant?.profilesUsed}
+                {adjustTenant?.profilesMax.toLocaleString()}
               </strong>{" "}
-              profiles.
+              profiles. API hiện tại không cung cấp số lượng đang dùng.
             </p>
           </div>
 
@@ -983,9 +709,14 @@ export function PlatformAdminView({
               variant="default"
               size="sm"
               onClick={handleSaveQuota}
+              disabled={
+                isSavingQuota ||
+                !Number.isInteger(newMaxProfiles) ||
+                newMaxProfiles < 0
+              }
               className="h-8 text-xs cursor-pointer font-medium"
             >
-              Lưu thay đổi
+              {isSavingQuota ? "Đang lưu…" : "Lưu thay đổi"}
             </Button>
           </DialogFooter>
         </DialogContent>

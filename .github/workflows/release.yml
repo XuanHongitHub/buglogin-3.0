@@ -109,7 +109,6 @@ jobs:
           done
           node scripts/release/assemble-tauri-updater-feed.mjs incoming "dist-release/$RELEASE_REF" "${RELEASE_REF#v}" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/$RELEASE_REF/$GITHUB_RUN_ID/"
           node scripts/release/verify-tauri-updater-feed.mjs "dist-release/$RELEASE_REF/latest.json" "${RELEASE_REF#v}" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
-          node scripts/release/verify-downloads-manifest.mjs "dist-release/$RELEASE_REF/downloads.json" "${RELEASE_REF#v}" "$S3_PUBLIC_BASE_URL/artifacts/"
           [[ "$(find "dist-release/$RELEASE_REF" -maxdepth 1 -name '*.zip' | wc -l | tr -d ' ')" == 2 ]] || { echo "Expected exactly two supported platform archives"; exit 1; }
           (cd "dist-release/$RELEASE_REF" && find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
       - name: Publish immutable RC artifacts and feed to DigitalOcean Spaces
@@ -136,15 +135,10 @@ jobs:
           aws s3 cp "dist-release/$RELEASE_REF/latest.json" "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/rc/latest.json" \
             --endpoint-url "$S3_ENDPOINT" --region sgp1 --acl public-read \
             --cache-control 'public,max-age=60' --content-type application/json
-          aws s3 cp "dist-release/$RELEASE_REF/downloads.json" "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/rc/downloads.json" \
-            --endpoint-url "$S3_ENDPOINT" --region sgp1 --acl public-read \
-            --cache-control 'public,max-age=60' --content-type application/json
           curl --fail --silent --show-error "$S3_PUBLIC_BASE_URL/rc/latest.json" -o downloaded-rc-latest.json
           cmp "dist-release/$RELEASE_REF/latest.json" downloaded-rc-latest.json
-          curl --fail --silent --show-error "$S3_PUBLIC_BASE_URL/rc/downloads.json" -o downloaded-rc-downloads.json
-          cmp "dist-release/$RELEASE_REF/downloads.json" downloaded-rc-downloads.json
           node scripts/release/verify-tauri-updater-feed.mjs downloaded-rc-latest.json "${RELEASE_REF#v}" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
-          node -e 'for (const item of Object.values(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).platforms)) console.log(item.url)' downloaded-rc-downloads.json | while IFS= read -r url; do curl --fail --silent --show-error --head --max-time 30 "$url" >/dev/null; done
+          node -e 'for (const item of Object.values(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).platforms)) console.log(item.url)' downloaded-rc-latest.json | while IFS= read -r url; do curl --fail --silent --show-error --head --max-time 30 "$url" >/dev/null; done
       - name: Create GitHub draft prerelease
         shell: bash
         run: |

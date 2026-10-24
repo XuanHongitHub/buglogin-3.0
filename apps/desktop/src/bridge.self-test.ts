@@ -14,6 +14,10 @@ const invoke = async <Result>(
     return { state: "unauthenticated" } as Result;
   if (command === "desktop_auth_login")
     return { state: "authenticated" } as Result;
+  if (command === "desktop_auth_sso_start") return 300 as Result;
+  if (command === "desktop_auth_sso_complete")
+    return { state: "authenticated" } as Result;
+  if (command === "desktop_deep_link_current") return [] as Result;
   if (command === "integrations_status_get")
     return {
       deploymentMode: "production",
@@ -355,6 +359,14 @@ assert.match(String(calls[recordCallStart + 1]?.args?.correlationId), /^cor_/);
 
 const accountCallStart = calls.length;
 await api.listAccounts();
+await api.createPendingAccount(
+  {
+    accountId: "acct_created",
+    username: "created-user",
+    email: "created@example.test",
+  },
+  "account-create-idempotency-01",
+);
 await api.updateAccountStatus({
   accountId: "acct_1",
   status: "suspended",
@@ -369,18 +381,27 @@ assert.deepEqual(
   [
     { command: "account_list", payload: {}, idempotencyKey: undefined },
     {
+      command: "account_create",
+      payload: {
+        accountId: "acct_created",
+        username: "created-user",
+        email: "created@example.test",
+      },
+      idempotencyKey: "account-create-idempotency-01",
+    },
+    {
       command: "account_status_update",
       payload: {
         accountId: "acct_1",
         status: "suspended",
         expectedRevision: 4,
       },
-      idempotencyKey: calls[accountCallStart + 1]?.args?.idempotencyKey,
+      idempotencyKey: calls[accountCallStart + 2]?.args?.idempotencyKey,
     },
   ],
 );
 assert.match(
-  String(calls[accountCallStart + 1]?.args?.idempotencyKey),
+  String(calls[accountCallStart + 2]?.args?.idempotencyKey),
   /^idem_/,
 );
 
@@ -409,3 +430,15 @@ assert.deepEqual(
   authEvents.map((event) => event.type),
   [DESKTOP_AUTH_STATUS_CHANGED_EVENT],
 );
+
+assert.equal(await api.startBugLabSso(), 300);
+assert.deepEqual(
+  await api.completeBugLabSso("a".repeat(64), "sso_test_token_123456"),
+  { state: "authenticated" },
+);
+assert.deepEqual(await api.currentDeepLinks(), []);
+assert.equal(calls.at(-3)?.command, "desktop_auth_sso_start");
+assert.equal(calls.at(-2)?.command, "desktop_auth_sso_complete");
+assert.equal(calls.at(-2)?.args?.callbackState, "a".repeat(64));
+assert.equal(calls.at(-2)?.args?.token, "sso_test_token_123456");
+assert.equal(calls.at(-1)?.command, "desktop_deep_link_current");

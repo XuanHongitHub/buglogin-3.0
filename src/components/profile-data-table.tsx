@@ -33,6 +33,7 @@ import {
   LuPlay,
   LuPlus,
   LuPuzzle,
+  LuRefreshCw,
   LuSparkles,
   LuSquare,
   LuTrash2,
@@ -1690,6 +1691,8 @@ interface ProfilesDataTableProps {
   /** True when the app has zero profiles overall (not just a filtered view). */
   showOnboardingEmptyState?: boolean;
   onCreateProfile?: () => void;
+  onRefreshProfiles?: () => Promise<void>;
+  isRefreshingProfiles?: boolean;
   workspaceSelected?: boolean;
   filterControls?: React.ReactNode;
   groups?: Array<{ id: string; name: string; profile_count?: number }>;
@@ -1737,6 +1740,8 @@ export function ProfilesDataTable({
   isLoading = false,
   showOnboardingEmptyState = false,
   onCreateProfile,
+  onRefreshProfiles,
+  isRefreshingProfiles = false,
   workspaceSelected,
   filterControls,
   groups = [],
@@ -3936,16 +3941,37 @@ export function ProfilesDataTable({
           })}
         </div>
 
-        {onCreateProfile && (
-          <Button
-            size="sm"
-            onClick={onCreateProfile}
-            className="h-7 shrink-0 gap-1.5 rounded-md px-3 text-xs font-medium shadow-xs"
-          >
-            <LuPlus className="size-3.5" />
-            <span>{t("header.newProfile")}</span>
-          </Button>
-        )}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {onRefreshProfiles && (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label={t("profiles.table.refresh")}
+              title={t("profiles.table.refresh")}
+              disabled={isRefreshingProfiles}
+              onClick={() => void onRefreshProfiles()}
+              className="size-7"
+            >
+              <LuRefreshCw
+                className={cn(
+                  "size-3.5",
+                  isRefreshingProfiles && "animate-spin",
+                )}
+              />
+            </Button>
+          )}
+          {onCreateProfile && (
+            <Button
+              size="sm"
+              onClick={onCreateProfile}
+              className="h-7 shrink-0 gap-1.5 rounded-md px-3 text-xs font-medium shadow-xs"
+            >
+              <LuPlus className="size-3.5" />
+              <span>{t("header.newProfile")}</span>
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Row 2: Search, Filters, Active chips, Sort, and Columns */}

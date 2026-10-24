@@ -111,15 +111,18 @@ export function verifySigningText(text) {
     /gh attestation verify/,
     /if-no-files-found:\s*error/,
     /if:\s*always\(\)/,
-    /Join-Path \$env:CARGO_TARGET_DIR \"\$env:TARGET\/release\"/,
-    /RELEASE_DIR=\"\$CARGO_TARGET_DIR\/\$TARGET\/release\"/,
-    /UPDATER_ARCHIVE=\"\$RELEASE_DIR\/bundle\/macos\/BugLogin\.app\.tar\.gz\"/,
-    /UPDATER_SIGNATURE=\"\$UPDATER_ARCHIVE\.sig\"/,
+    /Join-Path \$env:CARGO_TARGET_DIR "\$env:TARGET\\release"/,
+    /Join-Path \$releaseRoot 'buglogin-desktop-app\.exe'/,
+    /BUNDLE_ROOT="\$CARGO_TARGET_DIR\/\$TARGET\/release\/bundle"/,
+    /\$BUNDLE_ROOT\/macos/,
+    /\$BUNDLE_ROOT\/dmg/,
+    /find "\$BUNDLE_ROOT" -type f -name '\*\.app\.tar\.gz' -print0/,
+    /\[\[ -n "\$UPDATER_ARCHIVE" && -f "\$UPDATER_ARCHIVE\.sig" \]\]/,
   ], "signing");
   requireCount(text, /environment:\s*release-signing/g, 2, "signing protected environments");
   requireCount(text, /RUST_TOOLCHAIN:\s*1\.95\.0/g, 2, "signing Rust pins");
   requireCount(text, /node scripts\/release\/verify-runtime-trust-keys\.mjs/g, 2, "embedded runtime trust key validation");
-  forbidPatterns(text, [/windows-latest|macos-latest|toolchain:\s*stable/, /gh release|deploy|CLOUDFLARE|aws s3/i, /continue-on-error:\s*true/, /echo .*APPLE_|echo .*WINDOWS_/i, /src-tauri\/target|donutbrowser\.exe|donut-proxy/i, /verify-bundle\.mjs dist-release --require-updater/, /secrets\.BUGLOGIN_RUNTIME_TRUST_KEYS_JSON/, /WINDOWS_CERTIFICATE_PFX_BASE64|WINDOWS_CERTIFICATE_PASSWORD|WINDOWS_TIMESTAMP_URL|Get-AuthenticodeSignature|TimeStamperCertificate/, /(?:^|[\" ])target\/\$env:TARGET\/release/, /(?:^|[\" ])target\/\$TARGET\/release/, /\bmapfile\b|\breadarray\b/], "signing");
+  forbidPatterns(text, [/windows-latest|macos-latest|toolchain:\s*stable/, /gh release|deploy|CLOUDFLARE|aws s3/i, /continue-on-error:\s*true/, /echo .*APPLE_|echo .*WINDOWS_/i, /target\/\$env:TARGET|target\/\$TARGET|mapfile|readarray/, /src-tauri\/target|donutbrowser\.exe|donut-proxy/i, /verify-bundle\.mjs dist-release --require-updater/, /secrets\.BUGLOGIN_RUNTIME_TRUST_KEYS_JSON/, /WINDOWS_CERTIFICATE_PFX_BASE64|WINDOWS_CERTIFICATE_PASSWORD|WINDOWS_TIMESTAMP_URL|Get-AuthenticodeSignature|TimeStamperCertificate/], "signing");
   verifyPinnedActions(text, "signing");
 }
 

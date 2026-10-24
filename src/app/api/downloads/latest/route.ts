@@ -3,42 +3,26 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const FEED_BASE_URL =
-  "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3";
+const FEED_URL =
+  "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json";
 const ARTIFACT_HOST = "mavelnut-login.sgp1.digitaloceanspaces.com";
 const ARTIFACT_PREFIX = "/releases/desktop/v3/artifacts/";
 
-type DownloadManifest = {
+type Feed = {
   version?: unknown;
-  platforms?: Record<string, unknown>;
+  downloads?: Record<string, unknown>;
 };
 
-function artifactUrl(
-  value: unknown,
-  version: string,
-  platform: "windows" | "macos",
-): string | null {
+function artifactUrl(value: unknown): string | null {
   if (typeof value !== "string") return null;
   try {
     const url = new URL(value);
-    const expectedSuffix = platform === "windows" ? "-setup.exe" : ".dmg";
-    const relativePath = url.pathname.startsWith(ARTIFACT_PREFIX)
-      ? url.pathname.slice(ARTIFACT_PREFIX.length).split("/")
-      : [];
-    const filename = decodeURIComponent(relativePath[2] ?? "");
     if (
       url.protocol !== "https:" ||
       url.hostname !== ARTIFACT_HOST ||
       url.username ||
       url.password ||
-      url.search ||
-      url.hash ||
-      relativePath.length !== 3 ||
-      relativePath[0] !== `v${version}` ||
-      !/^\d+$/.test(relativePath[1]) ||
-      !filename.startsWith(`BugLogin_${version}_`) ||
-      /[/\\\r\n]/.test(filename) ||
-      !filename.endsWith(expectedSuffix)
+      !url.pathname.startsWith(ARTIFACT_PREFIX)
     )
       return null;
     return url.toString();
@@ -48,20 +32,15 @@ function artifactUrl(
 }
 
 export async function GET(request: Request) {
-  const params = new URL(request.url).searchParams;
-  const channel = params.get("channel") ?? "stable";
-  if (channel !== "stable" && channel !== "rc") {
-    return NextResponse.json({ error: "unsupported_channel" }, { status: 400 });
-  }
-  let feed: DownloadManifest;
+  let feed: Feed;
   try {
-    const response = await fetch(`${FEED_BASE_URL}/${channel}/downloads.json`, {
+    const response = await fetch(FEED_URL, {
       cache: "no-store",
       headers: { accept: "application/json", "cache-control": "no-cache" },
       signal: AbortSignal.timeout(8000),
     });
-    const body = await response.text();
-    if (new TextEncoder().encode(body).byteLength > 1024 * 1024) {
+    const contentLength = Number(response.headers.get("content-length") ?? 0);
+    if (contentLength > 1024 * 1024) {
       return NextResponse.json(
         { error: "invalid_release_manifest" },
         { status: 502 },
@@ -76,7 +55,7 @@ export async function GET(request: Request) {
         },
       );
     }
-    feed = JSON.parse(body) as DownloadManifest;
+    feed = (await response.json()) as Feed;
   } catch {
     return NextResponse.json(
       { error: "release_unavailable" },
@@ -99,17 +78,13 @@ export async function GET(request: Request) {
 
   const platforms = {
     windows: artifactUrl(
-      (feed.platforms?.windows as { url?: unknown } | undefined)?.url,
-      feed.version,
-      "windows",
+      (feed.downloads?.windows as { url?: unknown } | undefined)?.url,
     ),
     macos: artifactUrl(
-      (feed.platforms?.macos as { url?: unknown } | undefined)?.url,
-      feed.version,
-      "macos",
+      (feed.downloads?.macos as { url?: unknown } | undefined)?.url,
     ),
   };
-  const platform = params.get("platform");
+  const platform = new URL(request.url).searchParams.get("platform");
   if (platform !== null) {
     if (platform !== "windows" && platform !== "macos") {
       return NextResponse.json(
@@ -129,7 +104,6 @@ export async function GET(request: Request) {
   return NextResponse.json(
     {
       version: feed.version,
-      channel,
       platforms: {
         windows: platforms.windows ? { url: platforms.windows } : null,
         macos: platforms.macos ? { url: platforms.macos } : null,

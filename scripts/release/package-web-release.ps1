@@ -31,15 +31,10 @@ $env:BUGLOGIN_API_BASE_URL = "http://127.0.0.1:12343"
 $env:BUGLOGIN_BUILD_CPUS = "2"
 $env:NEXT_TELEMETRY_DISABLED = "1"
 Push-Location $repoRoot
-$nextEnvPath = Join-Path $repoRoot "next-env.d.ts"
-$nextEnvBytes = [IO.File]::ReadAllBytes($nextEnvPath)
 try {
     & pnpm.cmd build:web
     if ($LASTEXITCODE -ne 0) { throw "Next.js production web build failed." }
-} finally {
-    [IO.File]::WriteAllBytes($nextEnvPath, $nextEnvBytes)
-    Pop-Location
-}
+} finally { Pop-Location }
 
 $standalone = Join-Path $repoRoot ".next-web/standalone"
 $static = Join-Path $repoRoot ".next-web/static"
@@ -50,21 +45,6 @@ foreach ($path in @($standalone, $static, $public)) {
 Copy-Item -LiteralPath $static -Destination (Join-Path $standalone ".next-web/static") -Recurse -Force
 Copy-Item -LiteralPath $public -Destination (Join-Path $standalone "public") -Recurse -Force
 if (-not (Test-Path -LiteralPath (Join-Path $standalone "server.js") -PathType Leaf)) { throw "Standalone server.js is missing." }
-
-# pnpm's Windows standalone output keeps package aliases under node_modules/.pnpm/node_modules.
-# tar.exe follows junctions while packaging, which flattens linked packages such as `next` and
-# breaks their runtime resolution of sibling dependencies. Materialize missing aliases at the
-# standalone node_modules root before creating the immutable bundle.
-$standaloneNodeModules = Join-Path $standalone "node_modules"
-$pnpmAliases = Join-Path $standaloneNodeModules ".pnpm/node_modules"
-if (Test-Path -LiteralPath $pnpmAliases -PathType Container) {
-    foreach ($alias in Get-ChildItem -LiteralPath $pnpmAliases -Force) {
-        $destination = Join-Path $standaloneNodeModules $alias.Name
-        if (-not (Test-Path -LiteralPath $destination)) {
-            Copy-Item -LiteralPath $alias.FullName -Destination $destination -Recurse -Force
-        }
-    }
-}
 
 $bundlePath = Join-Path $outputRoot "buglogin3-web.tar.gz"
 $tar = (Get-Command tar.exe).Source

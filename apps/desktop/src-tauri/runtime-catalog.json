@@ -3,6 +3,19 @@
   "releases": [
     {
       "runtime": "wayfern",
+      "version": "154.0.8037.57",
+      "platform": "macos",
+      "architecture": "arm64",
+      "relativePath": "Wayfern.app/Contents/MacOS/Wayfern",
+      "packageFormat": "dmg",
+      "source": "https://download.wayfern.com/wayfern_154.0.8037.57-1.1_macos.dmg",
+      "sha256": "379e1f2b46becfead687802a83cbe9cfeee804d2563e33a69c571b1a68945b61",
+      "sizeBytes": 1546940760,
+      "keyId": "wayfern-release-2026",
+      "signature": "fbfb53238e828c2067c6915f58a4c9e04aa63699610589f74d9fd7aac8d01f144a1e4e500117509738d88ebe2109b4af7aa8234e2971c1bdbe2e774fd294200e"
+    },
+    {
+      "runtime": "wayfern",
       "version": "155.0.8059.79",
       "platform": "macos",
       "architecture": "arm64",

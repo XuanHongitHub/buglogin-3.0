@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBuildTargetDir } from "./build-target.mjs";
@@ -12,7 +11,6 @@ const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const desktopRoot = resolve(repositoryRoot, "apps/desktop");
 const cargoTargetDir = resolveBuildTargetDir(process.env.CARGO_TARGET_DIR);
 const frontendDist = resolve(cargoTargetDir, "desktop-dist");
-const frontendBundleStage = resolve(desktopRoot, "dist");
 const targetArgumentIndex = process.argv.indexOf("--target");
 const targetArgument = process.argv.find((argument) =>
   argument.startsWith("--target="),
@@ -45,32 +43,6 @@ const childEnv = {
 };
 let restoreBinariesDirectory;
 
-async function stageFrontendBundle() {
-  execFileSync("pnpm", ["build"], {
-    cwd: desktopRoot,
-    env: childEnv,
-    stdio: "inherit",
-    shell: process.platform === "win32",
-  });
-  if (!existsSync(resolve(frontendDist, "index.html"))) {
-    throw new Error(
-      `Frontend build did not produce ${resolve(frontendDist, "index.html")}`,
-    );
-  }
-  await rm(frontendBundleStage, { recursive: true, force: true });
-  await cp(frontendDist, frontendBundleStage, { recursive: true });
-}
-
-async function cleanupFrontendBundleStage() {
-  const expectedStage = resolve(desktopRoot, "dist");
-  if (frontendBundleStage !== expectedStage) {
-    throw new Error(
-      `Refusing to remove unexpected frontend staging path: ${frontendBundleStage}`,
-    );
-  }
-  await rm(frontendBundleStage, { recursive: true, force: true });
-}
-
 if (!(debugBuild && noBundle)) {
   execFileSync(
     process.execPath,
@@ -91,14 +63,6 @@ if (!(debugBuild && noBundle)) {
   });
 }
 
-try {
-  await stageFrontendBundle();
-} catch (error) {
-  await cleanupFrontendBundleStage();
-  await restoreBinariesDirectory?.();
-  throw error;
-}
-
 const child = spawn(
   process.execPath,
   [
@@ -108,7 +72,7 @@ const child = spawn(
     "src-tauri/tauri.conf.json",
     "--config",
     JSON.stringify({
-      build: { frontendDist: "../dist", beforeBuildCommand: "" },
+      build: { frontendDist, beforeBuildCommand: "pnpm build" },
       ...(debugBuild && noBundle ? { bundle: { externalBin: [] } } : {}),
     }),
     ...process.argv.slice(2),
@@ -118,7 +82,6 @@ const child = spawn(
 
 async function finishBuild(code, signal) {
   try {
-    await cleanupFrontendBundleStage();
     await restoreBinariesDirectory?.();
   } catch (error) {
     console.error(

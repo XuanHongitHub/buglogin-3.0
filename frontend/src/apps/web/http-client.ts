@@ -758,6 +758,12 @@ function parseAccount(value: unknown): AccountSummary | undefined {
     return undefined;
   return {
     accountId,
+    platformAdmin: value.platformAdmin === true,
+    managedWorkspaceIds: Array.isArray(value.managedWorkspaceIds)
+      ? value.managedWorkspaceIds.filter(
+          (workspaceId): workspaceId is string => typeof workspaceId === "string",
+        )
+      : [],
     ...(status !== undefined ? { status } : {}),
     ...(typeof value.revision === "number" ? { revision: value.revision } : {}),
     ...(typeof value.createdAt === "string"

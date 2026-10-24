@@ -57,11 +57,9 @@ jobs:
           gh release download "$RELEASE_REF" --dir downloaded
           test -s downloaded/SHA256SUMS.txt
           (cd downloaded && sha256sum --check SHA256SUMS.txt)
-          test -s downloaded/downloads.json
-          node scripts/release/verify-downloads-manifest.mjs downloaded/downloads.json "${RELEASE_REF#v}" "$S3_PUBLIC_BASE_URL/artifacts/"
           node scripts/release/verify-tauri-updater-feed.mjs downloaded/latest.json "${RELEASE_REF#v}" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
           count="$(find downloaded -maxdepth 1 -type f -name 'BugLogin-*.zip' | wc -l | tr -d ' ')"
-          [[ "$count" == 3 ]] || { echo "Expected the exact Windows and macOS RC archives"; exit 1; }
+          [[ "$count" == 2 ]] || { echo "Expected the supported Windows and Apple Silicon macOS archives"; exit 1; }
       - name: Promote existing release metadata without rebuilding
         shell: bash
         run: |
@@ -85,12 +83,5 @@ jobs:
           aws s3 cp downloaded/latest.json "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/stable/latest.json" \
             --endpoint-url "$S3_ENDPOINT" --region sgp1 --acl public-read \
             --cache-control 'public,max-age=60' --content-type application/json
-          aws s3 cp downloaded/downloads.json "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/stable/downloads.json" \
-            --endpoint-url "$S3_ENDPOINT" --region sgp1 --acl public-read \
-            --cache-control 'public,max-age=60' --content-type application/json
           curl --fail --silent --show-error "$S3_PUBLIC_BASE_URL/stable/latest.json" -o stable-latest.json
           cmp downloaded/latest.json stable-latest.json
-          curl --fail --silent --show-error "$S3_PUBLIC_BASE_URL/stable/downloads.json" -o stable-downloads.json
-          cmp downloaded/downloads.json stable-downloads.json
-          node scripts/release/verify-downloads-manifest.mjs stable-downloads.json "${RELEASE_REF#v}" "$S3_PUBLIC_BASE_URL/artifacts/"
-          node -e 'for (const item of Object.values(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).platforms)) console.log(item.url)' stable-downloads.json | while IFS= read -r url; do curl --fail --silent --show-error --head --max-time 30 "$url" >/dev/null; done

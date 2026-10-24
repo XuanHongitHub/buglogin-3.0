@@ -363,6 +363,11 @@ pub(crate) fn install(
     })?;
     let runtime = runtime_name(&release.release().runtime);
     let version = release.release().version.clone();
+    // A launch-time install and the startup preloader can race. Recheck after
+    // taking the lock so the second caller reuses the completed install.
+    if let Some(target) = existing_install(root, release, catalog_schema_version)? {
+        return Ok(target);
+    }
     let source = HttpsArtifactSource::new(app.clone(), runtime.to_owned(), version.clone())?;
     emit_progress(
         &source.app,
@@ -405,16 +410,6 @@ pub(crate) fn install(
             extra_args: Vec::new(),
         };
         persist_install_record(root, catalog_schema_version, release.release(), &target)?;
-        emit_progress(
-            &source.app,
-            &runtime,
-            &version,
-            release.release().size_bytes,
-            release.release().size_bytes,
-            0,
-            None,
-            "completed",
-        );
         Ok(target)
     })();
     match prepared {
@@ -435,6 +430,72 @@ pub(crate) fn install(
             Err(error)
         }
     }
+}
+
+fn existing_install(
+    root: &Path,
+    release: &VerifiedRuntimeRelease,
+    catalog_schema_version: u32,
+) -> Result<Option<RuntimeTarget>, Problem> {
+    let release = release.release();
+    let runtime_dir = download::runtime_directory(root, release)?;
+    let record_path = runtime_dir.join(".buglogin-install.json");
+    let metadata = match fs::symlink_metadata(&record_path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Ok(None),
+    };
+    if metadata.len() > MAX_INSTALL_RECORD_BYTES {
+        return Ok(None);
+    }
+    let record: InstalledRuntimeRecord = match fs::read(&record_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<InstalledRuntimeRecord>(&bytes).ok())
+    {
+        Some(record)
+            if record.schema_version == 1
+                && record.catalog_schema_version == catalog_schema_version
+                && record.release == *release
+                && record.executable_sha256.len() == 64
+                && record
+                    .executable_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            record
+        }
+        _ => return Ok(None),
+    };
+    let executable = confined_path(&runtime_dir, Path::new(&release.relative_path))?;
+    let executable_metadata = match fs::symlink_metadata(&executable) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        _ => return Ok(None),
+    };
+    let _ = executable_metadata;
+    let (actual_checksum, _) = checksum_reader(File::open(&executable).map_err(|_| {
+        problem(
+            "runtime_executable_invalid",
+            "Runtime executable is invalid",
+        )
+    })?)
+    .map_err(|_| {
+        problem(
+            "runtime_executable_invalid",
+            "Runtime executable is invalid",
+        )
+    })?;
+    if actual_checksum != record.executable_sha256.to_ascii_lowercase() {
+        return Ok(None);
+    }
+    Ok(Some(RuntimeTarget {
+        binary: RuntimeBinary {
+            path: executable,
+            version: release.version.clone(),
+            expected_checksum: actual_checksum,
+        },
+        extra_args: Vec::new(),
+    }))
 }
 
 fn rollback_or_remove_failed_install(
@@ -584,60 +645,109 @@ impl download::RuntimeArtifactSource for HttpsArtifactSource {
                 "Runtime source URL is invalid",
             ));
         }
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .map_err(|_| problem("runtime_download_failed", "Runtime download failed"))?;
-        if !response.status().is_success()
-            || response
-                .content_length()
-                .is_some_and(|length| length > maximum_bytes)
-        {
-            return Err(problem(
-                "runtime_download_failed",
-                "Runtime download failed",
-            ));
-        }
-        let total_bytes = response.content_length().unwrap_or(maximum_bytes);
+        // Use the signed package size as the progress denominator. CDN
+        // Content-Length can describe a truncated response, which previously
+        // showed 100% before the installer rejected it and threw away bytes.
+        let total_bytes = maximum_bytes;
         let started_at = Instant::now();
         let mut downloaded_bytes = 0_u64;
         let mut last_update = Instant::now();
-        let mut limited = response.take(maximum_bytes.saturating_add(1));
         let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = limited
-                .read(&mut buffer)
+        let mut retries = 0_u8;
+        while downloaded_bytes < maximum_bytes {
+            let mut request = self.client.get(url.clone());
+            if downloaded_bytes > 0 {
+                request =
+                    request.header(reqwest::header::RANGE, format!("bytes={downloaded_bytes}-"));
+            }
+            let response = request
+                .send()
                 .map_err(|_| problem("runtime_download_failed", "Runtime download failed"))?;
-            if count == 0 {
+            if downloaded_bytes == 0 {
+                if !response.status().is_success()
+                    || response
+                        .content_length()
+                        .is_some_and(|length| length > maximum_bytes)
+                {
+                    return Err(problem(
+                        "runtime_download_failed",
+                        "Runtime download failed",
+                    ));
+                }
+            } else {
+                let expected_prefix = format!("bytes {downloaded_bytes}-");
+                let valid_range = response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+                    && response
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.starts_with(&expected_prefix));
+                if !valid_range {
+                    return Err(problem(
+                        "runtime_download_resume_unsupported",
+                        "The browser download was interrupted and the server could not resume it",
+                    ));
+                }
+            }
+            let mut limited = response.take(maximum_bytes - downloaded_bytes + 1);
+            let mut made_progress = false;
+            let mut interrupted = false;
+            loop {
+                let count = match limited.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(_) => {
+                        interrupted = true;
+                        break;
+                    }
+                };
+                if count == 0 {
+                    break;
+                }
+                downloaded_bytes = downloaded_bytes.saturating_add(count as u64);
+                if downloaded_bytes > maximum_bytes {
+                    return Err(problem(
+                        "runtime_size_mismatch",
+                        "Runtime package exceeds its signed size",
+                    ));
+                }
+                output
+                    .write_all(&buffer[..count])
+                    .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
+                made_progress = true;
+                if last_update.elapsed() >= Duration::from_millis(250) {
+                    let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
+                    let speed = (downloaded_bytes as f64 / elapsed) as u64;
+                    let remaining = total_bytes.saturating_sub(downloaded_bytes);
+                    emit_progress(
+                        &self.app,
+                        &self.runtime,
+                        &self.version,
+                        downloaded_bytes,
+                        total_bytes,
+                        speed,
+                        (speed > 0).then_some(remaining / speed.max(1)),
+                        "downloading",
+                    );
+                    last_update = Instant::now();
+                }
+            }
+            if downloaded_bytes == maximum_bytes {
                 break;
             }
-            downloaded_bytes = downloaded_bytes.saturating_add(count as u64);
-            if downloaded_bytes > maximum_bytes {
+            retries = retries.saturating_add(1);
+            if retries > 4 || (!made_progress && !interrupted) {
                 return Err(problem(
-                    "runtime_size_mismatch",
-                    "Runtime package exceeds its signed size",
+                    "runtime_download_interrupted",
+                    "The browser download was interrupted before completion",
                 ));
             }
-            output
-                .write_all(&buffer[..count])
-                .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
-            if last_update.elapsed() >= Duration::from_millis(250) {
-                let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
-                let speed = (downloaded_bytes as f64 / elapsed) as u64;
-                let remaining = total_bytes.saturating_sub(downloaded_bytes);
-                emit_progress(
-                    &self.app,
-                    &self.runtime,
-                    &self.version,
-                    downloaded_bytes,
-                    total_bytes,
-                    speed,
-                    (speed > 0).then_some(remaining / speed.max(1)),
-                    "downloading",
-                );
-                last_update = Instant::now();
+            if downloaded_bytes == 0 {
+                return Err(problem(
+                    "runtime_download_interrupted",
+                    "The browser download was interrupted before completion",
+                ));
             }
+            std::thread::sleep(Duration::from_millis(400 * u64::from(retries)));
         }
         emit_progress(
             &self.app,
@@ -692,7 +802,7 @@ mod tests {
     use crate::adapter::RuntimeTarget;
     use buglogin_browser::runtime::{
         RuntimeBinary,
-        catalog::{RuntimePackageFormat, RuntimeRelease, RuntimeSignatureVerifier},
+        catalog::{RuntimeCatalog, RuntimePackageFormat, RuntimeRelease, RuntimeSignatureVerifier},
         download,
     };
     use buglogin_domain::entities::Runtime;
@@ -800,6 +910,27 @@ mod tests {
                 .unwrap();
             assert_eq!(target.binary.version, release.version);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completed_install_is_reused_by_later_concurrent_caller() {
+        let root = root();
+        let bytes = b"verified-wayfern-runtime";
+        let release = release("155.0.8059.79", bytes);
+        install_record(&root, &release, bytes);
+        let catalog = RuntimeCatalog {
+            schema_version: 1,
+            releases: vec![release.clone()],
+        };
+        let verified = catalog.verify(&ChecksumVerifier).unwrap().remove(0);
+
+        let reused = super::existing_install(&root, &verified, 1)
+            .unwrap()
+            .expect("completed signed runtime install should be reused");
+
+        assert_eq!(reused.binary.version, release.version);
+        assert_eq!(reused.binary.expected_checksum, checksum(bytes));
         fs::remove_dir_all(root).unwrap();
     }
 }
