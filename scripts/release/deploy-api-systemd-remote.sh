@@ -24,7 +24,7 @@ read_state() {
   local file=$1 key value
   declare -gA state=()
   while IFS='=' read -r key value; do
-    [[ -n "$key" && "$key" != *[!a-z_]* && -z "${state[$key]+present}" ]] || return 1
+    [[ -n "$key" && "$key" != *[!a-z0-9_]* && -z "${state[$key]+present}" ]] || return 1
     state[$key]=$value
   done < "$file"
 }
