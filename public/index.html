@@ -101,6 +101,7 @@ a{color:inherit}
 .alt-dl{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;color:var(--on-ink-muted);font-size:15px;text-decoration:none;transition:color .2s ease}
 .alt-dl:hover{color:#fff;text-decoration:underline;text-underline-offset:4px}
 .alt-dl:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.release-version{margin:0;color:var(--on-ink-muted);font-size:13px;font-variant-numeric:tabular-nums}
 .rc-downloads{margin:4px 0 0;color:var(--on-ink-muted);font-size:13px}
 .rc-downloads[hidden]{display:none}
 .rc-downloads a{color:#fff;text-underline-offset:3px}
@@ -306,6 +307,7 @@ a{color:inherit}
           <i class="fa-brands fa-apple" aria-hidden="true"></i>
           <span>Dùng macOS? Tải bản cho Mac</span>
         </a>
+        <p class="release-version" id="stable-version" role="status" aria-live="polite">Đang kiểm tra phiên bản tải xuống…</p>
         <p class="rc-downloads" id="dl-rc" hidden></p>
       </div>
 
@@ -616,6 +618,7 @@ a{color:inherit}
   const other = isMac ? OS.windows : OS.mac;
   const primary = document.getElementById('dl-primary');
   const alt = document.getElementById('dl-alt');
+  const stableVersion = document.getElementById('stable-version');
   primary.querySelector('i').className = 'fa-brands ' + main.icon;
   primary.querySelector('span').textContent = main.label;
   alt.querySelector('i').className = 'fa-brands ' + other.icon;
@@ -643,9 +646,12 @@ a{color:inherit}
       const response = await fetch('/api/downloads/latest?channel=stable', { cache: 'no-store', headers: { accept: 'application/json' } });
       if (!response.ok) throw new Error('release_catalog_unavailable');
       const catalog = await response.json();
+      if (typeof catalog.version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(catalog.version)) throw new Error('release_version_unavailable');
+      stableVersion.textContent = `Phiên bản tải xuống: ${catalog.version}`;
       setAvailable('windows', typeof catalog.platforms?.windows?.url === 'string');
       setAvailable('macos', typeof catalog.platforms?.macos?.url === 'string');
     } catch {
+      stableVersion.textContent = 'Không lấy được phiên bản tải xuống mới nhất.';
       setAvailable('windows', false);
       setAvailable('macos', false);
     }
