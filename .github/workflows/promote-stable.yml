@@ -1,76 +1,95 @@
-name: Promote BugLogin RC to Stable
+name: Publish BugLogin Stable Update Feed
 
 on:
   workflow_dispatch:
     inputs:
-      release_ref:
-        description: Existing published RC tag to promote (for example v1.2.3)
+      candidate_run_id:
+        description: Successful BugLogin Release Verification run containing signed Windows and macOS artifacts
         required: true
         type: string
-      qa_evidence_url:
-        description: HTTPS link to completed Windows/macOS install, update, and sync acceptance evidence
+      publication_reason:
+        description: Short reason for publishing the stable feed (recorded in the workflow log)
         required: true
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: buglogin-stable-promotion
+  group: buglogin-stable-publication
   cancel-in-progress: false
 
 jobs:
-  promote:
+  publish:
     if: github.ref_name == github.event.repository.default_branch && github.event.repository.fork == false
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    environment: stable-promotion
+    timeout-minutes: 30
+    environment: release-publish
     permissions:
-      contents: write
+      actions: read
+      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      RELEASE_REF: ${{ inputs.release_ref }}
-      QA_EVIDENCE_URL: ${{ inputs.qa_evidence_url }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      PUBLICATION_REASON: ${{ inputs.publication_reason }}
       S3_RELEASE_BUCKET: mavelnut-login
       S3_ENDPOINT: https://sgp1.digitaloceanspaces.com
       S3_PUBLIC_BASE_URL: https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3
+      BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64: ${{ vars.BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Validate request and source tag
+      - name: Validate successful candidate run and source commit
+        id: candidate
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Stable promotion requires a final semantic-version tag"; exit 1; }
-          [[ "$QA_EVIDENCE_URL" =~ ^https://[^[:space:]]+$ ]] || { echo "QA evidence must be an HTTPS URL"; exit 1; }
-          gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_REF" >/dev/null || { echo "Release tag is missing"; exit 1; }
-          RELEASE_JSON="$(gh release view "$RELEASE_REF" --json isDraft,isPrerelease,isLatest,tagName)"
-          node -e 'const r=JSON.parse(process.argv[1]); if(r.tagName!==process.env.RELEASE_REF||r.isDraft||(!r.isPrerelease&&!r.isLatest)) process.exit(1)' "$RELEASE_JSON" || { echo "Only a published RC or the already promoted latest release may continue"; exit 1; }
-          echo "QA evidence: $QA_EVIDENCE_URL"
-      - name: Download and verify immutable RC assets
+          [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'candidate_run_id must be numeric'; exit 1; }
+          [[ -n "${PUBLICATION_REASON//[[:space:]]/}" ]] || { echo 'publication_reason is required'; exit 1; }
+          RUN_JSON="$(gh api "repos/$GH_REPO/actions/runs/$CANDIDATE_RUN_ID")"
+          SOURCE_SHA="$(node -e 'const r=JSON.parse(process.argv[1]);if(r.status!=="completed"||r.conclusion!=="success"||!r.path.endsWith(".github/workflows/release.yml"))process.exit(1);process.stdout.write(r.head_sha)' "$RUN_JSON")"
+          git merge-base --is-ancestor "$SOURCE_SHA" "origin/$GITHUB_REF_NAME" || { echo 'Candidate source SHA is not on the default branch'; exit 1; }
+          VERSION="$(git show "$SOURCE_SHA:apps/desktop/package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')"
+          TAURI_VERSION="$(git show "$SOURCE_SHA:apps/desktop/src-tauri/tauri.conf.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Stable publication requires a final semantic version'; exit 1; }
+          [[ "$VERSION" == "$TAURI_VERSION" ]] || { echo 'Candidate package and Tauri versions do not match'; exit 1; }
+          printf 'source_sha=%s\nversion=%s\n' "$SOURCE_SHA" "$VERSION" >> "$GITHUB_OUTPUT"
+          printf 'SOURCE_SHA=%s\nVERSION=%s\n' "$SOURCE_SHA" "$VERSION" >> "$GITHUB_ENV"
+          echo "Publishing candidate run $CANDIDATE_RUN_ID from $SOURCE_SHA, version $VERSION"
+          echo "Publication reason: $PUBLICATION_REASON"
+      - name: Download signed platform artifacts
         shell: bash
         run: |
           set -euo pipefail
-          mkdir downloaded
-          gh release download "$RELEASE_REF" --dir downloaded
-          test -s downloaded/SHA256SUMS.txt
-          (cd downloaded && sha256sum --check SHA256SUMS.txt)
-          node scripts/release/verify-tauri-updater-feed.mjs downloaded/latest.json "${RELEASE_REF#v}" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
-          count="$(find downloaded -maxdepth 1 -type f -name 'BugLogin-*.zip' | wc -l | tr -d ' ')"
-          [[ "$count" == 2 ]] || { echo "Expected the supported Windows and Apple Silicon macOS archives"; exit 1; }
-      - name: Promote existing release metadata without rebuilding
+          mkdir -p incoming/windows incoming/macos
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-windows-x64-signed" --dir incoming/windows
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-macos-arm64-signed" --dir incoming/macos
+          node -e 'const fs=require("node:fs");for(const [dir,platform] of [["incoming/windows","windows-x64"],["incoming/macos","macos-arm64"]]){const p=JSON.parse(fs.readFileSync(`${dir}/provenance.json`,`utf8`));if(p.source.repository!==process.env.GH_REPO||p.source.sha!==process.env.SOURCE_SHA||p.source.ref!==process.env.SOURCE_SHA||p.platform!==platform)throw Error(`${platform}: candidate provenance mismatch`)}'
+          (cd incoming/windows && sha256sum --check SHA256SUMS.txt)
+          (cd incoming/macos && sha256sum --check SHA256SUMS.txt)
+          node scripts/release/verify-bundle.mjs incoming/windows
+          node scripts/release/verify-bundle.mjs incoming/macos
+      - name: Assemble and validate updater and download manifests
         shell: bash
         run: |
           set -euo pipefail
-          release_json="$(gh release view "$RELEASE_REF" --json isPrerelease,isLatest)"
-          if node -e 'const r=JSON.parse(process.argv[1]);process.exit(r.isPrerelease?0:1)' "$release_json"; then
-            gh release edit "$RELEASE_REF" --prerelease=false --latest
-          fi
-          RELEASE_JSON="$(gh release view "$RELEASE_REF" --json isDraft,isPrerelease,isLatest,tagName)"
-          node -e 'const r=JSON.parse(process.argv[1]); if(r.tagName!==process.env.RELEASE_REF||r.isDraft||r.isPrerelease||!r.isLatest) process.exit(1)' "$RELEASE_JSON"
-      - name: Publish stable updater feed to DigitalOcean Spaces
+          FEED_INPUT="$(mktemp -d)"
+          mkdir -p "$FEED_INPUT/buglogin-v${VERSION}-windows-x64-signed" "$FEED_INPUT/buglogin-v${VERSION}-macos-arm64-signed" assembled
+          cp incoming/windows/* "$FEED_INPUT/buglogin-v${VERSION}-windows-x64-signed/"
+          cp incoming/macos/* "$FEED_INPUT/buglogin-v${VERSION}-macos-arm64-signed/"
+          ARTIFACT_ROOT="$S3_PUBLIC_BASE_URL/artifacts/v${VERSION}/${CANDIDATE_RUN_ID}/"
+          node scripts/release/assemble-tauri-updater-feed.mjs "$FEED_INPUT" assembled "$VERSION" "$GH_REPO" "$ARTIFACT_ROOT"
+          node scripts/release/verify-tauri-updater-feed.mjs assembled/latest.json "$VERSION" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
+          node scripts/release/verify-downloads-manifest.mjs assembled/downloads.json "$VERSION" "$ARTIFACT_ROOT"
+          mkdir -p assembled/evidence/windows assembled/evidence/macos
+          cp incoming/windows/dist.spdx.json incoming/windows/provenance.json incoming/windows/SHA256SUMS.txt assembled/evidence/windows/
+          cp incoming/macos/dist.spdx.json incoming/macos/provenance.json incoming/macos/SHA256SUMS.txt assembled/evidence/macos/
+          (cd assembled && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+      - name: Upload immutable artifacts and verify public downloads
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
@@ -79,9 +98,30 @@ jobs:
           set -euo pipefail
           : "${AWS_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID secret is required}"
           : "${AWS_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY secret is required}"
-          aws --version
-          aws s3 cp downloaded/latest.json "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/stable/latest.json" \
+          aws s3 sync assembled/ "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/artifacts/v$VERSION/$CANDIDATE_RUN_ID/" \
+            --endpoint-url "$S3_ENDPOINT" --region sgp1 --acl public-read \
+            --cache-control 'public,max-age=31536000,immutable'
+          node -e 'const fs=require("node:fs");for(const [p,e] of Object.entries(JSON.parse(fs.readFileSync("assembled/latest.json","utf8")).platforms)){const u=new URL(e.url);if(u.protocol!=="https:")throw Error(`${p}: insecure URL`);console.log(u.href)}for(const e of Object.values(JSON.parse(fs.readFileSync("assembled/downloads.json","utf8")).platforms))console.log(new URL(e.url).href)' | while IFS= read -r url; do
+            status="$(curl --location --silent --show-error --output /dev/null --write-out '%{http_code}' --head "$url")"
+            [[ "$status" == 200 ]] || { echo "Public artifact HEAD returned $status: $url"; exit 1; }
+          done
+      - name: Publish stable JSON and confirm app and landing reads
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          aws s3 cp assembled/latest.json "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/stable/latest.json" \
+            --endpoint-url "$S3_ENDPOINT" --region sgp1 --acl public-read \
+            --cache-control 'public,max-age=60' --content-type application/json
+          aws s3 cp assembled/downloads.json "s3://$S3_RELEASE_BUCKET/releases/desktop/v3/stable/downloads.json" \
             --endpoint-url "$S3_ENDPOINT" --region sgp1 --acl public-read \
             --cache-control 'public,max-age=60' --content-type application/json
           curl --fail --silent --show-error "$S3_PUBLIC_BASE_URL/stable/latest.json" -o stable-latest.json
-          cmp downloaded/latest.json stable-latest.json
+          curl --fail --silent --show-error "$S3_PUBLIC_BASE_URL/stable/downloads.json" -o stable-downloads.json
+          cmp assembled/latest.json stable-latest.json
+          cmp assembled/downloads.json stable-downloads.json
+          node scripts/release/verify-tauri-updater-feed.mjs stable-latest.json "$VERSION" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
+          node scripts/release/verify-downloads-manifest.mjs stable-downloads.json "$VERSION" "$S3_PUBLIC_BASE_URL/artifacts/v$VERSION/$CANDIDATE_RUN_ID/"
+          curl --fail --silent --show-error --head https://app3.buglogin.com/api/downloads/latest
