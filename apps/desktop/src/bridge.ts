@@ -72,6 +72,7 @@ import {
   type TeamRecord,
   type TeamRecordList,
   type TeamUpdateInput,
+  type WorkspaceAccountCreateInput,
   type WorkspaceCreateInput,
   type WorkspaceIdInput,
   type WorkspaceRecord,
@@ -158,6 +159,10 @@ export interface DesktopApi {
   listAccounts(): Promise<Page<AccountAdminRecord>>;
   createPendingAccount(
     input: AccountCreatePendingInput,
+    idempotencyKey?: string,
+  ): Promise<PendingAccountProvisioningReceipt>;
+  createScopedPendingAccount(
+    input: WorkspaceAccountCreateInput,
     idempotencyKey?: string,
   ): Promise<PendingAccountProvisioningReceipt>;
   updateAccountStatus(input: AccountStatusUpdateCommandInput): Promise<Account>;
@@ -317,6 +322,7 @@ const invokeNames = {
   accountGet: contractInvoke("account.get"),
   accountList: contractInvoke("account.list"),
   accountCreate: contractInvoke("account.create"),
+  accountCreateScoped: contractInvoke("account.create.scoped"),
   accountStatusUpdate: contractInvoke("account.status.update"),
   authStatus: contractInvoke("desktop.auth.status"),
   authLogout: contractInvoke("desktop.auth.logout"),
@@ -557,6 +563,13 @@ export function createTauriDesktopApi(
     createPendingAccount: (input, idempotencyKey) =>
       call<PendingAccountProvisioningReceipt>(
         invokeNames.accountCreate,
+        input,
+        true,
+        idempotencyKey,
+      ),
+    createScopedPendingAccount: (input, idempotencyKey) =>
+      call<PendingAccountProvisioningReceipt>(
+        invokeNames.accountCreateScoped,
         input,
         true,
         idempotencyKey,

@@ -17,10 +17,10 @@ use buglogin_domain::{
         AccountId, CredentialId, ExtensionGroupId, GrantId, GroupId, MemberId, MemberInvitationId,
         OrganizationId, ProfileId, ProxyId, ResourceId, TeamId, WorkspaceId,
     },
-    member::{Member, MemberRole},
+    member::{Member, MemberRole, MemberStatus},
     member_invitation::{MemberInvitation, MemberInvitationState},
     organization::{Organization, OrganizationPolicy},
-    permissions::{Action, Capability, Principal, ResourceScope, is_allowed},
+    permissions::{Action, Capability, Effect, Principal, ResourceScope, is_allowed},
     profile::{
         ProfileArchiveState, ProfileCloneInput, ProfileKeyRotationEnvelopeUpdate, ProfileResource,
         ProfileShareInput, ProfileShareRevokeInput,
@@ -48,6 +48,7 @@ use super::{
     ApiState, BlobIdempotencyRecord, RuntimeProjection, authenticate, authorize_action,
     checked_now, checked_now_ms, grants, problem, request_now_ms, response, storage_quota_problem,
 };
+use crate::services::members::MemberService;
 use crate::services::profile_hosted::HostedProfileService;
 use crate::services::proxy_credentials::{credential_version, next_proxy_revision};
 
@@ -316,6 +317,8 @@ pub(super) async fn revoke_profile_share(
 #[serde(rename_all = "camelCase")]
 struct AccountView {
     account_id: AccountId,
+    platform_admin: bool,
+    managed_workspace_ids: Vec<WorkspaceId>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1060,6 +1063,10 @@ pub(super) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/account", get(account))
         .route("/v1/accounts", get(list_accounts).post(create_account))
+        .route(
+            "/v1/workspaces/{workspace_id}/accounts",
+            post(create_scoped_account),
+        )
         .route("/v1/accounts/{account_id}/status", put(set_account_status))
         .route(
             "/v1/organizations",
@@ -1620,6 +1627,15 @@ struct AccountCreateInput {
     email: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScopedAccountCreateInput {
+    account_id: AccountId,
+    username: String,
+    email: String,
+    role: MemberRole,
+}
+
 async fn list_accounts(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1727,6 +1743,269 @@ async fn create_account(
         },
     )
     .await
+}
+
+async fn create_scoped_account(
+    State(state): State<ApiState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<ScopedAccountCreateInput>,
+) -> Result<Response, Response> {
+    let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
+    let principal = authenticate(&state, &headers)?;
+    let grant_snapshot = grants(&state)?;
+    let _authority = scoped_account_creation_authority(
+        &state,
+        &principal,
+        &grant_snapshot,
+        &workspace_id,
+        &input.role,
+    )?;
+
+    let actor_id = principal.account_id.clone().ok_or_else(|| {
+        problem_response(
+            "account_missing",
+            "Account is missing",
+            401,
+            correlation(&headers),
+        )
+    })?;
+    let (pending, organization_owner_scope) = with_authorization_snapshot(
+        &state,
+        &headers,
+        &principal,
+        &grant_snapshot,
+        |principal, current_grants, _| -> Result<_, Response> {
+            let organization_owner_scope = scoped_account_creation_authority(
+                &state,
+                principal,
+                current_grants,
+                &workspace_id,
+                &input.role,
+            )?;
+            let account_id = input.account_id.clone();
+            let provisioning_key =
+                crate::services::account_provisioning::scoped_account_idempotency_key(
+                    &workspace_id,
+                    &account_id,
+                );
+            let pending = crate::services::account_provisioning::AccountProvisioningService::new(
+                state.control_persistence.clone(),
+            )
+            .create_pending_scoped(
+                account_id,
+                &input.username,
+                &input.email,
+                &actor_id,
+                &provisioning_key,
+                &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
+                &workspace_id,
+                &input.role,
+            )
+            .map_err(response_problem)?;
+            Ok((pending, organization_owner_scope))
+        },
+    )
+    .await?;
+
+    let member_id =
+        crate::services::account_provisioning::scoped_member_id(&workspace_id, &pending.account.id)
+            .map_err(response_problem)?;
+    let member = Member {
+        id: member_id,
+        account_id: pending.account.id.clone(),
+        workspace_id: workspace_id.clone(),
+        team_id: None,
+        role: input.role.clone(),
+        status: MemberStatus::Active,
+        invite_expires_at: None,
+    };
+    let member_input = json!({
+        "workspaceId": workspace_id,
+        "member": member,
+    });
+    let member_for_mutation = member.clone();
+    let organization_owner_scope_for_mutation = organization_owner_scope.clone();
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grant_snapshot,
+        workspace_id.as_str(),
+        "account.create.scoped",
+        member_input,
+        ResourceScope::workspace(workspace_id.clone()),
+        pending.account.id.as_str(),
+        || {
+            let mut members = state
+                .members
+                .write()
+                .map_err(|_| service_unavailable("member"))?;
+            if let Some(organization) = organization_owner_scope_for_mutation.as_ref() {
+                members.provision_active_as_org_owner(
+                    &principal,
+                    &grant_snapshot,
+                    organization,
+                    member_for_mutation.clone(),
+                )
+            } else {
+                members.provision_active(&principal, &grant_snapshot, member_for_mutation.clone())
+            }
+            .map_err(response_problem)
+        },
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "account": pending.account,
+            "identity": pending.identity,
+            "member": member,
+            "replayed": pending.replayed,
+            "onboardingStatus": "pending_verification",
+            "loginEnabled": false,
+        })),
+    )
+        .into_response())
+}
+
+fn scoped_account_creation_authority(
+    state: &ApiState,
+    principal: &Principal,
+    grants: &[buglogin_domain::permissions::Grant],
+    workspace_id: &WorkspaceId,
+    role: &MemberRole,
+) -> Result<Option<buglogin_domain::organization::Organization>, Response> {
+    if state
+        .members
+        .read()
+        .map_err(|_| service_unavailable("member"))?
+        .authorize_invitation(principal, grants, workspace_id, role)
+        .is_ok()
+    {
+        return Ok(None);
+    }
+    let organization = state
+        .workspaces
+        .read()
+        .map_err(|_| service_unavailable("workspace"))?
+        .managed_organization_for_workspace(principal, grants, workspace_id)
+        .map_err(response_problem)?;
+    MemberService::authorize_org_owner_account_creation(
+        principal,
+        grants,
+        &organization,
+        workspace_id,
+        role,
+    )
+    .map_err(response_problem)?;
+    Ok(Some(organization))
+}
+
+fn workspace_member_management_grants(
+    state: &ApiState,
+    principal: &Principal,
+    grants: &[buglogin_domain::permissions::Grant],
+    workspace_id: &WorkspaceId,
+    action: Action,
+    correlation_id: String,
+) -> Result<(Vec<buglogin_domain::permissions::Grant>, bool), Response> {
+    let capability = Capability::new("CAP-MEM-001").map_err(|_| {
+        problem_response(
+            "invalid_capability",
+            "Membership capability is invalid",
+            500,
+            correlation_id.clone(),
+        )
+    })?;
+    let scope = ResourceScope::workspace(workspace_id.clone());
+    if is_allowed(principal, &capability, action, &scope, grants) {
+        return Ok((grants.to_vec(), false));
+    }
+    if principal.token_scopes.is_some() {
+        return Err(problem_response(
+            "forbidden",
+            "Permission denied",
+            403,
+            correlation_id.clone(),
+        ));
+    }
+    let explicitly_denied = grants.iter().any(|grant| {
+        grant.capability == capability
+            && grant.action == Action::Manage
+            && grant.effect == Effect::Deny
+            && grant.scope.contains(&scope)
+            && grant
+                .account_id
+                .as_ref()
+                .is_none_or(|id| principal.account_id.as_ref() == Some(id))
+            && grant
+                .member_id
+                .as_ref()
+                .is_none_or(|id| principal.member_id.as_ref() == Some(id))
+    });
+    if explicitly_denied {
+        return Err(problem_response(
+            "forbidden",
+            "Permission denied",
+            403,
+            correlation_id.clone(),
+        ));
+    }
+    let organization = state
+        .workspaces
+        .read()
+        .map_err(|_| service_unavailable("workspace"))?
+        .managed_organization_for_workspace(principal, grants, workspace_id)
+        .map_err(response_problem)?;
+    MemberService::authorize_org_owner_access(principal, grants, &organization, workspace_id)
+        .map_err(response_problem)?;
+    let actor_id = principal.account_id.clone().ok_or_else(|| {
+        problem_response(
+            "account_missing",
+            "Account is missing",
+            401,
+            correlation_id.clone(),
+        )
+    })?;
+    let mut effective = grants.to_vec();
+    for action in [Action::Read, Action::Manage, action] {
+        if !effective.iter().any(|grant| {
+            grant.capability == capability && grant.action == action && grant.scope == scope
+        }) {
+            effective.push(buglogin_domain::permissions::Grant {
+                id: GrantId::new(format!(
+                    "derived_org_member_{}_{}",
+                    workspace_id.as_str(),
+                    match action {
+                        Action::Read => "read",
+                        Action::Create => "create",
+                        Action::Update => "update",
+                        Action::Delete => "delete",
+                        Action::Execute => "execute",
+                        Action::Share => "share",
+                        Action::Manage => "manage",
+                    }
+                ))
+                .map_err(|_| {
+                    problem_response(
+                        "invalid_grant",
+                        "Derived membership authority is invalid",
+                        500,
+                        correlation_id.clone(),
+                    )
+                })?,
+                account_id: Some(actor_id.clone()),
+                member_id: None,
+                capability: capability.clone(),
+                action,
+                scope: scope.clone(),
+                effect: Effect::Allow,
+            });
+        }
+    }
+    Ok((effective, true))
 }
 
 async fn set_account_status(
@@ -3045,14 +3324,26 @@ async fn account(
     headers: HeaderMap,
 ) -> Result<Json<AccountView>, Response> {
     let principal = authenticate(&state, &headers)?;
-    let account_id = principal.account_id.ok_or_else(|| {
+    let account_id = principal.account_id.clone().ok_or_else(|| {
         response(problem(
             "account_missing",
             "Authenticated account is missing",
             401,
         ))
     })?;
-    Ok(Json(AccountView { account_id }))
+    let grant_snapshot = grants(&state)?;
+    let managed_workspace_ids = state
+        .workspaces
+        .read()
+        .map_err(|_| service_unavailable("workspace"))?
+        .managed_workspace_ids(&principal, &grant_snapshot);
+    Ok(Json(AccountView {
+        account_id,
+        platform_admin: principal
+            .roles
+            .contains(&buglogin_domain::permissions::Role::PlatformAdmin),
+        managed_workspace_ids,
+    }))
 }
 
 async fn list_organizations(
@@ -3513,12 +3804,13 @@ async fn create_member_invitation(
         now,
     )
     .map_err(response_problem)?;
-    state
-        .members
-        .read()
-        .map_err(|_| service_unavailable("member"))?
-        .authorize_invitation(&principal, &grants, &workspace_id, &invitation.role)
-        .map_err(response_problem)?;
+    let _authority = scoped_account_creation_authority(
+        &state,
+        &principal,
+        &grants,
+        &workspace_id,
+        &invitation.role,
+    )?;
     let input_value = serde_json::json!({
         "emailHash": hex_bytes(&Sha256::digest(invitation.canonical_email.as_bytes())),
         "role": invitation.role,
@@ -3552,15 +3844,7 @@ async fn create_member_invitation(
         input_value,
         ResourceScope::workspace(workspace_id.clone()),
         invitation.id.as_str(),
-        || {
-            state
-                .members
-                .read()
-                .map_err(|_| service_unavailable("member"))?
-                .authorize_invitation(&principal, &grants, &workspace_id, &invitation.role)
-                .map_err(response_problem)?;
-            Ok((output, vec![put], Some(replay_body)))
-        },
+        || Ok((output, vec![put], Some(replay_body))),
     )
     .await
 }
@@ -3807,12 +4091,25 @@ async fn list_members(
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
-    let members = state
+    let member_service = state
         .members
         .read()
-        .map_err(|_| service_unavailable("member"))?
-        .list(&principal, &grants, &workspace_id)
-        .map_err(response_problem)?;
+        .map_err(|_| service_unavailable("member"))?;
+    let members = match member_service.list(&principal, &grants, &workspace_id) {
+        Ok(members) => members,
+        Err(error) if error.status == 403 => {
+            let organization = state
+                .workspaces
+                .read()
+                .map_err(|_| service_unavailable("workspace"))?
+                .managed_organization_for_workspace(&principal, &grants, &workspace_id)
+                .map_err(response_problem)?;
+            member_service
+                .list_as_org_owner(&principal, &grants, &organization, &workspace_id)
+                .map_err(response_problem)?
+        }
+        Err(error) => return Err(response(error)),
+    };
     let items = members
         .into_iter()
         .map(|member| member_directory_view(&state, &principal, &grants, member))
@@ -3842,7 +4139,7 @@ fn member_directory_view(
     grants: &[buglogin_domain::permissions::Grant],
     member: Member,
 ) -> Result<MemberDirectoryView, Response> {
-    let can_read_identity = is_allowed(
+    let direct_identity_access = is_allowed(
         principal,
         &Capability::new("CAP-MEM-001").map_err(|_| {
             problem_response(
@@ -3856,6 +4153,22 @@ fn member_directory_view(
         &ResourceScope::workspace(member.workspace_id.clone()),
         grants,
     );
+    let organization_owner_access = state
+        .workspaces
+        .read()
+        .map_err(|_| service_unavailable("workspace"))?
+        .managed_organization_for_workspace(principal, grants, &member.workspace_id)
+        .ok()
+        .is_some_and(|organization| {
+            MemberService::authorize_org_owner_access(
+                principal,
+                grants,
+                &organization,
+                &member.workspace_id,
+            )
+            .is_ok()
+        });
+    let can_read_identity = direct_identity_access || organization_owner_access;
     let identity = if can_read_identity {
         crate::services::identity_persistence::IdentityPersistence::new(
             state.control_persistence.clone(),
@@ -3888,12 +4201,38 @@ async fn list_members_page(
         .transpose()
         .map_err(|_| bad_id("cursor"))?;
     let limit = collection_page_limit(query.limit)?;
-    let (members, next_cursor) = state
+    let member_service = state
         .members
         .read()
-        .map_err(|_| service_unavailable("member"))?
-        .list_page(&principal, &grants, &workspace_id, cursor.as_ref(), limit)
-        .map_err(response_problem)?;
+        .map_err(|_| service_unavailable("member"))?;
+    let (members, next_cursor) = match member_service.list_page(
+        &principal,
+        &grants,
+        &workspace_id,
+        cursor.as_ref(),
+        limit,
+    ) {
+        Ok(page) => page,
+        Err(error) if error.status == 403 => {
+            let organization = state
+                .workspaces
+                .read()
+                .map_err(|_| service_unavailable("workspace"))?
+                .managed_organization_for_workspace(&principal, &grants, &workspace_id)
+                .map_err(response_problem)?;
+            member_service
+                .list_page_as_org_owner(
+                    &principal,
+                    &grants,
+                    &organization,
+                    &workspace_id,
+                    cursor.as_ref(),
+                    limit,
+                )
+                .map_err(response_problem)?
+        }
+        Err(error) => return Err(response(error)),
+    };
     let items = members
         .into_iter()
         .map(|member| member_directory_view(&state, &principal, &grants, member))
@@ -3932,6 +4271,28 @@ async fn activate_member(
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let member_id = MemberId::from_str(&member_id).map_err(|_| bad_id("member_id"))?;
+    let (member_grants, organization_owner) = workspace_member_management_grants(
+        &state,
+        &principal,
+        &grants,
+        &workspace_id,
+        Action::Manage,
+        correlation(&headers),
+    )?;
+    let target = state
+        .members
+        .read()
+        .map_err(|_| service_unavailable("member"))?
+        .get_in_workspace(&principal, &member_grants, &member_id, &workspace_id)
+        .map_err(response_problem)?;
+    if organization_owner && target.role == MemberRole::Owner {
+        return Err(problem_response(
+            "role_escalation",
+            "Organization owner cannot change a workspace Owner membership",
+            403,
+            correlation(&headers),
+        ));
+    }
     let value = serde_json::json!({"workspaceId": workspace_id, "memberId": member_id});
     mutate(
         &state,
@@ -3947,7 +4308,7 @@ async fn activate_member(
             HostedProfileService::activate_member(
                 &state,
                 &principal,
-                &grants,
+                &member_grants,
                 &workspace_id,
                 &member_id,
             )
@@ -3966,6 +4327,28 @@ async fn suspend_member(
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let member_id = MemberId::from_str(&member_id).map_err(|_| bad_id("member_id"))?;
+    let (member_grants, organization_owner) = workspace_member_management_grants(
+        &state,
+        &principal,
+        &grants,
+        &workspace_id,
+        Action::Manage,
+        correlation(&headers),
+    )?;
+    let target = state
+        .members
+        .read()
+        .map_err(|_| service_unavailable("member"))?
+        .get_in_workspace(&principal, &member_grants, &member_id, &workspace_id)
+        .map_err(response_problem)?;
+    if organization_owner && target.role == MemberRole::Owner {
+        return Err(problem_response(
+            "role_escalation",
+            "Organization owner cannot change a workspace Owner membership",
+            403,
+            correlation(&headers),
+        ));
+    }
     let value = serde_json::json!({"workspaceId": workspace_id, "memberId": member_id});
     mutate(
         &state,
@@ -3981,7 +4364,7 @@ async fn suspend_member(
             HostedProfileService::suspend_member(
                 &state,
                 &principal,
-                &grants,
+                &member_grants,
                 &workspace_id,
                 &member_id,
             )
@@ -4001,6 +4384,28 @@ async fn set_member_role(
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let member_id = MemberId::from_str(&member_id).map_err(|_| bad_id("member_id"))?;
+    let (member_grants, organization_owner) = workspace_member_management_grants(
+        &state,
+        &principal,
+        &grants,
+        &workspace_id,
+        Action::Manage,
+        correlation(&headers),
+    )?;
+    let target = state
+        .members
+        .read()
+        .map_err(|_| service_unavailable("member"))?
+        .get_in_workspace(&principal, &member_grants, &member_id, &workspace_id)
+        .map_err(response_problem)?;
+    if organization_owner && (target.role == MemberRole::Owner || input.role == MemberRole::Owner) {
+        return Err(problem_response(
+            "role_escalation",
+            "Organization owner may manage only memberships below Owner",
+            403,
+            correlation(&headers),
+        ));
+    }
     let value = serde_json::to_value(&input).map_err(internal)?;
     mutate(
         &state,
@@ -4021,7 +4426,7 @@ async fn set_member_role(
                 members
                     .set_role(
                         &principal,
-                        &grants,
+                        &member_grants,
                         &workspace_id,
                         &member_id,
                         input.role.clone(),
@@ -4032,7 +4437,7 @@ async fn set_member_role(
                 .members
                 .read()
                 .map_err(|_| service_unavailable("member"))?
-                .get_in_workspace(&principal, &grants, &member_id, &workspace_id)
+                .get_in_workspace(&principal, &member_grants, &member_id, &workspace_id)
                 .map_err(response_problem)
         },
     )
@@ -6949,8 +7354,12 @@ where
         command,
         "profile.proxy.assignment.set"
             | "profile.manifest.commit"
+            | "account.create.scoped"
             | "member.invitation.create"
             | "member.invitation.revoke"
+            | "member.activate"
+            | "member.suspend"
+            | "member.role.update"
     );
     if reauthorize {
         let metadata = crate::commands::CommandRegistry::get(command).ok_or_else(|| {
@@ -6961,7 +7370,82 @@ where
                 correlation(headers),
             )
         })?;
-        let allowed = if let Some(profile_id) = scope.profile_id.as_ref() {
+        let allowed = if matches!(
+            command,
+            "account.create.scoped" | "member.invitation.create"
+        ) {
+            let workspace_id = scope.workspace_id.as_ref().ok_or_else(|| {
+                problem_response(
+                    "invalid_scope",
+                    "Scoped account creation requires a workspace scope",
+                    400,
+                    correlation(headers),
+                )
+            })?;
+            let role_value = if command == "account.create.scoped" {
+                input.get("member").and_then(|member| member.get("role"))
+            } else {
+                input.get("role")
+            };
+            let role: MemberRole = serde_json::from_value(
+                role_value.cloned().unwrap_or(Value::Null),
+            )
+            .map_err(|_| {
+                problem_response(
+                    "invalid_input",
+                    "Scoped account role is invalid",
+                    400,
+                    correlation(headers),
+                )
+            })?;
+            scoped_account_creation_authority(state, &principal, &grants, workspace_id, &role)
+                .is_ok()
+        } else if matches!(
+            command,
+            "member.activate" | "member.suspend" | "member.role.update"
+        ) {
+            let workspace_id = scope.workspace_id.as_ref().ok_or_else(|| {
+                problem_response(
+                    "invalid_scope",
+                    "Member management requires a workspace scope",
+                    400,
+                    correlation(headers),
+                )
+            })?;
+            let (member_grants, organization_owner) = workspace_member_management_grants(
+                state,
+                &principal,
+                &grants,
+                workspace_id,
+                Action::Manage,
+                correlation(headers),
+            )?;
+            if organization_owner {
+                let member_id = MemberId::from_str(resource_id).map_err(|_| bad_id("member_id"))?;
+                let target = state
+                    .members
+                    .read()
+                    .map_err(|_| service_unavailable("member"))?
+                    .get_in_workspace(&principal, &member_grants, &member_id, workspace_id)
+                    .map_err(response_problem)?;
+                if target.role == MemberRole::Owner
+                    || (command == "member.role.update"
+                        && input
+                            .get("role")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value::<MemberRole>(value).ok())
+                            == Some(MemberRole::Owner))
+                {
+                    return Err(problem_response(
+                        "role_escalation",
+                        "Organization owner may manage only memberships below Owner",
+                        403,
+                        correlation(headers),
+                    ));
+                }
+            }
+            true
+        } else if let Some(profile_id) = scope.profile_id.as_ref() {
             HostedProfileService::authorized(
                 state,
                 &principal,
@@ -7050,7 +7534,10 @@ where
     let audit_time = checked_now(&correlation).map_err(response_problem)?;
     let before = state.control_aggregate().map_err(response_problem)?;
     let result = operation();
-    let success_status = if matches!(command, "profile.create" | "member.invitation.create") {
+    let success_status = if matches!(
+        command,
+        "profile.create" | "account.create.scoped" | "member.invitation.create"
+    ) {
         StatusCode::CREATED
     } else {
         StatusCode::OK
@@ -7414,6 +7901,90 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_account_creation_assigns_lower_role_without_invitation() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(crate::http::FirstOwnerBootstrapInput {
+                account_id: Some("acct_scoped_create_owner".into()),
+                username: "scoped-create-owner".into(),
+                email: "scoped-create-owner@example.com".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("owner-test-password-123".into()),
+                organization_name: "Scoped account test org".into(),
+                workspace_name: "Scoped account test workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 10,
+                max_members: 10,
+                max_storage_bytes: 1024 * 1024,
+            })
+            .unwrap();
+        let owner_token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let app = crate::http::router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/workspaces/{}/accounts",
+                        owner.workspace_id.as_str()
+                    ))
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "scoped-account-create-test-01")
+                    .header("x-correlation-id", "scoped-account-create-test")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "accountId": "acct_scoped_created_member",
+                            "username": "scoped-created-member",
+                            "email": "scoped-created-member@example.com",
+                            "role": "member",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["account"]["id"], "acct_scoped_created_member");
+        assert_eq!(body["identity"]["verification"], "pending");
+        assert_eq!(body["member"]["accountId"], "acct_scoped_created_member");
+        assert_eq!(body["member"]["workspaceId"], owner.workspace_id.as_str());
+        assert_eq!(body["member"]["role"], "member");
+        assert_eq!(body["member"]["status"], "active");
+        assert_eq!(body["onboardingStatus"], "pending_verification");
+        assert_eq!(body["loginEnabled"], false);
+        assert!(body.get("invitation").is_none());
+
+        let persisted_member = state
+            .members
+            .read()
+            .unwrap()
+            .active_members()
+            .into_iter()
+            .find(|member| member.id.as_str() == body["member"]["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            persisted_member.account_id.as_str(),
+            "acct_scoped_created_member"
+        );
+        assert_eq!(persisted_member.workspace_id, owner.workspace_id);
+        assert_eq!(persisted_member.role, MemberRole::Member);
+        assert_eq!(persisted_member.status, MemberStatus::Active);
     }
 
     #[tokio::test]

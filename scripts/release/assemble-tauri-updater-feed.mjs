@@ -118,7 +118,12 @@ for (const [source, name] of assets)
   await copyFile(source, join(outputRoot, name));
 await writeFile(
   join(outputRoot, "latest.json"),
-  `${JSON.stringify({ version, platforms: manifestPlatforms, downloads: manifestDownloads }, null, 2)}\n`,
+  `${JSON.stringify({ version, platforms: manifestPlatforms }, null, 2)}\n`,
+  { flag: "wx" },
+);
+await writeFile(
+  join(outputRoot, "downloads.json"),
+  `${JSON.stringify({ version, platforms: manifestDownloads }, null, 2)}\n`,
   { flag: "wx" },
 );
 console.log(

@@ -31,36 +31,14 @@ test("OSV dependency scanning does not require private-repository code scanning"
   assert.match(workflow, /osv-scanner-reusable-pr\.yml@[0-9a-f]{40}/);
 });
 
-test("release publishes verified platform bundles as a downloadable prerelease candidate", async () => {
-  const { release } = await verifyReleaseWorkflows();
-  assert.match(
-    release,
-    /publish-rc:[\s\S]*?needs:\s*\[validate, sign-and-verify\]/,
-  );
-  assert.match(
-    release,
-    /publish-rc:[\s\S]*?actions:\s*read\n\s+contents:\s*write/,
-  );
-  assert.match(release, /actions\/download-artifact@[0-9a-f]{40}/);
-  assert.match(
-    release,
-    /find \. -maxdepth 1 -type f ! -name SHA256SUMS\.txt[\s\S]*sha256sum > SHA256SUMS\.txt/,
-  );
-  assert.match(release, /assemble-tauri-updater-feed\.mjs/);
-  assert.match(
-    release,
-    /Publish immutable RC artifacts and feed to DigitalOcean Spaces/,
-  );
-  assert.match(release, /secrets\.S3_ACCESS_KEY_ID/);
-  assert.match(release, /releases\/desktop\/v3\/rc\/latest\.json/);
-  const updaterFeed = await readFile(
-    "scripts/release/assemble-tauri-updater-feed.mjs",
-    "utf8",
-  );
-  assert.match(updaterFeed, /latest\.json/);
-  assert.match(release, /--prerelease --verify-tag/);
-  assert.doesNotMatch(release, /--draft/);
-  assert.doesNotMatch(release, /--latest|--make-latest/);
+test("release builds private signed artifacts without publishing an RC or stable feed", async () => {
+  const { release, signing } = await verifyReleaseWorkflows();
+  assert.match(release, /sign-and-verify:[\s\S]*?needs: validate/);
+  assert.match(release, /source-ref:\s*\$\{\{ needs\.validate\.outputs\.release_ref \}\}/);
+  assert.match(release, /source-sha:\s*\$\{\{ needs\.validate\.outputs\.release_sha \}\}/);
+  assert.match(signing, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(signing, /retention-days:\s*14/);
+  assert.doesNotMatch(release, /publish-rc|releases\/desktop\/v3\/rc|aws s3 cp|gh release create/);
   assert.match(release, /ref: \$\{\{ inputs\.release_ref \}\}/);
   assert.match(release, /workflow_dispatch:[\s\S]*?release_ref:/);
   assert.doesNotMatch(release, /^\s+push:/m);
@@ -117,15 +95,9 @@ test("stable updater feed binds supported Windows and Apple Silicon Mac assets t
         url: "https://github.com/owner/repo/releases/download/v1.2.3/BugLogin_1.2.3_aarch64.app.tar.gz",
       },
     };
-    const downloads = {
-      windows: { url: platforms["windows-x86_64"].url },
-      macos: {
-        url: "https://github.com/owner/repo/releases/download/v1.2.3/BugLogin_1.2.3_aarch64.dmg",
-      },
-    };
     await writeFile(
       manifestPath,
-      JSON.stringify({ version: "1.2.3", platforms, downloads }),
+      JSON.stringify({ version: "1.2.3", platforms }),
     );
     run(
       "scripts/release/verify-tauri-updater-feed.mjs",
@@ -135,10 +107,9 @@ test("stable updater feed binds supported Windows and Apple Silicon Mac assets t
     );
     platforms["windows-x86_64"].url =
       "https://github.com/owner/repo/releases/download/v1.2.2/BugLogin_1.2.3_x64-setup.exe";
-    downloads.windows.url = platforms["windows-x86_64"].url;
     await writeFile(
       manifestPath,
-      JSON.stringify({ version: "1.2.3", platforms, downloads }),
+      JSON.stringify({ version: "1.2.3", platforms }),
     );
     assert.throws(
       () =>
@@ -171,13 +142,10 @@ test("stable updater feed validates version-bound Spaces artifact URLs", async (
         url: `${base}v1.2.3/12345/BugLogin_1.2.3_aarch64.app.tar.gz`,
       },
     };
-    const downloads = {
-      windows: { url: platforms["windows-x86_64"].url },
-      macos: { url: `${base}v1.2.3/12345/BugLogin_1.2.3_aarch64.dmg` },
-    };
+    const manifest = { version: "1.2.3", platforms };
     await writeFile(
       manifestPath,
-      JSON.stringify({ version: "1.2.3", platforms, downloads }),
+      JSON.stringify(manifest),
     );
     run(
       "scripts/release/verify-tauri-updater-feed.mjs",
@@ -188,10 +156,9 @@ test("stable updater feed validates version-bound Spaces artifact URLs", async (
     );
     platforms["windows-x86_64"].url =
       `${base}v1.2.2/12345/BugLogin_1.2.3_x64-setup.exe`;
-    downloads.windows.url = platforms["windows-x86_64"].url;
     await writeFile(
       manifestPath,
-      JSON.stringify({ version: "1.2.3", platforms, downloads }),
+      JSON.stringify(manifest),
     );
     assert.throws(() =>
       run(

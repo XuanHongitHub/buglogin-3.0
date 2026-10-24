@@ -8,6 +8,11 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::{
+    desktop_state::DesktopState,
+    remote_api::{FeedbackReceipt, FeedbackSubmission},
+};
+
 fn get_app_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
         PathBuf::from(dir)
@@ -514,12 +519,71 @@ pub async fn open_log_directory() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn preview_feedback_logs() -> Result<String, String> {
-    read_log_files().await
+    let logs = read_log_files().await?;
+    const MAX_FEEDBACK_LOG_BYTES: usize = 128 * 1024;
+    if logs.len() <= MAX_FEEDBACK_LOG_BYTES {
+        return Ok(logs);
+    }
+    let mut start = logs.len() - MAX_FEEDBACK_LOG_BYTES;
+    while !logs.is_char_boundary(start) {
+        start += 1;
+    }
+    Ok(format!("[Earlier log lines omitted]\n{}", &logs[start..]))
 }
 
 #[tauri::command]
-pub async fn send_feedback(_feedback: Value) -> Result<(), String> {
-    Ok(())
+pub async fn send_feedback(
+    state: tauri::State<'_, DesktopState>,
+    kind: String,
+    message: String,
+    include_logs: bool,
+    email: Option<String>,
+    locale: String,
+    idempotency_key: String,
+    correlation_id: String,
+) -> Result<FeedbackReceipt, buglogin_domain::errors::Problem> {
+    if !(16..=128).contains(&idempotency_key.len()) || !idempotency_key.is_ascii() {
+        return Err(buglogin_domain::errors::Problem::new(
+            "idempotency_key_required",
+            "Valid feedback idempotency key required",
+            400,
+            &correlation_id,
+        ));
+    }
+    if correlation_id.trim().is_empty() || correlation_id.len() > 128 {
+        return Err(buglogin_domain::errors::Problem::new(
+            "correlation_id_invalid",
+            "Feedback request correlation is invalid",
+            400,
+            "send-feedback",
+        ));
+    }
+    let logs = if include_logs {
+        Some(preview_feedback_logs().await.map_err(|_| {
+            buglogin_domain::errors::Problem::new(
+                "feedback_logs_unreadable",
+                "Recent logs could not be read",
+                500,
+                &correlation_id,
+            )
+        })?)
+    } else {
+        None
+    };
+    state
+        .submit_feedback(
+            FeedbackSubmission {
+                kind,
+                message,
+                include_logs,
+                logs,
+                email,
+                locale,
+            },
+            &idempotency_key,
+            &correlation_id,
+        )
+        .await
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

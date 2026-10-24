@@ -5899,6 +5899,10 @@ pub fn router(state: ApiState) -> Router {
             put(register_device_encryption_key)
                 .layer(DefaultBodyLimit::max(AUTH_JSON_BODY_LIMIT_BYTES)),
         )
+        .route(
+            "/v1/feedback",
+            post(submit_feedback).layer(DefaultBodyLimit::max(160 * 1024)),
+        )
         .route("/v1/auth/refresh", post(refresh_token))
         .route("/v1/auth/logout", post(logout))
         .route(
@@ -6038,6 +6042,140 @@ const WEB_SESSION_COOKIE: &str = "__Host-buglogin_session";
 const WEB_CSRF_COOKIE: &str = "__Host-buglogin_csrf";
 const WEB_SESSION_SECONDS: u64 = 12 * 60 * 60;
 const AUTH_JSON_BODY_LIMIT_BYTES: usize = 8 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FeedbackSubmissionInput {
+    kind: String,
+    message: String,
+    include_logs: bool,
+    logs: Option<String>,
+    email: Option<String>,
+    locale: String,
+}
+
+async fn submit_feedback(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<FeedbackSubmissionInput>,
+) -> Result<Response, Response> {
+    let idempotency_key = required_idempotency(&headers)?.to_owned();
+    let principal = authenticate(&state, &headers)?;
+    let account_id = principal.account_id.ok_or_else(|| {
+        response(problem(
+            "authentication_required",
+            "Sign in to send feedback",
+            401,
+        ))
+    })?;
+    let account_id = require_active_account(&state, account_id)?;
+    let valid_kind = matches!(input.kind.as_str(), "bug" | "idea" | "praise" | "other");
+    let invalid_email = input.email.as_ref().is_some_and(|email| {
+        email.len() > 254
+            || email.trim() != email
+            || !email.contains('@')
+            || !email
+                .rsplit('@')
+                .next()
+                .is_some_and(|domain| domain.contains('.'))
+    });
+    if invalid_email {
+        return Err(response(problem(
+            "FEEDBACK_EMAIL_INVALID",
+            "The feedback reply address is invalid",
+            400,
+        )));
+    }
+    if input
+        .logs
+        .as_ref()
+        .is_some_and(|logs| logs.len() > 128 * 1024)
+        || input.include_logs != input.logs.is_some()
+    {
+        return Err(response(problem(
+            "FEEDBACK_LOGS_UNREADABLE",
+            "Feedback logs could not be attached",
+            400,
+        )));
+    }
+    if !valid_kind
+        || input.message.trim().is_empty()
+        || input.message.chars().count() > 5_000
+        || input.locale.trim().is_empty()
+        || input.locale.len() > 32
+    {
+        return Err(response(problem(
+            "FEEDBACK_INVALID",
+            "Feedback fields are invalid",
+            400,
+        )));
+    }
+
+    if let Some(replay) = state
+        .control_persistence
+        .replay(account_id.as_str(), &idempotency_key)
+        .map_err(response)?
+    {
+        return Ok((
+            StatusCode::from_u16(replay.response.status).unwrap_or(StatusCode::OK),
+            Json(replay.response.body),
+        )
+            .into_response());
+    }
+
+    let idempotency_digest =
+        Sha256::digest(format!("{}:{idempotency_key}", account_id.as_str()).as_bytes());
+    let id = format!(
+        "fbk_{}",
+        idempotency_digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let now = request_now(&headers)?;
+    let command_id = "feedback.submit";
+    let body = json!({ "id": id });
+    state
+        .control_persistence
+        .execute(ExecuteControlCommand {
+            tenant_id: account_id.as_str().to_owned(),
+            command_id: command_id.into(),
+            idempotency_key,
+            expected_revisions: BTreeMap::new(),
+            puts: vec![ControlPut {
+                tenant_id: account_id.as_str().to_owned(),
+                record_type: "support_feedback".into(),
+                record_id: id.clone(),
+                expected_revision: Some(0),
+                value: json!({
+                    "id": id,
+                    "accountId": account_id,
+                    "kind": input.kind,
+                    "message": input.message,
+                    "includeLogs": input.include_logs,
+                    "logs": input.logs,
+                    "replyTo": input.email,
+                    "locale": input.locale,
+                    "submittedAtMs": now,
+                }),
+            }],
+            deletes: vec![],
+            audit: ControlAuditEntry {
+                tenant_id: account_id.as_str().to_owned(),
+                command_id: command_id.into(),
+                actor_id: account_id.as_str().to_owned(),
+                allowed: true,
+                detail: json!({ "feedbackId": id, "kind": input.kind }),
+            },
+            response: HttpResponse {
+                status: StatusCode::CREATED.as_u16(),
+                headers: BTreeMap::new(),
+                body: body.clone(),
+            },
+        })
+        .map_err(response)?;
+    Ok((StatusCode::CREATED, Json(body)).into_response())
+}
 
 async fn create_api_token(
     State(state): State<ApiState>,
@@ -10444,6 +10582,7 @@ mod persistence_tests {
             ConcurrentRemoteChunkStore, MemoryRemoteChunkStore, RemoteChunk, RemoteChunkStore,
         },
     };
+    use serde_json::Value;
 
     use std::{
         fs,
@@ -10454,6 +10593,172 @@ mod persistence_tests {
         },
         time::Duration,
     };
+
+    #[tokio::test]
+    async fn feedback_submission_is_authenticated_durable_and_idempotent() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "feedback-owner".into(),
+                email: "feedback-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("valid feedback owner password".into()),
+                organization_name: "Feedback Org".into(),
+                workspace_name: "Feedback Workspace".into(),
+                max_workspaces: 5,
+                max_profiles: 100,
+                max_members: 10,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let request = || {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            );
+            headers.insert(
+                "idempotency-key",
+                HeaderValue::from_static("feedback-request-0001"),
+            );
+            headers.insert(
+                "x-correlation-id",
+                HeaderValue::from_static("fbk_0123456789abcdef0123456789abcdef"),
+            );
+            headers
+        };
+        let input = || FeedbackSubmissionInput {
+            kind: "bug".into(),
+            message: "A reproducible feedback report".into(),
+            include_logs: false,
+            logs: None,
+            email: None,
+            locale: "en".into(),
+        };
+
+        let (first, replay) = tokio::join!(
+            submit_feedback(State(state.clone()), request(), Json(input())),
+            submit_feedback(State(state.clone()), request(), Json(input())),
+        );
+        let first = first.unwrap();
+        let replay = replay.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        let stored = state
+            .control_persistence
+            .list::<Value>(owner.account_id.as_str(), "support_feedback")
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0]["message"], "A reproducible feedback report");
+    }
+
+    #[tokio::test]
+    async fn feedback_rejects_inactive_account_with_explained_forbidden_response() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: None,
+                username: "inactive-feedback-owner".into(),
+                email: "inactive-feedback-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("valid feedback owner password".into()),
+                organization_name: "Feedback Org".into(),
+                workspace_name: "Feedback Workspace".into(),
+                max_workspaces: 5,
+                max_profiles: 100,
+                max_members: 10,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let (account, revision) = state
+            .account_persistence
+            .load_versioned(&owner.account_id)
+            .unwrap()
+            .unwrap();
+        let account = account
+            .transition_status(revision, AccountStatus::Suspended, "2026-10-24T00:00:01Z")
+            .unwrap();
+        let account_put = state
+            .account_persistence
+            .prepare_import_put(&account, revision)
+            .unwrap();
+        state
+            .control_persistence
+            .execute(ExecuteControlCommand {
+                tenant_id: "control".into(),
+                command_id: "account.status.test".into(),
+                idempotency_key: "feedback-test-suspend-account".into(),
+                expected_revisions: BTreeMap::new(),
+                puts: vec![account_put],
+                deletes: vec![],
+                audit: ControlAuditEntry {
+                    tenant_id: "control".into(),
+                    command_id: "account.status.test".into(),
+                    actor_id: "test".into(),
+                    allowed: true,
+                    detail: json!({ "accountId": owner.account_id }),
+                },
+                response: HttpResponse {
+                    status: StatusCode::OK.as_u16(),
+                    headers: BTreeMap::new(),
+                    body: json!({ "status": "suspended" }),
+                },
+            })
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("inactive-feedback-request-0001"),
+        );
+        headers.insert(
+            "x-correlation-id",
+            HeaderValue::from_static("inactive-feedback-correlation"),
+        );
+        let response = submit_feedback(
+            State(state.clone()),
+            headers,
+            Json(FeedbackSubmissionInput {
+                kind: "bug".into(),
+                message: "A report from an inactive account".into(),
+                include_logs: false,
+                logs: None,
+                email: None,
+                locale: "en".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "account_inactive");
+        assert_eq!(problem["title"], "Account is not active");
+        assert!(
+            state
+                .control_persistence
+                .list::<Value>(owner.account_id.as_str(), "support_feedback")
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn web_and_desktop_login_reject_pending_identity_generically() {

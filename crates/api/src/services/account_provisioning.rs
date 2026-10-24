@@ -8,7 +8,8 @@
 use buglogin_domain::{
     account::{Account, AccountIdentity, AccountStatus, IdentityVerification},
     errors::Problem,
-    ids::AccountId,
+    ids::{AccountId, MemberId, WorkspaceId},
+    member::MemberRole,
 };
 use buglogin_storage::control::{ControlAuditEntry, ExecuteControlCommand, HttpResponse};
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,10 @@ pub struct PendingAccountProvisioning {
 struct StoredPendingAccountProvisioning {
     account: Account,
     identity: AccountIdentity,
+    #[serde(default)]
+    workspace_id: Option<WorkspaceId>,
+    #[serde(default)]
+    requested_role: Option<MemberRole>,
 }
 
 #[derive(Clone)]
@@ -65,13 +70,66 @@ impl AccountProvisioningService {
         idempotency_key: &str,
         created_at: &str,
     ) -> Result<PendingAccountProvisioning, Problem> {
+        self.create_pending_in_scope(
+            account_id,
+            username,
+            email,
+            actor_id,
+            idempotency_key,
+            created_at,
+            None,
+        )
+    }
+
+    pub fn create_pending_scoped(
+        &self,
+        account_id: AccountId,
+        username: &str,
+        email: &str,
+        actor_id: &AccountId,
+        idempotency_key: &str,
+        created_at: &str,
+        workspace_id: &WorkspaceId,
+        requested_role: &MemberRole,
+    ) -> Result<PendingAccountProvisioning, Problem> {
+        self.create_pending_in_scope(
+            account_id,
+            username,
+            email,
+            actor_id,
+            idempotency_key,
+            created_at,
+            Some((workspace_id, requested_role)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_pending_in_scope(
+        &self,
+        account_id: AccountId,
+        username: &str,
+        email: &str,
+        actor_id: &AccountId,
+        idempotency_key: &str,
+        created_at: &str,
+        scope: Option<(&WorkspaceId, &MemberRole)>,
+    ) -> Result<PendingAccountProvisioning, Problem> {
         validate_idempotency_key(idempotency_key)?;
         let identity = AccountIdentity::new(account_id.clone(), username, email, created_at)?;
         let account = Account::new(account_id.clone(), created_at);
         let stored_key = scoped_idempotency_key(actor_id, idempotency_key);
+        let workspace_id = scope.map(|(workspace_id, _)| workspace_id.clone());
+        let requested_role = scope.map(|(_, role)| role.clone());
 
         if let Some(replay) = self.store.replay(CONTROL_TENANT, &stored_key)? {
-            return replay_pending(replay.response.body, &account, &identity, true);
+            return replay_pending(
+                replay.response.body,
+                &account,
+                &identity,
+                &workspace_id,
+                &requested_role,
+                true,
+            );
         }
 
         if self
@@ -93,6 +151,8 @@ impl AccountProvisioningService {
         let response_body = serde_json::to_value(StoredPendingAccountProvisioning {
             account: account.clone(),
             identity: identity.clone(),
+            workspace_id: workspace_id.clone(),
+            requested_role: requested_role.clone(),
         })
         .map_err(|_| corrupt())?;
         let command = ExecuteControlCommand {
@@ -112,6 +172,8 @@ impl AccountProvisioningService {
                     "identityVerification": "pending",
                     "credentialIssued": false,
                     "sessionIssued": false,
+                    "workspaceId": workspace_id,
+                    "requestedRole": requested_role,
                 }),
             },
             response: HttpResponse {
@@ -122,14 +184,26 @@ impl AccountProvisioningService {
         };
 
         match self.store.execute(command) {
-            Ok(result) => {
-                replay_pending(result.response.body, &account, &identity, result.replayed)
-            }
+            Ok(result) => replay_pending(
+                result.response.body,
+                &account,
+                &identity,
+                &workspace_id,
+                &requested_role,
+                result.replayed,
+            ),
             Err(error) => {
                 // A concurrent retry can reach the record CAS before the idempotency replay
                 // becomes visible. Only return the winner when its persisted request matches.
                 if let Some(replay) = self.store.replay(CONTROL_TENANT, &stored_key)? {
-                    return replay_pending(replay.response.body, &account, &identity, true);
+                    return replay_pending(
+                        replay.response.body,
+                        &account,
+                        &identity,
+                        &workspace_id,
+                        &requested_role,
+                        true,
+                    );
                 }
                 Err(error)
             }
@@ -137,10 +211,41 @@ impl AccountProvisioningService {
     }
 }
 
+/// Stable identifiers let a retry finish the membership step if identity creation
+/// succeeded but the API response was lost.
+pub fn scoped_account_idempotency_key(
+    workspace_id: &WorkspaceId,
+    account_id: &AccountId,
+) -> String {
+    let digest = Sha256::digest(format!("{}:{}", workspace_id.as_str(), account_id.as_str()));
+    format!("scoped-account-{}", hex_digest(&digest))
+}
+
+pub fn scoped_member_id(
+    workspace_id: &WorkspaceId,
+    account_id: &AccountId,
+) -> Result<MemberId, Problem> {
+    let digest = Sha256::digest(format!("{}:{}", workspace_id.as_str(), account_id.as_str()));
+    MemberId::new(format!("mem_{}", hex_digest(&digest[..16]))).map_err(|_| {
+        Problem::new(
+            "account_provisioning_member_id_invalid",
+            "Account provisioning member ID could not be generated",
+            500,
+            "identity",
+        )
+    })
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn replay_pending(
     body: Value,
     expected_account: &Account,
     expected_identity: &AccountIdentity,
+    expected_workspace_id: &Option<WorkspaceId>,
+    expected_role: &Option<MemberRole>,
     replayed: bool,
 ) -> Result<PendingAccountProvisioning, Problem> {
     let stored: StoredPendingAccountProvisioning =
@@ -152,7 +257,9 @@ fn replay_pending(
         && stored.identity.canonical_username == expected_identity.canonical_username
         && stored.identity.email == expected_identity.email
         && stored.identity.canonical_email == expected_identity.canonical_email;
-    if stored.account.id != expected_account.id
+    if stored.workspace_id != *expected_workspace_id
+        || stored.requested_role != *expected_role
+        || stored.account.id != expected_account.id
         || stored.account.status != AccountStatus::Active
         || stored.identity.verification != IdentityVerification::Pending
         || !same_identity

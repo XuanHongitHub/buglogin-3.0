@@ -22,6 +22,8 @@ pub enum Adapter {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CommandSchema {
     Empty,
+    FeedbackSubmission,
+    FeedbackReceipt,
     AuthTokenResponse,
     WebLoginInput,
     DesktopLoginInput,
@@ -53,6 +55,7 @@ pub enum CommandSchema {
     AccountAdminPage,
     AccountView,
     AccountCreatePendingInput,
+    WorkspaceAccountCreateInput,
     PendingAccountProvisioningReceipt,
     AccountStatusUpdateCommandInput,
     Organization,
@@ -228,6 +231,8 @@ impl CommandSchema {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Empty => "Empty",
+            Self::FeedbackSubmission => "FeedbackSubmission",
+            Self::FeedbackReceipt => "FeedbackReceipt",
             Self::AuthTokenResponse => "AuthTokenResponse",
             Self::WebLoginInput => "WebLoginInput",
             Self::DesktopLoginInput => "DesktopLoginInput",
@@ -259,6 +264,7 @@ impl CommandSchema {
             Self::AccountAdminPage => "AccountAdminPage",
             Self::AccountView => "AccountView",
             Self::AccountCreatePendingInput => "AccountCreatePendingInput",
+            Self::WorkspaceAccountCreateInput => "WorkspaceAccountCreateInput",
             Self::PendingAccountProvisioningReceipt => "PendingAccountProvisioningReceipt",
             Self::AccountStatusUpdateCommandInput => "AccountStatusUpdateCommandInput",
             Self::Organization => "Organization",

@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: 5076aaedb511093a3191813a88180d93b1fcbe6c90c355d4c19649c2b060992d
-projectionCount: 138
+sourceSha256: 7103cdc459fb711628ced2d4ff0faab4fa00e1f80442f9302ef2a135bf9e719a
+projectionCount: 140
 projections:
   - commandId: runtime.catalog.get
     kind: query
@@ -39,6 +39,22 @@ projections:
       tauri: system_health_get
       rest: system.health.get
       mcp: system_health_get
+  - commandId: feedback.submit
+    kind: command
+    capability: CAP-DIAG-001
+    action: create
+    inputSchema: FeedbackSubmission
+    outputSchema: FeedbackReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: feedback_submit
+      rest: feedback.submit
   - commandId: operation.get
     kind: query
     capability: operation.read
@@ -1394,6 +1410,24 @@ projections:
       tauri: account_list
       rest: account.list
       mcp: account_list
+  - commandId: account.create.scoped
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    inputSchema: WorkspaceAccountCreateInput
+    outputSchema: PendingAccountProvisioningReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+      - mcp
+    names:
+      tauri: account_create_scoped
+      rest: account.create.scoped
+      mcp: account_create_scoped
   - commandId: account.status.update
     kind: command
     capability: CAP-ADM-001
@@ -2089,7 +2123,7 @@ projections:
   - commandId: member.activate
     kind: command
     capability: CAP-MEM-001
-    action: update
+    action: manage
     inputSchema: MemberIdInput
     outputSchema: Member
     auth: required
@@ -2913,6 +2947,24 @@ mcp:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         secrets: never-returned
+    - name: account_create_scoped
+      commandId: account.create.scoped
+      kind: command
+      capability: CAP-MEM-001
+      action: create
+      inputSchema: WorkspaceAccountCreateInput
+      outputSchema: PendingAccountProvisioningReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        secrets: never-returned
+      requires:
+        - Idempotency-Key
     - name: account_status_update
       commandId: account.status.update
       kind: command
@@ -3515,7 +3567,7 @@ mcp:
       commandId: member.activate
       kind: command
       capability: CAP-MEM-001
-      action: update
+      action: manage
       inputSchema: MemberIdInput
       outputSchema: Member
       auth: required
@@ -3756,6 +3808,24 @@ rest:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: feedback.submit
+      commandId: feedback.submit
+      kind: command
+      capability: CAP-DIAG-001
+      action: create
+      inputSchema: FeedbackSubmission
+      outputSchema: FeedbackReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
     - operationId: operation.get
       commandId: operation.get
       kind: query
@@ -4902,6 +4972,24 @@ rest:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: account.create.scoped
+      commandId: account.create.scoped
+      kind: command
+      capability: CAP-MEM-001
+      action: create
+      inputSchema: WorkspaceAccountCreateInput
+      outputSchema: PendingAccountProvisioningReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
     - operationId: account.status.update
       commandId: account.status.update
       kind: command
@@ -5576,7 +5664,7 @@ rest:
       commandId: member.activate
       kind: command
       capability: CAP-MEM-001
-      action: update
+      action: manage
       inputSchema: MemberIdInput
       outputSchema: Member
       auth: required
@@ -5924,6 +6012,23 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: feedback_submit
+      commandId: feedback.submit
+      kind: command
+      capability: CAP-DIAG-001
+      action: create
+      inputSchema: FeedbackSubmission
+      outputSchema: FeedbackReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
     - invoke: operation_get
       commandId: operation.get
       kind: query
@@ -6642,6 +6747,23 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: account_create_scoped
+      commandId: account.create.scoped
+      kind: command
+      capability: CAP-MEM-001
+      action: create
+      inputSchema: WorkspaceAccountCreateInput
+      outputSchema: PendingAccountProvisioningReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
     - invoke: account_status_update
       commandId: account.status.update
       kind: command
@@ -7276,7 +7398,7 @@ tauri:
       commandId: member.activate
       kind: command
       capability: CAP-MEM-001
-      action: update
+      action: manage
       inputSchema: MemberIdInput
       outputSchema: Member
       auth: required

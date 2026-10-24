@@ -21,6 +21,7 @@ import {
 } from "react-icons/lu";
 import { CreateInviteModal } from "@/components/create-invite-modal";
 import { LoadingButton } from "@/components/loading-button";
+import { MemberManagementDialog } from "@/components/member-management-dialog";
 import { ResourceInventoryPanel } from "@/components/resource-inventory-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -127,6 +128,8 @@ export function OrgManagementCenter({
   // Sub-modal states
   const [editOrgModalOpen, setEditOrgModalOpen] = useState(false);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  const [accountManagementOpen, setAccountManagementOpen] = useState(false);
+  const [accountWorkspaceId, setAccountWorkspaceId] = useState("");
   const [editWsModal, setEditWsModal] = useState<OrgWorkspaceItem | null>(null);
   const [deleteWsModal, setDeleteWsModal] = useState<OrgWorkspaceItem | null>(
     null,
@@ -425,8 +428,22 @@ export function OrgManagementCenter({
           (member) => member.accountId === userId && member.status === "active",
         );
       const workspaceRoles = Object.fromEntries(
-        ownMemberships.map((member) => [member.workspaceId, member.role]),
+        account.managedWorkspaceIds.map((managedWorkspaceId) => [
+          managedWorkspaceId,
+          "owner",
+        ]),
       ) as Record<string, HierarchicalRole>;
+      Object.assign(
+        workspaceRoles,
+        Object.fromEntries(
+          ownMemberships
+            .filter(
+              (member) =>
+                !account.managedWorkspaceIds.includes(member.workspaceId),
+            )
+            .map((member) => [member.workspaceId, member.role]),
+        ),
+      );
       const ownMembership = ownMemberships[0];
       setWorkspaces(loadedWorkspaces);
       setEmployees(loadedMembers);
@@ -436,6 +453,12 @@ export function OrgManagementCenter({
         role: (ownMembership?.role as HierarchicalRole) ?? "member",
         workspaceRoles,
       });
+      const manageableWorkspaceIds = Object.keys(workspaceRoles);
+      setAccountWorkspaceId((current) =>
+        manageableWorkspaceIds.includes(current)
+          ? current
+          : (manageableWorkspaceIds[0] ?? ""),
+      );
       setOrgName(
         primaryOrg?.name ??
           t("orgManagement.noOrganization", {
@@ -848,16 +871,54 @@ export function OrgManagementCenter({
                 </SelectContent>
               </Select>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setInviteModalOpen(true)}
-              disabled={workspaces.length === 0}
-              className="h-8 gap-1.5 text-xs"
-            >
-              <LuUserCheck className="size-3.5" />
-              Mời thành viên và chọn quyền
-            </Button>
+            <div className="flex items-center gap-2">
+              {Object.keys(currentUser.workspaceRoles).length > 0 && (
+                <Select
+                  value={accountWorkspaceId}
+                  onValueChange={setAccountWorkspaceId}
+                >
+                  <SelectTrigger className="h-8 w-[190px] text-xs">
+                    <SelectValue placeholder="Chọn workspace" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {workspaces
+                      .filter(
+                        (workspace) => currentUser.workspaceRoles[workspace.id],
+                      )
+                      .map((workspace) => (
+                        <SelectItem
+                          key={workspace.id}
+                          value={workspace.id}
+                          className="text-xs"
+                        >
+                          {workspace.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setAccountManagementOpen(true)}
+                disabled={!accountWorkspaceId}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <LuUsers className="size-3.5" />
+                Tạo tài khoản
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setInviteModalOpen(true)}
+                disabled={workspaces.length === 0}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <LuUserCheck className="size-3.5" />
+                Mời thành viên và chọn quyền
+              </Button>
+            </div>
           </div>
 
           <div className="rounded-lg border border-border/60 overflow-hidden bg-card text-xs">
@@ -1491,6 +1552,21 @@ export function OrgManagementCenter({
         onClose={() => setInviteModalOpen(false)}
         onInviteCreated={() => void loadRealData()}
       />
+
+      {accountManagementOpen && accountWorkspaceId && (
+        <MemberManagementDialog
+          isOpen={accountManagementOpen}
+          onClose={() => {
+            setAccountManagementOpen(false);
+            void loadRealData();
+          }}
+          workspaceId={accountWorkspaceId}
+          workspaceName={
+            workspaces.find((workspace) => workspace.id === accountWorkspaceId)
+              ?.name
+          }
+        />
+      )}
 
       {/* SUB-MODAL: Edit Organization */}
       <Dialog open={editOrgModalOpen} onOpenChange={setEditOrgModalOpen}>

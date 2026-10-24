@@ -2691,6 +2691,7 @@
     "tablePreferencesLoadFailed": "Could not load the table settings. Try again.",
     "tablePreferencesSaveFailed": "Could not save the table settings. Try again.",
     "feedbackMessageEmpty": "Write a message first.",
+    "accountInactive": "This account is suspended or disabled and cannot send feedback.",
     "feedbackMessageTooLong": "The message is too long. The limit is {{max}} characters.",
     "feedbackEmailInvalid": "This email address does not look right.",
     "feedbackInvalid": "The feedback was not accepted. Check the message and try again.",

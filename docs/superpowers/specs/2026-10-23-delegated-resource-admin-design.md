@@ -3,11 +3,12 @@
 ## Approved product behavior
 
 - Platform Admin may administer global accounts, organizations, workspaces, memberships, roles, and resources, with audit.
-- An Org Owner/Admin may create or invite identities into its organization and manage workspaces, members, roles, and resources only inside its organization authority.
+- An Organization owner (the account stored on the organization and authorized by `CAP-ORG-001:manage`) may create workspace-scoped identities and manage lower workspace memberships only inside that organization. The current domain has no separate Org Admin membership/role entity.
 - A Workspace Owner/Admin may create or invite accounts into that workspace and manage its members, roles, groups, profiles, and grants.
 - A Workspace Lead is scoped to one workspace. It can manage workspace membership/team records and assign Operator/Member roles; it cannot manage workspace policy or grant Admin/Owner/Platform Admin. Team-specific Lead scope requires a separate team-scope contract.
 - Operator and Member actions remain bounded by their effective role and explicit grants.
-- Account creation creates an identity in a pending/invited state; it does not grant global access. Workspace/org membership and role assignment are explicit, scoped steps.
+- Account creation creates a pending identity and an explicitly scoped active membership; it does not grant global access or make the account login-ready. Email verification and credential setup remain separate.
+- Scoped workspace account creation accepts an account identity and a requested workspace role. Workspace managers use the workspace role ceiling; Organization owners may reach child workspaces through their organization authority and may assign only roles below Owner. Platform Admin may assign any workspace membership role. Lead may request only Operator or Member. No invitation acceptance is required.
 - Role administration is delegated: the assignable capability set and target scope must be subsets of the actor's authority. Platform Admin is never assignable by a scoped manager.
 - All protected actions are authorized by Rust/API, audited, revision-checked, and consistent across UI, REST, Tauri, and MCP.
 
@@ -16,8 +17,7 @@
 ```text
 Platform Admin [cross-tenant account/org/workspace/role policy/audit]
 └─ Organization A
-   ├─ Org Owner [invite identities; manage org members, roles, workspaces]
-   ├─ Org Admin [same org scope, minus owner-only transfer]
+   ├─ Org Owner [manage organization and child workspace memberships/resources]
    └─ Workspace A1
       ├─ Workspace Owner [invite; manage workspace members/roles/resources]
       ├─ Workspace Admin [same workspace scope, without owner transfer]
@@ -44,7 +44,7 @@ Platform Admin
   Create account -> pending identity -> explicit membership + role assignment
 
 Organization
-  Members [search/filter] [Invite] [bulk role/status]
+  Members [search/filter] [select workspace] [Create account] [Invite] [bulk role/status]
   Workspaces [search/filter] [Create] [policy]
   Select member/workspace -> detail -> allowed actions only
 
@@ -82,7 +82,8 @@ They never infer identity, role, quota, status, or inherited access from the UI.
 ## Current contract gaps
 
 - Workspace Lead is now a first-class membership role. Team-specific Lead and organization-scoped roles remain unimplemented domain scopes.
-- Custom role definition/assignment and delegated account provisioning need an approved versioned API/domain contract before exposing those actions as complete.
+- Custom role definition/assignment and a distinct delegated Organization Admin role remain unimplemented; Organization ownership continues to use `Organization.accountId` plus the organization management grant.
+- Pending identity creation and scoped workspace membership APIs exist. Verification delivery and credential issuance do not, so newly created accounts cannot sign in yet.
 - Organization ownership transfer, account password reset/recovery delivery, workspace archive/delete, billing, and license operations have no supported domain endpoints and remain unavailable.
 - Profile group replacement exists within one workspace, including an empty group list; cross-workspace/org profile transfer is not implemented.
 

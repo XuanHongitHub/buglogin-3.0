@@ -27,6 +27,14 @@ commands:
     input: Empty
     output: Health
     audit: metadata-only
+  - id: feedback.submit
+    kind: command
+    capability: CAP-DIAG-001
+    action: create
+    adapters: [tauri, rest]
+    input: FeedbackSubmission
+    output: FeedbackReceipt
+    idempotency: required
   - id: operation.get
     kind: query
     capability: operation.read
@@ -724,6 +732,16 @@ commands:
     adapters: [tauri, rest, mcp]
     input: Empty
     output: AccountAdminPage
+  - id: account.create.scoped
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: WorkspaceAccountCreateInput
+    output: PendingAccountProvisioningReceipt
+    idempotency: required
+    tauri: account_create_scoped
+    rest: account.create.scoped
   - id: account.status.update
     kind: command
     capability: CAP-ADM-001
@@ -1023,7 +1041,7 @@ commands:
   - id: member.activate
     kind: command
     capability: CAP-MEM-001
-    action: update
+    action: manage
     adapters: [tauri, rest, mcp]
     input: MemberIdInput
     output: Member

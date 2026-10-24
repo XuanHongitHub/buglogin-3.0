@@ -158,6 +158,7 @@ pub fn run() {
             account_get,
             account_list,
             account_create,
+            account_create_scoped,
             account_status_update,
             events_stream,
             events_stream_stop,
@@ -1314,6 +1315,23 @@ async fn account_create(
     state
         .invoke(
             "account_create",
+            &correlation_id,
+            idempotency_key.as_deref(),
+            payload,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn account_create_scoped(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    idempotency_key: Option<String>,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "account_create_scoped",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,

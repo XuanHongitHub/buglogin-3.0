@@ -33,13 +33,11 @@ const required = {
   "darwin-aarch64": ".app.tar.gz",
 };
 if (
+  Object.keys(manifest).sort().join("|") !== "platforms|version" ||
   manifest.version !== version ||
   Object.keys(manifest.platforms ?? {})
     .sort()
-    .join("|") !== Object.keys(required).sort().join("|") ||
-  Object.keys(manifest.downloads ?? {})
-    .sort()
-    .join("|") !== "macos|windows"
+    .join("|") !== Object.keys(required).sort().join("|")
 ) {
   throw new Error(
     "updater feed version or platform coverage does not match this stable release",
@@ -84,31 +82,7 @@ for (const [platform, requiredSuffix] of Object.entries(required)) {
   ) {
     throw new Error(`${platform}: invalid detached updater signature`);
   }
-  const updater = artifactPath(entry.url, requiredSuffix, platform);
-  const downloadKey = platform === "windows-x86_64" ? "windows" : "macos";
-  const downloadSuffix = platform === "windows-x86_64" ? ".exe" : ".dmg";
-  const download = artifactPath(
-    manifest.downloads[downloadKey]?.url,
-    downloadSuffix,
-    `${platform} download`,
-  );
-  const sameImmutableRelease =
-    download.urlParts.length === updater.urlParts.length &&
-    (download.urlParts.length === 1 ||
-      download.urlParts[0] === updater.urlParts[0]);
-  if (!sameImmutableRelease || download.url.origin !== updater.url.origin) {
-    throw new Error(
-      `${platform}: installer and updater must come from the same immutable release run`,
-    );
-  }
-  if (
-    platform === "windows-x86_64" &&
-    manifest.downloads.windows.url !== entry.url
-  ) {
-    throw new Error(
-      "Windows installer link must match the signed NSIS updater artifact",
-    );
-  }
+  artifactPath(entry.url, requiredSuffix, platform);
 }
 console.log(
   `Verified stable updater feed for ${version} (${Object.keys(required).length} platforms)`,

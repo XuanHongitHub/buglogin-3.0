@@ -71,7 +71,8 @@ use crate::{
     proxy_credential_vault::ProxyCredentialVault,
     proxy_store::{ImportedProxy, ProxyImportReport},
     remote_api::{
-        ApiTokenPage, BugLabSsoStartResponse, CreatedApiToken, DeviceSessionTokens, RemoteApiClient,
+        ApiTokenPage, BugLabSsoStartResponse, CreatedApiToken, DeviceSessionTokens,
+        FeedbackReceipt, FeedbackSubmission, RemoteApiClient,
     },
     sync_key_vault::SyncKeyVault,
     wayfern_fingerprint::{
@@ -6429,6 +6430,38 @@ fn invalid_proxy_mutation_response(correlation_id: &str) -> Problem {
 }
 
 impl DesktopState {
+    pub async fn submit_feedback(
+        &self,
+        submission: FeedbackSubmission,
+        idempotency_key: &str,
+        correlation_id: &str,
+    ) -> Result<FeedbackReceipt, Problem> {
+        match self {
+            Self::Production(state) => {
+                state.refresh_session_if_needed(correlation_id).await?;
+                if !state.client.has_token()? {
+                    return Err(Problem::new(
+                        "authentication_required",
+                        "Sign in to send feedback",
+                        401,
+                        correlation_id,
+                    ));
+                }
+                state
+                    .client
+                    .submit_feedback(submission, idempotency_key, correlation_id)
+                    .await
+            }
+            Self::Local(_) => Err(Problem::new(
+                "feedback_hosted_authority_required",
+                "Feedback submission requires the signed-in BugLogin API",
+                409,
+                correlation_id,
+            )),
+            Self::Unavailable(problem) => Err(problem.clone()),
+        }
+    }
+
     pub async fn integration_status(
         &self,
         correlation_id: &str,

@@ -7,7 +7,7 @@ use std::{
 
 use crate::clock::unix_time_seconds;
 use crate::profile_runtime::DesktopSyncBackend;
-use crate::runtime_config::{is_production_api_host, url_authority_has_userinfo};
+use crate::runtime_config::url_authority_has_userinfo;
 use buglogin_api::services::connected_cookie_jobs::{
     ConnectedCookieFailureCode, ConnectedCookieJob, ConnectedCookieReceipt,
 };
@@ -117,6 +117,23 @@ impl Drop for CreatedApiToken {
 #[serde(rename_all = "camelCase")]
 pub struct ApiTokenPage {
     pub tokens: Vec<ApiTokenSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackReceipt {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackSubmission {
+    pub kind: String,
+    pub message: String,
+    pub include_logs: bool,
+    pub logs: Option<String>,
+    pub email: Option<String>,
+    pub locale: String,
 }
 
 #[derive(Deserialize)]
@@ -319,6 +336,27 @@ struct ApiProblem {
 impl RemoteApiClient {
     pub fn new(base_url: &str, token: String) -> Result<Self, Problem> {
         Self::build(base_url, Some(token))
+    }
+
+    pub async fn submit_feedback(
+        &self,
+        payload: FeedbackSubmission,
+        idempotency_key: &str,
+        correlation: &str,
+    ) -> Result<FeedbackReceipt, Problem> {
+        self.send(
+            Method::POST,
+            "/v1/feedback",
+            Some(
+                serde_json::to_value(payload)
+                    .map_err(|_| client_problem("feedback_invalid", 400))?,
+            ),
+            correlation,
+            Some(idempotency_key),
+            None,
+            &[],
+        )
+        .await
     }
 
     pub fn new_unauthenticated(base_url: &str) -> Result<Self, Problem> {
@@ -1916,6 +1954,16 @@ impl RemoteApiClient {
             "account_get" => self.get::<Value>("/v1/account",correlation).await?,
             "account_list" => self.get::<Value>("/v1/accounts",correlation).await?,
             "account_create" => self.send::<Value>(Method::POST,"/v1/accounts",Some(payload),correlation,idem,None,&[]).await?,
+            "account_create_scoped" => {
+                let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
+                let body = json!({
+                    "accountId": payload.get("accountId").cloned().ok_or_else(|| bad_input("accountId", correlation))?,
+                    "username": payload.get("username").cloned().ok_or_else(|| bad_input("username", correlation))?,
+                    "email": payload.get("email").cloned().ok_or_else(|| bad_input("email", correlation))?,
+                    "role": payload.get("role").cloned().ok_or_else(|| bad_input("role", correlation))?,
+                });
+                self.send::<Value>(Method::POST,&format!("/v1/workspaces/{workspace_id}/accounts"),Some(body),correlation,idem,None,&[]).await?
+            },
             "account_status_update" => {
                 let account_id = AccountId::from_str(&path_arg(&payload, "accountId", correlation)?)
                     .map_err(|_| bad_input("accountId", correlation))?;
@@ -2892,6 +2940,7 @@ fn command_id(name: &str) -> &str {
         "account_get" => "account.get",
         "account_list" => "account.list",
         "account_create" => "account.create",
+        "account_create_scoped" => "account.create.scoped",
         "account_status_update" => "account.status.update",
         "organization_list" => "organization.list",
         "organization_get" => "organization.get",
@@ -2990,7 +3039,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, canonical_workspace_update,
+        FeedbackSubmission, MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, canonical_workspace_update,
         legacy_workspace_update, manifest_commit_idempotency_key, optional_bool, optional_cursor,
         optional_page_limit, request_retry_safe,
     };
@@ -3071,6 +3120,60 @@ mod tests {
             .code,
             "invalid_command_input"
         );
+    }
+
+    #[tokio::test]
+    async fn feedback_submission_uses_authenticated_idempotent_api_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            let headers = headers.to_ascii_lowercase();
+            assert!(headers.starts_with("post /v1/feedback http/1.1"));
+            assert!(headers.contains("authorization: bearer feedback-test-token"));
+            assert!(headers.contains("idempotency-key: feedback-request-0001"));
+            assert!(headers.contains("x-correlation-id: feedback-correlation-0001"));
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap(),
+                json!({
+                    "kind": "bug",
+                    "message": "Profile sync stopped unexpectedly",
+                    "includeLogs": true,
+                    "logs": "redacted recent logs",
+                    "email": "user@example.test",
+                    "locale": "en"
+                })
+            );
+            let response_body = r#"{"id":"fbk_0123456789abcdef0123456789abcdef"}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "feedback-test-token".into())
+                .unwrap();
+        let receipt = client
+            .submit_feedback(
+                FeedbackSubmission {
+                    kind: "bug".into(),
+                    message: "Profile sync stopped unexpectedly".into(),
+                    include_logs: true,
+                    logs: Some("redacted recent logs".into()),
+                    email: Some("user@example.test".into()),
+                    locale: "en".into(),
+                },
+                "feedback-request-0001",
+                "feedback-correlation-0001",
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.id, "fbk_0123456789abcdef0123456789abcdef");
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -49,7 +49,10 @@ import { getActiveUserEmail } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
-import { analyzeBulkInvitationEmails } from "../../apps/desktop/src/member-invitation-input";
+import {
+  analyzeBulkAccountRows,
+  analyzeBulkInvitationEmails,
+} from "../../apps/desktop/src/member-invitation-input";
 import type {
   Member,
   MemberRole,
@@ -93,22 +96,32 @@ export function MemberManagementDialog({
     accountId: string;
     email: string;
     role: string;
+    platformAdmin: boolean;
+    organizationOwner: boolean;
   }>({
     id: "",
     accountId: "",
     email: "",
     role: "member",
+    platformAdmin: false,
+    organizationOwner: false,
   });
 
   // Invite modal state
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteUsername, setInviteUsername] = useState("");
+  const [inviteProvisioningAccountId, setInviteProvisioningAccountId] =
+    useState("");
+  const [createInviteAccount, setCreateInviteAccount] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteRole, setInviteRole] = useState<MemberRole>("operator");
   const [isInviting, setIsInviting] = useState(false);
   const [generatedInvite, setGeneratedInvite] = useState<{
     code: string;
     deepLink: string;
     expiresAt: string;
+    createdPendingAccount?: boolean;
   } | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -130,9 +143,17 @@ export function MemberManagementDialog({
   // Bulk Provision Modal state
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkEmailsText, setBulkEmailsText] = useState("");
+  const [bulkCreateAccounts, setBulkCreateAccounts] = useState(false);
+  const [bulkAccountIds, setBulkAccountIds] = useState<Record<string, string>>(
+    {},
+  );
   const [bulkInputError, setBulkInputError] = useState<string | null>(null);
   const bulkEmailAnalysis = useMemo(
     () => analyzeBulkInvitationEmails(bulkEmailsText),
+    [bulkEmailsText],
+  );
+  const bulkAccountAnalysis = useMemo(
+    () => analyzeBulkAccountRows(bulkEmailsText),
     [bulkEmailsText],
   );
   const [bulkRole, setBulkRole] = useState<MemberRole>("operator");
@@ -143,6 +164,8 @@ export function MemberManagementDialog({
   }>({ current: 0, total: 0 });
   const [bulkResults, setBulkResults] = useState<Array<{
     email: string;
+    username?: string;
+    accountCreated?: boolean;
     inviteCode?: string;
     deepLink?: string;
     status: "success" | "error";
@@ -154,9 +177,13 @@ export function MemberManagementDialog({
   const bulkFailureCount =
     bulkResults?.filter((result) => result.status === "error").length ?? 0;
 
-  const currentUserRank = ROLE_RANKS[currentUser.role] ?? 0;
+  const currentUserRank = currentUser.platformAdmin
+    ? Number.POSITIVE_INFINITY
+    : currentUser.organizationOwner
+      ? ROLE_RANKS.owner
+      : (ROLE_RANKS[currentUser.role] ?? 0);
   const assignableRoles: MemberRole[] = (
-    ["admin", "lead", "operator", "member"] as MemberRole[]
+    ["owner", "admin", "lead", "operator", "member"] as MemberRole[]
   ).filter((r) => (ROLE_RANKS[r] ?? 0) < currentUserRank);
 
   // Resolve workspace if needed
@@ -201,6 +228,8 @@ export function MemberManagementDialog({
           accountId: account.accountId,
           email: membership?.identity?.email ?? activeEmail,
           role: membership?.role ?? "member",
+          platformAdmin: account.platformAdmin,
+          organizationOwner: account.managedWorkspaceIds.includes(workspaceId),
         });
       }
       return true;
@@ -279,7 +308,40 @@ export function MemberManagementDialog({
     if (!inviteEmail.trim() || !workspaceId) return;
 
     setIsInviting(true);
+    setInviteError(null);
+    let accountCreated = false;
+    let accountProvisioningAttempted = false;
     try {
+      if (createInviteAccount) {
+        const accountId =
+          inviteProvisioningAccountId ||
+          `acct_${crypto.randomUUID().replaceAll("-", "")}`;
+        if (!inviteProvisioningAccountId)
+          setInviteProvisioningAccountId(accountId);
+        accountProvisioningAttempted = true;
+        const account = await desktopApi.createScopedPendingAccount(
+          {
+            workspaceId,
+            accountId,
+            username: inviteUsername.trim(),
+            email: inviteEmail.trim(),
+            role: inviteRole,
+          },
+          `acct-create-${crypto.randomUUID().replaceAll("-", "")}`,
+        );
+        accountCreated = true;
+        if (!account.member || account.member.status !== "active") {
+          throw new Error(
+            "API đã tạo identity nhưng chưa trả membership active; hãy cập nhật API rồi thử lại cùng account này.",
+          );
+        }
+        await loadMembers();
+        showSuccessToast(
+          `Đã tạo account và gán ${inviteRole} vào workspace. Email vẫn chờ xác minh trước khi đăng nhập.`,
+        );
+        setInviteModalOpen(false);
+        return;
+      }
       const expiresAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
       const invitation = await desktopApi.createMemberInvitation({
         workspaceId,
@@ -304,7 +366,14 @@ export function MemberManagementDialog({
       );
     } catch (err) {
       console.error("Failed to invite member:", err);
-      showErrorToast(err instanceof Error ? err.message : JSON.stringify(err));
+      const detail = err instanceof Error ? err.message : JSON.stringify(err);
+      const message = accountCreated
+        ? `Account đã được tạo nhưng chưa gán xong member/role. Làm mới danh sách hoặc kiểm tra account trước khi thử lại. Chi tiết: ${detail}`
+        : accountProvisioningAttempted
+          ? `Chưa xác nhận được kết quả tạo account. Có thể identity đã được tạo; thử lại sẽ dùng cùng account ID. Chi tiết: ${detail}`
+          : detail;
+      setInviteError(message);
+      showErrorToast(message);
     } finally {
       setIsInviting(false);
     }
@@ -514,11 +583,26 @@ export function MemberManagementDialog({
 
   const handleCreateBulkInvitations = async () => {
     setBulkInputError(null);
-    if (!workspaceId || bulkEmailAnalysis.entryCount === 0) return;
+    const entryCount = bulkCreateAccounts
+      ? bulkAccountAnalysis.entryCount
+      : bulkEmailAnalysis.entryCount;
+    if (!workspaceId || entryCount === 0) return;
     if (
-      bulkEmailAnalysis.invalid.length > 0 ||
-      bulkEmailAnalysis.duplicates.length > 0 ||
-      bulkEmailAnalysis.exceedsLimit
+      bulkCreateAccounts &&
+      (bulkAccountAnalysis.invalidLines.length > 0 ||
+        bulkAccountAnalysis.duplicateLines.length > 0 ||
+        bulkAccountAnalysis.exceedsLimit)
+    ) {
+      setBulkInputError(
+        `Kiểm tra dòng không hợp lệ: ${bulkAccountAnalysis.invalidLines.join(", ") || "—"}; trùng: ${bulkAccountAnalysis.duplicateLines.join(", ") || "—"}; tối đa 100 dòng.`,
+      );
+      return;
+    }
+    if (
+      !bulkCreateAccounts &&
+      (bulkEmailAnalysis.invalid.length > 0 ||
+        bulkEmailAnalysis.duplicates.length > 0 ||
+        bulkEmailAnalysis.exceedsLimit)
     ) {
       const reasons = [
         bulkEmailAnalysis.invalid.length > 0 &&
@@ -531,24 +615,66 @@ export function MemberManagementDialog({
       return;
     }
 
+    const entries = bulkCreateAccounts
+      ? bulkAccountAnalysis.rows
+      : bulkEmailAnalysis.emails.map((email, index) => ({
+          line: index + 1,
+          email,
+          username: undefined,
+        }));
     setIsBulkProcessing(true);
-    setBulkProgress({ current: 0, total: bulkEmailAnalysis.emails.length });
+    setBulkProgress({ current: 0, total: entries.length });
     const results: Array<{
       email: string;
+      username?: string;
+      accountCreated?: boolean;
       inviteCode?: string;
       deepLink?: string;
       status: "success" | "error";
       error?: string;
     }> = [];
 
-    for (let i = 0; i < bulkEmailAnalysis.emails.length; i++) {
-      const email = bulkEmailAnalysis.emails[i];
+    for (let i = 0; i < entries.length; i++) {
+      const { email, username } = entries[i];
       setBulkProgress({
         current: i + 1,
-        total: bulkEmailAnalysis.emails.length,
+        total: entries.length,
       });
 
+      let accountCreated = false;
+      let accountProvisioningAttempted = false;
       try {
+        if (bulkCreateAccounts && username) {
+          const nonce = crypto.randomUUID().replaceAll("-", "");
+          const emailKey = email.trim().toLocaleLowerCase("en-US");
+          const accountId = bulkAccountIds[emailKey] || `acct_${nonce}`;
+          if (!bulkAccountIds[emailKey]) {
+            setBulkAccountIds((previous) => ({
+              ...previous,
+              [emailKey]: accountId,
+            }));
+          }
+          accountProvisioningAttempted = true;
+          const account = await desktopApi.createScopedPendingAccount(
+            {
+              workspaceId,
+              accountId,
+              username,
+              email,
+              role: bulkRole,
+            },
+            `acct-create-${crypto.randomUUID().replaceAll("-", "")}`,
+          );
+          accountCreated = true;
+          if (!account.member || account.member.status !== "active") {
+            throw new Error(
+              "API đã tạo identity nhưng chưa trả membership active; cần cập nhật API.",
+            );
+          }
+          accountCreated = true;
+          results.push({ email, username, accountCreated, status: "success" });
+          continue;
+        }
         const invitation = await desktopApi.createMemberInvitation({
           workspaceId,
           email,
@@ -560,22 +686,43 @@ export function MemberManagementDialog({
         }
         const inviteCode = `${invitation.invitationId}.${invitation.code}`;
         const deepLink = `buglogin://invite?invitationId=${encodeURIComponent(invitation.invitationId)}&code=${encodeURIComponent(invitation.code)}`;
-        results.push({ email, inviteCode, deepLink, status: "success" });
+        results.push({
+          email,
+          username,
+          accountCreated,
+          inviteCode,
+          deepLink,
+          status: "success",
+        });
       } catch (err) {
-        const message =
+        const detail =
           err instanceof Error ? err.message : "Không thể tạo lời mời.";
-        results.push({ email, status: "error", error: message });
+        const message = accountCreated
+          ? `Account đã tạo nhưng chưa gán xong member/role: ${detail}`
+          : accountProvisioningAttempted
+            ? `Chưa xác nhận được kết quả tạo account; chạy lại dòng này sẽ dùng cùng account ID: ${detail}`
+            : detail;
+        results.push({
+          email,
+          username,
+          accountCreated,
+          status: "error",
+          error: message,
+        });
       }
     }
 
     setBulkResults(results);
     setIsBulkProcessing(false);
+    if (bulkCreateAccounts) void loadMembers();
   };
 
   const handleCopyBulkResults = async () => {
     if (!bulkResults) return;
     const lines = bulkResults.map((r) => {
       if (r.status === "error") return `${r.email}\tError: ${r.error}`;
+      if (bulkCreateAccounts)
+        return `${r.username}\t${r.email}\t${bulkRole}\tTạo account; email chờ xác minh`;
       return `${r.email}\tCode: ${r.inviteCode}\tLink: ${r.deepLink}`;
     });
     try {
@@ -592,9 +739,13 @@ export function MemberManagementDialog({
 
   const handleExportBulkCsv = () => {
     if (!bulkResults) return;
-    const header = "Email,InviteCode,DeepLink,Role,Status";
+    const header = bulkCreateAccounts
+      ? "Username,Email,Role,Status"
+      : "Email,InviteCode,DeepLink,Role,Status";
     const rows = bulkResults.map((r) => {
-      return `"${r.email}","${r.inviteCode || ""}","${r.deepLink || ""}","${bulkRole}","${r.status}"`;
+      return bulkCreateAccounts
+        ? `"${r.username || ""}","${r.email}","${bulkRole}","${r.status === "success" ? "created_pending_verification" : r.error || "error"}"`
+        : `"${r.email}","${r.inviteCode || ""}","${r.deepLink || ""}","${bulkRole}","${r.status}"`;
     });
     const csvContent = [header, ...rows].join("\n");
     const encodedUri = `data:text/csv;charset=utf-8,%EF%BB%BF${encodeURIComponent(csvContent)}`;
@@ -602,7 +753,7 @@ export function MemberManagementDialog({
     link.setAttribute("href", encodedUri);
     link.setAttribute(
       "download",
-      `buglogin-invitations-${new Date().toISOString().slice(0, 10)}.csv`,
+      `buglogin-${bulkCreateAccounts ? "accounts" : "invitations"}-${new Date().toISOString().slice(0, 10)}.csv`,
     );
     document.body.appendChild(link);
     link.click();
@@ -784,6 +935,7 @@ export function MemberManagementDialog({
                   size="sm"
                   variant="outline"
                   onClick={() => {
+                    setBulkCreateAccounts(false);
                     setBulkEmailsText("");
                     setBulkInputError(null);
                     setBulkRole(assignableRoles[0] || "operator");
@@ -803,9 +955,29 @@ export function MemberManagementDialog({
 
                 <Button
                   size="sm"
+                  variant="outline"
                   onClick={() => {
+                    setBulkCreateAccounts(true);
+                    setBulkEmailsText("");
+                    setBulkInputError(null);
+                    setBulkRole(assignableRoles[0] || "operator");
+                    setBulkResults(null);
+                    setBulkModalOpen(true);
+                  }}
+                  disabled={currentUserRank <= 1}
+                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+                >
+                  <LuUsers className="size-3.5" />
+                  <span>Tạo account hàng loạt</span>
+                </Button>
+
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setCreateInviteAccount(false);
                     setGeneratedInvite(null);
                     setInviteEmail("");
+                    setInviteUsername("");
                     setInviteRole(assignableRoles[0] || "operator");
                     setInviteModalOpen(true);
                   }}
@@ -818,6 +990,27 @@ export function MemberManagementDialog({
                       defaultValue: "Mời Thành Viên",
                     })}
                   </span>
+                </Button>
+
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setCreateInviteAccount(true);
+                    setGeneratedInvite(null);
+                    setInviteEmail("");
+                    setInviteUsername("");
+                    setInviteProvisioningAccountId(
+                      `acct_${crypto.randomUUID().replaceAll("-", "")}`,
+                    );
+                    setInviteError(null);
+                    setInviteRole(assignableRoles[0] || "operator");
+                    setInviteModalOpen(true);
+                  }}
+                  disabled={currentUserRank <= 1}
+                  className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+                >
+                  <LuUserPlus className="size-3.5" />
+                  <span>Tạo tài khoản</span>
                 </Button>
               </div>
             </div>
@@ -1217,19 +1410,24 @@ export function MemberManagementDialog({
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
               <LuUserPlus className="size-4 text-primary" />
               <span>
-                {t("members.inviteModalTitle", {
-                  defaultValue: "Mời Thành Viên Vào Không Gian Làm Việc",
-                })}
+                {createInviteAccount
+                  ? "Tạo tài khoản trong workspace"
+                  : t("members.inviteModalTitle", {
+                      defaultValue: "Mời Thành Viên Vào Không Gian Làm Việc",
+                    })}
               </span>
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              {t("members.inviteModalDesc", {
-                defaultValue:
-                  "Tạo liên kết hoặc mã mời để gửi trực tiếp cho thành viên tham gia.",
-              })}
+              {createInviteAccount
+                ? "Tạo identity BugLogin và gán member/role vào workspace hiện tại."
+                : t("members.inviteModalDesc", {
+                    defaultValue:
+                      "Tạo liên kết hoặc mã mời để gửi trực tiếp cho thành viên tham gia.",
+                  })}
               <span className="mt-1 block">
-                Chỉ người có account đang hoạt động và email đã xác minh mới
-                dùng được mã mời. Luồng này không tạo account hoặc mật khẩu.
+                {createInviteAccount
+                  ? "Identity được tạo ở trạng thái chờ xác minh email; không cấp mật khẩu và chưa thể đăng nhập. Role được kiểm tra lại ở API."
+                  : "Chỉ người có account đang hoạt động và email đã xác minh mới dùng được mã mời. Luồng này không tạo account hoặc mật khẩu."}
               </span>
             </DialogDescription>
           </DialogHeader>
@@ -1239,9 +1437,25 @@ export function MemberManagementDialog({
               onSubmit={(e) => void handleCreateInvite(e)}
               className="space-y-4 py-2 text-xs"
             >
+              {createInviteAccount && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium">Tên tài khoản</Label>
+                  <Input
+                    value={inviteUsername}
+                    onChange={(e) => setInviteUsername(e.target.value)}
+                    minLength={3}
+                    maxLength={64}
+                    required
+                    placeholder="nguyen.van.a"
+                    className="h-9 text-xs"
+                  />
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">
-                  Email nhận lời mời
+                  {createInviteAccount
+                    ? "Email tài khoản"
+                    : "Email nhận lời mời"}
                 </Label>
                 <Input
                   type="email"
@@ -1252,6 +1466,11 @@ export function MemberManagementDialog({
                   className="h-9 text-xs"
                 />
               </div>
+              {inviteError && (
+                <p role="alert" className="text-xs text-destructive">
+                  {inviteError}
+                </p>
+              )}
 
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">
@@ -1294,10 +1513,17 @@ export function MemberManagementDialog({
                   type="submit"
                   size="sm"
                   isLoading={isInviting}
-                  disabled={!inviteEmail.trim()}
+                  disabled={
+                    !inviteEmail.trim() ||
+                    (createInviteAccount && inviteUsername.trim().length < 3)
+                  }
                   className="h-8 text-xs font-medium cursor-pointer"
                 >
-                  {t("members.inviteButton", { defaultValue: "Sinh Mã Mời" })}
+                  {createInviteAccount
+                    ? "Tạo account & gán role"
+                    : t("members.inviteButton", {
+                        defaultValue: "Sinh Mã Mời",
+                      })}
                 </LoadingButton>
               </DialogFooter>
             </form>
@@ -1399,19 +1625,24 @@ export function MemberManagementDialog({
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
               <LuUsers className="size-4 text-primary" />
               <span>
-                {t("members.bulkModal.title", {
-                  defaultValue: "Mời thành viên hàng loạt",
-                })}
+                {bulkCreateAccounts
+                  ? "Tạo tài khoản hàng loạt"
+                  : t("members.bulkModal.title", {
+                      defaultValue: "Mời thành viên hàng loạt",
+                    })}
               </span>
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              {t("members.bulkModal.desc", {
-                defaultValue:
-                  "Nhập danh sách email để tạo lời mời dùng một lần.",
-              })}
+              {bulkCreateAccounts
+                ? "Tạo tối đa 100 identity và gán role vào workspace hiện tại."
+                : t("members.bulkModal.desc", {
+                    defaultValue:
+                      "Nhập danh sách email để tạo lời mời dùng một lần.",
+                  })}
               <span className="mt-1 block">
-                Người nhận phải có account BugLogin đang hoạt động với email đã
-                xác minh; thao tác này không tạo account hay mật khẩu.
+                {bulkCreateAccounts
+                  ? "Dòng theo định dạng username,email. Identity chờ xác minh email và chưa thể đăng nhập; API kiểm tra quyền role cho từng account."
+                  : "Người nhận phải có account BugLogin đang hoạt động với email đã xác minh; thao tác này không tạo account hay mật khẩu."}
               </span>
             </DialogDescription>
           </DialogHeader>
@@ -1420,10 +1651,12 @@ export function MemberManagementDialog({
             <div className="space-y-4 py-2 text-xs">
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">
-                  {t("members.bulkModal.emailsLabel", {
-                    defaultValue:
-                      "Danh sách email (mỗi dòng một email hoặc phân cách bằng dấu phẩy):",
-                  })}
+                  {bulkCreateAccounts
+                    ? "Danh sách username,email (mỗi dòng một tài khoản):"
+                    : t("members.bulkModal.emailsLabel", {
+                        defaultValue:
+                          "Danh sách email (mỗi dòng một email hoặc phân cách bằng dấu phẩy):",
+                      })}
                 </Label>
                 <textarea
                   rows={5}
@@ -1432,17 +1665,21 @@ export function MemberManagementDialog({
                     setBulkEmailsText(e.target.value);
                     setBulkInputError(null);
                   }}
-                  placeholder={t("members.bulkModal.emailsPlaceholder", {
-                    defaultValue:
-                      "staff01@alphamedia.vn\nstaff02@alphamedia.vn\nstaff03@alphamedia.vn",
-                  })}
+                  placeholder={
+                    bulkCreateAccounts
+                      ? "username01,staff01@example.com\nusername02,staff02@example.com"
+                      : t("members.bulkModal.emailsPlaceholder", {
+                          defaultValue:
+                            "staff01@alphamedia.vn\nstaff02@alphamedia.vn\nstaff03@alphamedia.vn",
+                        })
+                  }
                   className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
                   disabled={isBulkProcessing}
                 />
                 <span className="text-[11px] text-muted-foreground">
-                  {bulkEmailAnalysis.emails.length} hợp lệ ·{" "}
-                  {bulkEmailAnalysis.invalid.length} không hợp lệ ·{" "}
-                  {bulkEmailAnalysis.duplicates.length} trùng · tối đa 100
+                  {bulkCreateAccounts
+                    ? `${bulkAccountAnalysis.rows.length} hợp lệ · ${bulkAccountAnalysis.invalidLines.length} không hợp lệ · ${bulkAccountAnalysis.duplicateLines.length} trùng · tối đa 100`
+                    : `${bulkEmailAnalysis.emails.length} hợp lệ · ${bulkEmailAnalysis.invalid.length} không hợp lệ · ${bulkEmailAnalysis.duplicates.length} trùng · tối đa 100`}
                   {bulkInputError && (
                     <span role="alert" className="block text-destructive">
                       {bulkInputError}
@@ -1482,7 +1719,9 @@ export function MemberManagementDialog({
                 <div className="space-y-1.5">
                   <Label className="text-xs font-medium">Phương thức</Label>
                   <p className="h-9 flex items-center text-muted-foreground">
-                    Gửi lời mời dùng một lần
+                    {bulkCreateAccounts
+                      ? "Tạo identity + gán member role"
+                      : "Gửi lời mời dùng một lần"}
                   </p>
                 </div>
               </div>
@@ -1533,14 +1772,20 @@ export function MemberManagementDialog({
                   size="sm"
                   isLoading={isBulkProcessing}
                   onClick={() => void handleCreateBulkInvitations()}
-                  disabled={bulkEmailAnalysis.entryCount === 0}
+                  disabled={
+                    (bulkCreateAccounts
+                      ? bulkAccountAnalysis.entryCount
+                      : bulkEmailAnalysis.entryCount) === 0
+                  }
                   className="h-8 text-xs font-medium cursor-pointer"
                 >
                   {t("members.bulkModal.startButton", {
-                    count: bulkEmailAnalysis.emails.length,
-                    defaultValue: `Tạo ${
-                      bulkEmailAnalysis.emails.length
-                    } lời mời`,
+                    count: bulkCreateAccounts
+                      ? bulkAccountAnalysis.rows.length
+                      : bulkEmailAnalysis.emails.length,
+                    defaultValue: bulkCreateAccounts
+                      ? `Tạo ${bulkAccountAnalysis.rows.length} tài khoản`
+                      : `Tạo ${bulkEmailAnalysis.emails.length} lời mời`,
                   })}
                 </LoadingButton>
               </DialogFooter>
@@ -1566,15 +1811,21 @@ export function MemberManagementDialog({
                   )}
                   <span>
                     {bulkFailureCount === 0
-                      ? "Đã tạo đủ lời mời"
+                      ? bulkCreateAccounts
+                        ? "Đã tạo account và gán workspace"
+                        : "Đã tạo đủ lời mời"
                       : bulkSuccessCount > 0
-                        ? "Đã tạo một phần lời mời"
-                        : "Không tạo được lời mời"}
+                        ? "Đã xử lý một phần"
+                        : bulkCreateAccounts
+                          ? "Không tạo được account"
+                          : "Không tạo được lời mời"}
                   </span>
                 </div>
                 <p className="text-[11px] opacity-90">
                   {bulkSuccessCount} thành công · {bulkFailureCount} thất bại.
-                  Mã mời chỉ hiển thị một lần; kiểm tra lỗi trước khi gửi lại.
+                  {bulkCreateAccounts
+                    ? "Identity đang chờ xác minh email nên chưa thể đăng nhập; kiểm tra lỗi trước khi thử lại."
+                    : "Mã mời chỉ hiển thị một lần; kiểm tra lỗi trước khi gửi lại."}
                 </p>
               </div>
 
@@ -1583,7 +1834,11 @@ export function MemberManagementDialog({
                   <thead className="bg-muted/50 border-b border-border sticky top-0 text-[11px] font-medium text-muted-foreground">
                     <tr>
                       <th className="py-2 px-3">Email</th>
-                      <th className="py-2 px-3">Mã mời / Liên kết</th>
+                      <th className="py-2 px-3">
+                        {bulkCreateAccounts
+                          ? "Kết quả cấp quyền"
+                          : "Mã mời / Liên kết"}
+                      </th>
                       <th className="py-2 px-3 w-20 text-center">Trạng thái</th>
                     </tr>
                   </thead>
@@ -1599,7 +1854,9 @@ export function MemberManagementDialog({
                         <td className="py-1.5 px-3 font-mono text-[11px]">
                           {res.status === "success" ? (
                             <span className="text-muted-foreground">
-                              {res.inviteCode}
+                              {bulkCreateAccounts
+                                ? `${res.username} · ${bulkRole} · chờ xác minh`
+                                : res.inviteCode}
                             </span>
                           ) : (
                             <span className="text-destructive text-[10px]">
@@ -1647,7 +1904,9 @@ export function MemberManagementDialog({
                             defaultValue: "Đã chép",
                           })
                         : t("members.bulkModal.copyCredentials", {
-                            defaultValue: "Sao chép mã mời",
+                            defaultValue: bulkCreateAccounts
+                              ? "Sao chép danh sách account"
+                              : "Sao chép mã mời",
                           })}
                     </span>
                   </Button>

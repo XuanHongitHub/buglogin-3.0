@@ -186,9 +186,18 @@ async fn transport_authenticates_and_serves_json_rpc_tools() {
         tools().len()
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {
-        assert!(tool["inputSchema"]["$ref"].is_string());
-        assert!(tool["inputSchema"]["$defs"].is_object());
-        assert_ne!(tool["inputSchema"]["additionalProperties"], true);
+        let schema = &tool["inputSchema"];
+        assert!(schema.is_object());
+        assert!(
+            schema["$ref"].is_string()
+                || (schema["type"] == "object" && schema["properties"].is_object()),
+            "tool {} must expose an object input schema or a schema reference",
+            tool["name"]
+        );
+        if schema["$ref"].is_string() {
+            assert!(schema["$defs"].is_object());
+        }
+        assert_ne!(schema["additionalProperties"], true);
     }
 
     let called = app

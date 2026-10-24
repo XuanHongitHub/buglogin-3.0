@@ -256,6 +256,48 @@ impl WorkspaceService {
             .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))
     }
 
+    /// Returns the parent organization only when the caller can manage it.
+    /// This is used to inherit the organization's owner authority into a child
+    /// workspace without treating organization access as a workspace membership.
+    pub(crate) fn managed_organization_for_workspace(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        workspace_id: &WorkspaceId,
+    ) -> Result<Organization, Problem> {
+        let record = self
+            .organizations
+            .values()
+            .find(|record| record.workspaces.contains_key(workspace_id))
+            .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))?;
+        authorize_organization(principal, grants, &record.organization, Action::Manage)?;
+        Ok(record.organization.clone())
+    }
+
+    pub fn managed_workspace_ids(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+    ) -> Vec<WorkspaceId> {
+        self.organizations
+            .values()
+            .filter(|record| {
+                (principal
+                    .roles
+                    .contains(&buglogin_domain::permissions::Role::PlatformAdmin)
+                    || principal.account_id.as_ref() == Some(&record.organization.account_id))
+                    && authorize_organization(
+                        principal,
+                        grants,
+                        &record.organization,
+                        Action::Manage,
+                    )
+                    .is_ok()
+            })
+            .flat_map(|record| record.workspaces.keys().cloned())
+            .collect()
+    }
+
     pub fn update_workspace(
         &mut self,
         principal: &Principal,

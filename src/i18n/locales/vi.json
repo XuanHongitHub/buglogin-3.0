@@ -2691,6 +2691,7 @@
     "tablePreferencesLoadFailed": "Không thể tải cài đặt bảng. Hãy thử lại.",
     "tablePreferencesSaveFailed": "Không thể lưu cài đặt bảng. Hãy thử lại.",
     "feedbackMessageEmpty": "Hãy viết tin nhắn trước.",
+    "accountInactive": "Tài khoản đã bị tạm ngưng hoặc vô hiệu hóa nên không thể gửi phản hồi.",
     "feedbackMessageTooLong": "Tin nhắn quá dài. Giới hạn là {{max}} ký tự.",
     "feedbackEmailInvalid": "Địa chỉ email này có vẻ không đúng.",
     "feedbackInvalid": "Phản hồi không được chấp nhận. Hãy kiểm tra tin nhắn và thử lại.",

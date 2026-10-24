@@ -13,6 +13,23 @@ tags:
   - name: migration
   - name: runtime
 paths:
+  /v1/feedback:
+    post:
+      operationId: feedback.submit
+      tags: [system]
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FeedbackSubmission' }
+      responses:
+        "201": { description: Feedback was durably accepted, content: { application/json: { schema: { $ref: '#/components/schemas/FeedbackReceipt' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
   /v1/health:
     get:
       operationId: system.health.get
@@ -750,6 +767,26 @@ paths:
         "403": { $ref: '#/components/responses/Problem' }
         "409": { $ref: '#/components/responses/Problem' }
         "422": { $ref: '#/components/responses/Problem' }
+  /v1/workspaces/{workspaceId}/accounts:
+    post:
+      operationId: account.create.scoped
+      parameters:
+        - { $ref: '#/components/parameters/WorkspaceId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScopedAccountCreateBody' }
+      responses:
+        "201":
+          description: Pending identity created with its active workspace membership and requested lower role. No invitation acceptance is needed; email verification and credential setup remain separate.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PendingAccountProvisioningReceipt' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "422": { $ref: '#/components/responses/Problem' }
   /v1/accounts/{accountId}/status:
     put:
       operationId: account.status.update
@@ -1378,13 +1415,15 @@ components:
     AccountPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Account' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
     AccountAdminRecord: { type: object, required: [account, identity], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { oneOf: [{ $ref: '#/components/schemas/AccountIdentity' }, { type: "null" }] } }, additionalProperties: false }
     AccountAdminPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/AccountAdminRecord' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
-    AccountView: { type: object, required: [accountId], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    AccountView: { type: object, required: [accountId, platformAdmin, managedWorkspaceIds], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, platformAdmin: { type: boolean, description: True when the authenticated principal has the platform administrator role. }, managedWorkspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' }, description: Workspaces whose parent organization the authenticated principal can manage. } }, additionalProperties: false }
     AccountStatusUpdateInput: { type: object, required: [status, expectedRevision], properties: { status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     AccountStatusUpdateCommandInput: { type: object, required: [accountId, status, expectedRevision], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     AccountCreatePendingInput: { type: object, required: [accountId, username, email], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 } }, additionalProperties: false, description: Creates only an account with pending identity verification. Passwords and credentials are not accepted; login remains disabled until a separate verification and credential flow completes. }
+    ScopedAccountCreateBody: { type: object, required: [accountId, username, email, role], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false, description: Creates a pending identity after checking the actor can invite this lower role in the workspace. No membership or credential is issued. }
+    WorkspaceAccountCreateInput: { type: object, required: [workspaceId, accountId, username, email, role], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false, description: Desktop and MCP input for scoped pending identity creation. }
     AccountIdentityVerification: { type: string, enum: [pending, verified] }
     AccountIdentity: { type: object, required: [accountId, username, canonicalUsername, email, canonicalEmail, verification, revision, createdAt, updatedAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, canonicalUsername: { type: string }, email: { type: string, format: email }, canonicalEmail: { type: string, format: email }, verification: { $ref: '#/components/schemas/AccountIdentityVerification' }, revision: { type: integer, minimum: 1 }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
-    PendingAccountProvisioningReceipt: { type: object, required: [account, identity, replayed, onboardingStatus, loginEnabled], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { $ref: '#/components/schemas/AccountIdentity' }, replayed: { type: boolean }, onboardingStatus: { const: pending_verification }, loginEnabled: { const: false } }, additionalProperties: false, description: A provisioned account record with a pending identity. It is not login-capable; no password, credential, access token, or session is issued. }
+    PendingAccountProvisioningReceipt: { type: object, required: [account, identity, replayed, onboardingStatus, loginEnabled], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { $ref: '#/components/schemas/AccountIdentity' }, member: { $ref: '#/components/schemas/Member', description: Present for scoped account creation after an active workspace membership and role are assigned. }, replayed: { type: boolean }, onboardingStatus: { const: pending_verification }, loginEnabled: { const: false } }, additionalProperties: false, description: Account provisioning receipt. Scoped creation includes an active workspace membership; identity verification remains pending and no credential/session is issued. }
     OrganizationSnapshot: { type: object, required: [organization, policy, workspaceIds], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, workspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
     WorkspaceUsage: { type: object, required: [profiles, members, storageBytes], properties: { profiles: { type: integer, minimum: 0 }, members: { type: integer, minimum: 0 }, storageBytes: { type: integer, minimum: 0 } }, additionalProperties: false }
     UsageCheckResult: { type: object, required: [ok], properties: { ok: { type: boolean } }, additionalProperties: false }
@@ -1537,6 +1576,8 @@ components:
     ProxyCreateResult: { type: object, required: [record, deduplicated], properties: { record: { $ref: '#/components/schemas/ProxyRecord' }, deduplicated: { type: boolean } }, additionalProperties: false }
     Health: { type: object, required: [status, service], properties: { status: { const: ok }, service: { const: buglogin-api } }, additionalProperties: false }
     Readiness: { type: object, required: [status, service], properties: { status: { const: ready }, service: { const: buglogin-api } }, additionalProperties: false }
+    FeedbackSubmission: { type: object, required: [kind, message, includeLogs, locale], properties: { kind: { type: string, enum: [bug, idea, praise, other] }, message: { type: string, minLength: 1, maxLength: 5000 }, includeLogs: { type: boolean }, logs: { type: [string, "null"], maxLength: 131072 }, email: { type: [string, "null"], format: email, maxLength: 254 }, locale: { type: string, minLength: 1, maxLength: 32 } }, additionalProperties: false }
+    FeedbackReceipt: { type: object, required: [id], properties: { id: { type: string, pattern: '^fbk_[0-9a-f]{32}$' } }, additionalProperties: false }
     RuntimeDispatchInput: { type: object, required: [commandId, targetDeviceId], properties: { commandId: { type: string, enum: [profile.launch, profile.stop] }, targetDeviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, input: { type: object, additionalProperties: true } }, additionalProperties: false }
     RuntimeDispatchJobIdInput: { type: object, required: [workspaceId, jobId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, jobId: { type: string, pattern: '^runtime_[0-9a-f]{64}$' } }, additionalProperties: false }
     RuntimeDispatchJob: { type: object, required: [jobId, operationId, commandId, workspaceId, deviceId, profileId, requestedBy, idempotencyKey, createdAt, expiresAt, state], properties: { jobId: { type: string, pattern: '^runtime_[0-9a-f]{64}$' }, operationId: { type: string, minLength: 1 }, commandId: { type: string, enum: [profile.launch, profile.stop] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, requestedBy: { $ref: '#/components/schemas/CanonicalId' }, idempotencyKey: { type: string, minLength: 1, maxLength: 256 }, createdAt: { type: integer, minimum: 0 }, expiresAt: { type: integer, minimum: 1 }, state: { type: string, enum: [accepted, dispatched, running, completed, failed, cancelled, expired] }, executorAccountId: { $ref: '#/components/schemas/CanonicalId' }, input: { type: object }, result: { type: object }, failureCode: { type: string, pattern: '^[a-z0-9_]{1,96}$' } }, additionalProperties: false }
