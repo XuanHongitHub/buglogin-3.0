@@ -88,6 +88,8 @@ test("stable promotion validates RC assets and changes metadata without rebuildi
   assert.match(promotion, /qa_evidence_url:/);
   assert.match(promotion, /sha256sum --check SHA256SUMS\.txt/);
   assert.match(promotion, /verify-tauri-updater-feed\.mjs/);
+  assert.match(promotion, /\[\[ "\$count" == 2 \]\]/);
+  assert.doesNotMatch(promotion, /\[\[ "\$count" == 3 \]\]/);
   assert.match(promotion, /gh release edit[\s\S]*?--prerelease=false --latest/);
   assert.match(promotion, /Publish stable updater feed to DigitalOcean Spaces/);
   assert.doesNotMatch(

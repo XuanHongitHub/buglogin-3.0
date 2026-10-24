@@ -59,7 +59,7 @@ jobs:
           (cd downloaded && sha256sum --check SHA256SUMS.txt)
           node scripts/release/verify-tauri-updater-feed.mjs downloaded/latest.json "${RELEASE_REF#v}" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
           count="$(find downloaded -maxdepth 1 -type f -name 'BugLogin-*.zip' | wc -l | tr -d ' ')"
-          [[ "$count" == 3 ]] || { echo "Expected the exact Windows and macOS RC archives"; exit 1; }
+          [[ "$count" == 2 ]] || { echo "Expected the supported Windows and Apple Silicon macOS archives"; exit 1; }
       - name: Promote existing release metadata without rebuilding
         shell: bash
         run: |
