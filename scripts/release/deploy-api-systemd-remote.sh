@@ -236,7 +236,7 @@ if [[ -e "$active_marker" ]]; then
   if [[ -f "$admin_target" && ! -L "$admin_target" ]]; then
     current_admin_sha=$(sha256sum -- "$admin_target" | cut -d ' ' -f 1)
   fi
-  if ! is_deployment_id "$old_marker_deployment_id" || "$old_marker_api_sha" != "$old_api_sha" || "$old_marker_admin_sha" != "$current_admin_sha"; then
+  if ! is_deployment_id "$old_marker_deployment_id" || [[ "$old_marker_api_sha" != "$old_api_sha" || "$old_marker_admin_sha" != "$current_admin_sha" ]]; then
     echo "active deployment marker does not match installed BugLogin binaries; refusing activation" >&2
     exit 48
   fi
