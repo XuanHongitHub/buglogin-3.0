@@ -306,7 +306,7 @@ a{color:inherit}
           <i class="fa-brands fa-apple" aria-hidden="true"></i>
           <span>Dùng macOS? Tải bản cho Mac</span>
         </a>
-        <p class="rc-downloads" id="dl-rc" hidden></p>
+        <p class="rc-downloads" id="dl-version" hidden></p>
       </div>
 
       <div class="readout-wrap" aria-hidden="true">
@@ -623,7 +623,7 @@ a{color:inherit}
 
   const links = Array.from(document.querySelectorAll('[data-dl]'));
   links.push(alt);
-  const setAvailable = (platform, available, channel = 'stable') => {
+  const setAvailable = (platform, available, channel = 'rc') => {
     links.filter(a => a === alt ? platform === other.platform : (a.dataset.dl === 'auto' ? platform === main.platform : (a.dataset.dl === 'mac' ? platform === 'macos' : a.dataset.dl === platform)))
       .forEach(a => {
         const selected = a === alt ? other.platform : (a.dataset.dl === 'auto' ? main.platform : (a.dataset.dl === 'mac' ? 'macos' : a.dataset.dl));
@@ -640,32 +640,18 @@ a{color:inherit}
 
   const refreshDownloads = async () => {
     try {
-      const response = await fetch('/api/downloads/latest?channel=stable', { cache: 'no-store', headers: { accept: 'application/json' } });
+      const response = await fetch('/api/downloads/latest?channel=rc', { cache: 'no-store', headers: { accept: 'application/json' } });
       if (!response.ok) throw new Error('release_catalog_unavailable');
       const catalog = await response.json();
-      setAvailable('windows', typeof catalog.platforms?.windows?.url === 'string');
-      setAvailable('macos', typeof catalog.platforms?.macos?.url === 'string');
-    } catch {
-      setAvailable('windows', false);
-      setAvailable('macos', false);
-    }
-  };
-
-  const refreshRcDownload = async () => {
-    const note = document.getElementById('dl-rc');
-    try {
-      const response = await fetch('/api/downloads/latest?channel=rc', { cache: 'no-store', headers: { accept: 'application/json' } });
-      if (!response.ok) throw new Error('rc_unavailable');
-      const catalog = await response.json();
-      const windows = typeof catalog.platforms?.windows?.url === 'string';
-      const macos = typeof catalog.platforms?.macos?.url === 'string';
-      if (!windows && !macos) throw new Error('rc_unavailable');
-      const links = [];
-      if (windows) links.push(`<a href="/api/downloads/latest?channel=rc&platform=windows">Windows</a>`);
-      if (macos) links.push(`<a href="/api/downloads/latest?channel=rc&platform=macos">macOS</a>`);
-      note.innerHTML = `Bản thử nghiệm ${catalog.version} (RC): ${links.join(' · ')}`;
+      setAvailable('windows', typeof catalog.platforms?.windows?.url === 'string', 'rc');
+      setAvailable('macos', typeof catalog.platforms?.macos?.url === 'string', 'rc');
+      const note = document.getElementById('dl-version');
+      note.textContent = `Phiên bản tải xuống: ${catalog.version}`;
       note.hidden = false;
     } catch {
+      setAvailable('windows', false, 'rc');
+      setAvailable('macos', false, 'rc');
+      const note = document.getElementById('dl-version');
       note.hidden = true;
       note.textContent = '';
     }
@@ -673,17 +659,16 @@ a{color:inherit}
 
   links.forEach(a => {
     const platform = a === alt ? other.platform : (a.dataset.dl === 'auto' ? main.platform : (a.dataset.dl === 'mac' ? 'macos' : a.dataset.dl));
-    a.href = `/api/downloads/latest?channel=stable&platform=${platform}`;
+    a.href = `/api/downloads/latest?channel=rc&platform=${platform}`;
     a.setAttribute('aria-disabled', 'true');
     a.tabIndex = -1;
   });
   setAvailable('windows', false);
   setAvailable('macos', false);
   void refreshDownloads();
-  void refreshRcDownload();
-  window.setInterval(() => { void refreshDownloads(); void refreshRcDownload(); }, 5 * 60 * 1000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { void refreshDownloads(); void refreshRcDownload(); } });
-  window.addEventListener('focus', () => { void refreshDownloads(); void refreshRcDownload(); });
+  window.setInterval(() => { void refreshDownloads(); }, 5 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshDownloads(); });
+  window.addEventListener('focus', () => { void refreshDownloads(); });
   document.getElementById('year').textContent = new Date().getFullYear();
 
   /* ---------- Thanh điều hướng ---------- */
