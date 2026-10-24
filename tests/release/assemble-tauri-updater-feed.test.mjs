@@ -12,6 +12,9 @@ const script = fileURLToPath(
     import.meta.url,
   ),
 );
+const downloadsVerifier = fileURLToPath(
+  new URL("../../scripts/release/verify-downloads-manifest.mjs", import.meta.url),
+);
 const targets = [
   ["windows-x64", "windows-x86_64", "BugLogin_1.2.3_x64-setup.exe"],
   ["macos-arm64", "darwin-aarch64", "BugLogin_1.2.3_aarch64.app.tar.gz"],
@@ -50,17 +53,25 @@ test("updater feed binds each supported target to a signed immutable release ass
     const manifest = JSON.parse(
       await readFile(join(output, "latest.json"), "utf8"),
     );
+    const downloads = JSON.parse(
+      await readFile(join(output, "downloads.json"), "utf8"),
+    );
     assert.equal(manifest.version, "1.2.3");
+    assert.equal(Object.hasOwn(manifest, "downloads"), false);
     assert.deepEqual(
       Object.keys(manifest.platforms).sort(),
       targets.map(([, key]) => key).sort(),
     );
     assert.equal(
-      manifest.downloads.windows.url,
+      downloads.version,
+      manifest.version,
+    );
+    assert.equal(
+      downloads.platforms.windows.url,
       manifest.platforms["windows-x86_64"].url,
     );
     assert.match(
-      manifest.downloads.macos.url,
+      downloads.platforms.macos.url,
       /BugLogin_1\.2\.3_aarch64\.dmg$/,
     );
     for (const [, key, artifact] of targets) {
@@ -163,6 +174,44 @@ test("updater feed can point signed assets at an immutable BugLogin Spaces versi
       { encoding: "utf8" },
     );
     assert.notEqual(invalid.status, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("manual download manifest accepts only the Windows and macOS installers from the same immutable release", async () => {
+  const root = await mkdtemp(join(tmpdir(), "buglogin-downloads-manifest-"));
+  try {
+    const manifestPath = join(root, "downloads.json");
+    const artifactRoot =
+      "https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/artifacts/v3.0.6/12345/";
+    const manifest = {
+      version: "3.0.6",
+      platforms: {
+        windows: { url: `${artifactRoot}BugLogin_3.0.6_x64-setup.exe` },
+        macos: { url: `${artifactRoot}BugLogin_3.0.6_aarch64.dmg` },
+      },
+    };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const valid = spawnSync(
+      process.execPath,
+      [downloadsVerifier, manifestPath, "3.0.6", artifactRoot],
+      { encoding: "utf8" },
+    );
+    assert.equal(valid.status, 0, valid.stderr);
+
+    manifest.platforms.macos.url = manifest.platforms.macos.url.replace(
+      "/v3.0.6/12345/",
+      "/v3.0.5/12344/",
+    );
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const wrongRelease = spawnSync(
+      process.execPath,
+      [downloadsVerifier, manifestPath, "3.0.6", artifactRoot],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(wrongRelease.status, 0);
+    assert.match(wrongRelease.stderr, /outside the immutable release/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

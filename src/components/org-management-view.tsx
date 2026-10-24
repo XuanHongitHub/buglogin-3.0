@@ -20,8 +20,8 @@ import {
   LuUsers,
 } from "react-icons/lu";
 import { CreateInviteModal } from "@/components/create-invite-modal";
-import { MemberManagementDialog } from "@/components/member-management-dialog";
 import { LoadingButton } from "@/components/loading-button";
+import { MemberManagementDialog } from "@/components/member-management-dialog";
 import { ResourceInventoryPanel } from "@/components/resource-inventory-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -457,7 +457,7 @@ export function OrgManagementCenter({
       setAccountWorkspaceId((current) =>
         manageableWorkspaceIds.includes(current)
           ? current
-          : manageableWorkspaceIds[0] ?? "",
+          : (manageableWorkspaceIds[0] ?? ""),
       );
       setOrgName(
         primaryOrg?.name ??
@@ -882,9 +882,15 @@ export function OrgManagementCenter({
                   </SelectTrigger>
                   <SelectContent>
                     {workspaces
-                      .filter((workspace) => currentUser.workspaceRoles[workspace.id])
+                      .filter(
+                        (workspace) => currentUser.workspaceRoles[workspace.id],
+                      )
                       .map((workspace) => (
-                        <SelectItem key={workspace.id} value={workspace.id} className="text-xs">
+                        <SelectItem
+                          key={workspace.id}
+                          value={workspace.id}
+                          className="text-xs"
+                        >
                           {workspace.name}
                         </SelectItem>
                       ))}
@@ -1555,7 +1561,10 @@ export function OrgManagementCenter({
             void loadRealData();
           }}
           workspaceId={accountWorkspaceId}
-          workspaceName={workspaces.find((workspace) => workspace.id === accountWorkspaceId)?.name}
+          workspaceName={
+            workspaces.find((workspace) => workspace.id === accountWorkspaceId)
+              ?.name
+          }
         />
       )}
 

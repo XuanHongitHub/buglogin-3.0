@@ -21,10 +21,16 @@ export function analyzeBulkAccountRows(input: string): {
   exceedsLimit: boolean;
   entryCount: number;
 } {
-  const entries = input.split(/\r?\n/).map((text, index) => ({
-    line: index + 1,
-    text: text.trim(),
-  })).filter(({ text }) => text && !text.startsWith("#") && !/^username\s*,\s*email$/i.test(text));
+  const entries = input
+    .split(/\r?\n/)
+    .map((text, index) => ({
+      line: index + 1,
+      text: text.trim(),
+    }))
+    .filter(
+      ({ text }) =>
+        text && !text.startsWith("#") && !/^username\s*,\s*email$/i.test(text),
+    );
   const rows: BulkAccountRow[] = [];
   const invalidLines: number[] = [];
   const duplicateLines: number[] = [];
@@ -32,7 +38,13 @@ export function analyzeBulkAccountRows(input: string): {
   const emails = new Set<string>();
   for (const { line, text } of entries) {
     const columns = text.split(",").map((part) => part.trim());
-    if (columns.length !== 2 || columns[0].length < 3 || columns[0].length > 64 || columns[1].length > 254 || !EMAIL_PATTERN.test(columns[1])) {
+    if (
+      columns.length !== 2 ||
+      columns[0].length < 3 ||
+      columns[0].length > 64 ||
+      columns[1].length > 254 ||
+      !EMAIL_PATTERN.test(columns[1])
+    ) {
       invalidLines.push(line);
       continue;
     }

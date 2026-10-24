@@ -16,7 +16,8 @@ fn registry_contains_every_v1_command_once() {
 
 #[test]
 fn generated_registry_matches_canonical_source_hash() {
-    let source_hash = format!("{:x}", Sha256::digest(REGISTRY_SOURCE.as_bytes()));
+    let normalized_source = REGISTRY_SOURCE.replace("\r\n", "\n");
+    let source_hash = format!("{:x}", Sha256::digest(normalized_source.as_bytes()));
     assert_eq!(CommandRegistry::source_sha256(), source_hash);
 }
 
@@ -34,6 +35,11 @@ fn every_registered_command_has_canonical_action() {
         ("runtime.catalog.get", Action::Read),
         ("system.health.get", Action::Read),
         ("feedback.submit", Action::Create),
+        ("runtime.dispatch.enqueue", Action::Execute),
+        ("runtime.dispatch.inbox", Action::Read),
+        ("runtime.dispatch.claim", Action::Execute),
+        ("runtime.dispatch.complete", Action::Execute),
+        ("runtime.dispatch.fail", Action::Execute),
         ("operation.get", Action::Read),
         ("events.stream", Action::Read),
         ("audit.events.list", Action::Read),
@@ -79,6 +85,8 @@ fn every_registered_command_has_canonical_action() {
         ("migration.package.verify", Action::Execute),
         ("migration.package.activate", Action::Execute),
         ("auth.device.start", Action::Create),
+        ("auth.sso.buglab.start", Action::Create),
+        ("auth.sso.buglab.complete", Action::Create),
         ("auth.login", Action::Create),
         ("auth.api.tokens.list", Action::Read),
         ("auth.api.token.create", Action::Create),
@@ -111,6 +119,8 @@ fn every_registered_command_has_canonical_action() {
         ("profile.blob.check", Action::Update),
         ("profile.blob.put", Action::Update),
         ("account.get", Action::Read),
+        ("account.create", Action::Create),
+        ("account.create.scoped", Action::Create),
         ("account.list", Action::Read),
         ("account.status.update", Action::Manage),
         ("organization.list", Action::Read),
@@ -151,7 +161,7 @@ fn every_registered_command_has_canonical_action() {
         ("member.invitation.create", Action::Create),
         ("member.invitation.redeem", Action::Update),
         ("member.invitation.revoke", Action::Manage),
-        ("member.activate", Action::Update),
+        ("member.activate", Action::Manage),
         ("member.suspend", Action::Manage),
         ("member.role.update", Action::Manage),
         ("resource.list", Action::Read),
@@ -367,8 +377,13 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
                 | "auth.recovery.request"
                 | "auth.recovery.complete"
                 | "auth.desktop.login"
+                | "auth.sso.buglab.start"
+                | "auth.sso.buglab.complete"
                 | "desktop.auth.login"
                 | "desktop.auth.logout"
+                | "runtime.dispatch.claim"
+                | "runtime.dispatch.complete"
+                | "runtime.dispatch.fail"
         ) {
             assert!(command.auth_required, "{}", command.id.as_str());
         }
@@ -385,6 +400,9 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
                 | "auth.desktop.login"
                 | "desktop.auth.login"
                 | "desktop.auth.logout"
+                | "runtime.dispatch.claim"
+                | "runtime.dispatch.complete"
+                | "runtime.dispatch.fail"
         ) {
             assert!(command.idempotency_required, "{}", command.id.as_str());
         }

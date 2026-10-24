@@ -7904,6 +7904,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_account_creation_assigns_lower_role_without_invitation() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(crate::http::FirstOwnerBootstrapInput {
+                account_id: Some("acct_scoped_create_owner".into()),
+                username: "scoped-create-owner".into(),
+                email: "scoped-create-owner@example.com".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("owner-test-password-123".into()),
+                organization_name: "Scoped account test org".into(),
+                workspace_name: "Scoped account test workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 10,
+                max_members: 10,
+                max_storage_bytes: 1024 * 1024,
+            })
+            .unwrap();
+        let owner_token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let app = crate::http::router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/workspaces/{}/accounts",
+                        owner.workspace_id.as_str()
+                    ))
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "scoped-account-create-test-01")
+                    .header("x-correlation-id", "scoped-account-create-test")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "accountId": "acct_scoped_created_member",
+                            "username": "scoped-created-member",
+                            "email": "scoped-created-member@example.com",
+                            "role": "member",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["account"]["id"], "acct_scoped_created_member");
+        assert_eq!(body["identity"]["verification"], "pending");
+        assert_eq!(body["member"]["accountId"], "acct_scoped_created_member");
+        assert_eq!(body["member"]["workspaceId"], owner.workspace_id.as_str());
+        assert_eq!(body["member"]["role"], "member");
+        assert_eq!(body["member"]["status"], "active");
+        assert_eq!(body["onboardingStatus"], "pending_verification");
+        assert_eq!(body["loginEnabled"], false);
+        assert!(body.get("invitation").is_none());
+
+        let persisted_member = state
+            .members
+            .read()
+            .unwrap()
+            .active_members()
+            .into_iter()
+            .find(|member| member.id.as_str() == body["member"]["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            persisted_member.account_id.as_str(),
+            "acct_scoped_created_member"
+        );
+        assert_eq!(persisted_member.workspace_id, owner.workspace_id);
+        assert_eq!(persisted_member.role, MemberRole::Member);
+        assert_eq!(persisted_member.status, MemberStatus::Active);
+    }
+
+    #[tokio::test]
     async fn workspace_invitation_rest_lifecycle_requires_verified_email_and_is_single_use() {
         let state = ApiState::hosted_with_control_store(
             ProfileService::disabled(),

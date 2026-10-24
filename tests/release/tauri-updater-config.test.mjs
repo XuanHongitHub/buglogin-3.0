@@ -7,6 +7,9 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const script = fileURLToPath(new URL("../../scripts/release/create-tauri-updater-config.mjs", import.meta.url));
+const publicKey = Buffer.from(
+  "untrusted comment: minisign public key: test\nRWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
+).toString("base64");
 
 test("release updater config pins HTTPS feed and signed-version policy", async () => {
   const directory = await mkdtemp(join(tmpdir(), "buglogin-updater-config-"));
@@ -16,7 +19,7 @@ test("release updater config pins HTTPS feed and signed-version policy", async (
       encoding: "utf8",
       env: {
         ...process.env,
-        BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: publicKey,
         TAURI_SIGNING_PRIVATE_KEY: "test-only-secret-not-written-to-config",
         BUGLOGIN_TAURI_UPDATER_ENDPOINT: "https://updates.example.test/stable/latest.json",
       },
@@ -25,7 +28,7 @@ test("release updater config pins HTTPS feed and signed-version policy", async (
     const config = JSON.parse(await readFile(output, "utf8"));
     assert.equal(config.bundle.createUpdaterArtifacts, true);
     assert.deepEqual(config.plugins.updater.endpoints, ["https://updates.example.test/stable/latest.json"]);
-    assert.equal(config.plugins.updater.pubkey, "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+    assert.equal(config.plugins.updater.pubkey, publicKey);
     assert.equal(config.plugins.updater.requireSignedVersion, true);
     assert.equal(JSON.stringify(config).includes("test-only-secret"), false);
   } finally {
@@ -49,7 +52,7 @@ test("release updater config rejects insecure endpoints", async () => {
       encoding: "utf8",
       env: {
         ...process.env,
-        BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: publicKey,
         TAURI_SIGNING_PRIVATE_KEY: "test-only",
         BUGLOGIN_TAURI_UPDATER_ENDPOINT: "http://updates.example.test/latest.json",
       },

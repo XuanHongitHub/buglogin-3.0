@@ -761,7 +761,8 @@ function parseAccount(value: unknown): AccountSummary | undefined {
     platformAdmin: value.platformAdmin === true,
     managedWorkspaceIds: Array.isArray(value.managedWorkspaceIds)
       ? value.managedWorkspaceIds.filter(
-          (workspaceId): workspaceId is string => typeof workspaceId === "string",
+          (workspaceId): workspaceId is string =>
+            typeof workspaceId === "string",
         )
       : [],
     ...(status !== undefined ? { status } : {}),

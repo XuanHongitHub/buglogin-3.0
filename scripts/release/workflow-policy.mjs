@@ -23,28 +23,20 @@ export function verifyReleaseText(text) {
     /uses:\s*\.\/\.github\/workflows\/signing\.yml/,
     /contents:\s*read/,
     /apps\/desktop\/src-tauri\/tauri\.conf\.json/,
-    /publish-rc:\n[\s\S]*?needs:\s*\[validate, sign-and-verify\]/,
-    /publish-rc:[\s\S]*?permissions:\n\s+actions:\s*read\n\s+contents:\s*write/,
-    /actions\/download-artifact@[0-9a-f]{40}/,
-    /verify-bundle\.mjs ["']?\$\{matches\[0\]\}/,
-    /S3_PUBLIC_BASE_URL: https:\/\/mavelnut-login\.sgp1\.digitaloceanspaces\.com\/releases\/desktop\/v3/,
-    /assemble-tauri-updater-feed\.mjs[^\n]*S3_PUBLIC_BASE_URL\/artifacts\//,
-    /verify-tauri-updater-feed\.mjs[^\n]*S3_PUBLIC_BASE_URL\/artifacts\//,
-    /aws s3 cp[^\n]*S3_RELEASE_BUCKET/,
-    /releases\/desktop\/v3\/rc\/latest\.json/,
-    /expected=\(windows-x64 macos-arm64\)/,
-    /gh release create[\s\S]*?--prerelease --verify-tag/,
+    /sign-and-verify:\n\s+needs: validate/,
+    /source-ref:\s*\$\{\{ needs\.validate\.outputs\.release_ref \}\}/,
+    /source-sha:\s*\$\{\{ needs\.validate\.outputs\.release_sha \}\}/,
+    /RELEASE_SHA="\$\(git rev-parse "refs\/tags\/\$RELEASE_REF\^\{commit\}"\)"/,
+    /git status --porcelain --untracked-files=no/,
   ], "release");
   const writePermissionJobs = [...text.matchAll(/^  ([\w-]+):[\s\S]*?^    permissions:\n((?:^      [^\n]*\n)+)/gm)]
     .filter(([, , permissions]) => /^      contents:\s*write$/m.test(permissions))
     .map(([ , job ]) => job);
-  if (writePermissionJobs.length !== 1 || writePermissionJobs[0] !== "publish-rc") {
-    throw new Error("[release-policy] contents: write must be scoped only to publish-rc");
+  if (writePermissionJobs.length !== 0) {
+    throw new Error("[release-policy] private candidate workflow must not grant contents: write");
   }
-  forbidPatterns(text, [/pull_request:/, /secrets\.(?!S3_ACCESS_KEY_ID\b|S3_SECRET_ACCESS_KEY\b)/, /zhom\/donutbrowser/i, /deploy|CLOUDFLARE/i, /\.\/src-tauri\/tauri\.conf\.json/], "release");
+  forbidPatterns(text, [/publish-rc/, /pull_request:/, /secrets\./, /S3_ACCESS|S3_SECRET|S3_RELEASE_BUCKET/i, /gh release create/i, /rc\/latest\.json/i, /aws s3 cp/i, /zhom\/donutbrowser/i, /deploy|CLOUDFLARE/i, /\.\/src-tauri\/tauri\.conf\.json/], "release");
   forbidPatterns(text, [/^\s+push:\s*$/m, /github\.ref_protected/], "release dispatch on unprotected tags");
-  requireCount(text, /secrets\.S3_ACCESS_KEY_ID/g, 1, "S3 access key exposure scope");
-  requireCount(text, /secrets\.S3_SECRET_ACCESS_KEY/g, 1, "S3 secret key exposure scope");
   verifyPinnedActions(text, "release");
 }
 

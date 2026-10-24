@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {
-  analyzeBulkInvitationEmails,
   analyzeBulkAccountRows,
+  analyzeBulkInvitationEmails,
   MAX_BULK_INVITATIONS,
 } from "./member-invitation-input.ts";
 
@@ -20,8 +20,13 @@ const tooMany = Array.from(
 ).join("\n");
 assert.equal(analyzeBulkInvitationEmails(tooMany).exceedsLimit, true);
 
-const accountRows = analyzeBulkAccountRows("username,email\nlead1,one@example.com\nlead2,TWO@example.com\nLEAD1,three@example.com\ninvalid");
-assert.deepEqual(accountRows.rows.map(({ username }) => username), ["lead1", "lead2"]);
+const accountRows = analyzeBulkAccountRows(
+  "username,email\nlead1,one@example.com\nlead2,TWO@example.com\nLEAD1,three@example.com\ninvalid",
+);
+assert.deepEqual(
+  accountRows.rows.map(({ username }) => username),
+  ["lead1", "lead2"],
+);
 assert.deepEqual(accountRows.duplicateLines, [4]);
 assert.deepEqual(accountRows.invalidLines, [5]);
 
