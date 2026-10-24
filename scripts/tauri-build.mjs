@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from "node:child_process";
-import { cp, mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { cp, mkdir, rm } from "node:fs/promises";
+import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBuildTargetDir } from "./build-target.mjs";
 import { stageTauriSidecarDirectory } from "./tauri-sidecar-staging.mjs";
@@ -10,7 +11,9 @@ import { stageTauriSidecarDirectory } from "./tauri-sidecar-staging.mjs";
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const desktopRoot = resolve(repositoryRoot, "apps/desktop");
 const cargoTargetDir = resolveBuildTargetDir(process.env.CARGO_TARGET_DIR);
-const frontendDist = resolve(cargoTargetDir, "desktop-dist");
+const frontendStageName = `.tauri-frontend-dist-${randomUUID()}`;
+const frontendStagePath = resolve(desktopRoot, frontendStageName);
+const frontendStageConfigPath = `../${frontendStageName}`;
 const targetArgumentIndex = process.argv.indexOf("--target");
 const targetArgument = process.argv.find((argument) =>
   argument.startsWith("--target="),
@@ -39,6 +42,7 @@ const sourceBinaries = resolve(desktopRoot, "src-tauri/binaries");
 const childEnv = {
   ...process.env,
   CARGO_TARGET_DIR: cargoTargetDir,
+  BUGLOGIN_TAURI_FRONTEND_DIST_STAGE: frontendStagePath,
   TAURI_ENV_TARGET_TRIPLE: targetTriple,
 };
 let restoreBinariesDirectory;
@@ -72,7 +76,13 @@ const child = spawn(
     "src-tauri/tauri.conf.json",
     "--config",
     JSON.stringify({
-      build: { frontendDist, beforeBuildCommand: "pnpm build" },
+      build: {
+        // Tauri interprets a Windows drive path such as G:\\... as a URI.
+        // Use a relative directory so Tauri embeds frontend assets in the app.
+        frontendDist: frontendStageConfigPath,
+        beforeBuildCommand:
+          "pnpm copy-migration-binary && pnpm build && node ../../scripts/stage-tauri-frontend.mjs",
+      },
       ...(debugBuild && noBundle ? { bundle: { externalBin: [] } } : {}),
     }),
     ...process.argv.slice(2),
@@ -83,10 +93,19 @@ const child = spawn(
 async function finishBuild(code, signal) {
   try {
     await restoreBinariesDirectory?.();
+    const stagedPath = relative(desktopRoot, frontendStagePath);
+    if (
+      !stagedPath ||
+      stagedPath === ".." ||
+      stagedPath.startsWith(`..${sep}`)
+    ) {
+      throw new Error(
+        "Refusing to remove frontend staging outside desktop root",
+      );
+    }
+    await rm(frontendStagePath, { recursive: true, force: true });
   } catch (error) {
-    console.error(
-      `Could not restore Tauri binaries directory: ${error.message}`,
-    );
+    console.error(`Could not clean Tauri build staging: ${error.message}`);
     process.exitCode = 1;
     return;
   }

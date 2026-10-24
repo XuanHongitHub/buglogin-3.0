@@ -10,19 +10,27 @@ import { RippleButton } from "./ui/ripple";
 interface AppUpdateToastProps {
   updateInfo: AppUpdateInfo;
   onRestart: () => Promise<void>;
+  onUpdate?: () => void;
   onDismiss: () => void;
   updateReady?: boolean;
+  updateAvailable?: boolean;
 }
 
 export function AppUpdateToast({
   updateInfo,
   onRestart,
+  onUpdate,
   onDismiss,
   updateReady = false,
+  updateAvailable = false,
 }: AppUpdateToastProps) {
   const { t } = useTranslation();
   const handleRestartClick = async () => {
     await onRestart();
+  };
+
+  const handleUpdateClick = () => {
+    onUpdate?.();
   };
 
   const handleViewRelease = () => {
@@ -46,9 +54,11 @@ export function AppUpdateToast({
             <span className="text-sm font-semibold text-foreground">
               {updateReady
                 ? t("appUpdate.toast.updateReady")
-                : updateInfo.repo_update
-                  ? "Update available via package manager"
-                  : t("appUpdate.toast.manualDownloadRequired")}
+                : updateAvailable
+                  ? t("appUpdate.toast.updateAvailable")
+                  : updateInfo.repo_update
+                    ? "Update available via package manager"
+                    : t("appUpdate.toast.manualDownloadRequired")}
             </span>
             <div className="text-xs text-muted-foreground">
               {updateInfo.current_version} → {updateInfo.new_version}
@@ -74,6 +84,15 @@ export function AppUpdateToast({
             >
               <LuCheckCheck className="size-3" />
               {t("appUpdate.toast.restartNow")}
+            </RippleButton>
+          ) : updateAvailable ? (
+            <RippleButton
+              onClick={handleUpdateClick}
+              size="sm"
+              className="flex items-center gap-2 text-xs"
+            >
+              <LuCheckCheck className="size-3" />
+              {t("appUpdate.toast.updateNow")}
             </RippleButton>
           ) : (
             !updateInfo.repo_update &&

@@ -697,6 +697,15 @@ const profileClient = createWebApiClient({
             nextCursor: "prf_web_1",
           });
     }
+    if (new URL(request.url).pathname === "/cdn-cgi/trace")
+      return new Response("fl=abc\nip=203.0.113.7\nloc=vn\n", {
+        headers: { "content-type": "text/plain" },
+      });
+    if (
+      request.url.endsWith("/v1/profiles/prf_web_1") &&
+      request.method === "GET"
+    )
+      return Response.json({ schemaVersion: 1, revision: 1, value: profile });
     if (request.url.endsWith("/v1/profiles") && request.method === "POST")
       return Response.json(
         { schemaVersion: 1, revision: 1, value: profile },
@@ -1138,6 +1147,60 @@ assert(
 assert(
   (await lastProfileRequest.clone().json()).expectedRevision === 1,
   "Profile group replacement must send the expected revision",
+);
+const loadedProfile = await profileClient.reads.profile(
+  "prf_web_1",
+  profileController.signal,
+);
+assert(
+  loadedProfile.value.id === "prf_web_1",
+  "Profile read response was not parsed",
+);
+const profileConnection = await profileClient.reads.profileConnection(
+  profileController.signal,
+);
+assert(
+  profileConnection.ip === "203.0.113.7" &&
+    profileConnection.countryCode === "VN",
+  "Profile connection response was not parsed",
+);
+const profileConnectionRequest = profileRequests.at(-1);
+if (!profileConnectionRequest)
+  throw new Error("Profile connection request was not captured");
+assert(
+  new URL(profileConnectionRequest.url).pathname === "/cdn-cgi/trace" &&
+    profileConnectionRequest.credentials === "same-origin" &&
+    profileConnectionRequest.cache === "no-store",
+  "Cloudflare connection observation request is not scoped to the current site",
+);
+const viewerRequests: Request[] = [];
+const viewerClient = createWebApiClient({
+  baseUrl: "https://api3.buglogin.com",
+  correlationId: () => "cor_profile_viewer_redeem",
+  fetch: async (input, init) => {
+    const request = new Request(input, init);
+    viewerRequests.push(request);
+    assert(
+      !request.headers.has("authorization"),
+      "Viewer ticket must not use an account bearer",
+    );
+    return Response.json({ authenticated: true });
+  },
+});
+await viewerClient.writes.redeemProfileViewerTicket(
+  "prf_viewer_test",
+  "a".repeat(64),
+  profileController.signal,
+);
+const viewerRequest = viewerRequests[0];
+if (!viewerRequest)
+  throw new Error("Viewer redemption request was not captured");
+assert(
+  viewerRequest.method === "POST" &&
+    new URL(viewerRequest.url).pathname ===
+      "/v1/profiles/prf_viewer_test/viewer-session" &&
+    (await viewerRequest.clone().json()).ticket === "a".repeat(64),
+  "Profile viewer ticket must be redeemed in the profile-scoped POST body",
 );
 
 async function expectProblem(

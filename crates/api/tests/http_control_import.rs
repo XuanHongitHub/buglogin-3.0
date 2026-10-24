@@ -449,7 +449,7 @@ async fn account_count(app: axum::Router, token: &str) -> usize {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    body(response).await.as_array().unwrap().len()
+    body(response).await["items"].as_array().unwrap().len()
 }
 
 async fn body(response: axum::response::Response) -> Value {

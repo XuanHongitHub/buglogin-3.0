@@ -101,6 +101,7 @@ use crate::{
         operations::{Operation, OperationService, OperationStatus},
         profile_creation::ProfileCreationService,
         profile_hosted::HostedProfileService,
+        profile_viewer::{ProfileViewerService, SESSION_TTL_SECONDS},
         recovery::{RecoveryDelivery, RecoveryService},
         resources::ResourceService,
         runtime_catalog::PublishedRuntimeCatalog,
@@ -308,6 +309,7 @@ pub struct ApiState {
     pub auth: Arc<RwLock<AuthService>>,
     pub(crate) device_authorization: DeviceAuthorizationService,
     pub(crate) device_key_directory: DeviceKeyDirectoryService,
+    profile_viewer: ProfileViewerService,
     api_tokens: ApiTokenService,
     device_verification_uri: Arc<str>,
     web_origin: Arc<str>,
@@ -564,6 +566,7 @@ impl ApiState {
             )?)),
             device_authorization: DeviceAuthorizationService::new(control_persistence.clone()),
             device_key_directory: DeviceKeyDirectoryService::new(control_persistence.clone()),
+            profile_viewer: ProfileViewerService::new(control_persistence.clone()),
             api_tokens,
             device_verification_uri: Arc::from("http://127.0.0.1:3000/device"),
             web_origin: Arc::from("http://127.0.0.1:3000"),
@@ -5920,6 +5923,14 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/proxies/parse", post(parse_proxy))
         .route("/v1/profiles", get(list_profiles).post(create_profile))
         .route("/v1/profiles/{id}", get(get_profile).delete(delete_profile))
+        .route(
+            "/v1/profiles/{id}/viewer-tickets",
+            post(issue_profile_viewer_ticket),
+        )
+        .route(
+            "/v1/profiles/{id}/viewer-session",
+            post(redeem_profile_viewer_ticket),
+        )
         .route("/v1/profiles/{id}/binding", get(get_profile_binding))
         .route("/v1/profiles/{id}/archive", put(archive_profile))
         .route("/v1/profiles/{id}/restore", put(restore_profile))
@@ -8303,16 +8314,82 @@ async fn get_profile(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<buglogin_storage::local::Versioned<Profile>>, Response> {
-    let principal = authenticate(&state, &headers)?;
-    let grants = grants(&state)?;
     let id = ProfileId::from_str(&id)
         .map_err(|_| response(problem("invalid_profile_id", "Invalid profile ID", 400)))?;
+    let principal = authenticate_profile_reader(&state, &headers, &id)?;
+    let grants = grants(&state)?;
     authorize_profile(&state, &principal, &grants, &id)?;
     let profile = state
         .get_profile_record(&id)
         .map_err(response)?
         .ok_or_else(|| response(problem("profile_not_found", "Profile not found", 404)))?;
     Ok(Json(profile))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RedeemProfileViewerTicketInput {
+    ticket: String,
+}
+
+impl Drop for RedeemProfileViewerTicketInput {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.ticket.zeroize();
+    }
+}
+
+async fn issue_profile_viewer_ticket(
+    State(state): State<ApiState>,
+    Path(raw_profile_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let account_id = principal.account_id.as_ref().ok_or_else(|| {
+        response(problem(
+            "profile_viewer_account_required",
+            "An account is required to open this profile",
+            403,
+        ))
+    })?;
+    let profile_id = ProfileId::from_str(&raw_profile_id)
+        .map_err(|_| response(problem("invalid_profile_id", "Invalid profile ID", 400)))?;
+    authorize_profile(&state, &principal, &grants(&state)?, &profile_id)?;
+    let ticket = state
+        .profile_viewer
+        .issue(account_id, &profile_id, request_now(&headers)?)
+        .map_err(response)?;
+    Ok(sensitive_json(ticket))
+}
+
+async fn redeem_profile_viewer_ticket(
+    State(state): State<ApiState>,
+    Path(raw_profile_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<RedeemProfileViewerTicketInput>,
+) -> Result<Response, Response> {
+    let profile_id = ProfileId::from_str(&raw_profile_id)
+        .map_err(|_| response(problem("invalid_profile_id", "Invalid profile ID", 400)))?;
+    let (session, _) = state
+        .profile_viewer
+        .redeem(&input.ticket, &profile_id, request_now(&headers)?)
+        .map_err(response)?;
+    let cookie_name = profile_viewer_cookie_name(&profile_id);
+    let cookie_value = format!(
+        "{cookie_name}={}; Path=/v1/profiles/{}; Max-Age={SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=Strict",
+        session.as_str(),
+        profile_id.as_str()
+    );
+    let cookie = HeaderValue::from_str(&cookie_value).map_err(|_| {
+        response(problem(
+            "profile_viewer_cookie_invalid",
+            "Profile viewer session could not be created",
+            500,
+        ))
+    })?;
+    let mut result = sensitive_json(serde_json::json!({"authenticated": true}));
+    result.headers_mut().append(header::SET_COOKIE, cookie);
+    Ok(result)
 }
 
 async fn get_profile_binding(
@@ -9755,6 +9832,91 @@ fn authenticate(state: &ApiState, headers: &HeaderMap) -> Result<Principal, Resp
         .map_err(response)
 }
 
+fn authenticate_profile_reader(
+    state: &ApiState,
+    headers: &HeaderMap,
+    profile_id: &ProfileId,
+) -> Result<Principal, Response> {
+    if headers.get(header::AUTHORIZATION).is_some() {
+        return authenticate(state, headers);
+    }
+    let viewer_account = cookie(headers, &profile_viewer_cookie_name(profile_id))
+        .ok()
+        .and_then(|raw_session| {
+            state
+                .profile_viewer
+                .authenticate(raw_session, profile_id, request_now(headers).ok()?)
+                .ok()
+        });
+    let account_id = match viewer_account {
+        Some(account_id) => account_id,
+        None => {
+            let raw_session = cookie(headers, WEB_SESSION_COOKIE)?;
+            let raw_csrf = cookie(headers, WEB_CSRF_COOKIE)?;
+            state
+                .auth
+                .read()
+                .map_err(|_| {
+                    response(problem(
+                        "auth_unavailable",
+                        "Authentication unavailable",
+                        503,
+                    ))
+                })?
+                .browser_session(raw_session, raw_csrf, request_now(headers)?)
+                .map_err(response)?
+                .0
+        }
+    };
+    let account_id = require_active_account(state, account_id)?;
+    let memberships = state
+        .members
+        .read()
+        .map_err(|_| {
+            response(problem(
+                "member_unavailable",
+                "Member state unavailable",
+                503,
+            ))
+        })?
+        .active_for_account(&account_id);
+    let mut principal = Principal {
+        account_id: Some(account_id),
+        roles: BTreeSet::from([Role::Account]),
+        ..Principal::default()
+    };
+    if state
+        .platform_admin_accounts
+        .read()
+        .map_err(|_| {
+            response(problem(
+                "permission_unavailable",
+                "Permission service unavailable",
+                503,
+            ))
+        })?
+        .contains(principal.account_id.as_ref().expect("account assigned"))
+    {
+        principal.roles.insert(Role::PlatformAdmin);
+    }
+    for member in memberships {
+        principal.workspace_ids.insert(member.workspace_id);
+    }
+    Ok(principal)
+}
+
+fn profile_viewer_cookie_name(profile_id: &ProfileId) -> String {
+    let digest = Sha256::digest(profile_id.as_str().as_bytes());
+    let suffix = digest[..12]
+        .iter()
+        .fold(String::with_capacity(24), |mut output, byte| {
+            use std::fmt::Write;
+            let _ = write!(output, "{byte:02x}");
+            output
+        });
+    format!("__Secure-buglogin_viewer_{suffix}")
+}
+
 fn authenticated_browser_account_for_mutation(
     state: &ApiState,
     headers: &HeaderMap,
@@ -10593,6 +10755,124 @@ mod persistence_tests {
         },
         time::Duration,
     };
+
+    #[test]
+    fn profile_reader_accepts_verified_web_session_and_derives_workspace_scope() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: Some("profile_reader_owner".into()),
+                username: "profile-reader-owner".into(),
+                email: "profile-reader-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("profile reader test password".into()),
+                organization_name: "Profile Reader Org".into(),
+                workspace_name: "Profile Reader Workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 10,
+                max_members: 5,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let issued = state
+            .auth
+            .write()
+            .unwrap()
+            .issue_browser(owner.account_id.clone(), now() + 3_600, now())
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "{WEB_SESSION_COOKIE}={}; {WEB_CSRF_COOKIE}={}",
+                issued.raw_session, issued.raw_csrf
+            ))
+            .unwrap(),
+        );
+        headers.insert(
+            "x-correlation-id",
+            HeaderValue::from_static("cor_profile_reader_test"),
+        );
+
+        let profile_id = ProfileId::from_str("prf_profile_reader_test").unwrap();
+        let principal = authenticate_profile_reader(&state, &headers, &profile_id).unwrap();
+        assert_eq!(principal.account_id, Some(owner.account_id));
+        assert_eq!(
+            principal.roles,
+            BTreeSet::from([Role::Account, Role::PlatformAdmin])
+        );
+        assert_eq!(principal.workspace_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn profile_viewer_redemption_sets_profile_scoped_http_only_cookie() {
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: Some("profile_viewer_http_owner".into()),
+                username: "profile-viewer-http-owner".into(),
+                email: "profile-viewer-http-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("profile viewer test password".into()),
+                organization_name: "Profile Viewer Org".into(),
+                workspace_name: "Profile Viewer Workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 10,
+                max_members: 5,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let profile_id = ProfileId::from_str("prf_profile_viewer_http").unwrap();
+        let mut issued = state
+            .profile_viewer
+            .issue(&owner.account_id, &profile_id, now())
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-correlation-id",
+            HeaderValue::from_static("cor_profile_viewer_redeem_test"),
+        );
+        let response = redeem_profile_viewer_ticket(
+            State(state.clone()),
+            Path(profile_id.as_str().to_owned()),
+            headers,
+            Json(RedeemProfileViewerTicketInput {
+                ticket: std::mem::take(&mut issued.ticket),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("Path=/v1/profiles/prf_profile_viewer_http"));
+        assert!(set_cookie.contains("HttpOnly; Secure; SameSite=Strict"));
+
+        let cookie_pair = set_cookie.split(';').next().unwrap();
+        let mut viewer_headers = HeaderMap::new();
+        viewer_headers.insert(header::COOKIE, HeaderValue::from_str(cookie_pair).unwrap());
+        viewer_headers.insert(
+            "x-correlation-id",
+            HeaderValue::from_static("cor_profile_viewer_read_test"),
+        );
+        let principal = authenticate_profile_reader(&state, &viewer_headers, &profile_id).unwrap();
+        assert_eq!(principal.account_id, Some(owner.account_id));
+
+        let other_profile = ProfileId::from_str("prf_profile_viewer_other").unwrap();
+        assert!(authenticate_profile_reader(&state, &viewer_headers, &other_profile).is_err());
+    }
 
     #[tokio::test]
     async fn feedback_submission_is_authenticated_durable_and_idempotent() {

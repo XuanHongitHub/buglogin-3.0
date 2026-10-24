@@ -60,6 +60,12 @@ import type {
   WorkspaceUpdate as WorkspaceUpdateInput,
 } from "../../generated/command-registry.js";
 
+export type ProfileConnection = {
+  ip: string | null;
+  countryCode: string | null;
+  source: "cloudflare-edge";
+};
+
 export type {
   AccountDto,
   AccountStatus,
@@ -279,6 +285,8 @@ export type WebApiClient = {
       limit: number,
       signal: AbortSignal,
     ): Promise<VersionedProfilePage>;
+    profile(id: string, signal: AbortSignal): Promise<VersionedProfile>;
+    profileConnection(signal: AbortSignal): Promise<ProfileConnection>;
     operation(operationId: string, signal: AbortSignal): Promise<Operation>;
     proxies(workspaceId: string, signal: AbortSignal): Promise<ProxyPage>;
     proxy(
@@ -304,6 +312,11 @@ export type WebApiClient = {
     ): Promise<AuditEventPage>;
   };
   writes: {
+    redeemProfileViewerTicket(
+      profileId: string,
+      ticket: string,
+      signal: AbortSignal,
+    ): Promise<void>;
     createOrganization(
       input: OrganizationCreateInput,
       options: MutationOptions,

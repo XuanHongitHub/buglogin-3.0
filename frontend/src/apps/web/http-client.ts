@@ -35,6 +35,7 @@ import {
   type OrganizationSummary,
   type Problem,
   type Profile,
+  type ProfileConnection,
   type ProfileCreateInput,
   type ProfileGroupsReplaceInput,
   type ProfileProxyAssignment,
@@ -426,6 +427,14 @@ export function createWebApiClient(options: WebApiClientOptions): WebApiClient {
           parseVersionedProfilePage,
         );
       },
+      profile: (id, signal) =>
+        request(
+          `/v1/profiles/${encodeURIComponent(id)}`,
+          { signal },
+          parseVersionedProfile,
+        ),
+      profileConnection: (signal) =>
+        readCloudflareConnection(fetchRequest, signal),
       operation: (operationId, signal) =>
         request(
           `/v1/operations/${encodeURIComponent(operationId)}`,
@@ -471,6 +480,17 @@ export function createWebApiClient(options: WebApiClientOptions): WebApiClient {
       },
     },
     writes: {
+      redeemProfileViewerTicket: (profileId, ticket, signal) =>
+        request(
+          `/v1/profiles/${encodeURIComponent(profileId)}/viewer-session`,
+          {
+            body: { ticket },
+            method: "POST",
+            signal,
+          },
+          (value) =>
+            isRecord(value) && value.authenticated === true ? true : undefined,
+        ).then(() => undefined),
       createOrganization: (input, mutationOptions) =>
         mutation(
           "/v1/organizations",
@@ -1102,6 +1122,58 @@ function parseProfileProxyAssignment(
     proxyId: value.proxyId,
     requestedAt: value.requestedAt,
   };
+}
+
+async function readCloudflareConnection(
+  fetchRequest: typeof fetch,
+  signal: AbortSignal,
+): Promise<ProfileConnection> {
+  const origin =
+    typeof window === "undefined"
+      ? "https://buglogin.com"
+      : window.location.origin;
+  const response = await fetchRequest(new URL("/cdn-cgi/trace", origin), {
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: { Accept: "text/plain" },
+    signal,
+  });
+  if (!response.ok) throw new Error("Cloudflare edge location is unavailable");
+  const fields = new Map<string, string>();
+  for (const line of (await response.text()).split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator > 0)
+      fields.set(line.slice(0, separator), line.slice(separator + 1).trim());
+  }
+  const rawIp = fields.get("ip");
+  const ip = rawIp && isIpAddress(rawIp) ? rawIp : null;
+  const rawCountry = fields.get("loc")?.toUpperCase();
+  const countryCode =
+    rawCountry &&
+    /^[A-Z]{2}$/.test(rawCountry) &&
+    !["XX", "T1"].includes(rawCountry)
+      ? rawCountry
+      : null;
+  return {
+    ip,
+    countryCode,
+    source: "cloudflare-edge",
+  };
+}
+
+function isIpAddress(value: string): boolean {
+  if (value.includes(":")) {
+    try {
+      return new URL(`http://[${value}]/`).hostname.length > 2;
+    } catch {
+      return false;
+    }
+  }
+  const parts = value.split(".");
+  return (
+    parts.length === 4 &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+  );
 }
 
 function parseGroup(value: unknown): Group | undefined {

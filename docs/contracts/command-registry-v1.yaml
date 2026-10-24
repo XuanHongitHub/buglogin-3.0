@@ -72,6 +72,23 @@ commands:
     adapters: [tauri, rest, mcp]
     input: ProfileIdInput
     output: ProfileRecord
+  - id: profile.viewer.ticket.issue
+    kind: command
+    capability: profile.read
+    action: read
+    adapters: [rest]
+    input: ProfileIdInput
+    output: ProfileViewerTicket
+    idempotency: none
+  - id: profile.viewer.ticket.redeem
+    kind: command
+    capability: profile.read
+    action: read
+    auth: single-use-capability
+    adapters: [rest]
+    input: ProfileViewerTicketInput
+    output: ProfileViewerSessionResponse
+    idempotency: none
   - id: profile.binding.get
     kind: query
     capability: profile.read

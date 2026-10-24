@@ -112,6 +112,16 @@ for (const command of commands.commands) {
   ) {
     fail(`public command must be a read-only query: ${command.id}`);
   }
+  if (
+    command.auth === "single-use-capability" &&
+    (command.id !== "profile.viewer.ticket.redeem" ||
+      command.kind !== "command" ||
+      command.action !== "read" ||
+      command.adapters.length !== 1 ||
+      command.adapters[0] !== "rest")
+  ) {
+    fail(`single-use capability auth is restricted to profile viewer redemption: ${command.id}`);
+  }
 }
 const sourceHash = createHash("sha256").update(commandSource).digest("hex");
 if (

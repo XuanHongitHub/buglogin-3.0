@@ -10,7 +10,6 @@ const requiredCoreOperations = ["auth.desktop.login", "runtime.catalog.get"];
 
 export function summarizeOpenApi(bytes) {
   const text = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : String(bytes);
-  const normalizedBytes = Buffer.from(text.replace(/\r\n?/g, "\n"), "utf8");
   const paths = [...text.matchAll(/^  \/[^:\r\n]+:/gm)].length;
   const operations = [...text.matchAll(/^\s+operationId:\s*([^\s#]+)/gm)]
     .map((match) => match[1])
@@ -18,7 +17,7 @@ export function summarizeOpenApi(bytes) {
   return {
     paths,
     operations,
-    sha256: createHash("sha256").update(normalizedBytes).digest("hex").toUpperCase(),
+    sha256: createHash("sha256").update(bytes).digest("hex").toUpperCase(),
   };
 }
 

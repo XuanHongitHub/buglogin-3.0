@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from "node:child_process";
-import { cp, mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { cp, mkdir, rm } from "node:fs/promises";
+import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBuildTargetDir } from "./build-target.mjs";
 import { stageTauriSidecarDirectory } from "./tauri-sidecar-staging.mjs";
@@ -12,12 +13,16 @@ const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 export function tauriCargoEnvironment(
   environment = process.env,
   platform = process.platform,
+  frontendStageName = ".tauri-cargo-dist-test",
 ) {
   const targetDir = resolveBuildTargetDir(
     environment.CARGO_TARGET_DIR,
     platform,
   );
-  const frontendDist = resolve(targetDir, "desktop-dist");
+  if (!/^\.tauri-cargo-dist-[A-Za-z0-9-]+$/.test(frontendStageName)) {
+    throw new Error("Tauri Cargo frontend stage name is invalid");
+  }
+  const frontendDist = `../${frontendStageName}`;
   let tauriConfig = {};
   const configured = environment.TAURI_CONFIG?.trim();
   if (configured) {
@@ -139,8 +144,31 @@ async function main(args) {
     return;
   }
 
-  const config = tauriCargoEnvironment();
-  await mkdir(config.frontendDist, { recursive: true });
+  const frontendStageName = `.tauri-cargo-dist-${randomUUID()}`;
+  const config = tauriCargoEnvironment(
+    process.env,
+    process.platform,
+    frontendStageName,
+  );
+  const frontendStagePath = resolve(
+    repositoryRoot,
+    "apps/desktop",
+    frontendStageName,
+  );
+  const relativeStagePath = relative(
+    resolve(repositoryRoot, "apps/desktop"),
+    frontendStagePath,
+  );
+  if (
+    !relativeStagePath ||
+    relativeStagePath === ".." ||
+    relativeStagePath.startsWith(`..${sep}`)
+  ) {
+    throw new Error(
+      "Refusing to stage Tauri Cargo frontend outside desktop root",
+    );
+  }
+  await mkdir(frontendStagePath);
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
   let restoreSidecar = async () => {};
   let terminationSignal;
@@ -166,6 +194,14 @@ async function main(args) {
     } catch (error) {
       console.error(
         `Could not restore Tauri binaries directory: ${error.message}`,
+      );
+      process.exitCode = 1;
+    }
+    try {
+      await rm(frontendStagePath, { recursive: true, force: true });
+    } catch (error) {
+      console.error(
+        `Could not remove Tauri Cargo frontend stage: ${error.message}`,
       );
       process.exitCode = 1;
     }

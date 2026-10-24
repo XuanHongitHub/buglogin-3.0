@@ -167,7 +167,7 @@ Priority: P0 launch-critical, P1 required operational breadth, P2 conditional/la
 |---|---|---|---:|---|
 | WSP-01 | Workspace overview | Assess current operations and exceptions | P0 | Resolve highest-priority issue |
 | WSP-02 | Profiles inventory | Find, inspect, govern profiles | P0 | Create/profile action |
-| WSP-03 | Profile detail | Review state, access, runtime, activity | P0 | Contextual action |
+| WSP-03 | Profile detail (`/profileId={id}`) | Review profile state, runtime/fingerprint configuration, and current browser connection; runtime opens it with a short-lived, read-only, profile-scoped handoff | P0 | Copy profile link |
 | WSP-04 | Profile access | Manage grants and lease policy | P0 | Grant access |
 | WSP-05 | Profile activity | Investigate profile events | P1 | Filter/export audit |
 | WSP-06 | Resource inventory | Find all typed resources | P0 | Add resource |

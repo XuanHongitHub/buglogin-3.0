@@ -1,10 +1,20 @@
 # CI, Build, Signing, Promotion, and Rollback Policy
 
 For the Windows workstation paths and the repository's current GitHub Actions/S3 procedure, see [Windows release workstation runbook](windows-release-workstation.md).
+The shared, binding desktop build/update/publish gates are in the [desktop release contract](desktop-release-contract.md); synchronize that file unchanged to the Actions repository before a release.
 
 ## Version authority
 
-One release version must match `package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`, tag, artifact names, update manifest, and release notes. Any mismatch stops release.
+One release version must match the root `Cargo.toml` workspace version, `apps/desktop/package.json`, `Cargo.lock`, `apps/desktop/src-tauri/tauri.conf.json`, tag or immutable source SHA, artifact names, update manifest, and release notes. Any mismatch stops release.
+
+## Tauri frontend assets and update behavior
+
+- `CARGO_TARGET_DIR` is only a compiler/cache and build-output location. Never pass its absolute Windows drive path (for example `G:\\buglogin-target\\desktop-dist`) as Tauri `build.frontendDist`.
+- Tauri `frontendDist` accepts either a URL or a directory. A Windows drive path begins with a URI scheme such as `G:`, so it can be interpreted as an external URL instead of bundled assets. The app can then open the build directory at runtime and show an `Index of ...` listing; another machine may have no such path at all.
+- Build frontend files into the selected target, then stage/copy them under a generated, repository-relative directory for the Tauri build. Configure `frontendDist` with that relative directory so Tauri embeds the files. Remove the generated staging directory after packaging.
+- The release verifier must reject a drive-absolute `frontendDist` and test the wrapper that constructs Tauri's merged config. The signed Windows install smoke must launch the installed app and confirm it renders the BugLogin UI without reading any workstation build path.
+- A manual “Check for updates” action only checks and presents the available version. It must not download, install, close, or restart the app until the user chooses “Update now”; after preparation, present a separate restart action. Automatic startup updates are a separate path and must follow the user's auto-update setting.
+- Check the published feed from the exact URL embedded in the app; successful S3 upload alone is not evidence. Verify public GET/JSON schema, platform signatures, immutable asset HEAD/download/checksums, then test update from the previous signed installer.
 
 ## CI/release matrix
 
@@ -16,9 +26,8 @@ One release version must match `package.json`, `src-tauri/Cargo.toml`, `src-taur
 | Build | Immutable commit/tag | Windows x86_64; macOS arm64; Intel if supported | Unsigned bundles, SBOM, provenance | Clean/reproducible inputs |
 | Sign | Protected job | macOS Developer ID signer; Tauri updater signer for supported platforms | Notarized macOS app; updater-signed archives | Signature and notarization verification |
 | Notarize | macOS protected job | macOS | Stapled DMG/app | Apple acceptance |
-| E2E RC | Manual/protected | Full supported Windows/macOS | Acceptance evidence | Thresholds pass |
-| Publish RC | Approved commit | RC channel | Immutable assets/manifest | Two-person approval |
-| Promote stable | Existing RC artifacts | Stable metadata | Stable manifest | Same hashes as tested RC |
+| Device acceptance | Protected candidate run | Full supported Windows/macOS | Install/update evidence | Exact signed bytes pass |
+| Publish stable | Approved successful candidate run | Stable S3 metadata | Immutable assets + manifests | Same hashes as accepted candidate |
 | Post-release | Stable publish | Install/update smoke | Canary report | No stop condition |
 
 ## Toolchain baseline
@@ -53,7 +62,7 @@ Every release includes SHA-256, SBOM, provenance/attestation, license notices, v
 - macOS identity/team/entitlements/hardened runtime/notarization/stapling verify.
 - Update artifacts are signed separately from installers when the updater capability is enabled. The native Tauri updater client/feed is now implemented in source, but signing credentials and installed-app platform evidence remain outstanding. The signed installer verifier still validates the custom Ed25519 release-evidence manifest when one is present. Stable promotion remains gated on key custody and rollback evidence below.
 - The native desktop binary updater uses Tauri updater artifact signatures (minisign format) and a static `latest.json` feed with platform keys `windows-x86_64` and `darwin-aarch64`. Tauri v2 uses the signed NSIS `.exe` directly for Windows updates and `.app.tar.gz` for macOS. The protected `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are consumed only by signing jobs; `BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY` is embedded into the build and is safe to publish. The existing Ed25519 `updater-manifest.json` verifier is release evidence only and is not accepted as the Tauri install trust root.
-- The desktop candidate workflow produces signed Windows/macOS artifacts privately in GitHub Actions and does not create a GitHub prerelease or write S3. `.github/workflows/promote-stable.yml` publishes only from a successful candidate run on the default branch. It rechecks the run source SHA, both platform provenance and checksum bundles, updater signatures, SBOMs, and both manifest schemas; it uploads artifacts under immutable `artifacts/v<version>/<run-id>/` paths before writing the stable `latest.json` and `downloads.json` objects to Spaces. It verifies public HEAD on every artifact and reads both stable manifests back byte-for-byte. `publication_reason` is retained in the workflow log. No rebuild occurs during publication.
+- Signed candidate artifacts are private workflow outputs until device acceptance completes. The stable publisher consumes the successful candidate run, rechecks source SHA, signatures, checksums, SBOM/provenance, platform manifests, and QA evidence, then publishes those exact immutable assets and stable S3 manifests without rebuilding. GitHub is not the updater JSON source; the app reads the configured S3 feed.
 - When an Ed25519 release-evidence manifest is included, its verifier must pin the public key from protected release configuration; a public key embedded only in the detached signature envelope is not a trust root. The signing workflow reads the non-secret `BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64` repository variable and fails closed if the manifest's key is absent or mismatched. This evidence key is separate from the compiled Tauri artifact-signing key described below.
 - Key rotation/revocation tested before GA.
 
@@ -72,24 +81,20 @@ Every release includes SHA-256, SBOM, provenance/attestation, license notices, v
 |---|---|---|---|---|
 | `dev` | Developers | Disposable | Local optional | Short |
 | `nightly` | Internal testers | No downgrade promise | Signed when distributed | Rolling + incident holds |
-| `rc` | Release/E2E cohort | Stable-upgrade path required | Production-equivalent | Through stable window |
 | `stable` | Users | Forward migration + rollback docs | Mandatory | Support policy |
 
-Separate manifests per channel. Less-stable channels require explicit opt-in.
+Do not publish or maintain an RC feed for the current desktop release flow. Development builds remain separate from the stable updater feed.
 
 ## Promotion
 
-1. Build once from immutable commit/tag.
-2. Sign/notarize and verify.
-3. Store immutable artifacts by hash.
-4. Publish hashes to RC.
-5. Run staging and full Windows/macOS acceptance against downloaded RC artifacts.
-6. Review defects, migration evidence, SBOM/provenance, residual risks.
-7. Obtain QA lead plus release commander approval.
-8. Promote exact hashes by publishing stable metadata.
-9. Run clean-install and previous-stable update canaries.
+1. Build once from the immutable source commit/tag.
+2. Sign/notarize and verify, then retain the exact immutable candidate artifacts privately.
+3. Install those exact bytes and complete Windows/macOS acceptance, including previous-stable update behavior.
+4. Review defects, migration evidence, SBOM/provenance, and residual risks; obtain the required release approval.
+5. Publish the same accepted hashes and stable S3 metadata without rebuilding.
+6. Read the public feed and every artifact back, then run clean-install and previous-stable update canaries.
 
-Rebuilding for stable is prohibited. Any binary change creates a new RC.
+Rebuilding during stable publication is prohibited. Any binary change requires a new version and a complete acceptance cycle before stable metadata changes.
 
 ## Stop conditions
 

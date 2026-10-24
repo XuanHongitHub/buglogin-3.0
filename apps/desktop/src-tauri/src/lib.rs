@@ -8,6 +8,7 @@ mod cookie_tools;
 mod desktop_state;
 mod device_identity;
 mod device_key_vault;
+mod diagnostics;
 mod event_stream;
 mod extension_features;
 mod legacy_compat;
@@ -2540,17 +2541,25 @@ async fn profile_launch(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    if let Some(profile_id) = payload.get("profileId").and_then(Value::as_str) {
-        ensure_profile_runtime_installed(app, state.inner(), profile_id, &correlation_id).await?;
+    let result = async {
+        if let Some(profile_id) = payload.get("profileId").and_then(Value::as_str) {
+            ensure_profile_runtime_installed(app, state.inner(), profile_id, &correlation_id)
+                .await?;
+        }
+        state
+            .invoke(
+                "profile_launch",
+                &correlation_id,
+                idempotency_key.as_deref(),
+                payload,
+            )
+            .await
     }
-    state
-        .invoke(
-            "profile_launch",
-            &correlation_id,
-            idempotency_key.as_deref(),
-            payload,
-        )
-        .await
+    .await;
+    if let Err(error) = &result {
+        diagnostics::report_profile_launch_failure(state.inner().clone(), error.clone());
+    }
+    result
 }
 
 #[tauri::command]

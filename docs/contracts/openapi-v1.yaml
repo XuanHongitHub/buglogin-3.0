@@ -361,6 +361,27 @@ paths:
       parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileDeleteBody' } } } }
       responses: { "200": { description: Deleted, content: { application/json: { schema: { $ref: '#/components/schemas/DeleteReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/viewer-tickets:
+    post:
+      operationId: profile.viewer.ticket.issue
+      description: Issues a short-lived single-use read-only handoff ticket for this profile. The ticket is returned once and must be kept out of logs.
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses:
+        "200": { description: One-time profile viewer ticket, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileViewerTicket' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+  /v1/profiles/{profileId}/viewer-session:
+    post:
+      operationId: profile.viewer.ticket.redeem
+      description: Consumes a single-use ticket and sets an HttpOnly read-only session cookie scoped to this profile's API path.
+      security: []
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileViewerTicketInput' } } } }
+      responses:
+        "200": { description: Profile-scoped viewer cookie established, headers: { Set-Cookie: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileViewerSessionResponse' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
   /v1/profiles/{profileId}/binding:
     get:
       operationId: profile.binding.get
@@ -1552,6 +1573,9 @@ components:
     ApiTokenIdInput: { type: object, required: [tokenId], properties: { tokenId: { $ref: '#/components/schemas/ApiTokenIdentifier' } }, additionalProperties: false }
     RecoveryCompleteInput: { type: object, required: [token, newPassword], properties: { token: { $ref: '#/components/schemas/OpaqueHexToken64' }, newPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
     WebSessionResponse: { type: object, required: [accountId, expiresAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, expiresAt: { type: integer, minimum: 1 } }, additionalProperties: false }
+    ProfileViewerTicket: { type: object, required: [ticket, expiresIn], properties: { ticket: { type: string, minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' }, expiresIn: { type: integer, const: 120 } }, additionalProperties: false }
+    ProfileViewerTicketInput: { type: object, required: [ticket], properties: { ticket: { type: string, minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
+    ProfileViewerSessionResponse: { type: object, required: [authenticated], properties: { authenticated: { const: true } }, additionalProperties: false }
     WebSessionPage: { type: object, required: [sessions], properties: { sessions: { type: array, items: { $ref: '#/components/schemas/WebSession' } } }, additionalProperties: false }
     WebSession: { type: object, required: [id, kind, expiresAt, current], properties: { id: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, kind: { enum: [browser, desktop, api] }, deviceId: { anyOf: [{ $ref: '#/components/schemas/DeviceIdentifier' }, { type: "null" }] }, createdAt: { type: [integer, "null"] }, expiresAt: { type: integer, minimum: 1 }, revokedAt: { type: [integer, "null"] }, current: { type: boolean } }, additionalProperties: false }
     SessionIdInput: { type: object, required: [sessionId], properties: { sessionId: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }, additionalProperties: false }

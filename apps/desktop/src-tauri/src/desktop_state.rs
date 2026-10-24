@@ -85,6 +85,7 @@ const MAX_CONCURRENT_PROFILE_BLOB_UPLOADS: usize = 2;
 const MAX_OPERATION_IDEMPOTENCY_RECORDS: usize = 1_024;
 const PROXY_MUTATION_JOURNAL_SCHEMA_VERSION: u16 = 1;
 
+#[derive(Clone)]
 pub enum DesktopState {
     Local(AdapterState),
     Production(ProductionDesktopState),
@@ -4361,6 +4362,32 @@ impl ProductionDesktopState {
             } else {
                 None
             };
+            let viewer_ticket = match self
+                .client
+                .issue_profile_viewer_ticket(&profile_id, &correlation_id)
+                .await
+            {
+                Ok(ticket) => ticket,
+                Err(mut error) => {
+                    if let Some(bridge) = proxy_bridge.take() {
+                        let _ = bridge.stop().await;
+                    }
+                    let _ = self
+                        .client
+                        .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
+                        .await;
+                    error.correlation_id = correlation_id.clone();
+                    return Err(error);
+                }
+            };
+            push_or_replace_arg(
+                &mut specification.args,
+                format!(
+                    "https://buglogin.com/profileId={}#viewer={}",
+                    profile_id.as_str(),
+                    viewer_ticket.ticket
+                ),
+            );
             let runtime_key = runtime_projection_idempotency_key(&idempotency_key, "started");
             let lease_for_projection = lease.clone();
             if let Err(error) =

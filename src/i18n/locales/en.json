@@ -2354,6 +2354,8 @@
       "updateFailed": "Failed to update BugLogin",
       "restartFailed": "Failed to restart",
       "updateReady": "Update ready, restart to apply",
+      "updateAvailable": "BugLogin update available",
+      "updateNow": "Update now",
       "manualDownloadRequired": "Manual download required",
       "restartNow": "Restart Now",
       "viewRelease": "View Release",

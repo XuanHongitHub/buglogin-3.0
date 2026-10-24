@@ -25,15 +25,6 @@ test("staging OpenAPI comparison reports missing and unexpected operations", () 
   assert.deepEqual(report.unexpectedOperations, ["legacy.profile.get"]);
 });
 
-test("staging OpenAPI comparison treats Windows and Unix line endings as equivalent", () => {
-  const unix = spec(["profile.list"]);
-  const windows = Buffer.from(unix.toString("utf8").replace(/\n/g, "\r\n"));
-  const report = compareOpenApi(unix, windows);
-
-  assert.equal(report.matches, true);
-  assert.equal(report.local.sha256, report.remote.sha256);
-});
-
 test("staging verification checks readiness before fetching the contract", async () => {
   const calls = [];
   const fetchImpl = async (url, options) => {

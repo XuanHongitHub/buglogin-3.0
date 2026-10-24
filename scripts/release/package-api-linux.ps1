@@ -37,14 +37,6 @@ function Get-CommandOutput([string]$FilePath, [string[]]$Arguments) {
     return (($output | Out-String).Trim())
 }
 
-function Get-NormalizedUtf8Sha256([string]$Path) {
-    $text = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
-    $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n")
-    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($normalized)
-    $hash = [Security.Cryptography.SHA256]::HashData($bytes)
-    return [Convert]::ToHexString($hash).ToLowerInvariant()
-}
-
 $commit = Get-CommandOutput "git.exe" @("-C", $repoRoot, "rev-parse", "HEAD")
 $status = Get-CommandOutput "git.exe" @("-C", $repoRoot, "status", "--porcelain", "--untracked-files=all")
 if ($status) {
@@ -99,7 +91,7 @@ if ($apiHash -ne $buildManifest.artifacts.bugloginApiSha256 -or $adminHash -ne $
 }
 $openApiSource = Join-Path $buildRoot "openapi-v1.yaml"
 $openApiExpected = Join-Path $repoRoot "crates/api/openapi/openapi-v1.yaml"
-if (-not (Test-Path -LiteralPath $openApiSource -PathType Leaf) -or (Get-NormalizedUtf8Sha256 $openApiSource) -ne (Get-NormalizedUtf8Sha256 $openApiExpected) -or (Get-NormalizedUtf8Sha256 $openApiSource) -ne $buildManifest.artifacts.openApiSha256.ToLowerInvariant()) {
+if (-not (Test-Path -LiteralPath $openApiSource -PathType Leaf) -or (Get-FileHash -LiteralPath $openApiSource -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $openApiExpected -Algorithm SHA256).Hash -or (Get-FileHash -LiteralPath $openApiSource -Algorithm SHA256).Hash.ToLowerInvariant() -ne $buildManifest.artifacts.openApiSha256) {
     throw "Downloaded OpenAPI contract does not match this checkout."
 }
 
@@ -113,8 +105,6 @@ foreach ($path in @($inputs.bugloginApi, $inputs.adminPasswordReset, $openApiSou
 Copy-Item -LiteralPath $inputs.bugloginApi -Destination $apiTarget
 Copy-Item -LiteralPath $inputs.adminPasswordReset -Destination $adminTarget
 $openApiTarget = Join-Path $artifactRoot "openapi-v1.yaml"
-# Preserve the Linux artifact's LF bytes: its raw SHA-256 is part of the CI manifest
-# and is verified again by the deployment script and remote activation helper.
 Copy-Item -LiteralPath $openApiSource -Destination $openApiTarget
 Copy-Item -LiteralPath $buildManifestPath -Destination (Join-Path $artifactRoot "release-manifest.json")
 Get-Content -LiteralPath (Join-Path $artifactRoot "release-manifest.json") -Raw

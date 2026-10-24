@@ -2354,6 +2354,8 @@
       "updateFailed": "Cập nhật BugLogin thất bại",
       "restartFailed": "Khởi động lại thất bại",
       "updateReady": "Bản cập nhật sẵn sàng, khởi động lại để áp dụng",
+      "updateAvailable": "Có bản cập nhật BugLogin",
+      "updateNow": "Cập nhật ngay",
       "manualDownloadRequired": "Cần tải xuống thủ công",
       "restartNow": "Khởi động lại ngay",
       "viewRelease": "Xem phiên bản",

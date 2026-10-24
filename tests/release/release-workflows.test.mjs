@@ -21,7 +21,21 @@ test("release workflows satisfy fail-closed static policy", async () => {
     /WINDOWS_CERTIFICATE_PFX_BASE64|Get-AuthenticodeSignature/,
   );
   verifyPlatformText(platform);
-  assert.match(promotion, /PUBLICATION_REASON/);
+  assert.match(promotion, /CANDIDATE_RUN_ID/);
+});
+
+test("desktop release contract prevents external frontend paths and surprise updates", async () => {
+  const contract = await readFile(
+    "docs/release/desktop-release-contract.md",
+    "utf8",
+  );
+  assert.match(contract, /Never pass its absolute/);
+  assert.match(
+    contract,
+    /Manual-check results must not enter the state\/effect/,
+  );
+  assert.match(contract, /until “Update now” is selected/);
+  assert.match(contract, /Missing Windows or macOS installed-app evidence/);
 });
 
 test("OSV dependency scanning does not require private-repository code scanning", async () => {
@@ -34,11 +48,20 @@ test("OSV dependency scanning does not require private-repository code scanning"
 test("release builds private signed artifacts without publishing an RC or stable feed", async () => {
   const { release, signing } = await verifyReleaseWorkflows();
   assert.match(release, /sign-and-verify:[\s\S]*?needs: validate/);
-  assert.match(release, /source-ref:\s*\$\{\{ needs\.validate\.outputs\.release_ref \}\}/);
-  assert.match(release, /source-sha:\s*\$\{\{ needs\.validate\.outputs\.release_sha \}\}/);
+  assert.match(
+    release,
+    /source-ref:\s*\$\{\{ needs\.validate\.outputs\.release_ref \}\}/,
+  );
+  assert.match(
+    release,
+    /source-sha:\s*\$\{\{ needs\.validate\.outputs\.release_sha \}\}/,
+  );
   assert.match(signing, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(signing, /retention-days:\s*14/);
-  assert.doesNotMatch(release, /publish-rc|releases\/desktop\/v3\/rc|aws s3 cp|gh release create/);
+  assert.doesNotMatch(
+    release,
+    /publish-rc|releases\/desktop\/v3\/rc|aws s3 cp|gh release create/,
+  );
   assert.match(release, /ref: \$\{\{ inputs\.release_ref \}\}/);
   assert.match(release, /workflow_dispatch:[\s\S]*?release_ref:/);
   assert.doesNotMatch(release, /^\s+push:/m);
@@ -76,24 +99,25 @@ test("release verifier rejects upstream repository locks and deployment", () => 
   );
 });
 
-test("stable publication verifies a successful signed run and writes both public S3 manifests", async () => {
+test("stable publication validates signed candidate assets and updates S3 without rebuilding", async () => {
   const { promotion } = await verifyReleaseWorkflows();
   assert.match(promotion, /environment:\s*release-publish/);
   assert.match(promotion, /candidate_run_id:/);
   assert.match(promotion, /publication_reason:/);
-  assert.match(promotion, /r\.status!=="completed"\|\|r\.conclusion!=="success"/);
+  assert.match(promotion, /conclusion!=="success"/);
+  assert.match(promotion, /provenance mismatch/);
+  assert.match(promotion, /windows-x64-signed/);
+  assert.match(promotion, /macos-arm64-signed/);
   assert.match(promotion, /sha256sum --check SHA256SUMS\.txt/);
-  assert.match(promotion, /verify-bundle\.mjs incoming\/windows/);
-  assert.match(promotion, /verify-bundle\.mjs incoming\/macos/);
-  assert.match(promotion, /assemble-tauri-updater-feed\.mjs/);
   assert.match(promotion, /verify-tauri-updater-feed\.mjs/);
   assert.match(promotion, /verify-downloads-manifest\.mjs/);
   assert.match(promotion, /aws s3 sync assembled\//);
-  assert.match(promotion, /releases\/desktop\/v3\/stable\/latest\.json/);
-  assert.match(promotion, /releases\/desktop\/v3\/stable\/downloads\.json/);
+  assert.match(promotion, /artifacts\/v\$\{VERSION\}\/\$\{CANDIDATE_RUN_ID\}/);
+  assert.match(promotion, /stable\/latest\.json/);
+  assert.match(promotion, /stable\/downloads\.json/);
   assert.doesNotMatch(
     promotion,
-    /gh release create|gh release edit|tauri build|cargo build|--clobber|prerelease/i,
+    /gh release create|gh release edit|tauri build|cargo build|--clobber|--delete\b/,
   );
   assert.match(
     await readFile("scripts/release/verify-tauri-updater-feed.mjs", "utf8"),
@@ -163,10 +187,7 @@ test("stable updater feed validates version-bound Spaces artifact URLs", async (
       },
     };
     const manifest = { version: "1.2.3", platforms };
-    await writeFile(
-      manifestPath,
-      JSON.stringify(manifest),
-    );
+    await writeFile(manifestPath, JSON.stringify(manifest));
     run(
       "scripts/release/verify-tauri-updater-feed.mjs",
       manifestPath,
@@ -176,10 +197,7 @@ test("stable updater feed validates version-bound Spaces artifact URLs", async (
     );
     platforms["windows-x86_64"].url =
       `${base}v1.2.2/12345/BugLogin_1.2.3_x64-setup.exe`;
-    await writeFile(
-      manifestPath,
-      JSON.stringify(manifest),
-    );
+    await writeFile(manifestPath, JSON.stringify(manifest));
     assert.throws(() =>
       run(
         "scripts/release/verify-tauri-updater-feed.mjs",
@@ -284,7 +302,7 @@ test("release verifier rejects legacy desktop artifact paths", async () => {
     () =>
       verifySigningText(
         signing.replace(
-          'Join-Path $releaseRoot \'buglogin-desktop-app.exe\'',
+          "Join-Path $releaseRoot 'buglogin-desktop-app.exe'",
           "src-tauri/target/$env:TARGET/release/donutbrowser.exe",
         ),
       ),
@@ -294,9 +312,18 @@ test("release verifier rejects legacy desktop artifact paths", async () => {
 
 test("signing artifact lookups use the configured Cargo target directory on both OSes", async () => {
   const { signing } = await verifyReleaseWorkflows();
-  assert.match(signing, /Join-Path \$env:CARGO_TARGET_DIR "\$env:TARGET\\release"/);
-  assert.match(signing, /BUNDLE_ROOT="\$CARGO_TARGET_DIR\/\$TARGET\/release\/bundle"/);
-  assert.doesNotMatch(signing, /target\/\$env:TARGET|target\/\$TARGET|mapfile|readarray/);
+  assert.match(
+    signing,
+    /Join-Path \$env:CARGO_TARGET_DIR "\$env:TARGET\\release"/,
+  );
+  assert.match(
+    signing,
+    /BUNDLE_ROOT="\$CARGO_TARGET_DIR\/\$TARGET\/release\/bundle"/,
+  );
+  assert.doesNotMatch(
+    signing,
+    /target\/\$env:TARGET|target\/\$TARGET|mapfile|readarray/,
+  );
 });
 
 test("evidence generators emit SBOM, hashes, and lock-bound provenance", async () => {

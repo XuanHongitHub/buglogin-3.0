@@ -11,6 +11,7 @@ import {
 } from "./auth";
 import { MigrationPage } from "./migration";
 import { OperationsPage } from "./operations";
+import { ProfileDetailPage } from "./profile-detail";
 import { PublicPage } from "./public";
 import { matchWebRoute } from "./route-match";
 import { WebShell } from "./shells";
@@ -102,6 +103,9 @@ export function WebApp({
       {route.area === "public" ? <PublicPage api={api} path={path} /> : null}
       {route.area === "login" ? <LoginPage api={api} path={path} /> : null}
       {route.area === "recovery" ? <RecoveryPage path={path} /> : null}
+      {route.area === "profile" ? (
+        <ProfileDetailPage api={api} profileId={route.profileId} />
+      ) : null}
       {[
         "account",
         "operations",

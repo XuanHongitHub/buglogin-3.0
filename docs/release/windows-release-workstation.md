@@ -2,6 +2,8 @@
 
 This runbook documents the Windows release workstation at `F:\Herd\buglogin` and its local build target at `G:\buglogin-target`. The same source commit is built on protected GitHub Actions runners for Windows x64 and macOS arm64. A local Windows build is for development and smoke testing; it is not an official release artifact.
 
+Follow the shared [desktop release contract](desktop-release-contract.md) for build, updater, signing, S3 publication, and installed-app smoke gates. The Actions repository must carry an identical copy before running release workflows.
+
 ## Release authority and channels
 
 - Main product/source repository: `keyduc91/Malvanut-Login`, default branch `main`. This is the source of truth for approved BugLogin desktop, API, and web source changes.
@@ -13,6 +15,12 @@ This runbook documents the Windows release workstation at `F:\Herd\buglogin` and
 - Release signing runs in protected GitHub Actions environments. Windows Authenticode is optional; the Tauri updater signature is required when updater support is enabled. macOS requires Developer ID signing, notarization, stapling, and Gatekeeper checks.
 - The canonical updater channel manifests are on DigitalOcean Spaces, not GitHub Pages. Candidate release assets are also attached to GitHub Releases; immutable app artifacts are copied to Spaces. The stable feed is `https://mavelnut-login.sgp1.digitaloceanspaces.com/releases/desktop/v3/stable/latest.json`.
 
+### Tauri asset-path safety (required)
+
+`G:\\buglogin-target` is a local build/cache location only. Never inject its absolute Windows path into `build.frontendDist`: Tauri may parse the drive prefix (`G:`) as a URI and ship an app that opens the build folder instead of its embedded UI. The build wrapper must stage the Vite output under a temporary repository-relative directory, pass that relative directory to Tauri, and remove the stage after bundling. `release:verify` must test this rule before signing. After installing an updater artifact, launch the installed executable and confirm the BugLogin UI loads with the original build directory unavailable; a version label or successful signature alone is insufficient.
+
+Manual update checking is check-only. The app must show the detected version and let the user choose **Update now** or **Later**. Download/install and app shutdown happen only after that explicit choice, followed by a separate restart action. Startup auto-update behavior is controlled independently by the user's auto-update setting.
+
 ## End-to-end release order
 
 Use this order so the desktop cannot get ahead of its API, browser catalog, updater feed, or landing page:
@@ -23,7 +31,7 @@ Use this order so the desktop cannot get ahead of its API, browser catalog, upda
 4. If the landing/download handler changed, keep it aligned with the manifest schema produced by the release workflow. Publish the landing only after the stable manifest and both platform downloads are publicly readable.
 5. Tag and run the signed desktop candidate from `XuanHongitHub/buglogin-3.0`. Verify GitHub release assets, S3 immutable artifacts, signatures, hashes, SBOM, provenance, and feed readback.
 6. Install and test those exact candidate bytes on Windows and macOS. Record the evidence; build success or notarization alone is not device acceptance.
-7. Promote the tested hashes through `Promote BugLogin RC to Stable`. This updates stable S3 metadata; it does not rebuild the app or deploy the API/web service.
+7. After OS acceptance and release approval, publish the tested hashes to the stable S3 feed with `Publish BugLogin Stable Update Feed`. This updates stable S3 metadata; it does not rebuild the app or deploy the API/web service. There is no public RC feed in this release flow.
 8. Verify the app updater and landing download flow from a clean client. Deploy the website separately when its source changed. A `buglogin.com`/`www` DNS or Cloudflare cutover is a separate operation, never an implicit part of desktop release.
 
 Release-critical source to compare between the two GitHub repositories includes the version files and `Cargo.lock`, desktop Tauri updater configuration, signed runtime-catalog fallback/trust keys, release assembly/verification scripts, `.github/workflows/release.yml`, `signing.yml` and `promote-stable.yml`, API runtime-catalog code/config contract, and web `/api/downloads/latest` handler. Preserve repository-specific secrets, environment approvals, and deployment settings in GitHub; do not copy them into source.
@@ -31,12 +39,11 @@ Release-critical source to compare between the two GitHub repositories includes 
 ```mermaid
 flowchart LR
   P[Malvanut product main] -->|reviewed source sync; record both SHAs| A[XuanHong Actions main and tag]
-  A -->|protected build and sign| G[GitHub prerelease assets]
+  A -->|protected build and sign| G[Private GitHub workflow artifacts]
   A -->|immutable app artifacts| S3A[S3 artifacts/tag/run-id]
-  A -->|candidate manifests| S3RC[S3 rc/latest.json and downloads.json]
   G --> Q[Windows and macOS install/update/sync acceptance]
   S3A --> Q
-  Q -->|same tested hashes| ST[Stable promotion workflow]
+  Q -->|same tested hashes| ST[Stable publication workflow]
   ST --> S3S3[S3 stable manifests]
   S3S3 --> U[Desktop Tauri updater]
   S3S3 --> W[app3 landing download route]
@@ -51,7 +58,7 @@ These are separate distribution paths:
 
 | Item | Version/configuration authority | Download/storage location |
 |---|---|---|
-| BugLogin app installer and Tauri updater packages | Signed release tag/code in the Actions repository, synchronized from the product repository | Candidate files are attached to a GitHub prerelease in `XuanHongitHub/buglogin-3.0` and copied to Spaces under `releases/desktop/v3/artifacts/<tag>/<run-id>/`. The app checks the S3 `stable/latest.json` feed. |
+| BugLogin app installer and Tauri updater packages | Signed source SHA in the Actions repository, synchronized from the product repository | Private candidate files are retained in the successful GitHub workflow run, then copied to Spaces under `releases/desktop/v3/artifacts/v<version>/<run-id>/` during stable publication. The app checks the S3 `stable/latest.json` feed. |
 | Browser runtime version list | Live signed `GET https://api3.buglogin.com/v1/runtime/catalog`; if that request fails, the desktop source falls back to `apps/desktop/src-tauri/runtime-catalog.json` | Catalog metadata comes from the API or embedded fallback. It contains each runtime archive's own HTTPS `source` URL; it is not the Tauri updater feed. The API serves the catalog configured by `XuanHongitHub/buglogin-3.0`'s API deployment. |
 | Browser runtime archive bytes | The `source` field of each signed catalog entry | Current embedded entries point to `github.com/XuanHongitHub/wayfern-windows` for Wayfern 154 Windows x64, and `download.wayfern.com` for Wayfern 154 macOS arm64 and Wayfern 155 Windows x64/macOS arm64. These browser archives are not currently stored in the BugLogin v3 app-artifact Spaces prefix. |
 | Installed browser runtime on this Windows device | Verified catalog release receipt | `%LOCALAPPDATA%\BugLogin\runtimes\wayfern\windows\x64\versions\<version-hash>\`. Each installed version has `.buglogin-install.json` with its version and source. This is local device storage, not S3 or GitHub. |
@@ -149,11 +156,11 @@ The root `.gitignore` excludes local `binaries.build-restore-*` recovery directo
 7. Run the browser-version checklist above. Confirm the production API catalog is available and signature-valid, identify every supported runtime version and its direct archive host, then confirm the app's embedded fallback contains compatible entries. Confirm each archive URL returns the expected bytes and matches the signed size/checksum before advertising that version.
 8. In each repository checkout, verify the release tag does not already exist and the tagged commit is an ancestor of that repository's `main` (`git merge-base --is-ancestor <tag> origin/main`). The release workflow itself validates the requested version and tag checkout but does not prove the tag is reachable from `main`; the operator must enforce this policy.
 
-## Create signed candidate artifacts
+## Build signed candidate artifacts
 
-Run `BugLogin Release Verification` from `main` in `XuanHongitHub/buglogin-3.0`, after synchronizing the reviewed release source there. The workflow checks out the tag from that same repository, invokes the signed Windows/macOS build, and publishes a GitHub prerelease plus the S3 RC manifests. It does not directly publish stable.
+Run `BugLogin Release Verification` from `main` in `XuanHongitHub/buglogin-3.0`, after synchronizing the reviewed release source there. It builds and signs Windows/macOS artifacts and retains them as private workflow artifacts. It does not publish an RC or change the stable feed. The source SHA must be on the Actions repository's default branch.
 
-After the versioned source is reviewed and synchronized, create the same semantic-version tag on the product commit in Malvanut and on the verified mirrored commit in the Actions repository. The Actions-repository tag must point to its `main` history because that is what the workflow builds. Preserve both tag-to-SHA mappings; create/push each tag from its own clean repository checkout. From the Actions-repository checkout, push its tag and dispatch:
+After the versioned source is reviewed and synchronized, verify both repositories point to the intended source content and record both SHAs. The release workflow is dispatched from the Actions repository's default branch with the product version/tag as release reference; do not create or overwrite a tag that already exists. Preserve both source/tag-to-SHA mappings. From the Actions-repository checkout, dispatch:
 
 ```powershell
 $version = '<approved-version>'
@@ -164,7 +171,7 @@ gh workflow run 'BugLogin Release Verification' --repo XuanHongitHub/buglogin-3.
 gh run list --repo XuanHongitHub/buglogin-3.0 --workflow release.yml --limit 5
 ```
 
-Do not rerun a tag after artifacts have been published. The release workflow intentionally refuses to replace a release/tag's immutable artifacts. A correction requires a new patch version and tag.
+Do not replace published bytes for an existing version. A correction requires a new patch version and a new signed candidate run.
 
 The protected signing job must produce and verify:
 
@@ -172,7 +179,7 @@ The protected signing job must produce and verify:
 - macOS arm64 signed app and DMG, accepted by Apple notarization, stapled, and validated by Gatekeeper; plus the signed `.app.tar.gz` and `.sig` updater pair.
 - SHA-256 checksums, SPDX SBOM, GitHub build provenance attestations, and version/platform evidence.
 - `latest.json` for signed Tauri updater URLs/signatures and `downloads.json` for manual installer URLs (if using the current Actions workflow), both matching the version and immutable S3 artifact prefix.
-- GitHub prerelease assets and S3 immutable artifacts whose downloaded bytes have the recorded checksums. GitHub attachments are a candidate mirror; the canonical public stable updater/download manifests are the S3 objects.
+- Private GitHub workflow artifacts and S3 immutable artifacts whose downloaded bytes have the recorded checksums. The canonical public stable updater/download manifests are the S3 objects.
 
 Review the workflow summary and logs for Windows and macOS jobs. Confirm the macOS notarization result says Accepted and staple validation succeeds. Never treat a macOS build that only codesigns, or a Windows local build, as a completed release artifact.
 
@@ -191,16 +198,16 @@ The current Windows workstation can provide Windows evidence only. A macOS build
 
 ## Stable promotion and live verification
 
-The `Promote BugLogin RC to Stable` workflow in `XuanHongitHub/buglogin-3.0` requires the published candidate plus an HTTPS URL to the completed Windows/macOS acceptance evidence. It verifies checksums and manifests, marks the same GitHub release stable/latest, then uploads the same `latest.json` and `downloads.json` to S3 stable paths. It must not rebuild or replace candidate assets.
+The `Publish BugLogin Stable Update Feed` workflow in `XuanHongitHub/buglogin-3.0` consumes a successful signed candidate run and publishes its exact immutable bytes plus `latest.json` and `downloads.json` to S3 stable paths. Before dispatch, the release owner must review and record Windows/macOS acceptance evidence. The current workflow validates the candidate artifacts and publication reason but does not itself accept or enforce an evidence URL; treat missing reviewed evidence as a stop condition. It must not rebuild or replace candidate assets.
 
 Dispatch only after the acceptance evidence has been reviewed:
 
 ```powershell
-gh workflow run 'Promote BugLogin RC to Stable' `
+gh workflow run 'Publish BugLogin Stable Update Feed' `
   --repo XuanHongitHub/buglogin-3.0 `
   --ref main `
-  -f 'release_ref=v3.0.6' `
-  -f 'qa_evidence_url=https://<approved-evidence-location>'
+  -f 'candidate_run_id=<successful-release-run-id>' `
+  -f 'publication_reason=<reviewed-release-reason>'
 ```
 
 After a successful run, verify from an unauthenticated client:
