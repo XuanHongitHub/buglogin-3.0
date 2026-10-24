@@ -1,5 +1,7 @@
 # CI, Build, Signing, Promotion, and Rollback Policy
 
+For the Windows workstation paths and the repository's current GitHub Actions/S3 procedure, see [Windows release workstation runbook](windows-release-workstation.md).
+
 ## Version authority
 
 One release version must match `package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`, tag, artifact names, update manifest, and release notes. Any mismatch stops release.

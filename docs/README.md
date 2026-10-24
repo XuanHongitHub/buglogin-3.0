@@ -16,4 +16,6 @@ Read in order:
 10. `docs/e2e/`
 11. `docs/release/`
 
+For the end-to-end Windows workstation release sequence across the Malvanut product repo, XuanHong Actions/API repo, S3, updater, VPS API, browser catalog, and landing page, use [`docs/release/windows-release-workstation.md`](release/windows-release-workstation.md).
+
 `.tmp/` contains local read-only references only.
