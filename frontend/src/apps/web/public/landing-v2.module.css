@@ -490,7 +490,7 @@
 .whyCopy .keyLine {
   padding-left: 18px;
   border-left: 3px solid var(--red);
-  color: #222b39 !important;
+  color: #222b39;
   font-weight: 650;
 }
 .compare {
@@ -1163,9 +1163,13 @@
   .site *,
   .site *::before,
   .site *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: Accessibility preferences must override site animations. */
     scroll-behavior: auto !important;
+    /* biome-ignore lint/complexity/noImportantStyles: Accessibility preferences must override site animations. */
     transition-duration: 0.01ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: Accessibility preferences must override site animations. */
     animation-duration: 0.01ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: Accessibility preferences must override site animations. */
     animation-iteration-count: 1 !important;
   }
 }
