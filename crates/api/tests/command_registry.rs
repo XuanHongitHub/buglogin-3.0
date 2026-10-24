@@ -45,6 +45,8 @@ fn every_registered_command_has_canonical_action() {
         ("audit.events.list", Action::Read),
         ("profile.list", Action::Read),
         ("profile.get", Action::Read),
+        ("profile.viewer.ticket.issue", Action::Read),
+        ("profile.viewer.ticket.redeem", Action::Read),
         ("profile.binding.get", Action::Read),
         ("profile.create", Action::Create),
         ("profile.update", Action::Update),
@@ -379,6 +381,7 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
                 | "auth.desktop.login"
                 | "auth.sso.buglab.start"
                 | "auth.sso.buglab.complete"
+                | "profile.viewer.ticket.redeem"
                 | "desktop.auth.login"
                 | "desktop.auth.logout"
                 | "runtime.dispatch.claim"
@@ -395,6 +398,8 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
                 | "auth.device.refresh"
                 | "auth.refresh"
                 | "auth.login"
+                | "profile.viewer.ticket.issue"
+                | "profile.viewer.ticket.redeem"
                 | "auth.api.token.create"
                 | "auth.recovery.request"
                 | "auth.desktop.login"

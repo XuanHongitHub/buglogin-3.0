@@ -120,7 +120,9 @@ for (const command of commands.commands) {
       command.adapters.length !== 1 ||
       command.adapters[0] !== "rest")
   ) {
-    fail(`single-use capability auth is restricted to profile viewer redemption: ${command.id}`);
+    fail(
+      `single-use capability auth is restricted to profile viewer redemption: ${command.id}`,
+    );
   }
 }
 const sourceHash = createHash("sha256").update(commandSource).digest("hex");
