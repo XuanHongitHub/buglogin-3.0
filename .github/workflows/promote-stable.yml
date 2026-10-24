@@ -124,4 +124,15 @@ jobs:
           cmp assembled/downloads.json stable-downloads.json
           node scripts/release/verify-tauri-updater-feed.mjs stable-latest.json "$VERSION" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
           node scripts/release/verify-downloads-manifest.mjs stable-downloads.json "$VERSION" "$S3_PUBLIC_BASE_URL/artifacts/v$VERSION/$CANDIDATE_RUN_ID/"
-          curl --fail --silent --show-error --head https://app3.buglogin.com/api/downloads/latest
+          LANDING_HEADERS="$(mktemp)"
+          LANDING_BODY="$(mktemp)"
+          LANDING_STATUS="$(curl --silent --show-error --output "$LANDING_BODY" --dump-header "$LANDING_HEADERS" --write-out '%{http_code}' https://app3.buglogin.com/api/downloads/latest || true)"
+          if [[ "$LANDING_STATUS" == 200 ]]; then
+            node -e 'const fs=require("node:fs");const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(d.version!==process.argv[2])throw Error(`landing version ${d.version} != ${process.argv[2]}`);for(const p of ["windows","macos"]){const u=new URL(d.platforms?.[p]?.url);if(!u.href.startsWith(process.argv[3]))throw Error(`${p}: unexpected landing URL`)}' "$LANDING_BODY" "$VERSION" "$S3_PUBLIC_BASE_URL/artifacts/v$VERSION/$CANDIDATE_RUN_ID/"
+          elif [[ "$LANDING_STATUS" == 403 ]] && grep -qi '^cf-mitigated: challenge' "$LANDING_HEADERS" && grep -qi '^server: cloudflare' "$LANDING_HEADERS" && grep -qi '^cf-ray:' "$LANDING_HEADERS"; then
+            echo '::warning::Cloudflare challenge blocks the GitHub-hosted runner; the stable S3 feed was verified above. Verify the landing endpoint from a normal client.'
+          else
+            echo "Landing download endpoint returned HTTP $LANDING_STATUS"
+            cat "$LANDING_BODY"
+            exit 1
+          fi
