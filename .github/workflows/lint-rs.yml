@@ -34,7 +34,7 @@ jobs:
 
       - uses: ./.github/actions/setup-buglogin
         with:
-          install-node-dependencies: false
+          install-node-dependencies: true
 
       - name: Install native Linux dependencies
         run: |
