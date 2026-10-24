@@ -21,7 +21,7 @@ test("release workflows satisfy fail-closed static policy", async () => {
     /WINDOWS_CERTIFICATE_PFX_BASE64|Get-AuthenticodeSignature/,
   );
   verifyPlatformText(platform);
-  assert.match(promotion, /QA_EVIDENCE_URL/);
+  assert.match(promotion, /PUBLICATION_REASON/);
 });
 
 test("OSV dependency scanning does not require private-repository code scanning", async () => {
@@ -76,21 +76,25 @@ test("release verifier rejects upstream repository locks and deployment", () => 
   );
 });
 
-test("stable promotion validates RC assets and changes metadata without rebuilding", async () => {
+test("stable publication verifies a successful signed run and writes both public S3 manifests", async () => {
   const { promotion } = await verifyReleaseWorkflows();
-  assert.match(promotion, /environment:\s*stable-promotion/);
-  assert.match(promotion, /qa_evidence_url:/);
+  assert.match(promotion, /environment:\s*release-publish/);
+  assert.match(promotion, /candidate_run_id:/);
+  assert.match(promotion, /publication_reason:/);
+  assert.match(promotion, /r\.status!=="completed"\|\|r\.conclusion!=="success"/);
   assert.match(promotion, /sha256sum --check SHA256SUMS\.txt/);
+  assert.match(promotion, /verify-bundle\.mjs incoming\/windows/);
+  assert.match(promotion, /verify-bundle\.mjs incoming\/macos/);
+  assert.match(promotion, /assemble-tauri-updater-feed\.mjs/);
   assert.match(promotion, /verify-tauri-updater-feed\.mjs/);
-  assert.match(promotion, /\[\[ "\$count" == 2 \]\]/);
-  assert.doesNotMatch(promotion, /\[\[ "\$count" == 3 \]\]/);
-  assert.match(promotion, /gh release edit[\s\S]*?--prerelease=false --latest/);
-  assert.match(promotion, /Publish stable updater feed to DigitalOcean Spaces/);
+  assert.match(promotion, /verify-downloads-manifest\.mjs/);
+  assert.match(promotion, /aws s3 sync assembled\//);
+  assert.match(promotion, /releases\/desktop\/v3\/stable\/latest\.json/);
+  assert.match(promotion, /releases\/desktop\/v3\/stable\/downloads\.json/);
   assert.doesNotMatch(
     promotion,
-    /gh release create|tauri build|cargo build|--clobber/,
+    /gh release create|gh release edit|tauri build|cargo build|--clobber|prerelease/i,
   );
-  assert.match(promotion, /isDraft\|\|\(!r\.isPrerelease&&!r\.isLatest\)/);
   assert.match(
     await readFile("scripts/release/verify-tauri-updater-feed.mjs", "utf8"),
     /stable updater feed requires/,

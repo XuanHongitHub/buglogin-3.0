@@ -43,19 +43,30 @@ export function verifyReleaseText(text) {
 export function verifyPromotionText(text) {
   requirePatterns(text, [
     /workflow_dispatch:/,
-    /environment:\s*stable-promotion/,
-    /contents:\s*write/,
-    /gh release download[\s\S]*?SHA256SUMS\.txt/,
+    /environment:\s*release-publish/,
+    /candidate_run_id:/,
+    /publication_reason:/,
+    /r\.status!=="completed"\|\|r\.conclusion!=="success"/,
+    /Candidate source SHA is not on the default branch/,
+    /gh run download[\s\S]*buglogin-\$\{SOURCE_SHA\}-windows-x64-signed/,
+    /buglogin-\$\{SOURCE_SHA\}-macos-arm64-signed/,
     /sha256sum --check SHA256SUMS\.txt/,
+    /verify-bundle\.mjs incoming\/windows/,
+    /verify-bundle\.mjs incoming\/macos/,
+    /assemble-tauri-updater-feed\.mjs/,
     /verify-tauri-updater-feed\.mjs/,
-    /gh release edit[\s\S]*?--prerelease=false[\s\S]*?--latest/,
-    /aws s3 cp downloaded\/latest\.json[^\n]*releases\/desktop\/v3\/stable\/latest\.json/,
+    /verify-downloads-manifest\.mjs/,
+    /aws s3 sync assembled\//,
+    /aws s3 cp assembled\/latest\.json[^\n]*releases\/desktop\/v3\/stable\/latest\.json/,
+    /aws s3 cp assembled\/downloads\.json[^\n]*releases\/desktop\/v3\/stable\/downloads\.json/,
+    /cmp assembled\/latest\.json stable-latest\.json/,
+    /curl --fail[\s\S]*--head/,
     /AWS_ACCESS_KEY_ID: \$\{\{ secrets\.S3_ACCESS_KEY_ID \}\}/,
     /AWS_SECRET_ACCESS_KEY: \$\{\{ secrets\.S3_SECRET_ACCESS_KEY \}\}/,
     /github\.ref_name == github\.event\.repository\.default_branch/,
-  ], "stable promotion");
-  forbidPatterns(text, [/gh release create/, /tauri build|cargo build|pnpm tauri build/i, /--clobber|--delete-asset/], "stable promotion");
-  verifyPinnedActions(text, "stable promotion");
+  ], "stable publication");
+  forbidPatterns(text, [/gh release create|gh release edit/, /tauri build|cargo build|pnpm tauri build/i, /--clobber|--delete-asset/, /prerelease|release_ref:/i], "stable publication");
+  verifyPinnedActions(text, "stable publication");
 }
 
 export function verifyPlatformText(text) {
