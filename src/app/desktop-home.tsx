@@ -1782,7 +1782,9 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <AccountManagementPanel />
+              <AccountManagementPanel
+                onCreateScoped={() => setCurrentPage("orgCenter")}
+              />
             </motion.div>
           )}
 

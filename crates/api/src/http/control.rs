@@ -1634,6 +1634,7 @@ struct ScopedAccountCreateInput {
     username: String,
     email: String,
     role: MemberRole,
+    initial_password: String,
 }
 
 async fn list_accounts(
@@ -1754,89 +1755,102 @@ async fn create_scoped_account(
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let principal = authenticate(&state, &headers)?;
     let grant_snapshot = grants(&state)?;
-    let _authority = scoped_account_creation_authority(
+    let organization_owner_scope = scoped_account_creation_authority(
         &state,
         &principal,
         &grant_snapshot,
         &workspace_id,
         &input.role,
     )?;
-
-    let actor_id = principal.account_id.clone().ok_or_else(|| {
-        problem_response(
-            "account_missing",
-            "Account is missing",
-            401,
-            correlation(&headers),
-        )
-    })?;
-    let (pending, organization_owner_scope) = with_authorization_snapshot(
-        &state,
-        &headers,
-        &principal,
-        &grant_snapshot,
-        |principal, current_grants, _| -> Result<_, Response> {
-            let organization_owner_scope = scoped_account_creation_authority(
-                &state,
-                principal,
-                current_grants,
-                &workspace_id,
-                &input.role,
-            )?;
-            let account_id = input.account_id.clone();
-            let provisioning_key =
-                crate::services::account_provisioning::scoped_account_idempotency_key(
-                    &workspace_id,
-                    &account_id,
-                );
-            let pending = crate::services::account_provisioning::AccountProvisioningService::new(
-                state.control_persistence.clone(),
-            )
-            .create_pending_scoped(
-                account_id,
-                &input.username,
-                &input.email,
-                &actor_id,
-                &provisioning_key,
-                &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
-                &workspace_id,
-                &input.role,
-            )
-            .map_err(response_problem)?;
-            Ok((pending, organization_owner_scope))
-        },
+    crate::services::credentials::CredentialService::validate_initial_password(
+        &input.initial_password,
     )
-    .await?;
+    .map_err(response_problem)?;
 
     let member_id =
-        crate::services::account_provisioning::scoped_member_id(&workspace_id, &pending.account.id)
+        crate::services::account_provisioning::scoped_member_id(&workspace_id, &input.account_id)
             .map_err(response_problem)?;
     let member = Member {
         id: member_id,
-        account_id: pending.account.id.clone(),
+        account_id: input.account_id.clone(),
         workspace_id: workspace_id.clone(),
         team_id: None,
         role: input.role.clone(),
         status: MemberStatus::Active,
         invite_expires_at: None,
     };
-    let member_input = json!({
+    let mutation_input = json!({
         "workspaceId": workspace_id,
+        "account": {
+            "accountId": input.account_id,
+            "username": input.username,
+            "email": input.email,
+        },
         "member": member,
     });
     let member_for_mutation = member.clone();
+    let account_id_for_mutation = input.account_id.clone();
+    let username_for_mutation = input.username.clone();
+    let email_for_mutation = input.email.clone();
+    let initial_password = zeroize::Zeroizing::new(input.initial_password);
+    let credential_now =
+        crate::clock::unix_time_seconds(&correlation(&headers)).map_err(response_problem)?;
     let organization_owner_scope_for_mutation = organization_owner_scope.clone();
-    mutate(
+    mutate_with_additional_puts_and_replay_check(
         &state,
         &headers,
         &principal,
         &grant_snapshot,
         workspace_id.as_str(),
         "account.create.scoped",
-        member_input,
+        mutation_input,
         ResourceScope::workspace(workspace_id.clone()),
-        pending.account.id.as_str(),
+        input.account_id.as_str(),
         || {
+            let credentials = crate::services::credentials::CredentialService::new(
+                state.control_persistence.clone(),
+            )
+            .map_err(response_problem)?;
+            if credentials
+                .matches_password_without_recording_attempt(
+                    &member_for_mutation.account_id,
+                    initial_password.as_str(),
+                )
+                .map_err(response_problem)?
+            {
+                Ok(())
+            } else {
+                Err(response_problem(Problem::new(
+                    "idempotency_conflict",
+                    "Idempotency key was already used with a different initial password",
+                    409,
+                    "identity",
+                )))
+            }
+        },
+        || {
+            let (pending, mut account_puts) =
+                crate::services::account_provisioning::AccountProvisioningService::new(
+                    state.control_persistence.clone(),
+                )
+                .prepare_admin_provisioned_scoped(
+                    account_id_for_mutation,
+                    &username_for_mutation,
+                    &email_for_mutation,
+                    &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
+                )
+                .map_err(response_problem)?;
+            let credential_put = crate::services::credentials::CredentialService::new(
+                state.control_persistence.clone(),
+            )
+            .map_err(response_problem)?
+            .prepare_initial_password_put(
+                &pending.account.id,
+                initial_password.as_str(),
+                credential_now,
+            )
+            .map_err(response_problem)?;
+            account_puts.push(credential_put);
             let mut members = state
                 .members
                 .write()
@@ -1851,23 +1865,22 @@ async fn create_scoped_account(
             } else {
                 members.provision_active(&principal, &grant_snapshot, member_for_mutation.clone())
             }
-            .map_err(response_problem)
+            .map_err(response_problem)?;
+            Ok((
+                json!({
+                    "account": pending.account,
+                    "identity": pending.identity,
+                    "member": member_for_mutation,
+                    "replayed": pending.replayed,
+                    "onboardingStatus": "admin_provisioned",
+                    "loginEnabled": true,
+                }),
+                account_puts,
+                None,
+            ))
         },
     )
-    .await?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "account": pending.account,
-            "identity": pending.identity,
-            "member": member,
-            "replayed": pending.replayed,
-            "onboardingStatus": "pending_verification",
-            "loginEnabled": false,
-        })),
-    )
-        .into_response())
+    .await
 }
 
 fn scoped_account_creation_authority(
@@ -4832,6 +4845,41 @@ async fn acquire_resource_lease(
         capability,
         action,
     )?;
+    let idempotency_key = require_idempotency(&headers)?;
+    let registered = state
+        .resources
+        .read()
+        .map_err(|_| service_unavailable("resource"))?
+        .exists_in_workspace(&resource_id, &workspace_id);
+    if !registered {
+        // Reconcile through the normal control mutation path so a recovered
+        // registration is durably written and visible to every API instance.
+        // The same idempotency key is safe here: mutation receipts are scoped by
+        // command, while lease idempotency is scoped by the coordination store.
+        let _ = mutate::<bool, _>(
+            &state,
+            &headers,
+            &principal,
+            &grants,
+            workspace_id.as_str(),
+            "resource.registration.reconcile",
+            serde_json::json!({
+                "workspaceId": workspace_id,
+                "resourceId": resource_id,
+            }),
+            ResourceScope::resource(workspace_id.clone(), resource_id.clone()),
+            resource_id.as_str(),
+            || {
+                crate::services::profile_sync::reconcile_managed_profile_resource_registration(
+                    &state,
+                    &workspace_id,
+                    &resource_id,
+                )
+                .map_err(response_problem)
+            },
+        )
+        .await?;
+    }
     if !state
         .resources
         .read()
@@ -4845,7 +4893,6 @@ async fn acquire_resource_lease(
             correlation(&headers),
         ));
     }
-    let idempotency_key = require_idempotency(&headers)?;
     let auth = CoordinationAuth::new(input.owner_id, bearer_token(&headers).to_owned())
         .map_err(response_problem)?;
     let backend = state.coordination().map_err(response_problem)?;
@@ -7323,6 +7370,40 @@ where
     T: Serialize,
     F: FnOnce() -> Result<(T, Vec<ControlPut>, Option<Value>), ResponseProblem>,
 {
+    mutate_with_additional_puts_and_replay_check(
+        state,
+        headers,
+        expected_principal,
+        expected_grants,
+        workspace,
+        command,
+        input,
+        scope,
+        resource_id,
+        || Ok(()),
+        operation,
+    )
+    .await
+}
+
+pub(super) async fn mutate_with_additional_puts_and_replay_check<T, F, R>(
+    state: &ApiState,
+    headers: &HeaderMap,
+    expected_principal: &Principal,
+    expected_grants: &[buglogin_domain::permissions::Grant],
+    workspace: &str,
+    command: &str,
+    input: serde_json::Value,
+    scope: ResourceScope,
+    resource_id: &str,
+    replay_check: R,
+    operation: F,
+) -> Result<Response, Response>
+where
+    T: Serialize,
+    F: FnOnce() -> Result<(T, Vec<ControlPut>, Option<Value>), ResponseProblem>,
+    R: FnOnce() -> Result<(), ResponseProblem>,
+{
     let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
         .write_owned()
         .await;
@@ -7524,6 +7605,7 @@ where
         resource_id,
     )?;
     if let Some(response) = replay_mutation_receipt(state, &replay_keys)? {
+        replay_check()?;
         return Ok(response);
     }
     let correlation = replay_keys.correlation.clone();
@@ -7867,6 +7949,129 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lease_reconciliation_persists_missing_hosted_resource_registration() {
+        let store = MemoryControlRecordStore::default();
+        let state =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.clone()).unwrap();
+        let owner = state
+            .bootstrap_first_owner(crate::http::FirstOwnerBootstrapInput {
+                account_id: Some("acct_resource_repair_owner".into()),
+                username: "resource-repair-owner".into(),
+                email: "resource-repair-owner@example.com".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("owner-test-password-123".into()),
+                organization_name: "Resource repair org".into(),
+                workspace_name: "Resource repair workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 10,
+                max_members: 10,
+                max_storage_bytes: 1024 * 1024,
+            })
+            .unwrap();
+        let workspace_id = owner.workspace_id.clone();
+        let profile_id = ProfileId::new("prf_resource_repair_http").unwrap();
+        let resource_id = ResourceId::new("res_resource_repair_http").unwrap();
+        let state = state.with_profile_resource(ProfileResource {
+            profile_id: profile_id.clone(),
+            resource_id: resource_id.clone(),
+            workspace_id: workspace_id.clone(),
+            archive_state: ProfileArchiveState::Active,
+        });
+        state
+            .create_profile_record(buglogin_domain::entities::Profile {
+                id: profile_id,
+                name: "Recoverable profile".into(),
+                runtime: Runtime::Wayfern,
+                runtime_version: Some("1.0.0".into()),
+                runtime_config: None,
+                state: ProfileState::Ready,
+                archived: false,
+                fingerprint: None,
+                note: None,
+                proxy_id: None,
+                vpn_id: None,
+                group_ids: Vec::new(),
+                tags: Vec::new(),
+                extension_group_id: None,
+                sync_mode: None,
+                created_at: "2026-10-24T00:00:00Z".into(),
+                updated_at: "2026-10-24T00:00:00Z".into(),
+            })
+            .unwrap();
+        state
+            .persist_control_aggregate(
+                "test.resource.repair.seed",
+                "resource-repair-seed-key-01".into(),
+                owner.account_id.as_str().to_owned(),
+                true,
+                &"a".repeat(64),
+                serde_json::json!({"seeded": true}),
+                200,
+                serde_json::json!({"seeded": true}),
+            )
+            .unwrap();
+
+        assert!(
+            !state
+                .resources
+                .read()
+                .unwrap()
+                .exists_in_workspace(&resource_id, &workspace_id)
+        );
+        let token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let headers = HeaderMap::from_iter([
+            (
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            ),
+            (
+                axum::http::header::HeaderName::from_static("idempotency-key"),
+                "resource-repair-lease-key-01".parse().unwrap(),
+            ),
+            (
+                axum::http::header::HeaderName::from_static("x-correlation-id"),
+                "resource-repair-lease-test".parse().unwrap(),
+            ),
+        ]);
+        let principal = super::authenticate(&state, &headers).unwrap();
+        let grants = super::grants(&state).unwrap();
+        let result = super::mutate::<bool, _>(
+            &state,
+            &headers,
+            &principal,
+            &grants,
+            workspace_id.as_str(),
+            "resource.registration.reconcile",
+            serde_json::json!({
+                "workspaceId": workspace_id,
+                "resourceId": resource_id,
+            }),
+            ResourceScope::resource(workspace_id.clone(), resource_id.clone()),
+            resource_id.as_str(),
+            || {
+                crate::services::profile_sync::reconcile_managed_profile_resource_registration(
+                    &state,
+                    &workspace_id,
+                    &resource_id,
+                )
+                .map_err(response_problem)
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let reopened =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store).unwrap();
+        assert!(
+            reopened
+                .resources
+                .read()
+                .unwrap()
+                .exists_in_workspace(&resource_id, &workspace_id)
+        );
+    }
+
     #[test]
     fn control_http_body_dtos_reject_unknown_fields() {
         assert!(
@@ -7928,6 +8133,7 @@ mod tests {
         let owner_token = state.issue_token(owner.account_id.as_str()).unwrap();
         let app = crate::http::router(state.clone());
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -7945,6 +8151,7 @@ mod tests {
                             "username": "scoped-created-member",
                             "email": "scoped-created-member@example.com",
                             "role": "member",
+                            "initialPassword": "scoped-member-password-123",
                         }))
                         .unwrap(),
                     ))
@@ -7961,14 +8168,154 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["account"]["id"], "acct_scoped_created_member");
-        assert_eq!(body["identity"]["verification"], "pending");
+        assert_eq!(body["identity"]["verification"], "admin_provisioned");
         assert_eq!(body["member"]["accountId"], "acct_scoped_created_member");
         assert_eq!(body["member"]["workspaceId"], owner.workspace_id.as_str());
         assert_eq!(body["member"]["role"], "member");
         assert_eq!(body["member"]["status"], "active");
-        assert_eq!(body["onboardingStatus"], "pending_verification");
-        assert_eq!(body["loginEnabled"], false);
+        assert_eq!(body["onboardingStatus"], "admin_provisioned");
+        assert_eq!(body["loginEnabled"], true);
+        assert!(!body.to_string().contains("scoped-member-password-123"));
         assert!(body.get("invitation").is_none());
+
+        let replay = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/workspaces/{}/accounts",
+                        owner.workspace_id.as_str()
+                    ))
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "scoped-account-create-test-01")
+                    .header("x-correlation-id", "scoped-account-create-replay")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "accountId": "acct_scoped_created_member",
+                            "username": "scoped-created-member",
+                            "email": "scoped-created-member@example.com",
+                            "role": "member",
+                            "initialPassword": "scoped-member-password-123",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        let replay_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(replay.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replay_body["account"]["id"], "acct_scoped_created_member");
+        assert_eq!(replay_body["loginEnabled"], true);
+        assert!(
+            !replay_body
+                .to_string()
+                .contains("scoped-member-password-123")
+        );
+        let changed_password_replay = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/workspaces/{}/accounts",
+                        owner.workspace_id.as_str()
+                    ))
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "scoped-account-create-test-01")
+                    .header("x-correlation-id", "scoped-account-create-changed-password")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "accountId": "acct_scoped_created_member",
+                            "username": "scoped-created-member",
+                            "email": "scoped-created-member@example.com",
+                            "role": "member",
+                            "initialPassword": "different-member-password-456",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed_password_replay.status(), StatusCode::CONFLICT);
+        let changed_password_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(changed_password_replay.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(changed_password_body["code"], "idempotency_conflict");
+        assert!(
+            !changed_password_body
+                .to_string()
+                .contains("different-member-password-456")
+        );
+        let credential_after_changed_replay = state
+            .control_persistence
+            .load::<Value>("identity", "account_password", "acct_scoped_created_member")
+            .unwrap()
+            .unwrap();
+        assert_eq!(credential_after_changed_replay["failedAttempts"], 0);
+        assert_eq!(
+            state
+                .control_persistence
+                .load::<Account>("control", "account", "acct_scoped_created_member")
+                .unwrap()
+                .unwrap()
+                .id
+                .as_str(),
+            "acct_scoped_created_member"
+        );
+        assert_eq!(
+            state
+                .control_persistence
+                .load::<buglogin_domain::account::AccountIdentity>(
+                    "identity",
+                    "account_identity",
+                    "acct_scoped_created_member"
+                )
+                .unwrap()
+                .unwrap()
+                .email,
+            "scoped-created-member@example.com"
+        );
+        let credential = state
+            .control_persistence
+            .load::<Value>("identity", "account_password", "acct_scoped_created_member")
+            .unwrap()
+            .unwrap();
+        assert!(
+            credential["passwordPhc"]
+                .as_str()
+                .unwrap()
+                .starts_with("$argon2id$")
+        );
+        assert!(
+            !credential
+                .to_string()
+                .contains("scoped-member-password-123")
+        );
+        assert_eq!(
+            crate::services::credentials::CredentialService::new(state.control_persistence.clone())
+                .unwrap()
+                .authenticate(
+                    "scoped-created-member@example.com",
+                    "scoped-member-password-123",
+                    1
+                )
+                .unwrap()
+                .as_str(),
+            "acct_scoped_created_member"
+        );
 
         let persisted_member = state
             .members
@@ -7985,6 +8332,165 @@ mod tests {
         assert_eq!(persisted_member.workspace_id, owner.workspace_id);
         assert_eq!(persisted_member.role, MemberRole::Member);
         assert_eq!(persisted_member.status, MemberStatus::Active);
+        assert_eq!(
+            state
+                .members
+                .read()
+                .unwrap()
+                .active_members()
+                .into_iter()
+                .filter(|member| member.account_id.as_str() == "acct_scoped_created_member")
+                .count(),
+            1
+        );
+
+        let invalid_password = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/workspaces/{}/accounts",
+                        owner.workspace_id.as_str()
+                    ))
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "scoped-account-create-invalid-01")
+                    .header("x-correlation-id", "scoped-account-create-invalid")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "accountId": "acct_scoped_invalid_password",
+                            "username": "scoped-invalid-password",
+                            "email": "scoped-invalid-password@example.com",
+                            "role": "member",
+                            "initialPassword": "too-short",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_password.status(), StatusCode::BAD_REQUEST);
+        for (tenant, record_type) in [
+            ("control", "account"),
+            ("identity", "account_identity"),
+            ("identity", "account_password"),
+        ] {
+            assert!(
+                state
+                    .control_persistence
+                    .load::<Value>(tenant, record_type, "acct_scoped_invalid_password")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_account_creation_membership_failure_leaves_no_account_or_identity() {
+        let store = MemoryControlRecordStore::default();
+        let state = ApiState::hosted_with_control_store(ProfileService::disabled(), store).unwrap();
+        let owner = state
+            .bootstrap_first_owner(crate::http::FirstOwnerBootstrapInput {
+                account_id: Some("acct_scoped_failure_owner".into()),
+                username: "scoped-failure-owner".into(),
+                email: "scoped-failure-owner@example.com".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("owner-test-password-123".into()),
+                organization_name: "Scoped failure test org".into(),
+                workspace_name: "Scoped failure test workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 10,
+                max_members: 10,
+                max_storage_bytes: 1024 * 1024,
+            })
+            .unwrap();
+        let owner_token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let account_id = AccountId::new("acct_scoped_membership_conflict").unwrap();
+        let colliding_member_id = crate::services::account_provisioning::scoped_member_id(
+            &owner.workspace_id,
+            &account_id,
+        )
+        .unwrap();
+        let conflicting_member = Member {
+            id: colliding_member_id.clone(),
+            account_id: AccountId::new("acct_existing_collision_member").unwrap(),
+            workspace_id: owner.workspace_id.clone(),
+            team_id: None,
+            role: MemberRole::Member,
+            status: MemberStatus::Active,
+            invite_expires_at: None,
+        };
+        let mut members = serde_json::to_value(&*state.members.read().unwrap()).unwrap();
+        members["members"][colliding_member_id.as_str()] =
+            serde_json::to_value(conflicting_member).unwrap();
+        *state.members.write().unwrap() = serde_json::from_value(members).unwrap();
+
+        let response = crate::http::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/workspaces/{}/accounts",
+                        owner.workspace_id.as_str()
+                    ))
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "scoped-account-create-failure-01")
+                    .header("x-correlation-id", "scoped-account-create-failure")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "accountId": account_id,
+                            "username": "scoped-membership-conflict",
+                            "email": "scoped-membership-conflict@example.com",
+                            "role": "member",
+                            "initialPassword": "scoped-member-password-123",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            state
+                .control_persistence
+                .load::<Account>("control", "account", "acct_scoped_membership_conflict")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .control_persistence
+                .load::<Value>("identity", "account_password", account_id.as_str())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .control_persistence
+                .load::<buglogin_domain::account::AccountIdentity>(
+                    "identity",
+                    "account_identity",
+                    "acct_scoped_membership_conflict"
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .members
+                .read()
+                .unwrap()
+                .active_members()
+                .into_iter()
+                .filter(|member| member.account_id.as_str() == "acct_existing_collision_member")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

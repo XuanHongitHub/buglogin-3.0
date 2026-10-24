@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -257,6 +258,7 @@ while ([BugLoginJob]::ActiveProcesses() -gt 0) {
     exit 1
 }
 "#;
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn profile_app_user_model_id(profile_path: &Path) -> String {
     let normalized = profile_path.to_string_lossy().to_lowercase();
@@ -397,6 +399,7 @@ impl WindowsJobController {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|_| launch_failed())?;
         let stdout = helper.stdout.take().ok_or_else(launch_failed)?;
@@ -554,7 +557,8 @@ fn query_process(powershell: &Path, pid: u32) -> Option<(PathBuf, String)> {
                 "-Command",
                 SCRIPT,
             ])
-            .env("BUGLOGIN_PID", pid.to_string()),
+            .env("BUGLOGIN_PID", pid.to_string())
+            .creation_flags(CREATE_NO_WINDOW),
         Duration::from_secs(5),
     )?;
     if !output.status.success() {
@@ -577,6 +581,7 @@ fn run_taskkill(taskkill: &Path, pid: u32, force: bool) -> Result<(), Problem> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map_err(|_| stop_failed())?;
     if status.success() {

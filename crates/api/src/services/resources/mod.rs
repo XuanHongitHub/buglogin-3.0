@@ -20,6 +20,27 @@ pub struct ResourceService {
 }
 
 impl ResourceService {
+    pub(crate) fn reconcile_managed_profile_registration(
+        &mut self,
+        resource: Resource,
+    ) -> Result<(), Problem> {
+        if let Some(existing) = self.resources.get(&resource.id) {
+            if existing.workspace_id == resource.workspace_id
+                && existing.kind == ResourceKind::Profile
+                && existing.state == ResourceState::Active
+            {
+                return Ok(());
+            }
+            return Err(problem(
+                "resource_registration_conflict",
+                "Managed profile resource registration conflicts with existing resource state",
+                409,
+            ));
+        }
+        self.resources.insert(resource.id.clone(), resource);
+        Ok(())
+    }
+
     pub(crate) fn purge_resource(&mut self, resource_id: &ResourceId) {
         self.grants
             .retain(|_, grant| &grant.resource_id != resource_id);

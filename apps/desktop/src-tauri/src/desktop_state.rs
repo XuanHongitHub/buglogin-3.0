@@ -4631,6 +4631,41 @@ impl ProductionDesktopState {
         correlation_id: String,
         confirmed_recipients: Option<Vec<ConfirmedKeyRotationRecipient>>,
         preacquired_lease: Option<LeaseGrant>,
+        preheld_stop: Option<StopReceipt>,
+    ) -> Result<Value, Problem> {
+        let cleanup_profile_id = profile_id.clone();
+        let result = self
+            .stop_profile_inner(
+                profile_id,
+                idempotency_key,
+                correlation_id,
+                confirmed_recipients,
+                preacquired_lease,
+                preheld_stop,
+            )
+            .await;
+        if result.is_err()
+            && self
+                .profile_runtime
+                .active_profiles()
+                .await
+                .is_ok_and(|active| !active.contains(&cleanup_profile_id))
+        {
+            // Cover failures before the sync transaction has a StopReceipt
+            // (for example key/manifest preflight or proxy shutdown). Never
+            // clear state while the browser is still active.
+            let _ = self.profile_runtime.complete_stop(cleanup_profile_id).await;
+        }
+        result
+    }
+
+    async fn stop_profile_inner(
+        &self,
+        profile_id: ProfileId,
+        idempotency_key: String,
+        correlation_id: String,
+        confirmed_recipients: Option<Vec<ConfirmedKeyRotationRecipient>>,
+        preacquired_lease: Option<LeaseGrant>,
         mut preheld_stop: Option<StopReceipt>,
     ) -> Result<Value, Problem> {
         let binding = self
@@ -4786,7 +4821,7 @@ impl ProductionDesktopState {
         } else {
             dirty_local_path
         };
-        let stopped = if let Some(stopped) = preheld_stop {
+        let mut stopped = if let Some(stopped) = preheld_stop {
             stopped
         } else if browser_was_running && preacquired_lease.is_some() {
             if let Some(lease) = preacquired_lease.as_ref() {
@@ -4873,214 +4908,262 @@ impl ProductionDesktopState {
                 &correlation_id,
             ));
         };
-        let lease = stopped.lease.as_ref().ok_or_else(|| {
-            Problem::new(
-                "production_write_authority_required",
-                "Production write authority is required",
-                409,
-                &correlation_id,
-            )
-        })?;
-        if lease.workspace_id != binding.workspace_id
-            || lease.resource_id != binding.resource_id
-            || lease.owner_id != auth.actor_id()
-        {
-            return Err(Problem::new(
-                "production_write_authority_mismatch",
-                "Production write authority does not match binding",
-                409,
-                correlation_id,
-            ));
-        }
-        if stopped.was_launched {
-            self.client
-                .runtime_stopped(
-                    &profile_id,
-                    auth.actor_id(),
+        let sync_result = async {
+            if stopped.was_launched
+                && stopped
+                    .lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.fencing_token <= previous.fencing_token)
+            {
+                let was_launched = stopped.was_launched;
+                let profile_path = stopped.profile_path.clone();
+                // A browser can outlive its lease after sleep, process crash, or a
+                // second device taking over. Never snapshot against the manifest
+                // with that stale fence: release local runtime bookkeeping and
+                // acquire a fresh lease before reconciling the stopped tree.
+                self.profile_runtime
+                    .complete_stop(profile_id.clone())
+                    .await?;
+                let refreshed_lease_key = lease_idempotency_key(
+                    &format!("{idempotency_key}:fence-refresh:{}", previous.fencing_token),
                     previous.generation,
-                    &previous.root_checksum,
-                    lease,
-                    &runtime_projection_idempotency_key(&idempotency_key, "process-stopped"),
-                    &correlation_id,
-                )
-                .await?;
-        }
-        if pending_proxy_assignment
-            .as_ref()
-            .is_some_and(|assignment| assignment.expected_profile_revision != profile.revision)
-        {
-            return Err(Problem::new(
-                "profile_proxy_assignment_stale",
-                "Profile proxy assignment is stale; refresh the profile before syncing",
-                409,
-                &correlation_id,
-            ));
-        }
-        let selected_proxy_id = pending_proxy_assignment
-            .as_ref()
-            .map(|assignment| assignment.proxy_id.clone())
-            .unwrap_or_else(|| profile.value.proxy_id.clone());
-        let workspace_keys = if let Some(encryption) = previous.payload_encryption.as_ref() {
-            let key_version = encryption.key_version.as_deref().ok_or_else(|| {
+                );
+                let refreshed_lease = self
+                    .client
+                    .acquire_lease_idempotent(
+                        scope.clone(),
+                        &binding.resource_id,
+                        Duration::from_secs(120),
+                        &refreshed_lease_key,
+                    )
+                    .await?;
+                stopped = self
+                    .profile_runtime
+                    .hold_idle_profile_for_sync(
+                        profile_id.clone(),
+                        profile_path,
+                        LeaseScope {
+                            workspace_id: binding.workspace_id.clone(),
+                            resource_id: binding.resource_id.clone(),
+                        },
+                        refreshed_lease,
+                    )
+                    .await?;
+                stopped.was_launched = was_launched;
+            }
+            let lease = stopped.lease.as_ref().ok_or_else(|| {
                 Problem::new(
-                    "profile_key_version_missing",
-                    "Profile sync manifest has no active resource key version",
+                    "production_write_authority_required",
+                    "Production write authority is required",
                     409,
                     &correlation_id,
                 )
             })?;
-            match self.sync_key_vault.load_for_manifest(
-                &binding.workspace_id,
-                &binding.resource_id,
-                key_version,
-                &correlation_id,
-            ) {
-                Ok(Some(keys)) => keys,
-                Ok(None) => {
-                    self.recover_profile_key_envelope(
-                        &binding,
-                        &profile_id,
-                        key_version,
-                        &correlation_id,
-                    )
-                    .await?
-                }
-                Err(error) if error.code == "profile_key_version_stale" => {
-                    self.recover_profile_key_envelope(
-                        &binding,
-                        &profile_id,
-                        key_version,
-                        &correlation_id,
-                    )
-                    .await?
-                }
-                Err(error) => return Err(error),
+            if lease.workspace_id != binding.workspace_id
+                || lease.resource_id != binding.resource_id
+                || lease.owner_id != auth.actor_id()
+            {
+                return Err(Problem::new(
+                    "production_write_authority_mismatch",
+                    "Production write authority does not match binding",
+                    409,
+                    correlation_id,
+                ));
             }
-        } else {
-            self.sync_key_vault.load_or_create(
-                &binding.workspace_id,
-                &binding.resource_id,
-                &correlation_id,
-            )?
-        };
-        let rotation_keys = if rotation_recipients.is_some() {
-            Some(self.sync_key_vault.stage_rotation(
-                &binding.workspace_id,
-                &binding.resource_id,
-                &correlation_id,
-            )?)
-        } else {
-            None
-        };
-        let keys_for_snapshot = rotation_keys.as_ref().unwrap_or(&workspace_keys);
-        let rotation_envelopes = rotation_recipients
-            .map(|recipients| {
-                let key_version =
-                    format!("{:x}", Sha256::digest(keys_for_snapshot.client.as_bytes()));
-                self.profile_key_rotation_envelopes(
-                    &binding,
-                    recipients,
-                    keys_for_snapshot,
-                    &key_version,
+            if stopped.was_launched {
+                self.client
+                    .runtime_stopped(
+                        &profile_id,
+                        auth.actor_id(),
+                        previous.generation,
+                        &previous.root_checksum,
+                        lease,
+                        &runtime_projection_idempotency_key(&idempotency_key, "process-stopped"),
+                        &correlation_id,
+                    )
+                    .await?;
+            }
+            if pending_proxy_assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.expected_profile_revision != profile.revision)
+            {
+                return Err(Problem::new(
+                    "profile_proxy_assignment_stale",
+                    "Profile proxy assignment is stale; refresh the profile before syncing",
+                    409,
                     &correlation_id,
-                )
-            })
-            .transpose()?;
-        let proxy_snapshot = self
-            .proxy_snapshot_for_sync(
-                &binding.workspace_id,
-                selected_proxy_id.as_ref(),
-                &previous,
-                &correlation_id,
-            )
-            .await?;
-        let (descriptor, files, manifest) = self.projection.snapshot_with_proxy_encryption(
-            &stopped.profile_path,
-            &previous,
-            lease.fencing_token,
-            proxy_snapshot,
-            &keys_for_snapshot.client,
-            &keys_for_snapshot.recovery,
-        )?;
-        self.upload_profile_snapshot(
-            scope.clone(),
-            &binding.resource_id,
-            &lease.owner_token,
-            lease.fencing_token,
-            &idempotency_key,
-            &descriptor,
-            files,
-            &manifest,
-            &correlation_id,
-        )
-        .await?;
-        self.projection
-            .prepare_sync_commit(&profile_id, &previous, &manifest)?;
-        if let Some(envelopes) = rotation_envelopes.as_ref() {
-            self.client
-                .commit_manifest_with_key_rotation_reconciliation(
-                    scope,
+                ));
+            }
+            let selected_proxy_id = pending_proxy_assignment
+                .as_ref()
+                .map(|assignment| assignment.proxy_id.clone())
+                .unwrap_or_else(|| profile.value.proxy_id.clone());
+            let workspace_keys = if let Some(encryption) = previous.payload_encryption.as_ref() {
+                let key_version = encryption.key_version.as_deref().ok_or_else(|| {
+                    Problem::new(
+                        "profile_key_version_missing",
+                        "Profile sync manifest has no active resource key version",
+                        409,
+                        &correlation_id,
+                    )
+                })?;
+                match self.sync_key_vault.load_for_manifest(
+                    &binding.workspace_id,
                     &binding.resource_id,
-                    &lease.owner_token,
-                    pending_proxy_assignment.as_ref().map(|_| profile.revision),
-                    manifest.clone(),
-                    envelopes,
+                    key_version,
                     &correlation_id,
-                )
-                .await?;
-        } else {
-            self.client
-                .commit_manifest_with_reconciliation(
-                    scope,
-                    &binding.resource_id,
-                    &lease.owner_token,
-                    pending_proxy_assignment.as_ref().map(|_| profile.revision),
-                    manifest.clone(),
-                    &correlation_id,
-                )
-                .await?;
-        }
-        self.projection.clear_active_session(&profile_id)?;
-        let key_rotation_error = if rotation_envelopes.is_some() {
-            self.sync_key_vault
-                .activate_staged_rotation(
+                ) {
+                    Ok(Some(keys)) => keys,
+                    Ok(None) => {
+                        self.recover_profile_key_envelope(
+                            &binding,
+                            &profile_id,
+                            key_version,
+                            &correlation_id,
+                        )
+                        .await?
+                    }
+                    Err(error) if error.code == "profile_key_version_stale" => {
+                        self.recover_profile_key_envelope(
+                            &binding,
+                            &profile_id,
+                            key_version,
+                            &correlation_id,
+                        )
+                        .await?
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                self.sync_key_vault.load_or_create(
                     &binding.workspace_id,
                     &binding.resource_id,
                     &correlation_id,
-                )
-                .err()
-        } else {
-            None
-        };
-        if stopped.was_launched {
-            self.client
-                .runtime_stopped(
-                    &profile_id,
-                    auth.actor_id(),
-                    manifest.generation,
-                    &manifest.root_checksum,
-                    lease,
-                    &runtime_projection_idempotency_key(&idempotency_key, "stopped"),
+                )?
+            };
+            let rotation_keys = if rotation_recipients.is_some() {
+                Some(self.sync_key_vault.stage_rotation(
+                    &binding.workspace_id,
+                    &binding.resource_id,
+                    &correlation_id,
+                )?)
+            } else {
+                None
+            };
+            let keys_for_snapshot = rotation_keys.as_ref().unwrap_or(&workspace_keys);
+            let rotation_envelopes = rotation_recipients
+                .map(|recipients| {
+                    let key_version =
+                        format!("{:x}", Sha256::digest(keys_for_snapshot.client.as_bytes()));
+                    self.profile_key_rotation_envelopes(
+                        &binding,
+                        recipients,
+                        keys_for_snapshot,
+                        &key_version,
+                        &correlation_id,
+                    )
+                })
+                .transpose()?;
+            let proxy_snapshot = self
+                .proxy_snapshot_for_sync(
+                    &binding.workspace_id,
+                    selected_proxy_id.as_ref(),
+                    &previous,
                     &correlation_id,
                 )
                 .await?;
+            let (descriptor, files, manifest) = self.projection.snapshot_with_proxy_encryption(
+                &stopped.profile_path,
+                &previous,
+                lease.fencing_token,
+                proxy_snapshot,
+                &keys_for_snapshot.client,
+                &keys_for_snapshot.recovery,
+            )?;
+            self.upload_profile_snapshot(
+                scope.clone(),
+                &binding.resource_id,
+                &lease.owner_token,
+                lease.fencing_token,
+                &idempotency_key,
+                &descriptor,
+                files,
+                &manifest,
+                &correlation_id,
+            )
+            .await?;
+            self.projection
+                .prepare_sync_commit(&profile_id, &previous, &manifest)?;
+            if let Some(envelopes) = rotation_envelopes.as_ref() {
+                self.client
+                    .commit_manifest_with_key_rotation_reconciliation(
+                        scope,
+                        &binding.resource_id,
+                        &lease.owner_token,
+                        pending_proxy_assignment.as_ref().map(|_| profile.revision),
+                        manifest.clone(),
+                        envelopes,
+                        &correlation_id,
+                    )
+                    .await?;
+            } else {
+                self.client
+                    .commit_manifest_with_reconciliation(
+                        scope,
+                        &binding.resource_id,
+                        &lease.owner_token,
+                        pending_proxy_assignment.as_ref().map(|_| profile.revision),
+                        manifest.clone(),
+                        &correlation_id,
+                    )
+                    .await?;
+            }
+            self.projection.clear_active_session(&profile_id)?;
+            let key_rotation_error = if rotation_envelopes.is_some() {
+                self.sync_key_vault
+                    .activate_staged_rotation(
+                        &binding.workspace_id,
+                        &binding.resource_id,
+                        &correlation_id,
+                    )
+                    .err()
+            } else {
+                None
+            };
+            if stopped.was_launched {
+                self.client
+                    .runtime_stopped(
+                        &profile_id,
+                        auth.actor_id(),
+                        manifest.generation,
+                        &manifest.root_checksum,
+                        lease,
+                        &runtime_projection_idempotency_key(&idempotency_key, "stopped"),
+                        &correlation_id,
+                    )
+                    .await?;
+            }
+            self.profile_runtime
+                .complete_stop(profile_id.clone())
+                .await
+                .map_err(|mut error| {
+                    error.correlation_id = correlation_id;
+                    error
+                })?;
+            if let Some(error) = key_rotation_error {
+                return Err(error);
+            }
+            Ok(json!({
+                "profileId": profile_id,
+                "generation": manifest.generation,
+                "rootChecksum": manifest.root_checksum,
+                "keyRotated": rotation_envelopes.is_some()
+            }))
         }
+        .await;
         self.profile_runtime
-            .complete_stop(profile_id.clone())
+            .finish_sync_result(profile_id, sync_result)
             .await
-            .map_err(|mut error| {
-                error.correlation_id = correlation_id;
-                error
-            })?;
-        if let Some(error) = key_rotation_error {
-            return Err(error);
-        }
-        Ok(json!({
-            "profileId": profile_id,
-            "generation": manifest.generation,
-            "rootChecksum": manifest.root_checksum,
-            "keyRotated": rotation_envelopes.is_some()
-        }))
     }
 
     async fn import_legacy_profile_data_tree(

@@ -327,16 +327,22 @@ impl RecoveryService {
     }
 
     fn find_identity(&self, identifier: &str) -> Result<Option<AccountIdentity>, Problem> {
-        if identifier.contains('@') {
-            return Ok(match canonical_email(identifier) {
+        let identity = if identifier.contains('@') {
+            match canonical_email(identifier) {
                 Ok(value) => self.identities.find_by_email(&value)?,
                 Err(_) => None,
-            });
-        }
-        Ok(match canonical_username(identifier) {
-            Ok(value) => self.identities.find_by_username(&value)?,
-            Err(_) => None,
-        })
+            }
+        } else {
+            match canonical_username(identifier) {
+                Ok(value) => self.identities.find_by_username(&value)?,
+                Err(_) => None,
+            }
+        };
+        // Do not send recovery links to an address that has not been verified. Admin
+        // provisioning enables the initial credential only; it does not prove email control.
+        Ok(identity.filter(|identity| {
+            identity.verification == buglogin_domain::account::IdentityVerification::Verified
+        }))
     }
 
     fn invalidate(&self, record: &RecoveryTokenRecord, now: u64) -> Result<(), Problem> {
@@ -645,6 +651,39 @@ mod tests {
         }
         recovery.request("owner", 204).unwrap();
         assert_eq!(delivery.messages.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn admin_provisioned_email_is_not_eligible_for_password_recovery() {
+        let store = ControlPersistence::new(MemoryControlRecordStore::default());
+        let account_id = AccountId::new("acct_unverified_recovery").unwrap();
+        IdentityPersistence::new(store.clone())
+            .create(
+                &AccountIdentity::admin_provisioned(
+                    account_id.clone(),
+                    "unverified",
+                    "unverified@example.com",
+                    "2026-10-24T00:00:00Z",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let credentials = CredentialService::new(store.clone()).unwrap();
+        credentials
+            .set_initial_password(&account_id, "initial-password-123", 100)
+            .unwrap();
+        let delivery = Arc::new(RecordingDelivery::default());
+        let recovery =
+            RecoveryService::new(store.clone(), credentials).with_delivery(delivery.clone());
+
+        recovery.request("unverified@example.com", 200).unwrap();
+        assert!(delivery.messages.lock().unwrap().is_empty());
+        assert!(
+            store
+                .list::<RecoveryTokenRecord>(TENANT, TOKEN_RECORD_TYPE)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

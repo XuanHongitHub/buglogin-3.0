@@ -83,6 +83,7 @@ pub fn run() {
         .setup(move |app| {
             let state = build_state().unwrap_or_else(DesktopState::unavailable);
             state.start_background_auth_refresh();
+            let update_state = state.clone();
             app.manage(state);
             app.manage(event_stream::EventStreamManager::default());
             if updater_configured {
@@ -99,12 +100,22 @@ pub fn run() {
                             Ok(Some(update)) => {
                                 if let Err(error) = update_app.emit("app-update-available", update)
                                 {
-                                    eprintln!("Could not announce BugLogin app update: {error}");
+                                    diagnostics::report_string_failure(
+                                        update_state.clone(),
+                                        "app.update_announce",
+                                        &error.to_string(),
+                                        "auto-app-update-announce",
+                                    );
                                 }
                             }
                             Ok(None) => {}
                             Err(error) => {
-                                eprintln!("Could not check for BugLogin app updates: {error}");
+                                diagnostics::report_string_failure(
+                                    update_state.clone(),
+                                    "app.update_check",
+                                    &error,
+                                    "auto-app-update-check",
+                                );
                             }
                         }
                     }
@@ -406,11 +417,12 @@ pub fn run() {
             sync_features::remove_sync_follower,
             // System, Updates, Logs, TOTP & Bookmarks
             system_features::check_for_app_updates,
-            system_features::check_for_app_updates_manual,
-            system_features::download_and_prepare_app_update,
-            system_features::restart_application,
+            check_for_app_updates_manual,
+            download_and_prepare_app_update,
+            restart_application,
+            discard_prepared_app_update,
             system_features::check_browser_exists,
-            system_features::download_browser,
+            download_browser,
             system_features::check_for_browser_updates,
             system_features::get_version_update_status,
             system_features::trigger_manual_version_update,
@@ -1144,7 +1156,8 @@ async fn desktop_auth_logout(
     state: State<'_, DesktopState>,
     correlation_id: String,
 ) -> Result<DesktopAuthStatus, Problem> {
-    state.logout(&correlation_id).await
+    let result = state.logout(&correlation_id).await;
+    report_profile_command_result(&state, "auth.logout", result)
 }
 
 fn build_state() -> Result<DesktopState, Problem> {
@@ -2282,15 +2295,99 @@ async fn migration_profile_data_import(
         .await
 }
 
+fn report_profile_command_result<T>(
+    state: &State<'_, DesktopState>,
+    operation: &'static str,
+    result: Result<T, Problem>,
+) -> Result<T, Problem> {
+    if let Err(error) = &result {
+        diagnostics::report_problem_failure(state.inner().clone(), operation, error.clone());
+    }
+    result
+}
+
+fn report_string_command_result<T>(
+    state: &State<'_, DesktopState>,
+    operation: &str,
+    correlation_id: &str,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if let Err(error) = &result {
+        diagnostics::report_string_failure(state.inner().clone(), operation, error, correlation_id);
+    }
+    result
+}
+
+#[tauri::command]
+async fn check_for_app_updates_manual(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Option<Value>, String> {
+    let result = system_features::check_for_app_updates_manual(app).await;
+    report_string_command_result(&state, "app.update_check", "auto-app-update-check", result)
+}
+
+#[tauri::command]
+async fn download_and_prepare_app_update(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    update_info: Value,
+) -> Result<Value, String> {
+    let result = system_features::download_and_prepare_app_update(app, update_info).await;
+    report_string_command_result(
+        &state,
+        "app.update_prepare",
+        "auto-app-update-prepare",
+        result,
+    )
+}
+
+#[tauri::command]
+async fn restart_application(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<(), String> {
+    let result = system_features::restart_application(app, state.clone()).await;
+    report_string_command_result(
+        &state,
+        "app.update_install",
+        "auto-app-update-install",
+        result,
+    )
+}
+
+#[tauri::command]
+fn discard_prepared_app_update(state: State<'_, DesktopState>) -> Result<(), String> {
+    let result = system_features::discard_prepared_app_update();
+    report_string_command_result(
+        &state,
+        "app.update_discard",
+        "auto-app-update-discard",
+        result,
+    )
+}
+
+#[tauri::command]
+async fn download_browser(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    browser_str: String,
+    version: Option<String>,
+) -> Result<(), String> {
+    let result = system_features::download_browser(app, state.clone(), browser_str, version).await;
+    report_string_command_result(&state, "browser.download", "auto-browser-download", result)
+}
+
 #[tauri::command]
 async fn profile_list(
     state: State<'_, DesktopState>,
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke("profile_list", &correlation_id, None, payload)
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.list", result)
 }
 
 #[tauri::command]
@@ -2299,9 +2396,10 @@ async fn profile_get(
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke("profile_get", &correlation_id, None, payload)
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.get", result)
 }
 
 #[tauri::command]
@@ -2311,14 +2409,15 @@ async fn profile_delete(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_delete",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.delete", result)
 }
 
 #[tauri::command]
@@ -2327,9 +2426,10 @@ async fn profile_binding_get(
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke("profile_binding_get", &correlation_id, None, payload)
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.binding_get", result)
 }
 
 #[tauri::command]
@@ -2338,14 +2438,15 @@ async fn profile_proxy_assignment_get(
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_proxy_assignment_get",
             &correlation_id,
             None,
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.proxy_assignment_get", result)
 }
 
 #[tauri::command]
@@ -2355,14 +2456,15 @@ async fn profile_update(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_update",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.update", result)
 }
 
 #[tauri::command]
@@ -2372,14 +2474,15 @@ async fn profile_proxy_assignment_set(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_proxy_assignment_set",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.proxy_assignment_set", result)
 }
 
 #[tauri::command]
@@ -2388,14 +2491,15 @@ async fn profile_keyrotation_recipients_list(
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_keyrotation_recipients_list",
             &correlation_id,
             None,
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.keyrotation_recipients_list", result)
 }
 
 #[tauri::command]
@@ -2405,14 +2509,15 @@ async fn profile_keyrotation_execute(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_keyrotation_execute",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.keyrotation_execute", result)
 }
 
 #[tauri::command]
@@ -2422,14 +2527,15 @@ async fn profile_create(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_create",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.create", result)
 }
 
 #[tauri::command]
@@ -2439,14 +2545,15 @@ async fn profile_archive(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_archive",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.archive", result)
 }
 
 #[tauri::command]
@@ -2456,14 +2563,15 @@ async fn profile_restore(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_restore",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.restore", result)
 }
 
 #[tauri::command]
@@ -2473,14 +2581,15 @@ async fn profile_clone(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_clone",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.clone", result)
 }
 
 #[tauri::command]
@@ -2490,14 +2599,15 @@ async fn profile_share(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_share",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.share", result)
 }
 
 #[tauri::command]
@@ -2507,14 +2617,15 @@ async fn profile_share_revoke(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_share_revoke",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.share_revoke", result)
 }
 
 #[tauri::command]
@@ -2523,14 +2634,15 @@ async fn profile_share_recipientdevicekeys_list(
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_share_recipientdevicekeys_list",
             &correlation_id,
             None,
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.share_recipient_device_keys_list", result)
 }
 
 #[tauri::command]
@@ -2557,7 +2669,7 @@ async fn profile_launch(
     }
     .await;
     if let Err(error) = &result {
-        diagnostics::report_profile_launch_failure(state.inner().clone(), error.clone());
+        diagnostics::report_problem_failure(state.inner().clone(), "profile.launch", error.clone());
     }
     result
 }
@@ -2569,14 +2681,15 @@ async fn profile_stop(
     idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_stop",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.stop", result)
 }
 
 #[tauri::command]
@@ -2585,14 +2698,15 @@ async fn profile_sync_recovery_code_get(
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke(
             "profile_sync_recovery_code_get",
             &correlation_id,
             None,
             payload,
         )
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.sync_recovery_code_get", result)
 }
 
 #[tauri::command]
@@ -2601,9 +2715,10 @@ async fn profile_sync_recover(
     correlation_id: String,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
-    state
+    let result = state
         .invoke("profile_sync_recover", &correlation_id, None, payload)
-        .await
+        .await;
+    report_profile_command_result(&state, "profile.sync_recover", result)
 }
 
 #[tauri::command]

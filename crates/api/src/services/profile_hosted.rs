@@ -6,7 +6,7 @@ use buglogin_domain::{
     errors::Problem,
     grant::{GroupShareGrant, ResourceGrant},
     ids::{GrantId, GroupId, MemberId, ProfileId, ResourceId, WorkspaceId},
-    member::Member,
+    member::{Member, MemberRole},
     permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, is_allowed},
     profile::{
         ProfileArchiveState, ProfileCloneInput, ProfileCloneReceipt,
@@ -506,6 +506,19 @@ impl HostedProfileService {
         binding: &ProfileResource,
         actions: &[Action],
     ) -> Result<std::collections::BTreeSet<MemberId>, Problem> {
+        let grants = state.grants()?;
+        Self::effective_profile_key_recipients_with_grants(
+            state, profile_id, binding, actions, &grants,
+        )
+    }
+
+    fn effective_profile_key_recipients_with_grants(
+        state: &ApiState,
+        profile_id: &ProfileId,
+        binding: &ProfileResource,
+        actions: &[Action],
+        capability_grants: &[Grant],
+    ) -> Result<std::collections::BTreeSet<MemberId>, Problem> {
         let active_members = state
             .members
             .read()
@@ -526,7 +539,9 @@ impl HostedProfileService {
             .groups
             .read()
             .map_err(|_| problem("group_unavailable", "Group service unavailable", 503))?;
-        let capability_grants = state.grants()?;
+        // Use the same grant snapshot as authorization. Normal requests include
+        // role-derived membership defaults, but a narrower authorization
+        // context must never be silently widened here.
         let capability_scope = ResourceScope {
             workspace_id: Some(binding.workspace_id.clone()),
             resource_id: Some(binding.resource_id.clone()),
@@ -574,7 +589,20 @@ impl HostedProfileService {
                         &binding.workspace_id,
                         &member.id,
                         *action,
-                    );
+                    ) || capability_grants.iter().any(|grant| {
+                        grant.capability.as_str() == capability
+                            && grant.action == *action
+                            && grant.effect == Effect::Allow
+                            // Membership defaults grant authorization but do
+                            // not create encrypted key-sharing obligations.
+                            && !grant.id.as_str().starts_with("membership:")
+                            && grant.scope.contains(&capability_scope)
+                            && grant
+                                .account_id
+                                .as_ref()
+                                .is_none_or(|id| id == &member.account_id)
+                            && grant.member_id.as_ref().is_none_or(|id| id == &member.id)
+                    });
                     !explicitly_denied && !denied && allowed
                 })
             })
@@ -728,20 +756,35 @@ impl HostedProfileService {
             if !can_update || !matches!(action, Action::Read | Action::Update) {
                 return Ok(false);
             }
+            // Metadata updates may proceed during key rotation, but reads and
+            // launches still require an unwrap-capable key envelope below.
+            if action == Action::Update {
+                return Ok(true);
+            }
         }
         let capability = Capability::new(capability_name)
             .map_err(|_| problem("invalid_capability", "Invalid capability", 500))?;
-        if is_allowed(principal, &capability, action, &scope, grants) {
+        let capability_allowed = is_allowed(principal, &capability, action, &scope, grants);
+        if capability_allowed && !matches!(action, Action::Read | Action::Execute) {
             return Ok(true);
         }
         let Some(binding) = binding else {
-            return Ok(false);
+            return Ok(capability_allowed);
         };
         if !matches!(
             action,
             Action::Read | Action::Update | Action::Execute | Action::Share
         ) {
             return Ok(false);
+        }
+        let current_manifest =
+            state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)?;
+        if capability_allowed
+            && !current_manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.payload_encryption.is_some())
+        {
+            return Ok(true);
         }
 
         // Resource shares are an additional grant path. They must not bypass
@@ -778,32 +821,40 @@ impl HostedProfileService {
         let Some(account_id) = principal.account_id.as_ref() else {
             return Ok(false);
         };
-        let member_ids = state
+        let active_members = state
             .members
             .read()
             .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
             .active_for_account(account_id)
             .into_iter()
             .filter(|member| member.workspace_id == binding.workspace_id)
-            .map(|member| member.id)
             .collect::<Vec<_>>();
-        if member_ids.is_empty() {
+        if active_members.is_empty() {
             return Ok(false);
         }
-        let share_members =
-            Self::effective_profile_key_recipients(state, profile_id, &binding, &[action])?;
-        if let Some(manifest) =
-            state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
+        let share_members = Self::effective_profile_key_recipients_with_grants(
+            state,
+            profile_id,
+            &binding,
+            &[action],
+            grants,
+        )?;
+        if let Some(manifest) = current_manifest
             && let Some(encryption) = manifest.payload_encryption.as_ref()
         {
-            if share_members.is_empty() {
-                return Ok(false);
-            }
             let Some(key_version) = encryption.key_version.as_deref() else {
-                return Ok(false);
+                // Legacy v1 manifests carry the initial resource key envelope
+                // in the manifest itself and predate per-device share rows.
+                // Preserve that initial workspace-owner access only; other
+                // readers still need explicit grants and a recipient envelope.
+                return Ok(encryption.schema_version == 1
+                    && active_members
+                        .iter()
+                        .any(|member| member.role == MemberRole::Owner && capability_allowed));
             };
-            for member_id in &member_ids {
-                if !share_members.contains(member_id) {
+            for member in &active_members {
+                let member_id = &member.id;
+                if !capability_allowed && !share_members.contains(member_id) {
                     continue;
                 }
                 if state.has_profile_key_share_envelope_for_member(
@@ -818,9 +869,10 @@ impl HostedProfileService {
             }
             return Ok(false);
         }
-        Ok(member_ids
-            .iter()
-            .any(|member_id| share_members.contains(member_id)))
+        Ok(capability_allowed
+            || active_members
+                .iter()
+                .any(|member| share_members.contains(&member.id)))
     }
 
     pub fn authorize_share_mutation(
@@ -2386,6 +2438,18 @@ mod authorization_tests {
             resource_key_envelope: ManifestObjectReference::from(&envelope),
         });
         state.replace_sync_manifest(manifest).unwrap();
+        assert!(
+            !HostedProfileService::authorized(
+                &state,
+                &owner,
+                &[],
+                &profile_id,
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap(),
+            "role-default permission must not authorize encrypted content without a recipient envelope"
+        );
         let binding = state.profile_resource_record(&profile_id).unwrap().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2914,6 +2978,117 @@ mod authorization_tests {
             )
             .unwrap();
         let binding = state.profile_resource_record(&profile_id).unwrap().unwrap();
+        let owner_member_id = state
+            .members
+            .read()
+            .unwrap()
+            .active_for_account(&owner_id)
+            .into_iter()
+            .find(|member| member.workspace_id == workspace_id)
+            .expect("seeded owner membership")
+            .id;
+        let lead_account_id = AccountId::new("acct_group_key_lead_recipient").unwrap();
+        let lead_member_id = MemberId::new("mem_group_key_lead_recipient").unwrap();
+        state
+            .members
+            .write()
+            .unwrap()
+            .invite(
+                &Principal {
+                    roles: [Role::PlatformAdmin].into_iter().collect(),
+                    ..Principal::default()
+                },
+                &[],
+                Member {
+                    id: lead_member_id.clone(),
+                    account_id: lead_account_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    team_id: None,
+                    role: MemberRole::Lead,
+                    status: MemberStatus::Invited,
+                    invite_expires_at: Some(100),
+                },
+                3,
+            )
+            .unwrap();
+        state
+            .members
+            .write()
+            .unwrap()
+            .activate(
+                &Principal {
+                    account_id: Some(lead_account_id),
+                    ..Principal::default()
+                },
+                &[],
+                &workspace_id,
+                &lead_member_id,
+                4,
+            )
+            .unwrap();
+        let effective_grants = state.grants().unwrap();
+        let lead = Principal {
+            account_id: Some(AccountId::new("acct_group_key_lead_recipient").unwrap()),
+            workspace_ids: [workspace_id.clone()].into_iter().collect(),
+            ..Principal::default()
+        };
+        assert!(
+            HostedProfileService::authorized(
+                &state,
+                &lead,
+                &effective_grants,
+                &profile_id,
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+        let default_owner_recipients = HostedProfileService::effective_profile_key_recipients(
+            &state,
+            &profile_id,
+            &binding,
+            &[Action::Read, Action::Execute],
+        )
+        .unwrap();
+        assert!(
+            HostedProfileService::authorized(
+                &state,
+                &owner,
+                &effective_grants,
+                &profile_id,
+                Action::Read,
+                "profile.read",
+            )
+            .unwrap()
+        );
+        assert!(
+            !default_owner_recipients.contains(&owner_member_id)
+                && !default_owner_recipients.contains(&lead_member_id),
+            "membership role defaults authorize unencrypted access but do not create key-share recipients"
+        );
+        state
+            .members
+            .write()
+            .unwrap()
+            .suspend(&owner, &effective_grants, &workspace_id, &lead_member_id)
+            .unwrap();
+        state.grants.write().unwrap().push(capability_grant(
+            "group_recipient_workspace_profile_read",
+            &owner_id,
+            "profile.read",
+            Action::Read,
+            ResourceScope::workspace(workspace_id.clone()),
+        ));
+        assert!(
+            HostedProfileService::effective_profile_key_recipients(
+                &state,
+                &profile_id,
+                &binding,
+                &[Action::Read],
+            )
+            .unwrap()
+            .contains(&owner_member_id)
+        );
         assert_eq!(
             HostedProfileService::effective_profile_key_recipients(
                 &state,
@@ -2922,8 +3097,13 @@ mod authorization_tests {
                 &[Action::Read, Action::Execute],
             )
             .unwrap(),
-            std::collections::BTreeSet::from([member_id.clone()])
+            std::collections::BTreeSet::from([member_id.clone(), owner_member_id.clone()])
         );
+        state
+            .grants
+            .write()
+            .unwrap()
+            .retain(|grant| grant.id.as_str() != "group_recipient_workspace_profile_read");
         state.grants.write().unwrap().push(Grant {
             id: GrantId::new("grt_group_key_capability_deny").unwrap(),
             account_id: Some(account_id.clone()),
@@ -2937,17 +3117,29 @@ mod authorization_tests {
             effect: Effect::Deny,
         });
         assert!(
-            HostedProfileService::effective_profile_key_recipients(
+            !HostedProfileService::effective_profile_key_recipients(
                 &state,
                 &profile_id,
                 &binding,
                 &[Action::Read],
             )
             .unwrap()
-            .is_empty(),
+            .contains(&member_id),
             "explicit capability deny must prevent key delivery despite a group allow"
         );
         state.grants.write().unwrap().clear();
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::new("grt_group_key_owner_rotation_deny").unwrap(),
+            account_id: Some(owner_id.clone()),
+            member_id: Some(owner_member_id),
+            capability: Capability::new("profile.read").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope {
+                profile_id: Some(profile_id.clone()),
+                ..ResourceScope::default()
+            },
+            effect: Effect::Deny,
+        });
 
         state
             .mark_resource_key_rotation_pending(&workspace_id, &resource_id)

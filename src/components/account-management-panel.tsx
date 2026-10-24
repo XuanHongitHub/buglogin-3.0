@@ -73,7 +73,11 @@ function createLineInput(
   };
 }
 
-export function AccountManagementPanel() {
+export function AccountManagementPanel({
+  onCreateScoped,
+}: {
+  onCreateScoped: () => void;
+}) {
   const { t } = useTranslation();
   const [records, setRecords] = useState<AccountAdminRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -507,15 +511,9 @@ export function AccountManagementPanel() {
             />
             {t("common.refresh", { defaultValue: "Làm mới" })}
           </Button>
-          <Button
-            size="sm"
-            onClick={() => {
-              setShowCreatePage(true);
-              setActionError(null);
-            }}
-          >
+          <Button size="sm" onClick={onCreateScoped}>
             <LuPlus className="mr-2 size-3.5" />
-            {t("accountAdmin.create", { defaultValue: "Tạo account" })}
+            Tạo trong Org / Workspace
           </Button>
         </div>
       </div>

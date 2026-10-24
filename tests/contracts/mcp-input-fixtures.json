@@ -15,7 +15,8 @@
     "accountId": "acc_fixture_002",
     "username": "mcp-pending-user",
     "email": "mcp-pending-user@example.test",
-    "role": "member"
+    "role": "member",
+    "initialPassword": "fixture-password-123"
   },
   "GroupListInput": { "workspaceId": "ws_fixture_001" },
   "GroupIdInput": {
@@ -86,6 +87,7 @@
     "cursor": null,
     "limit": 25
   },
+  "DiagnosticErrorsListInput": { "cursor": null, "limit": 25 },
   "ExtensionGroupCreateInput": {
     "workspaceId": "ws_fixture_001",
     "extensionGroupId": "exg_fixture_001",
@@ -146,8 +148,7 @@
   },
   "ProfileLaunchInput": {
     "profileId": "prf_fixture_001",
-    "profilesRoot": "C:/BugLogin/profiles",
-    "extraArgs": []
+    "targetDeviceId": "dev_0123456789abcdef0123456789abcdef"
   },
   "ProfileDeleteInput": {
     "profileId": "prf_fixture_001",

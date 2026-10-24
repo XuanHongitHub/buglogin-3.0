@@ -19,10 +19,9 @@ import {
   LuUserCheck,
   LuUsers,
 } from "react-icons/lu";
-import { CreateInviteModal } from "@/components/create-invite-modal";
 import { LoadingButton } from "@/components/loading-button";
-import { MemberManagementDialog } from "@/components/member-management-dialog";
 import { ResourceInventoryPanel } from "@/components/resource-inventory-panel";
+import { ScopedAccountCreationPage } from "@/components/scoped-account-creation-page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -43,6 +42,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { WorkspaceDetailPage } from "@/components/workspace-detail-page";
 import { getActiveUserEmail } from "@/lib/identity-display";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
@@ -73,7 +73,6 @@ export interface OrgEmployee {
   email: string;
   role: HierarchicalRole;
   workspaces: string[];
-  groupScope: string;
   status: "invited" | "active" | "suspended";
 }
 
@@ -127,9 +126,12 @@ export function OrgManagementCenter({
 
   // Sub-modal states
   const [editOrgModalOpen, setEditOrgModalOpen] = useState(false);
-  const [inviteModalOpen, setInviteModalOpen] = useState(false);
-  const [accountManagementOpen, setAccountManagementOpen] = useState(false);
+  const [accountCreationPageOpen, setAccountCreationPageOpen] = useState(false);
   const [accountWorkspaceId, setAccountWorkspaceId] = useState("");
+  const [workspaceDetailPage, setWorkspaceDetailPage] =
+    useState<OrgWorkspaceItem | null>(null);
+  const [workspaceDetailInviteOpen, setWorkspaceDetailInviteOpen] =
+    useState(false);
   const [editWsModal, setEditWsModal] = useState<OrgWorkspaceItem | null>(null);
   const [deleteWsModal, setDeleteWsModal] = useState<OrgWorkspaceItem | null>(
     null,
@@ -417,7 +419,6 @@ export function OrgManagementCenter({
               email,
               role: member.role as HierarchicalRole,
               workspaces: [workspace.name],
-              groupScope: "—",
               status: member.status,
             };
           }),
@@ -901,7 +902,7 @@ export function OrgManagementCenter({
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() => setAccountManagementOpen(true)}
+                onClick={() => setAccountCreationPageOpen(true)}
                 disabled={!accountWorkspaceId}
                 className="h-8 gap-1.5 text-xs"
               >
@@ -911,8 +912,16 @@ export function OrgManagementCenter({
               <Button
                 type="button"
                 size="sm"
-                onClick={() => setInviteModalOpen(true)}
-                disabled={workspaces.length === 0}
+                onClick={() => {
+                  const workspace = workspaces.find(
+                    (item) => item.id === accountWorkspaceId,
+                  );
+                  if (workspace) {
+                    setWorkspaceDetailInviteOpen(true);
+                    setWorkspaceDetailPage(workspace);
+                  }
+                }}
+                disabled={!accountWorkspaceId}
                 className="h-8 gap-1.5 text-xs"
               >
                 <LuUserCheck className="size-3.5" />
@@ -937,9 +946,8 @@ export function OrgManagementCenter({
                     />
                   </th>
                   <th className="py-2.5 px-3">Nhân Viên & Email</th>
-                  <th className="py-2.5 px-3">Quyền Tổ Chức</th>
-                  <th className="py-2.5 px-3">Workspaces Được Vào</th>
-                  <th className="py-2.5 px-3">Nhóm Profile Phụ Trách</th>
+                  <th className="py-2.5 px-3">Vai trò tại workspace</th>
+                  <th className="py-2.5 px-3">Workspace</th>
                   <th className="py-2.5 px-3">Trạng Thái</th>
                   <th className="py-2.5 px-3 text-right">Thao Tác Quản Trị</th>
                 </tr>
@@ -948,7 +956,7 @@ export function OrgManagementCenter({
                 {isLoading ? (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={6}
                       className="py-8 text-center text-muted-foreground"
                     >
                       {t("common.buttons.loading", {
@@ -959,7 +967,7 @@ export function OrgManagementCenter({
                 ) : filteredEmployees.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={6}
                       className="py-8 text-center text-muted-foreground"
                     >
                       Không tìm thấy nhân viên nào phù hợp
@@ -1044,10 +1052,7 @@ export function OrgManagementCenter({
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-muted-foreground">
-                          {emp.workspaces.join(", ")}
-                        </td>
-                        <td className="py-2.5 px-3 text-muted-foreground">
-                          {emp.groupScope}
+                          {emp.workspaces[0] ?? "Workspace không xác định"}
                         </td>
                         <td className="py-2.5 px-3 whitespace-nowrap">
                           {emp.status === "active" ? (
@@ -1305,6 +1310,19 @@ export function OrgManagementCenter({
                             type="button"
                             variant="outline"
                             size="sm"
+                            onClick={() => {
+                              setWorkspaceDetailInviteOpen(false);
+                              setWorkspaceDetailPage(ws);
+                            }}
+                            className="h-7 px-2 text-[10px] gap-1 cursor-pointer font-medium"
+                          >
+                            <LuArrowRight className="size-3" />
+                            <span>Mở workspace</span>
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
                             onClick={() => setEditWsModal(ws)}
                             className="h-7 px-2 text-[10px] gap-1 cursor-pointer font-medium"
                           >
@@ -1546,27 +1564,6 @@ export function OrgManagementCenter({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <CreateInviteModal
-        isOpen={inviteModalOpen}
-        onClose={() => setInviteModalOpen(false)}
-        onInviteCreated={() => void loadRealData()}
-      />
-
-      {accountManagementOpen && accountWorkspaceId && (
-        <MemberManagementDialog
-          isOpen={accountManagementOpen}
-          onClose={() => {
-            setAccountManagementOpen(false);
-            void loadRealData();
-          }}
-          workspaceId={accountWorkspaceId}
-          workspaceName={
-            workspaces.find((workspace) => workspace.id === accountWorkspaceId)
-              ?.name
-          }
-        />
-      )}
 
       {/* SUB-MODAL: Edit Organization */}
       <Dialog open={editOrgModalOpen} onOpenChange={setEditOrgModalOpen}>
@@ -1822,6 +1819,39 @@ export function OrgManagementCenter({
       )}
     </div>
   );
+
+  if (workspaceDetailPage) {
+    return (
+      <WorkspaceDetailPage
+        organizationId={workspaceDetailPage.organizationId}
+        organizationName={orgName}
+        workspaceId={workspaceDetailPage.id}
+        workspaceName={workspaceDetailPage.name}
+        initialTab="members"
+        initialInvitePage={workspaceDetailInviteOpen}
+        onBack={() => {
+          setWorkspaceDetailPage(null);
+          setWorkspaceDetailInviteOpen(false);
+          void loadRealData();
+        }}
+      />
+    );
+  }
+
+  if (accountCreationPageOpen && accountWorkspaceId) {
+    return (
+      <ScopedAccountCreationPage
+        workspaceId={accountWorkspaceId}
+        workspaceName={
+          workspaces.find((workspace) => workspace.id === accountWorkspaceId)
+            ?.name ?? "Workspace"
+        }
+        organizationName={orgName}
+        onBack={() => setAccountCreationPageOpen(false)}
+        onCreated={() => void loadRealData()}
+      />
+    );
+  }
 
   if (mode === "page") {
     return (

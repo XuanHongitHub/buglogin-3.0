@@ -176,6 +176,49 @@ pub(crate) fn authorize_resource_access(
     }
 }
 
+pub(crate) fn reconcile_managed_profile_resource_registration(
+    state: &ApiState,
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+) -> Result<bool, Problem> {
+    let Some(binding) = state.profile_resource_for_resource(workspace_id, resource_id)? else {
+        return Ok(false);
+    };
+    if binding.archive_state != buglogin_domain::profile::ProfileArchiveState::Active {
+        return Ok(false);
+    }
+    let Some(profile) = state.get_profile_record(&binding.profile_id)? else {
+        return Ok(false);
+    };
+    // The active profile-resource binding is the authoritative indication that
+    // this profile is hosted. Older hosted profiles may predate `sync_mode` and
+    // have it unset; that must not strand their lease behind a missing resource
+    // registry row.
+    if profile.value.archived {
+        return Ok(false);
+    }
+    let resource = buglogin_domain::resource::Resource {
+        id: binding.resource_id,
+        workspace_id: binding.workspace_id,
+        kind: buglogin_domain::resource::ResourceKind::Profile,
+        state: buglogin_domain::resource::ResourceState::Active,
+        display_name: profile.value.name,
+    };
+    state
+        .resources
+        .write()
+        .map_err(|_| {
+            Problem::new(
+                "resource_unavailable",
+                "Resource service unavailable",
+                503,
+                "sync",
+            )
+        })?
+        .reconcile_managed_profile_registration(resource)?;
+    Ok(true)
+}
+
 pub(crate) fn validate_proxy_dependency(
     state: &ApiState,
     principal: &Principal,
@@ -457,5 +500,65 @@ mod tests {
 
         assert_eq!(error.status, 409);
         assert_eq!(error.code, "proxy_assignment_pending");
+    }
+
+    #[test]
+    fn repairs_missing_registration_for_active_hosted_profile_without_legacy_sync_mode() {
+        let workspace = WorkspaceId::new("ws_resource_repair").unwrap();
+        let profile_id = ProfileId::new("prf_resource_repair").unwrap();
+        let resource_id = ResourceId::new("res_resource_repair").unwrap();
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap()
+        .with_profile_resource(ProfileResource {
+            profile_id: profile_id.clone(),
+            resource_id: resource_id.clone(),
+            workspace_id: workspace.clone(),
+            archive_state: ProfileArchiveState::Active,
+        });
+        state
+            .create_profile_record(Profile {
+                id: profile_id,
+                name: "Recoverable profile".into(),
+                runtime: Runtime::Wayfern,
+                runtime_version: Some("1.0.0".into()),
+                runtime_config: None,
+                state: ProfileState::Ready,
+                archived: false,
+                fingerprint: None,
+                note: None,
+                proxy_id: None,
+                vpn_id: None,
+                group_ids: Vec::new(),
+                tags: Vec::new(),
+                extension_group_id: None,
+                // Older hosted profile records may omit this optional field.
+                sync_mode: None,
+                created_at: "2026-10-24T00:00:00Z".into(),
+                updated_at: "2026-10-24T00:00:00Z".into(),
+            })
+            .unwrap();
+
+        assert!(
+            reconcile_managed_profile_resource_registration(&state, &workspace, &resource_id,)
+                .unwrap()
+        );
+        assert!(
+            state
+                .resources
+                .read()
+                .unwrap()
+                .exists_in_workspace(&resource_id, &workspace)
+        );
+        assert!(
+            !reconcile_managed_profile_resource_registration(
+                &state,
+                &WorkspaceId::new("ws_other_resource_repair").unwrap(),
+                &resource_id,
+            )
+            .unwrap()
+        );
     }
 }

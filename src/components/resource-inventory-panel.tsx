@@ -40,10 +40,22 @@ import type {
 
 const desktopApi = createTauriDesktopApi();
 
-export function ResourceInventoryPanel() {
+export function ResourceInventoryPanel({
+  initialWorkspaceId,
+  initialOrganizationId,
+  initialWorkspaceName,
+  initialKind,
+  showWorkspaceSelector = true,
+}: {
+  initialWorkspaceId?: string;
+  initialOrganizationId?: string;
+  initialWorkspaceName?: string;
+  initialKind?: ResourceKind;
+  showWorkspaceSelector?: boolean;
+} = {}) {
   const { t } = useTranslation();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [workspaceId, setWorkspaceId] = useState("");
+  const [workspaceId, setWorkspaceId] = useState(initialWorkspaceId ?? "");
   const [resources, setResources] = useState<Resource[]>([]);
   const [pageStack, setPageStack] = useState<ResourceCursorPage[]>([
     { cursor: undefined },
@@ -76,7 +88,7 @@ export function ResourceInventoryPanel() {
   const [isSavingGrant, setIsSavingGrant] = useState(false);
   const [grantError, setGrantError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [kind, setKind] = useState("all");
+  const [kind, setKind] = useState(initialKind ?? "all");
   const [state, setState] = useState("all");
   const [isLoadingWorkspaces, setIsLoadingWorkspaces] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
@@ -103,6 +115,17 @@ export function ResourceInventoryPanel() {
     const load = async () => {
       setIsLoadingWorkspaces(true);
       try {
+        if (initialWorkspaceId && initialOrganizationId) {
+          const workspace = await desktopApi.getWorkspace({
+            organizationId: initialOrganizationId,
+            workspaceId: initialWorkspaceId,
+          });
+          if (disposed) return;
+          setWorkspaces([workspace]);
+          setWorkspaceId(initialWorkspaceId);
+          setLoadError(null);
+          return;
+        }
         const orgs = await desktopApi.listOrganizations();
         const pages = await Promise.all(
           orgs.items.map((org: Organization) =>
@@ -112,11 +135,12 @@ export function ResourceInventoryPanel() {
         const all = pages.flatMap((page) => page.items);
         if (disposed) return;
         setWorkspaces(all);
-        setWorkspaceId((current) =>
-          all.some((workspace) => workspace.id === current)
+        setWorkspaceId((current) => {
+          if (initialWorkspaceId) return initialWorkspaceId;
+          return all.some((workspace) => workspace.id === current)
             ? current
-            : (all[0]?.id ?? ""),
-        );
+            : (all[0]?.id ?? "");
+        });
       } catch (error) {
         if (!disposed)
           setLoadError(error instanceof Error ? error.message : String(error));
@@ -128,7 +152,7 @@ export function ResourceInventoryPanel() {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [initialOrganizationId, initialWorkspaceId]);
 
   const loadPage = useCallback(
     async (
@@ -472,18 +496,24 @@ export function ResourceInventoryPanel() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={workspaceId} onValueChange={setWorkspaceId}>
-            <SelectTrigger className="h-9 w-56" aria-label="Workspace">
-              <SelectValue placeholder="Chọn workspace" />
-            </SelectTrigger>
-            <SelectContent>
-              {workspaces.map((workspace) => (
-                <SelectItem key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {showWorkspaceSelector ? (
+            <Select value={workspaceId} onValueChange={setWorkspaceId}>
+              <SelectTrigger className="h-9 w-56" aria-label="Workspace">
+                <SelectValue placeholder="Chọn workspace" />
+              </SelectTrigger>
+              <SelectContent>
+                {workspaces.map((workspace) => (
+                  <SelectItem key={workspace.id} value={workspace.id}>
+                    {workspace.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className="max-w-64 truncate text-xs text-muted-foreground">
+              {initialWorkspaceName ?? selectedWorkspace?.name ?? "Workspace"}
+            </span>
+          )}
           <Button
             variant="outline"
             size="sm"
