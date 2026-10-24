@@ -47,6 +47,8 @@ test("release builds private signed artifacts without publishing an RC or stable
     /CURRENT_REF_TYPE" != "branch" \|\| "\$CURRENT_REF" != "\$DEFAULT_BRANCH"/,
   );
   assert.match(release, /release_ref is required/);
+  assert.match(release, /Source SHA must be on the default branch/);
+  assert.match(release, /\^\[0-9a-f\]\{40\}\$/);
   assert.doesNotMatch(release, /git fetch --force --tags/);
 });
 
