@@ -91,7 +91,15 @@ if ($apiHash -ne $buildManifest.artifacts.bugloginApiSha256 -or $adminHash -ne $
 }
 $openApiSource = Join-Path $buildRoot "openapi-v1.yaml"
 $openApiExpected = Join-Path $repoRoot "crates/api/openapi/openapi-v1.yaml"
-if (-not (Test-Path -LiteralPath $openApiSource -PathType Leaf) -or (Get-FileHash -LiteralPath $openApiSource -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $openApiExpected -Algorithm SHA256).Hash -or (Get-FileHash -LiteralPath $openApiSource -Algorithm SHA256).Hash.ToLowerInvariant() -ne $buildManifest.artifacts.openApiSha256) {
+if (-not (Test-Path -LiteralPath $openApiSource -PathType Leaf)) {
+    throw "Downloaded OpenAPI contract is missing from the CI artifact."
+}
+$openApiSourceHash = (Get-FileHash -LiteralPath $openApiSource -Algorithm SHA256).Hash.ToLowerInvariant()
+$openApiSourceText = [IO.File]::ReadAllText($openApiSource)
+$openApiExpectedText = [IO.File]::ReadAllText($openApiExpected)
+$normalizedOpenApiSource = $openApiSourceText -replace "`r`n?", "`n"
+$normalizedOpenApiExpected = $openApiExpectedText -replace "`r`n?", "`n"
+if ($openApiSourceHash -ne $buildManifest.artifacts.openApiSha256 -or $normalizedOpenApiSource -cne $normalizedOpenApiExpected) {
     throw "Downloaded OpenAPI contract does not match this checkout."
 }
 

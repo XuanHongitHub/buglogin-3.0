@@ -24,7 +24,7 @@ read_state() {
   local file=$1 key value
   declare -gA state=()
   while IFS='=' read -r key value; do
-    [[ -n "$key" && "$key" != *[!a-z_]* && -z "${state[$key]+present}" ]] || return 1
+    [[ -n "$key" && "$key" != *[!a-z0-9_]* && -z "${state[$key]+present}" ]] || return 1
     state[$key]=$value
   done < "$file"
 }
@@ -236,7 +236,7 @@ if [[ -e "$active_marker" ]]; then
   if [[ -f "$admin_target" && ! -L "$admin_target" ]]; then
     current_admin_sha=$(sha256sum -- "$admin_target" | cut -d ' ' -f 1)
   fi
-  if ! is_deployment_id "$old_marker_deployment_id" || "$old_marker_api_sha" != "$old_api_sha" || "$old_marker_admin_sha" != "$current_admin_sha"; then
+  if ! is_deployment_id "$old_marker_deployment_id" || [[ "$old_marker_api_sha" != "$old_api_sha" || "$old_marker_admin_sha" != "$current_admin_sha" ]]; then
     echo "active deployment marker does not match installed BugLogin binaries; refusing activation" >&2
     exit 48
   fi
