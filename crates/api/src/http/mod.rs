@@ -152,6 +152,8 @@ pub(crate) struct ControlAggregate {
     #[serde(default)]
     platform_admin_accounts: BTreeSet<AccountId>,
     #[serde(default)]
+    organization_members: crate::services::organization_members::OrganizationMemberService,
+    #[serde(default)]
     profiles: BTreeMap<ProfileId, Versioned<Profile>>,
     #[serde(default)]
     profile_quarantine: BTreeMap<ProfileId, ProfileQuarantineRecord>,
@@ -209,6 +211,105 @@ impl ProfileQuarantineRecord {
     pub(crate) fn was_archived(&self) -> bool {
         self.was_archived
     }
+}
+
+fn persist_organization_member_backfill(
+    persistence: &ControlPersistence,
+    mut aggregate: ControlAggregate,
+    mut revision: u64,
+) -> Result<(ControlAggregate, u64), Problem> {
+    for _ in 0..3 {
+        let candidates = aggregate
+            .workspaces
+            .organization_membership_candidates(&aggregate.members.all_members());
+        let inserted = aggregate.organization_members.backfill_active(candidates);
+        if inserted == 0 || revision == 0 {
+            return Ok((aggregate, revision));
+        }
+
+        let serialized = serde_json::to_value(&aggregate).map_err(|_| {
+            problem(
+                "organization_member_backfill_invalid",
+                "Organization membership backfill could not be serialized",
+                500,
+            )
+        })?;
+        let result = persistence.execute(ExecuteControlCommand {
+            tenant_id: CONTROL_TENANT.into(),
+            command_id: "migration.organization_member.backfill.v1".into(),
+            idempotency_key: format!("organization-member-backfill-v1-{revision}"),
+            expected_revisions: BTreeMap::from([(
+                ControlRecordKey {
+                    tenant_id: CONTROL_TENANT.into(),
+                    record_type: CONTROL_STATE_TYPE.into(),
+                    record_id: CONTROL_STATE_ID.into(),
+                },
+                revision,
+            )]),
+            puts: vec![ControlPut {
+                tenant_id: CONTROL_TENANT.into(),
+                record_type: CONTROL_STATE_TYPE.into(),
+                record_id: CONTROL_STATE_ID.into(),
+                expected_revision: Some(revision),
+                value: serialized,
+            }],
+            deletes: Vec::new(),
+            audit: ControlAuditEntry {
+                tenant_id: CONTROL_TENANT.into(),
+                command_id: "migration.organization_member.backfill.v1".into(),
+                actor_id: "system:organization-member-backfill".into(),
+                allowed: true,
+                detail: serde_json::json!({
+                    "insertedMemberships": inserted,
+                    "source": "existing_organization_owners_and_workspace_memberships",
+                }),
+            },
+            response: HttpResponse {
+                status: StatusCode::OK.as_u16(),
+                headers: BTreeMap::new(),
+                body: serde_json::json!({ "backfilled": inserted }),
+            },
+        });
+
+        match result {
+            Ok(_) => {
+                if let Some((persisted, persisted_revision)) = persistence
+                    .load_versioned::<ControlAggregate>(
+                        CONTROL_TENANT,
+                        CONTROL_STATE_TYPE,
+                        CONTROL_STATE_ID,
+                    )?
+                {
+                    return Ok((persisted, persisted_revision));
+                }
+                return Err(problem(
+                    "organization_member_backfill_lost",
+                    "Organization membership backfill disappeared after commit",
+                    500,
+                ));
+            }
+            Err(error) if error.status == StatusCode::CONFLICT.as_u16() => {
+                let Some((latest, latest_revision)) = persistence
+                    .load_versioned::<ControlAggregate>(
+                        CONTROL_TENANT,
+                        CONTROL_STATE_TYPE,
+                        CONTROL_STATE_ID,
+                    )?
+                else {
+                    return Err(error);
+                };
+                aggregate = latest;
+                revision = latest_revision;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(problem(
+        "organization_member_backfill_busy",
+        "Organization membership backfill could not acquire a current control revision",
+        503,
+    )
+    .retryable(true))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -318,6 +419,8 @@ pub struct ApiState {
     pub events: Arc<RwLock<EventService>>,
     pub workspaces: Arc<RwLock<WorkspaceService>>,
     pub members: Arc<RwLock<MemberService>>,
+    pub(crate) organization_members:
+        Arc<RwLock<crate::services::organization_members::OrganizationMemberService>>,
     pub resources: Arc<RwLock<ResourceService>>,
     pub groups: Arc<RwLock<GroupService>>,
     pub extension_groups: Arc<RwLock<ExtensionGroupService>>,
@@ -439,6 +542,9 @@ struct ApiAuthorizationAuthority {
     api_tokens: ApiTokenService,
     account_persistence: AccountPersistence,
     members: Arc<RwLock<MemberService>>,
+    organization_members:
+        Arc<RwLock<crate::services::organization_members::OrganizationMemberService>>,
+    workspaces: Arc<RwLock<WorkspaceService>>,
     platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
     grants: Arc<RwLock<Vec<Grant>>>,
     materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
@@ -531,6 +637,8 @@ impl ApiState {
                 CONTROL_STATE_ID,
             )?
             .unwrap_or_default();
+        let (aggregate, revision) =
+            persist_organization_member_backfill(&control_persistence, aggregate, revision)?;
         let proxies = ProxyRepository::restore(aggregate.proxies.clone())
             .map_err(proxy_repository_problem)?;
         let identity_persistence = IdentityPersistence::new(control_persistence.clone());
@@ -577,6 +685,7 @@ impl ApiState {
             events: Arc::new(RwLock::new(EventService::default())),
             workspaces: Arc::new(RwLock::new(aggregate.workspaces)),
             members: Arc::new(RwLock::new(aggregate.members)),
+            organization_members: Arc::new(RwLock::new(aggregate.organization_members)),
             resources: Arc::new(RwLock::new(aggregate.resources)),
             groups: Arc::new(RwLock::new(aggregate.groups)),
             extension_groups: Arc::new(RwLock::new(aggregate.extension_groups)),
@@ -1607,6 +1716,8 @@ impl ApiState {
             api_tokens: self.api_tokens.clone(),
             account_persistence: self.account_persistence.clone(),
             members: Arc::clone(&self.members),
+            organization_members: Arc::clone(&self.organization_members),
+            workspaces: Arc::clone(&self.workspaces),
             platform_admin_accounts: Arc::clone(&self.platform_admin_accounts),
             grants: Arc::clone(&self.grants),
             materialized_member_grants: Arc::clone(&self.materialized_member_grants),
@@ -1640,6 +1751,11 @@ impl ApiState {
                 .clone(),
             platform_admin_accounts: self
                 .platform_admin_accounts
+                .read()
+                .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
+                .clone(),
+            organization_members: self
+                .organization_members
                 .read()
                 .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
                 .clone(),
@@ -1840,6 +1956,11 @@ impl ApiState {
             .write()
             .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))? =
             aggregate.members;
+        *self
+            .organization_members
+            .write()
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))? =
+            aggregate.organization_members;
         *self
             .resources
             .write()
@@ -5381,10 +5502,42 @@ impl ApiAuthorizationAuthority {
                 )
             })?
             .active_for_account(&account_id);
+        let suspended_organizations = self
+            .organization_members
+            .read()
+            .map_err(|_| {
+                Problem::new(
+                    "organization_member_unavailable",
+                    "Organization membership state unavailable",
+                    503,
+                    "identity",
+                )
+            })?
+            .suspended_organizations_for(&account_id);
+        let workspaces = self.workspaces.read().map_err(|_| {
+            Problem::new(
+                "workspace_unavailable",
+                "Workspace state unavailable",
+                503,
+                "identity",
+            )
+        })?;
+        let blocked_organization_ids = suspended_organizations
+            .into_iter()
+            .filter(|organization_id| {
+                !workspaces.organization_owner_is(organization_id, &account_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let blocked_workspace_ids = blocked_organization_ids
+            .iter()
+            .flat_map(|organization_id| workspaces.workspace_ids_in_organization(organization_id))
+            .collect::<BTreeSet<_>>();
         let mut principal = Principal {
             account_id: Some(account_id),
             roles: BTreeSet::from([Role::Account]),
             token_scopes,
+            blocked_organization_ids,
+            blocked_workspace_ids,
             ..Principal::default()
         };
         if self
@@ -5503,8 +5656,13 @@ impl ApiAuthorizationAuthority {
 }
 
 pub fn coordination_authorizer(state: &ApiState) -> Arc<dyn CoordinationAuthorizer> {
+    // Share live policy/storage handles without retaining the backend that owns
+    // this authorizer, which would create an Arc cycle.
+    let mut resource_authority = state.clone();
+    resource_authority.coordination = Arc::new(RwLock::new(None));
     Arc::new(ApiCoordinationAuthorizer {
         authority: state.authorization_authority(),
+        resource_authority: Some(resource_authority),
     })
 }
 
@@ -5573,6 +5731,7 @@ pub(crate) async fn read_workspace_events(
 
 struct ApiCoordinationAuthorizer {
     authority: ApiAuthorizationAuthority,
+    resource_authority: Option<ApiState>,
 }
 
 #[async_trait]
@@ -5631,6 +5790,19 @@ impl CoordinationAuthorizer for ApiCoordinationAuthorizer {
             ..ResourceScope::default()
         };
         let grants = self.authority.grants()?;
+        if let (Some(state), Some(resource_id)) = (&self.resource_authority, request.resource_id)
+            && capability.as_str() != "events.read"
+        {
+            return crate::services::profile_sync::authorize_resource_access(
+                state,
+                &principal,
+                &grants,
+                request.workspace_id,
+                resource_id,
+                capability.as_str(),
+                action,
+            );
+        }
         if is_allowed(&principal, &capability, action, &scope, &grants) {
             Ok(())
         } else {
@@ -10757,6 +10929,57 @@ mod persistence_tests {
     };
 
     #[test]
+    fn startup_backfills_and_persists_organization_members_from_legacy_workspace_state() {
+        let store = MemoryControlRecordStore::default();
+        let state =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.clone()).unwrap();
+        let owner = state
+            .bootstrap_first_owner(FirstOwnerBootstrapInput {
+                account_id: Some("org_backfill_owner".into()),
+                username: "org-backfill-owner".into(),
+                email: "org-backfill-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("org backfill test password".into()),
+                organization_name: "Backfill Org".into(),
+                workspace_name: "Backfill Workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 10,
+                max_members: 5,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        drop(state);
+
+        let reopened =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.clone()).unwrap();
+        let account_id = owner.account_id;
+        let aggregate = reopened.control_aggregate().unwrap();
+        assert!(
+            aggregate
+                .organization_members
+                .get(&owner.organization_id, &account_id)
+                .is_some()
+        );
+
+        let persistence = ControlPersistence::new(store);
+        let (persisted, revision) = persistence
+            .load_versioned::<ControlAggregate>(
+                CONTROL_TENANT,
+                CONTROL_STATE_TYPE,
+                CONTROL_STATE_ID,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(revision > 0);
+        assert!(
+            persisted
+                .organization_members
+                .get(&owner.organization_id, &account_id)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn profile_reader_accepts_verified_web_session_and_derives_workspace_scope() {
         let state = ApiState::hosted_with_control_store(
             ProfileService::disabled(),
@@ -12362,6 +12585,7 @@ mod persistence_tests {
         let auth = CoordinationAuth::new(account_id.as_str(), bearer).unwrap();
         let authorizer = ApiCoordinationAuthorizer {
             authority: state.authorization_authority(),
+            resource_authority: None,
         };
         authorizer
             .authorize(

@@ -242,6 +242,40 @@ mod tests {
     }
 
     #[test]
+    fn qa_instance_namespaces_create_distinct_stable_device_ids() {
+        let vault = FakeVault::default();
+        let first = DeviceIdentityVault::new(vault.clone());
+        let second = DeviceIdentityVault::new(vault);
+
+        let first_id = first
+            .load_or_create_in_namespace("buglogin-device-identity-instance-qa-a", "qa-a")
+            .unwrap();
+        let second_id = second
+            .load_or_create_in_namespace("buglogin-device-identity-instance-qa-b", "qa-b")
+            .unwrap();
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(
+            first
+                .load_or_create_in_namespace(
+                    "buglogin-device-identity-instance-qa-a",
+                    "qa-a-reload",
+                )
+                .unwrap(),
+            first_id
+        );
+        assert_eq!(
+            second
+                .load_or_create_in_namespace(
+                    "buglogin-device-identity-instance-qa-b",
+                    "qa-b-reload",
+                )
+                .unwrap(),
+            second_id
+        );
+    }
+
+    #[test]
     fn concurrent_first_start_converges_on_one_device_identity() {
         let vault = FakeVault::default();
         let first = DeviceIdentityVault::new(vault.clone());

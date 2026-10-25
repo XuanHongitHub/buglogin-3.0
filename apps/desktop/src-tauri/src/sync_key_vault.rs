@@ -11,6 +11,8 @@ use buglogin_storage::{
 use buglogin_sync::crypto::{ClientKey, RecoveryKey};
 use sha2::{Digest, Sha256};
 
+use crate::app_instance::AppInstance;
+
 const NAMESPACE: &str = "buglogin-sync";
 const KEY_BYTES: usize = 32;
 
@@ -290,9 +292,19 @@ fn resource_secret_key(
     resource_id: &ResourceId,
     correlation_id: &str,
 ) -> Result<SecretKey, Problem> {
+    let namespace = AppInstance::from_environment()?.vault_namespace(NAMESPACE);
+    resource_secret_key_in_namespace(&namespace, workspace_id, resource_id, correlation_id)
+}
+
+fn resource_secret_key_in_namespace(
+    namespace: &str,
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+    correlation_id: &str,
+) -> Result<SecretKey, Problem> {
     let scoped_id = format!("{}\0{}", workspace_id.as_str(), resource_id.as_str());
     let digest = Sha256::digest(scoped_id.as_bytes());
-    SecretKey::new(NAMESPACE, format!("resource-{:x}", digest))
+    SecretKey::new(namespace, format!("resource-{:x}", digest))
         .map_err(|error| vault_problem(error, correlation_id))
 }
 
@@ -301,9 +313,19 @@ fn rotation_secret_key(
     resource_id: &ResourceId,
     correlation_id: &str,
 ) -> Result<SecretKey, Problem> {
+    let namespace = AppInstance::from_environment()?.vault_namespace(NAMESPACE);
+    rotation_secret_key_in_namespace(&namespace, workspace_id, resource_id, correlation_id)
+}
+
+fn rotation_secret_key_in_namespace(
+    namespace: &str,
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+    correlation_id: &str,
+) -> Result<SecretKey, Problem> {
     let scoped_id = format!("{}\0{}", workspace_id.as_str(), resource_id.as_str());
     let digest = Sha256::digest(scoped_id.as_bytes());
-    SecretKey::new(NAMESPACE, format!("resource-{:x}-rotation", digest))
+    SecretKey::new(namespace, format!("resource-{:x}-rotation", digest))
         .map_err(|error| vault_problem(error, correlation_id))
 }
 
@@ -336,6 +358,59 @@ fn vault_problem(error: SecretError, correlation_id: &str) -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_and_rotation_keys_are_separate_per_application_instance() {
+        let workspace = WorkspaceId::new("workspace-instance-test").unwrap();
+        let resource = ResourceId::new("resource-instance-test").unwrap();
+        let first = AppInstance::from_id(Some("qa-a")).unwrap();
+        let second = AppInstance::from_id(Some("qa-b")).unwrap();
+        let first_namespace = first.vault_namespace(NAMESPACE);
+        let second_namespace = second.vault_namespace(NAMESPACE);
+
+        let first_active = resource_secret_key_in_namespace(
+            &first_namespace,
+            &workspace,
+            &resource,
+            "sync-key-instance-test",
+        )
+        .unwrap();
+        let second_active = resource_secret_key_in_namespace(
+            &second_namespace,
+            &workspace,
+            &resource,
+            "sync-key-instance-test",
+        )
+        .unwrap();
+        let first_rotation = rotation_secret_key_in_namespace(
+            &first_namespace,
+            &workspace,
+            &resource,
+            "sync-key-instance-test",
+        )
+        .unwrap();
+        let second_rotation = rotation_secret_key_in_namespace(
+            &second_namespace,
+            &workspace,
+            &resource,
+            "sync-key-instance-test",
+        )
+        .unwrap();
+
+        assert_ne!(first_active, second_active);
+        assert_ne!(first_rotation, second_rotation);
+        assert_eq!(
+            resource_secret_key_in_namespace(
+                NAMESPACE,
+                &workspace,
+                &resource,
+                "sync-key-instance-test",
+            )
+            .unwrap()
+            .namespace(),
+            NAMESPACE
+        );
+    }
 
     #[cfg(any(windows, target_os = "macos"))]
     #[test]

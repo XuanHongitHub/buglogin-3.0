@@ -42,7 +42,7 @@ impl ProxyChecker for TrackingChecker {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::thread::yield_now();
         self.active.fetch_sub(1, Ordering::SeqCst);
-        if proxy.port % 2 == 0 {
+        if proxy.port.is_multiple_of(2) {
             ProxyHealth::Healthy {
                 latency_ms: u64::from(proxy.port),
             }

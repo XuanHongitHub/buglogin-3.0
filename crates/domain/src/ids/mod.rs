@@ -13,12 +13,22 @@ macro_rules! id_type {
                 Ok(Self(value))
             }
 
+            // Keep the established associated constructor while also exposing `FromStr` below.
+            #[allow(clippy::should_implement_trait)]
             pub fn from_str(value: &str) -> Result<Self, IdError> {
                 Self::new(value)
             }
 
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = IdError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::new(value)
             }
         }
 
@@ -88,6 +98,7 @@ id_type!(ExtensionGroupId);
 id_type!(ArtifactId);
 id_type!(AccountId);
 id_type!(OrganizationId);
+id_type!(OrganizationMemberId);
 id_type!(WorkspaceId);
 id_type!(TeamId);
 id_type!(MemberId);
@@ -129,6 +140,18 @@ impl DeviceId {
     }
 }
 
+pub const MIGRATION_UUID_NAMESPACE: Uuid = Uuid::from_u128(0xf5d2d691b71548b1bc162855ef99586b);
+
+pub fn migration_uuid(
+    source_system: &str,
+    source_instance_id: &str,
+    entity_type: &str,
+    source_id: &str,
+) -> Uuid {
+    let name = format!("{source_system}:{source_instance_id}:{entity_type}:{source_id}");
+    Uuid::new_v5(&MIGRATION_UUID_NAMESPACE, name.as_bytes())
+}
+
 #[cfg(test)]
 mod device_id_tests {
     use super::{DeviceId, IdError};
@@ -161,16 +184,4 @@ mod device_id_tests {
             IdError::TooLong
         );
     }
-}
-
-pub const MIGRATION_UUID_NAMESPACE: Uuid = Uuid::from_u128(0xf5d2d691b71548b1bc162855ef99586b);
-
-pub fn migration_uuid(
-    source_system: &str,
-    source_instance_id: &str,
-    entity_type: &str,
-    source_id: &str,
-) -> Uuid {
-    let name = format!("{source_system}:{source_instance_id}:{entity_type}:{source_id}");
-    Uuid::new_v5(&MIGRATION_UUID_NAMESPACE, name.as_bytes())
 }

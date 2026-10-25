@@ -2,6 +2,7 @@
 
 pub mod adapter;
 mod agent_features;
+mod app_instance;
 mod auth_vault;
 mod clock;
 mod cookie_tools;
@@ -70,6 +71,13 @@ use profile_cookie_manager::{
 };
 
 pub fn run() {
+    let app_instance = match app_instance::AppInstance::from_environment() {
+        Ok(instance) => instance,
+        Err(problem) => {
+            eprintln!("BugLogin startup configuration error: {}", problem.code);
+            std::process::exit(2);
+        }
+    };
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init());
@@ -79,10 +87,28 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
+    let mut context = tauri::generate_context!();
+    if app_instance.is_isolated() {
+        for window in &mut context.config_mut().app.windows {
+            if let Some(instance_id) = app_instance.id() {
+                window.title = format!("BugLogin [{instance_id}]");
+            }
+            #[cfg(target_os = "macos")]
+            {
+                window.data_store_identifier = app_instance.webview_data_store_identifier();
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                window.data_directory = app_instance.webview_relative_data_directory();
+            }
+        }
+    }
+
     builder
         .setup(move |app| {
             let state = build_state().unwrap_or_else(DesktopState::unavailable);
             state.start_background_auth_refresh();
+            diagnostics::start_background_flush(state.clone());
             let update_state = state.clone();
             app.manage(state);
             app.manage(event_stream::EventStreamManager::default());
@@ -179,6 +205,10 @@ pub fn run() {
             organization_record_get,
             organization_create,
             organization_update,
+            organization_members_list,
+            organization_account_create,
+            organization_member_status_update,
+            organization_member_workspace_assign,
             workspace_list,
             workspace_get,
             workspace_record_get,
@@ -506,7 +536,7 @@ pub fn run() {
             agent_features::test_agent_schedule_notice,
             agent_features::list_agent_schedule_runs,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build BugLogin desktop application")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
@@ -787,7 +817,7 @@ struct ProfileRuntimeSelection {
     runtime_version: Option<String>,
 }
 
-async fn ensure_profile_runtime_installed(
+pub(crate) async fn ensure_profile_runtime_installed(
     app: tauri::AppHandle,
     state: &DesktopState,
     profile_id: &str,
@@ -1430,6 +1460,68 @@ async fn organization_update(
     state
         .invoke(
             "organization_update",
+            &correlation_id,
+            idempotency_key.as_deref(),
+            payload,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn organization_members_list(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke("organization_members_list", &correlation_id, None, payload)
+        .await
+}
+
+#[tauri::command]
+async fn organization_account_create(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    idempotency_key: Option<String>,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "organization_account_create",
+            &correlation_id,
+            idempotency_key.as_deref(),
+            payload,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn organization_member_status_update(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    idempotency_key: Option<String>,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "organization_member_status_update",
+            &correlation_id,
+            idempotency_key.as_deref(),
+            payload,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn organization_member_workspace_assign(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    idempotency_key: Option<String>,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "organization_member_workspace_assign",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,

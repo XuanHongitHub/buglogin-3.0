@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::app_instance::AppInstance;
 use crate::desktop_state::DesktopState;
 use crate::legacy_compat::{self, create_browser_profile_new};
 use crate::profile_password;
@@ -21,13 +22,14 @@ fn req_id(prefix: &str) -> String {
 }
 
 fn get_app_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
+    let base = if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
         PathBuf::from(dir)
     } else if let Some(base) = dirs::data_dir() {
         base.join("buglogin")
     } else {
         PathBuf::from(".buglogin")
-    }
+    };
+    AppInstance::app_data_dir(base)
 }
 
 fn now_secs() -> i64 {

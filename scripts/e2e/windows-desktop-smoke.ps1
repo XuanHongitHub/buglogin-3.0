@@ -10,9 +10,14 @@ if ($resolvedRoot.TrimEnd('\') -ine 'G:\buglogin-target') {
 }
 $releaseRoot = Join-Path $resolvedRoot 'x86_64-pc-windows-msvc\release'
 $executable = Join-Path $releaseRoot 'buglogin-desktop-app.exe'
+$desktopPackage = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\apps\desktop\package.json') -Raw | ConvertFrom-Json
+$appVersion = [string]$desktopPackage.version
+if ($appVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid desktop package version: $appVersion"
+}
 $artifacts = @(
     $executable,
-    (Join-Path $releaseRoot 'bundle\nsis\BugLogin_3.0.0_x64-setup.exe')
+    (Join-Path $releaseRoot "bundle\nsis\BugLogin_${appVersion}_x64-setup.exe")
 )
 foreach ($artifact in $artifacts) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {

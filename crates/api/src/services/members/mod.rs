@@ -113,6 +113,33 @@ impl MemberService {
         self.insert_active_membership(member)
     }
 
+    /// Assign an existing active organization member directly to a workspace.
+    /// The caller must first verify the parent membership and organization/workspace
+    /// relationship; this method preserves the normal workspace role ceiling.
+    pub fn assign_active_as_org_owner(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization: &Organization,
+        member: Member,
+    ) -> Result<Member, Problem> {
+        Self::authorize_org_owner_account_creation(
+            principal,
+            grants,
+            organization,
+            &member.workspace_id,
+            &member.role,
+        )?;
+        if member.status != MemberStatus::Active || member.invite_expires_at.is_some() {
+            return Err(problem(
+                "invalid_workspace_assignment",
+                "Workspace assignment must be active and have no invitation expiry",
+                400,
+            ));
+        }
+        self.insert_active_membership(member)
+    }
+
     pub fn list_as_org_owner(
         &self,
         principal: &Principal,
@@ -206,6 +233,10 @@ impl MemberService {
             .filter(|member| member.status == MemberStatus::Active)
             .cloned()
             .collect()
+    }
+
+    pub fn all_members(&self) -> Vec<Member> {
+        self.members.values().cloned().collect()
     }
 
     pub fn list(
@@ -364,11 +395,28 @@ impl MemberService {
         id: &MemberId,
         now: u64,
     ) -> Result<(), Problem> {
-        let self_accept = self.members.get(id).is_some_and(|member| {
+        let is_self = self.members.get(id).is_some_and(|member| {
             &member.workspace_id == workspace_id
                 && (principal.account_id.as_ref() == Some(&member.account_id)
                     || principal.member_id.as_ref() == Some(id))
         });
+        let suspended_self = is_self
+            && self
+                .members
+                .get(id)
+                .is_some_and(|member| member.status == MemberStatus::Suspended);
+        if suspended_self {
+            return Err(problem(
+                "member_forbidden",
+                "A suspended member cannot reactivate their own membership",
+                403,
+            ));
+        }
+        let self_accept = is_self
+            && self
+                .members
+                .get(id)
+                .is_some_and(|member| member.status == MemberStatus::Invited);
         if !self_accept {
             authorize(principal, grants, workspace_id, Action::Manage)?;
         }
@@ -380,11 +428,14 @@ impl MemberService {
         if !self_accept {
             self.ensure_actor_can_manage_role(principal, workspace_id, &member.role)?;
         }
-        if member.status != MemberStatus::Invited
-            || member
+        if member.status == MemberStatus::Invited
+            && member
                 .invite_expires_at
                 .is_none_or(|expires| expires <= now)
         {
+            return Err(problem("invite_expired", "Invite expired", 409));
+        }
+        if member.status == MemberStatus::Active {
             return Err(problem("invite_expired", "Invite expired", 409));
         }
         if self.members.values().any(|existing| {
@@ -677,7 +728,6 @@ fn authorize_org_owner(
     let scope = ResourceScope {
         account_id: Some(organization.account_id.clone()),
         organization_id: Some(organization.id.clone()),
-        workspace_id: Some(workspace_id.clone()),
         ..ResourceScope::default()
     };
     let member_capability = Capability::new(CAPABILITY)
@@ -705,15 +755,40 @@ fn authorize_org_owner(
     if explicit_member_deny {
         return Err(problem("member_forbidden", "Member access denied", 403));
     }
-    if is_allowed(principal, &capability, Action::Manage, &scope, grants) {
-        Ok(())
-    } else {
-        Err(problem(
+    if principal.token_scopes.as_ref().is_some_and(|scopes| {
+        !scopes.contains("CAP-ORG-001:manage") && !scopes.contains("CAP-ORG-001:*")
+    }) {
+        return Err(problem(
             "member_forbidden",
             "Organization owner access denied",
             403,
-        ))
+        ));
     }
+    let explicit_organization_deny = grants.iter().any(|grant| {
+        grant.capability == capability
+            && grant.action == Action::Manage
+            && grant.effect == buglogin_domain::permissions::Effect::Deny
+            && grant.scope.contains(&scope)
+            && grant
+                .account_id
+                .as_ref()
+                .is_none_or(|id| principal.account_id.as_ref() == Some(id))
+            && grant
+                .member_id
+                .as_ref()
+                .is_none_or(|id| principal.member_id.as_ref() == Some(id))
+    });
+    if explicit_organization_deny {
+        return Err(problem(
+            "member_forbidden",
+            "Organization owner access denied",
+            403,
+        ));
+    }
+    // Organization ownership is implicit authority, matching
+    // WorkspaceService::authorize_organization_management. Keep explicit
+    // organization and member denies, and scoped-token checks, authoritative.
+    Ok(())
 }
 
 fn role_rank(role: &MemberRole) -> u8 {
@@ -812,6 +887,53 @@ mod tests {
             .unwrap();
         assert_eq!(unchanged.status, MemberStatus::Invited);
         assert_eq!(unchanged.role, MemberRole::Member);
+    }
+
+    #[test]
+    fn suspended_members_can_be_restored_by_managers_but_not_by_themselves() {
+        let workspace = WorkspaceId::new("ws_member_restore").unwrap();
+        let member = Member {
+            id: MemberId::new("mem_member_restore").unwrap(),
+            account_id: AccountId::new("acct_member_restore").unwrap(),
+            workspace_id: workspace.clone(),
+            team_id: None,
+            role: MemberRole::Member,
+            status: MemberStatus::Active,
+            invite_expires_at: None,
+        };
+        let platform_admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        let mut members = MemberService::default();
+        members
+            .provision_active(&platform_admin, &[], member.clone())
+            .unwrap();
+        members
+            .suspend(&platform_admin, &[], &workspace, &member.id)
+            .unwrap();
+
+        let suspended_member = Principal {
+            account_id: Some(member.account_id.clone()),
+            workspace_ids: BTreeSet::from([workspace.clone()]),
+            ..Principal::default()
+        };
+        let self_restore = members
+            .activate(&suspended_member, &[], &workspace, &member.id, 10)
+            .unwrap_err();
+        assert_eq!(self_restore.code, "member_forbidden");
+        assert_eq!(self_restore.status, 403);
+
+        members
+            .activate(&platform_admin, &[], &workspace, &member.id, 10)
+            .unwrap();
+        assert_eq!(
+            members
+                .get_in_workspace(&platform_admin, &[], &member.id, &workspace)
+                .unwrap()
+                .status,
+            MemberStatus::Active
+        );
     }
 
     #[test]
@@ -1031,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn organization_owner_can_list_and_create_lower_workspace_members() {
+    fn organization_owner_can_list_and_assign_lower_workspace_members() {
         use buglogin_domain::{
             ids::{GrantId, OrganizationId},
             organization::Organization,
@@ -1063,7 +1185,7 @@ mod tests {
         };
         let mut members = MemberService::default();
         let created = members
-            .provision_active_as_org_owner(
+            .assign_active_as_org_owner(
                 &owner,
                 std::slice::from_ref(&organization_manage),
                 &organization,
@@ -1079,6 +1201,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(created.role, MemberRole::Admin);
+        assert_eq!(
+            members
+                .assign_active_as_org_owner(
+                    &owner,
+                    std::slice::from_ref(&organization_manage),
+                    &organization,
+                    created.clone(),
+                )
+                .unwrap(),
+            created
+        );
         assert_eq!(
             members
                 .list_as_org_owner(
@@ -1098,7 +1231,7 @@ mod tests {
         owner_assignment.role = MemberRole::Owner;
         assert_eq!(
             members
-                .provision_active_as_org_owner(
+                .assign_active_as_org_owner(
                     &owner,
                     &[organization_manage.clone()],
                     &organization,
@@ -1145,6 +1278,64 @@ mod tests {
                 )
                 .unwrap_err()
                 .status,
+            403
+        );
+    }
+
+    #[test]
+    fn organization_owner_identity_needs_no_org_grant_but_honors_explicit_deny() {
+        use buglogin_domain::{
+            ids::{GrantId, OrganizationId},
+            organization::Organization,
+        };
+
+        let organization = Organization {
+            id: OrganizationId::new("org_owner_implicit_access").unwrap(),
+            account_id: AccountId::new("acct_org_owner_implicit_access").unwrap(),
+            name: "Implicit Owner Org".into(),
+            created_at: "2026-10-24T00:00:00Z".into(),
+        };
+        let workspace = WorkspaceId::new("ws_owner_implicit_access").unwrap();
+        let owner = Principal {
+            account_id: Some(organization.account_id.clone()),
+            roles: BTreeSet::from([Role::Account]),
+            ..Principal::default()
+        };
+
+        assert!(
+            MemberService::authorize_org_owner_account_creation(
+                &owner,
+                &[],
+                &organization,
+                &workspace,
+                &MemberRole::Admin,
+            )
+            .is_ok()
+        );
+
+        let explicit_deny = Grant {
+            id: GrantId::new("grant_org_owner_implicit_access_deny").unwrap(),
+            account_id: Some(organization.account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-ORG-001").unwrap(),
+            action: Action::Manage,
+            scope: ResourceScope {
+                account_id: Some(organization.account_id.clone()),
+                organization_id: Some(organization.id.clone()),
+                ..ResourceScope::default()
+            },
+            effect: Effect::Deny,
+        };
+        assert_eq!(
+            MemberService::authorize_org_owner_account_creation(
+                &owner,
+                &[explicit_deny],
+                &organization,
+                &workspace,
+                &MemberRole::Admin,
+            )
+            .unwrap_err()
+            .status,
             403
         );
     }

@@ -8,6 +8,7 @@ const result = spawnSync(
   [
     "--test",
     "tests/release/release-workflows.test.mjs",
+    "tests/release/tauri-signature.test.mjs",
     "tests/platform/tauri-cargo.test.mjs",
   ],
   { stdio: "inherit" },

@@ -14,6 +14,8 @@ use buglogin_storage::{
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
+use crate::app_instance::AppInstance;
+
 const NAMESPACE: &str = "buglogin-proxy";
 const PENDING_NAMESPACE: &str = "buglogin-proxy-mutation";
 
@@ -177,7 +179,8 @@ impl ProxyCredentialVault {
         proxy_id: &ProxyId,
         correlation_id: &str,
     ) -> Result<File, Problem> {
-        let root = std::env::temp_dir().join("buglogin-proxy-mutation-locks");
+        let root = AppInstance::from_environment()?
+            .namespace_path(std::env::temp_dir().join("buglogin-proxy-mutation-locks"));
         fs::create_dir_all(&root).map_err(|_| unavailable(correlation_id))?;
         #[cfg(unix)]
         {
@@ -217,13 +220,34 @@ fn pending_key(
     proxy_id: &ProxyId,
     correlation_id: &str,
 ) -> Result<SecretKey, Problem> {
+    let namespace = AppInstance::from_environment()?.vault_namespace(PENDING_NAMESPACE);
+    pending_key_in_namespace(&namespace, workspace_id, proxy_id, correlation_id)
+}
+
+fn pending_key_in_namespace(
+    namespace: &str,
+    workspace_id: &WorkspaceId,
+    proxy_id: &ProxyId,
+    correlation_id: &str,
+) -> Result<SecretKey, Problem> {
     let scoped_id = format!("{}\0{}", workspace_id.as_str(), proxy_id.as_str());
     let digest = Sha256::digest(scoped_id.as_bytes());
-    SecretKey::new(PENDING_NAMESPACE, format!("proxy-mutation-{:x}", digest))
+    SecretKey::new(namespace, format!("proxy-mutation-{:x}", digest))
         .map_err(|error| vault_problem(error, correlation_id))
 }
 
 fn credential_key(
+    workspace_id: &WorkspaceId,
+    proxy_id: &ProxyId,
+    revision: u64,
+    correlation_id: &str,
+) -> Result<SecretKey, Problem> {
+    let namespace = AppInstance::from_environment()?.vault_namespace(NAMESPACE);
+    credential_key_in_namespace(&namespace, workspace_id, proxy_id, revision, correlation_id)
+}
+
+fn credential_key_in_namespace(
+    namespace: &str,
     workspace_id: &WorkspaceId,
     proxy_id: &ProxyId,
     revision: u64,
@@ -236,7 +260,7 @@ fn credential_key(
         revision
     );
     let digest = Sha256::digest(scoped_id.as_bytes());
-    SecretKey::new(NAMESPACE, format!("proxy-{:x}", digest))
+    SecretKey::new(namespace, format!("proxy-{:x}", digest))
         .map_err(|error| vault_problem(error, correlation_id))
 }
 
@@ -325,6 +349,54 @@ mod tests {
             self.0.remove(&map_key);
             Ok(())
         }
+    }
+
+    #[test]
+    fn proxy_secrets_and_pending_mutations_are_separate_per_instance() {
+        let workspace = WorkspaceId::new("workspace-instance-test").unwrap();
+        let proxy = ProxyId::new("proxy-instance-test").unwrap();
+        let first = AppInstance::from_id(Some("qa-a")).unwrap();
+        let second = AppInstance::from_id(Some("qa-b")).unwrap();
+
+        let first_credential = credential_key_in_namespace(
+            &first.vault_namespace(NAMESPACE),
+            &workspace,
+            &proxy,
+            1,
+            "proxy-instance-test",
+        )
+        .unwrap();
+        let second_credential = credential_key_in_namespace(
+            &second.vault_namespace(NAMESPACE),
+            &workspace,
+            &proxy,
+            1,
+            "proxy-instance-test",
+        )
+        .unwrap();
+        let first_pending = pending_key_in_namespace(
+            &first.vault_namespace(PENDING_NAMESPACE),
+            &workspace,
+            &proxy,
+            "proxy-instance-test",
+        )
+        .unwrap();
+        let second_pending = pending_key_in_namespace(
+            &second.vault_namespace(PENDING_NAMESPACE),
+            &workspace,
+            &proxy,
+            "proxy-instance-test",
+        )
+        .unwrap();
+
+        assert_ne!(first_credential, second_credential);
+        assert_ne!(first_pending, second_pending);
+        assert_eq!(
+            credential_key_in_namespace(NAMESPACE, &workspace, &proxy, 1, "proxy-instance-test")
+                .unwrap()
+                .namespace(),
+            NAMESPACE
+        );
     }
 
     #[test]

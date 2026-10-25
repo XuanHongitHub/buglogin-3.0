@@ -1,17 +1,14 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Duration,
 };
-
-use buglogin_domain::{entities::Runtime, errors::Problem, ids::ProfileId};
-use buglogin_storage::paths::confined_path;
-use rusqlite::{Connection, OpenFlags, params};
 
 use super::{
     LaunchSpecification, RuntimeAdapter, RuntimeBinary, RuntimeCapability, ValidatedRuntimeBinary,
     invalid_runtime,
 };
+use buglogin_domain::{entities::Runtime, errors::Problem, ids::ProfileId};
+use buglogin_storage::paths::confined_path;
 
 const CAPABILITIES: &[RuntimeCapability] = &[
     RuntimeCapability::ProfileIsolation,
@@ -21,46 +18,15 @@ const CAPABILITIES: &[RuntimeCapability] = &[
     RuntimeCapability::Fingerprint,
     RuntimeCapability::Cdp,
 ];
-// The bundled runtime has shipped its vendor shortcut with and without the
-// trailing slash. Keep both forms blacklisted locally and seed BugLogin as a
-// custom NTP shortcut so first-launch profiles never expose the vendor tile.
-const UPSTREAM_SHORTCUT_HOST: &str = "donutbrowser.com";
 const BUGLOGIN_NEW_TAB_SHORTCUT: &str = "https://buglogin.com/";
-const UPSTREAM_NEW_TAB_SHORTCUTS: &[&str] =
-    &["https://donutbrowser.com", "https://donutbrowser.com/"];
 
-/// Replace the runtime vendor tile with BugLogin without discarding unrelated
-/// profile shortcuts or browsing history.
+/// Remove the exact BugLogin NTP shortcut emitted by older builds. Wayfern 155
+/// can crash on that generated string entry; retain unrelated user shortcuts.
 pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
-    let mut vendor_urls = read_top_site_urls(profile_path)?
-        .into_iter()
-        .filter(|url| is_upstream_shortcut(url))
-        .collect::<Vec<_>>();
-    for url in UPSTREAM_NEW_TAB_SHORTCUTS {
-        if !vendor_urls.iter().any(|suggested| suggested == url) {
-            vendor_urls.push((*url).to_owned());
-        }
-    }
-    let default_profile = profile_path.join("Default");
-    fs::create_dir_all(&default_profile).map_err(|_| {
-        Problem::new(
-            "wayfern_profile_preferences_unavailable",
-            "Wayfern profile preferences are unavailable",
-            503,
-            "wayfern-new-tab",
-        )
-    })?;
-    let preferences_path = default_profile.join("Preferences");
-    let mut preferences = match fs::read(&preferences_path) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-            Problem::new(
-                "wayfern_profile_preferences_invalid",
-                "Wayfern profile preferences could not be read",
-                409,
-                "wayfern-new-tab",
-            )
-        })?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+    let preferences_path = profile_path.join("Default").join("Preferences");
+    let bytes = match fs::read(&preferences_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => {
             return Err(Problem::new(
                 "wayfern_profile_preferences_unavailable",
@@ -70,6 +36,14 @@ pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
             ));
         }
     };
+    let mut preferences = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+        Problem::new(
+            "wayfern_profile_preferences_invalid",
+            "Wayfern profile preferences could not be read",
+            409,
+            "wayfern-new-tab",
+        )
+    })?;
     let Some(root) = preferences.as_object_mut() else {
         return Err(Problem::new(
             "wayfern_profile_preferences_invalid",
@@ -78,57 +52,43 @@ pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
             "wayfern-new-tab",
         ));
     };
-    let ntp = root.entry("ntp").or_insert_with(|| serde_json::json!({}));
-    if !ntp.is_object() {
-        *ntp = serde_json::json!({});
-    }
-    let Some(ntp) = ntp.as_object_mut() else {
-        return Err(Problem::new(
-            "wayfern_profile_preferences_invalid",
-            "Wayfern profile preferences could not be saved",
-            500,
-            "wayfern-new-tab",
-        ));
+    let Some(custom_links) = root
+        .get_mut("custom_links")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(());
     };
-    // Chromium's registered preference uses this historical spelling.
-    ntp.insert(
-        "shortcust_visible".to_owned(),
-        serde_json::Value::Bool(true),
-    );
-    ntp.insert(
-        "custom_links_visible".to_owned(),
-        serde_json::Value::Bool(true),
-    );
-    ntp.insert(
-        "enterprise_shortcuts_visible".to_owned(),
-        serde_json::Value::Bool(false),
-    );
-    ntp.insert(
-        "personal_shortcuts_visible".to_owned(),
-        serde_json::Value::Bool(true),
-    );
-    let blacklist = ntp
-        .entry("most_visited_blacklist")
-        .or_insert_with(|| serde_json::json!({}));
-    if !blacklist.is_object() {
-        *blacklist = serde_json::json!({});
+    let has_buglogin_shortcut = custom_links
+        .get("list")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|links| {
+            links
+                .iter()
+                .any(|link| link.as_str() == Some(BUGLOGIN_NEW_TAB_SHORTCUT))
+        });
+    if !has_buglogin_shortcut {
+        return Ok(());
     }
-    let Some(blacklist) = blacklist.as_object_mut() else {
-        return Err(Problem::new(
-            "wayfern_profile_preferences_invalid",
-            "Wayfern New Tab suggestions could not be disabled",
-            500,
-            "wayfern-new-tab",
-        ));
-    };
-    for url in vendor_urls {
-        blacklist.insert(
-            format!("{:x}", md5::compute(url.as_bytes())),
-            serde_json::Value::Null,
-        );
+    if let Some(links) = custom_links
+        .get_mut("list")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        links.retain(|link| link.as_str() != Some(BUGLOGIN_NEW_TAB_SHORTCUT));
     }
-
-    seed_buglogin_custom_shortcut(root)?;
+    if custom_links
+        .get("list")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        custom_links.remove("list");
+    }
+    if custom_links.get("initialized") == Some(&serde_json::Value::Bool(true)) {
+        custom_links.remove("initialized");
+    }
+    let remove_custom_links = custom_links.is_empty();
+    if remove_custom_links {
+        root.remove("custom_links");
+    }
     let encoded = serde_json::to_vec(&preferences).map_err(|_| {
         Problem::new(
             "wayfern_profile_preferences_invalid",
@@ -145,169 +105,7 @@ pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
             "wayfern-new-tab",
         )
     })?;
-
-    replace_vendor_top_site(profile_path)
-}
-
-fn seed_buglogin_custom_shortcut(
-    root: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<(), Problem> {
-    let custom_links = root
-        .entry("custom_links")
-        .or_insert_with(|| serde_json::json!({}));
-    if !custom_links.is_object() {
-        *custom_links = serde_json::json!({});
-    }
-    let Some(custom_links) = custom_links.as_object_mut() else {
-        return Err(Problem::new(
-            "wayfern_profile_preferences_invalid",
-            "Wayfern custom shortcuts could not be saved",
-            500,
-            "wayfern-new-tab",
-        ));
-    };
-    let existing = custom_links
-        .get("list")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut links = Vec::with_capacity(existing.len() + 1);
-    let mut has_buglogin = false;
-    for value in existing {
-        let Some(url) = value.as_str() else {
-            continue;
-        };
-        if is_upstream_shortcut(url) {
-            if !has_buglogin {
-                links.push(serde_json::Value::String(
-                    BUGLOGIN_NEW_TAB_SHORTCUT.to_owned(),
-                ));
-                has_buglogin = true;
-            }
-        } else {
-            if url == BUGLOGIN_NEW_TAB_SHORTCUT {
-                has_buglogin = true;
-            }
-            links.push(value);
-        }
-    }
-    if !has_buglogin {
-        links.push(serde_json::Value::String(
-            BUGLOGIN_NEW_TAB_SHORTCUT.to_owned(),
-        ));
-    }
-    custom_links.insert("list".to_owned(), serde_json::Value::Array(links));
-    custom_links.insert("initialized".to_owned(), serde_json::Value::Bool(true));
     Ok(())
-}
-
-fn is_upstream_shortcut(url: &str) -> bool {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| host == UPSTREAM_SHORTCUT_HOST || host.ends_with(".donutbrowser.com"))
-}
-
-fn read_top_site_urls(profile_path: &Path) -> Result<Vec<String>, Problem> {
-    let database_path = profile_path.join("Default").join("Top Sites");
-    let metadata = match fs::symlink_metadata(&database_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(top_sites_unavailable()),
-    };
-    if !metadata.file_type().is_file() {
-        return Err(top_sites_unavailable());
-    }
-
-    let connection = Connection::open_with_flags(
-        &database_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| top_sites_unavailable())?;
-    connection
-        .busy_timeout(Duration::from_secs(2))
-        .map_err(|_| top_sites_unavailable())?;
-
-    let has_top_sites_table: bool = connection
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'top_sites')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| top_sites_unavailable())?;
-    if !has_top_sites_table {
-        return Ok(Vec::new());
-    }
-
-    let mut statement = connection
-        .prepare("SELECT url FROM top_sites")
-        .map_err(|_| top_sites_unavailable())?;
-    let rows = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|_| top_sites_unavailable())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|_| top_sites_unavailable())
-}
-
-fn replace_vendor_top_site(profile_path: &Path) -> Result<(), Problem> {
-    let database_path = profile_path.join("Default").join("Top Sites");
-    if !database_path.exists() {
-        return Ok(());
-    }
-    let connection = Connection::open_with_flags(
-        &database_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| top_sites_unavailable())?;
-    connection
-        .busy_timeout(Duration::from_secs(2))
-        .map_err(|_| top_sites_unavailable())?;
-    let has_top_sites_table: bool = connection
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'top_sites')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| top_sites_unavailable())?;
-    if has_top_sites_table {
-        let urls = {
-            let mut statement = connection
-                .prepare("SELECT url FROM top_sites")
-                .map_err(|_| top_sites_unavailable())?;
-            let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|_| top_sites_unavailable())?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|_| top_sites_unavailable())?
-        };
-        for url in urls.iter().filter(|url| is_upstream_shortcut(url)) {
-            connection
-                .execute("DELETE FROM top_sites WHERE url = ?1", params![url])
-                .map_err(|_| top_sites_unavailable())?;
-        }
-        connection
-            .execute(
-                "UPDATE top_sites SET url_rank = url_rank + 1 WHERE url != ?1",
-                params![BUGLOGIN_NEW_TAB_SHORTCUT],
-            )
-            .map_err(|_| top_sites_unavailable())?;
-        connection
-            .execute(
-                "INSERT OR REPLACE INTO top_sites(url, url_rank, title) VALUES (?1, 0, 'BugLogin')",
-                params![BUGLOGIN_NEW_TAB_SHORTCUT],
-            )
-            .map_err(|_| top_sites_unavailable())?;
-    }
-    Ok(())
-}
-
-fn top_sites_unavailable() -> Problem {
-    Problem::new(
-        "wayfern_top_sites_unavailable",
-        "Wayfern New Tab shortcuts could not be updated",
-        503,
-        "wayfern-new-tab",
-    )
 }
 
 fn persist_preferences_atomically(path: &Path, encoded: &[u8]) -> std::io::Result<()> {
@@ -432,7 +230,7 @@ impl RuntimeAdapter for WayfernAdapter {
         }
         let mut args = vec![format!(
             "--user-data-dir={}",
-            profile_path.to_string_lossy()
+            chromium_compatible_user_data_dir(profile_path)
         )];
         args.extend(extra_args.iter().cloned());
         Ok(LaunchSpecification {
@@ -443,6 +241,24 @@ impl RuntimeAdapter for WayfernAdapter {
             args,
         })
     }
+}
+
+fn chromium_compatible_user_data_dir(profile_path: &Path) -> String {
+    let path = profile_path.to_string_lossy();
+    if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc_path}");
+    }
+    if let Some(drive_path) = path.strip_prefix(r"\\?\") {
+        let bytes = drive_path.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return drive_path.to_owned();
+        }
+    }
+    path.into_owned()
 }
 
 fn is_user_data_dir_override(argument: &str) -> bool {
@@ -486,6 +302,34 @@ mod tests {
     }
 
     #[test]
+    fn chromium_data_directory_removes_verbatim_drive_prefix() {
+        assert_eq!(
+            chromium_compatible_user_data_dir(Path::new(
+                r"\\?\D:\buglogin-temp\profiles\profile-one"
+            )),
+            r"D:\buglogin-temp\profiles\profile-one"
+        );
+    }
+
+    #[test]
+    fn chromium_data_directory_converts_verbatim_unc_prefix() {
+        assert_eq!(
+            chromium_compatible_user_data_dir(Path::new(
+                r"\\?\UNC\server\share\profiles\profile-one"
+            )),
+            r"\\server\share\profiles\profile-one"
+        );
+    }
+
+    #[test]
+    fn chromium_data_directory_preserves_nonverbatim_paths() {
+        assert_eq!(
+            chromium_compatible_user_data_dir(Path::new(r"D:\buglogin-temp\profiles\profile-one")),
+            r"D:\buglogin-temp\profiles\profile-one"
+        );
+    }
+
+    #[test]
     fn launch_specification_rejects_runtime_data_directory_overrides() {
         let error = WayfernAdapter
             .launch_specification(
@@ -499,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn new_tab_replaces_vendor_shortcut_with_buglogin_and_preserves_other_profile_data() {
+    fn new_tab_repair_removes_generated_shortcut_and_marker_preserving_profile_data() {
         let profile_path = std::env::temp_dir().join(format!(
             "buglogin-wayfern-ntp-test-{}-{}",
             std::process::id(),
@@ -513,86 +357,32 @@ mod tests {
         let preferences_path = default_profile.join("Preferences");
         fs::write(
             &preferences_path,
-            br#"{"bookmark_bar":{"show_on_all_tabs":true},"ntp":{"shortcust_visible":false,"most_visited_blacklist":{"preexisting":null}},"custom_links":{"initialized":true,"list":["https://donutbrowser.com","https://example.org/"]}}"#,
+            br#"{"bookmark_bar":{"show_on_all_tabs":true},"ntp":{"shortcust_visible":false,"most_visited_blacklist":{"preexisting":null}},"custom_links":{"initialized":true,"list":["https://buglogin.com/","https://example.org/"]}}"#,
         )
         .unwrap();
-        let top_sites_path = default_profile.join("Top Sites");
-        let connection = Connection::open(&top_sites_path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE top_sites(url TEXT PRIMARY KEY, url_rank INTEGER NOT NULL, title TEXT NOT NULL);",
-            )
-            .unwrap();
-        let suggested_urls = [
-            "https://donutbrowser.com/",
-            "https://chromewebstore.google.com/",
-            "https://example.test/",
-        ];
-        for (rank, url) in suggested_urls.iter().enumerate() {
-            connection
-                .execute(
-                    "INSERT INTO top_sites(url, url_rank, title) VALUES (?1, ?2, ?3)",
-                    params![url, rank as i64, url],
-                )
-                .unwrap();
-        }
-        drop(connection);
 
         configure_new_tab_shortcuts(&profile_path).unwrap();
 
         let preferences: serde_json::Value =
             serde_json::from_slice(&fs::read(&preferences_path).unwrap()).unwrap();
         assert_eq!(preferences["bookmark_bar"]["show_on_all_tabs"], true);
-        for key in [
-            "shortcust_visible",
-            "custom_links_visible",
-            "personal_shortcuts_visible",
-        ] {
-            assert_eq!(preferences["ntp"][key], true, "{key}");
-        }
-        assert_eq!(preferences["ntp"]["enterprise_shortcuts_visible"], false);
-        for url in ["https://donutbrowser.com/", "https://donutbrowser.com"] {
-            let hash = format!("{:x}", md5::compute(url.as_bytes()));
-            assert_eq!(
-                preferences["ntp"]["most_visited_blacklist"][hash],
-                serde_json::Value::Null
-            );
-        }
         assert_eq!(
-            preferences["ntp"]["most_visited_blacklist"]["preexisting"],
-            serde_json::Value::Null
+            preferences["ntp"]["shortcust_visible"], false,
+            "existing NTP settings remain untouched"
         );
-        assert_eq!(preferences["custom_links"]["initialized"], true);
         assert_eq!(
             preferences["custom_links"]["list"],
-            serde_json::json!(["https://buglogin.com/", "https://example.org/"])
+            serde_json::json!(["https://example.org/"])
         );
-
-        let connection = Connection::open(&top_sites_path).unwrap();
-        let top_site_urls: Vec<String> = connection
-            .prepare("SELECT url FROM top_sites ORDER BY url_rank")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(
-            top_site_urls,
-            vec![
-                "https://buglogin.com/",
-                "https://chromewebstore.google.com/",
-                "https://example.test/"
-            ]
-        );
-        drop(connection);
+        assert!(preferences["custom_links"].get("initialized").is_none());
 
         fs::remove_dir_all(profile_path).unwrap();
     }
 
     #[test]
-    fn first_launch_seeds_buglogin_and_blacklists_upstream_url_variants_before_top_sites_exists() {
+    fn new_tab_repair_removes_empty_generated_custom_links_object() {
         let profile_path = std::env::temp_dir().join(format!(
-            "buglogin-wayfern-ntp-first-launch-{}-{}",
+            "buglogin-wayfern-ntp-empty-links-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -602,27 +392,57 @@ mod tests {
         let default_profile = profile_path.join("Default");
         fs::create_dir_all(&default_profile).unwrap();
         let preferences_path = default_profile.join("Preferences");
+        fs::write(
+            &preferences_path,
+            br#"{"custom_links":{"list":["https://buglogin.com/"]},"profile":{"name":"QA"}}"#,
+        )
+        .unwrap();
 
         configure_new_tab_shortcuts(&profile_path).unwrap();
 
         let preferences: serde_json::Value =
             serde_json::from_slice(&fs::read(&preferences_path).unwrap()).unwrap();
-        for url in UPSTREAM_NEW_TAB_SHORTCUTS {
-            let hash = format!("{:x}", md5::compute(url.as_bytes()));
-            assert_eq!(
-                preferences["ntp"]["most_visited_blacklist"][hash],
-                serde_json::Value::Null,
-                "fresh profiles must blacklist {url}"
-            );
-        }
-        assert_eq!(
-            preferences["ntp"]["custom_links_visible"], true,
-            "new tabs must show custom BugLogin shortcut"
-        );
-        assert_eq!(
-            preferences["custom_links"]["list"],
-            serde_json::json!([BUGLOGIN_NEW_TAB_SHORTCUT])
-        );
+        assert!(preferences.get("custom_links").is_none());
+        assert_eq!(preferences["profile"]["name"], "QA");
+        fs::remove_dir_all(profile_path).unwrap();
+    }
+
+    #[test]
+    fn fresh_profile_new_tab_repair_does_not_create_preferences() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "buglogin-wayfern-ntp-first-launch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&profile_path).unwrap();
+        configure_new_tab_shortcuts(&profile_path).unwrap();
+
+        assert!(!profile_path.join("Default").join("Preferences").exists());
+        fs::remove_dir_all(profile_path).unwrap();
+    }
+
+    #[test]
+    fn new_tab_repair_leaves_unmarked_user_shortcuts_untouched() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "buglogin-wayfern-ntp-user-links-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let default_profile = profile_path.join("Default");
+        fs::create_dir_all(&default_profile).unwrap();
+        let preferences_path = default_profile.join("Preferences");
+        let bytes = br#"{"custom_links":{"list":["https://example.org/"]}}"#;
+        fs::write(&preferences_path, bytes).unwrap();
+
+        configure_new_tab_shortcuts(&profile_path).unwrap();
+
+        assert_eq!(fs::read(&preferences_path).unwrap(), bytes);
         fs::remove_dir_all(profile_path).unwrap();
     }
 }

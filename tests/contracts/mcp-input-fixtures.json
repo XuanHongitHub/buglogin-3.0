@@ -199,6 +199,26 @@
     "proxyId": "pxy_fixture_001",
     "expectedRevision": 1
   },
+  "OrganizationAccountCreateInput": {
+    "organizationId": "org_fixture_001",
+    "accountId": "acct_fixture_003",
+    "username": "new-org-member",
+    "email": "new-org-member@example.test",
+    "initialPassword": "fixture-password-123"
+  },
+  "OrganizationMemberStatusUpdateInput": {
+    "organizationId": "org_fixture_001",
+    "accountId": "acct_fixture_003",
+    "status": "suspended",
+    "expectedRevision": 1
+  },
+  "OrganizationMemberWorkspaceAssignInput": {
+    "organizationId": "org_fixture_001",
+    "workspaceId": "ws_fixture_001",
+    "organizationMemberId": "omem_fixture_003",
+    "organizationMemberRevision": 1,
+    "role": "member"
+  },
   "OrganizationIdInput": { "organizationId": "org_fixture_001" },
   "OrganizationCreateInput": {
     "organization": {

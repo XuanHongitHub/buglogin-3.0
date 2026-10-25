@@ -155,6 +155,7 @@ export function verifySigningText(text) {
       /Create Windows updater build configuration/,
       /Expected Windows app executable and one NSIS installer/,
       /Expected the Tauri updater signature for the NSIS installer/,
+      /Verify Windows installer and updater signature[\s\S]*?BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: \$\{\{ vars\.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY \}\}[\s\S]*?verify-tauri-signature\.mjs/,
       /app\.tar\.gz/,
       /Require Apple signing and notarization credentials/,
       /secrets\.APPLE_CERTIFICATE_P12_BASE64\s*\|\|\s*secrets\.APPLE_CERTIFICATE/,
@@ -178,6 +179,7 @@ export function verifySigningText(text) {
       /\$BUNDLE_ROOT\/dmg/,
       /find "\$BUNDLE_ROOT" -type f -name '\*\.app\.tar\.gz' -print0/,
       /\[\[ -n "\$UPDATER_ARCHIVE" && -f "\$UPDATER_ARCHIVE\.sig" \]\]/,
+      /Notarize, staple, and verify macOS artifacts[\s\S]*?BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: \$\{\{ vars\.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY \}\}[\s\S]*?verify-tauri-signature\.mjs/,
     ],
     "signing",
   );
@@ -193,6 +195,12 @@ export function verifySigningText(text) {
     /node scripts\/release\/verify-runtime-trust-keys\.mjs/g,
     2,
     "embedded runtime trust key validation",
+  );
+  requireCount(
+    text,
+    /node scripts\/release\/verify-tauri-signature\.mjs/g,
+    2,
+    "cryptographic Tauri updater signature verification",
   );
   forbidPatterns(
     text,

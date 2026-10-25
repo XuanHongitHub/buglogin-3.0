@@ -66,9 +66,11 @@ them before building or publishing.
 
 ## Signing and evidence
 
-- Windows updater signature must verify against the public key embedded in the
-  app. macOS packages require Developer ID signing, notarization acceptance,
-  stapling, and Gatekeeper validation.
+- Windows and macOS Tauri updater signatures must be cryptographically verified
+  against the configured public updater key before their artifacts are uploaded.
+  A neighboring `.sig` file is not signature evidence by itself. macOS packages
+  also require Developer ID signing, notarization acceptance, stapling, and
+  Gatekeeper validation.
 - Keep private signing keys, Apple credentials, S3 credentials, and tokens in
   protected CI secrets only. Never print them or copy them into source/handoff.
 - Preserve SHA-256 checksums, SBOM, provenance/attestation, signing and

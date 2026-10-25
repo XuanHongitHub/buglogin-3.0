@@ -907,44 +907,47 @@ impl CoordinationBackend for RedisCoordination {
             return Err(protocol::invalid("invalid_event_read_limit"));
         }
         let mut connection = self.connection.clone();
-        if let Some(cursor) = after_stream_id {
-            if let Some(cursor_parsed) = parse_stream_id(cursor) {
-                let first_reply: StreamRangeReply = redis::cmd("XRANGE")
-                    .arg(self.stream_key(scope.clone()))
-                    .arg("-")
-                    .arg("+")
-                    .arg("COUNT")
-                    .arg(1)
-                    .query_async(&mut connection)
-                    .await
-                    .map_err(redis_problem)?;
-                if let Some(first_entry) = first_reply.ids.first() {
-                    if let Some(first_parsed) = parse_stream_id(&first_entry.id) {
-                        if first_parsed > cursor_parsed {
-                            return Err(Problem::new(
-                                "sync_history_gap_resnapshot_required",
-                                "Event stream history gap detected. Resnapshot required.",
-                                409,
-                                "sync-coordination",
-                            ));
-                        }
-                    }
-                }
+        if let Some(cursor) = after_stream_id
+            && let Some(cursor_parsed) = parse_stream_id(cursor)
+        {
+            let first_reply: StreamRangeReply = redis::cmd("XRANGE")
+                .arg(self.stream_key(scope.clone()))
+                .arg("-")
+                .arg("+")
+                .arg("COUNT")
+                .arg(1)
+                .query_async(&mut connection)
+                .await
+                .map_err(redis_problem)?;
+            if let Some(first_entry) = first_reply.ids.first()
+                && let Some(first_parsed) = parse_stream_id(&first_entry.id)
+                && first_parsed > cursor_parsed
+            {
+                return Err(Problem::new(
+                    "sync_history_gap_resnapshot_required",
+                    "Event stream history gap detected. Resnapshot required.",
+                    409,
+                    "sync-coordination",
+                ));
             }
         }
-        let start = after_stream_id.map_or_else(|| "-".to_owned(), |id| format!("({id}"));
+        // Use an inclusive XRANGE cursor and discard the cursor entry below.
+        // Redis 6.0 does not support the exclusive `(id` range syntax.
+        let start = after_stream_id.map_or_else(|| "-".to_owned(), str::to_owned);
         let reply: StreamRangeReply = redis::cmd("XRANGE")
             .arg(self.stream_key(scope))
             .arg(start)
             .arg("+")
             .arg("COUNT")
-            .arg(limit)
+            .arg(limit + usize::from(after_stream_id.is_some()))
             .query_async(&mut connection)
             .await
             .map_err(redis_problem)?;
         reply
             .ids
             .into_iter()
+            .filter(|entry| after_stream_id.is_none_or(|cursor| entry.id != cursor))
+            .take(limit)
             .map(|entry| {
                 let encoded = entry.get::<String>("event").ok_or_else(|| {
                     Problem::new(

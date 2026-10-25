@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "@/i18n";
+import { followLatestProfileLoadResult } from "@/lib/profile-workspace-state";
 import type { BrowserProfile, GroupWithCount } from "@/types";
 
 interface UseProfileEventsReturn {
@@ -11,7 +12,7 @@ interface UseProfileEventsReturn {
   isLoading: boolean;
   isRefreshing: boolean;
   error: string | null;
-  loadProfiles: () => Promise<void>;
+  loadProfiles: () => Promise<boolean>;
   loadGroups: () => Promise<void>;
   clearError: () => void;
 }
@@ -31,39 +32,53 @@ export function useProfileEvents(): UseProfileEventsReturn {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const profilesRequestRef = useRef(0);
+  const profilesRequestPromiseRef = useRef<Promise<boolean> | null>(null);
   const groupsRequestRef = useRef(0);
   const runningRequestRef = useRef(0);
   const runningStateRevisionRef = useRef(0);
 
   // Load profiles from backend
-  const loadProfiles = useCallback(async () => {
+  const loadProfiles = useCallback((): Promise<boolean> => {
     const request = ++profilesRequestRef.current;
     setIsRefreshing(true);
-    try {
-      const profileList = await invoke<BrowserProfile[]>(
-        "list_browser_profiles",
-      );
-      if (request !== profilesRequestRef.current) return;
-      setProfiles(profileList);
-      setError(null);
-    } catch (err: unknown) {
-      if (request !== profilesRequestRef.current) return;
-      console.warn("Passive load profiles notice:", err);
-      const isUnavailable =
-        typeof err === "object" &&
-        err !== null &&
-        ((err as any).code === "api_unavailable" ||
-          (err as any).status === 503);
-      if (!isUnavailable) {
-        const errorDetail =
-          typeof err === "object" && err !== null && "title" in err
-            ? String((err as any).title)
-            : String(err);
-        setError(i18n.t("errors.loadProfilesFailed", { error: errorDetail }));
+    const operation = (async (): Promise<boolean | null> => {
+      try {
+        const profileList = await invoke<BrowserProfile[]>(
+          "list_browser_profiles",
+        );
+        if (request !== profilesRequestRef.current) return null;
+        setProfiles(profileList);
+        setError(null);
+        return true;
+      } catch (err: unknown) {
+        if (request !== profilesRequestRef.current) return null;
+        console.warn("Passive load profiles notice:", err);
+        const isUnavailable =
+          typeof err === "object" &&
+          err !== null &&
+          ((err as any).code === "api_unavailable" ||
+            (err as any).status === 503);
+        if (!isUnavailable) {
+          const errorDetail =
+            typeof err === "object" && err !== null && "title" in err
+              ? String((err as any).title)
+              : String(err);
+          setError(i18n.t("errors.loadProfilesFailed", { error: errorDetail }));
+        }
+        return false;
+      } finally {
+        if (request === profilesRequestRef.current) setIsRefreshing(false);
       }
-    } finally {
-      if (request === profilesRequestRef.current) setIsRefreshing(false);
-    }
+    })();
+    const result: Promise<boolean> = operation.then(async (success) => {
+      return followLatestProfileLoadResult(
+        success,
+        profilesRequestPromiseRef.current,
+        result,
+      );
+    });
+    profilesRequestPromiseRef.current = result;
+    return result;
   }, []);
 
   // Load groups from backend

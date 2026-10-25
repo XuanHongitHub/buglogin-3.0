@@ -6,14 +6,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
+use crate::app_instance::AppInstance;
+
 fn get_app_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
+    let base = if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
         PathBuf::from(dir)
     } else if let Some(base) = dirs::data_dir() {
         base.join("buglogin")
     } else {
         PathBuf::from(".buglogin")
-    }
+    };
+    AppInstance::app_data_dir(base)
 }
 
 fn get_db_path() -> PathBuf {

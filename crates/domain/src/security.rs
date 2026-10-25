@@ -9,19 +9,6 @@ pub fn is_lower_hex_token_64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_lower_hex_token_64;
-
-    #[test]
-    fn opaque_token_wire_form_is_exactly_lowercase_hex() {
-        assert!(is_lower_hex_token_64(&"0123456789abcdef".repeat(4)));
-        assert!(!is_lower_hex_token_64(&"0123456789ABCDEF".repeat(4)));
-        assert!(!is_lower_hex_token_64(&"a".repeat(63)));
-        assert!(!is_lower_hex_token_64(&format!("{}g", "a".repeat(63))));
-    }
-}
-
 /// Detect secret-bearing fields and values in caller-controlled JSON before
 /// storing data that may later be returned to other authorized readers.
 pub fn contains_secret(value: &Value) -> bool {
@@ -78,4 +65,17 @@ pub fn is_secret_field(key: &str) -> bool {
             | "credentials"
             | "authorization"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_lower_hex_token_64;
+
+    #[test]
+    fn opaque_token_wire_form_is_exactly_lowercase_hex() {
+        assert!(is_lower_hex_token_64(&"0123456789abcdef".repeat(4)));
+        assert!(!is_lower_hex_token_64(&"0123456789ABCDEF".repeat(4)));
+        assert!(!is_lower_hex_token_64(&"a".repeat(63)));
+        assert!(!is_lower_hex_token_64(&format!("{}g", "a".repeat(63))));
+    }
 }

@@ -2018,6 +2018,22 @@ impl RemoteApiClient {
             "organization_record_get" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/record"),correlation).await? },
             "organization_create" => self.send::<Value>(Method::POST,"/v1/organizations",Some(payload),correlation,idem,None,&[]).await?,
             "organization_update" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=payload.get("update").cloned().ok_or_else(||bad_input("update",correlation))?; self.send::<Value>(Method::PATCH,&format!("/v1/organizations/{id}"),Some(body),correlation,idem,None,&[]).await? },
+            "organization_members_list" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/members"),correlation).await? },
+            "organization_member_workspace_assign" => {
+                let organization_id = path_arg(&payload, "organizationId", correlation)?;
+                let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/organizations/{organization_id}/workspaces/{workspace_id}/members"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                ).await?
+            },
+            "organization_account_create" => { let id=path_arg(&payload,"organizationId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/organizations/{id}/accounts"),Some(payload),correlation,idem,None,&[]).await? },
+            "organization_member_status_update" => { let org=path_arg(&payload,"organizationId",correlation)?; let account=path_arg(&payload,"accountId",correlation)?; let body=json!({"organizationId":org,"accountId":account,"status":payload.get("status").cloned().ok_or_else(||bad_input("status",correlation))?,"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::PATCH,&format!("/v1/organizations/{org}/members/{account}"),Some(body),correlation,idem,None,&[]).await? },
             "workspace_list" => { let org=path_arg(&payload,"organizationId",correlation)?; json!({"items":self.get::<Vec<Value>>(&format!("/v1/organizations/{org}/workspaces"),correlation).await?,"nextCursor":Value::Null}) },
             "workspace_get" => { let org=path_arg(&payload,"organizationId",correlation)?; let id=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{org}/workspaces/{id}"),correlation).await? },
             "workspace_record_get" => { let org=path_arg(&payload,"organizationId",correlation)?; let id=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{org}/workspaces/{id}/record"),correlation).await? },
@@ -2987,6 +3003,10 @@ fn command_id(name: &str) -> &str {
         "organization_record_get" => "organization.record.get",
         "organization_create" => "organization.create",
         "organization_update" => "organization.update",
+        "organization_members_list" => "organization.members.list",
+        "organization_account_create" => "organization.account.create",
+        "organization_member_status_update" => "organization.member.status.update",
+        "organization_member_workspace_assign" => "organization.member.workspace.assign",
         "workspace_list" => "workspace.list",
         "workspace_get" => "workspace.get",
         "workspace_record_get" => "workspace.record.get",

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::desktop_state::DesktopState;
+use crate::{app_instance::AppInstance, desktop_state::DesktopState};
 
 static NET_REQ_SEQ: AtomicU64 = AtomicU64::new(5000);
 
@@ -19,13 +19,14 @@ fn net_req_id(prefix: &str) -> String {
 }
 
 fn get_app_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
+    let base = if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
         PathBuf::from(dir)
     } else if let Some(base) = dirs::data_dir() {
         base.join("buglogin")
     } else {
         PathBuf::from(".buglogin")
-    }
+    };
+    AppInstance::app_data_dir(base)
 }
 
 fn get_db_path() -> PathBuf {

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
+use crate::app_instance::AppInstance;
+
 const SCHEMA_VERSION: u8 = 1;
 const FILE_NAME: &str = "desktop-preferences.json";
 
@@ -146,7 +148,7 @@ fn validate_table_preferences(preferences: &TablePreferences) -> Result<(), Stri
 fn preferences_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
-        .map(|directory| directory.join(FILE_NAME))
+        .map(|directory| AppInstance::app_data_dir(directory).join(FILE_NAME))
         .map_err(|error| format!("preferences_path_unavailable: {error}"))
 }
 

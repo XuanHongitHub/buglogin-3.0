@@ -17,6 +17,7 @@ pub(crate) mod identity_persistence;
 pub mod leases;
 pub mod members;
 pub mod operations;
+pub mod organization_members;
 pub mod profile_creation;
 pub mod profile_deletion;
 pub mod profile_hosted;

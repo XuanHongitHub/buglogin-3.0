@@ -2046,11 +2046,13 @@ impl ProductionDesktopState {
             self.ensure_authenticated_coordination(correlation_id)
                 .await?;
             if self.client.has_token()? {
+                self.ensure_device_key_registered(correlation_id).await?;
                 return Ok(DesktopAuthStatus::Authenticated);
             }
         }
         let _login_guard = self.auth_refresh_gate.lock().await;
         if self.client.has_token()? {
+            self.ensure_device_key_registered(correlation_id).await?;
             return Ok(DesktopAuthStatus::Authenticated);
         }
         let token = self
@@ -2093,11 +2095,13 @@ impl ProductionDesktopState {
             self.ensure_authenticated_coordination(correlation_id)
                 .await?;
             if self.client.has_token()? {
+                self.ensure_device_key_registered(correlation_id).await?;
                 return Ok(DesktopAuthStatus::Authenticated);
             }
         }
         let _login_guard = self.auth_refresh_gate.lock().await;
         if self.client.has_token()? {
+            self.ensure_device_key_registered(correlation_id).await?;
             return Ok(DesktopAuthStatus::Authenticated);
         }
         let token = self
@@ -2145,6 +2149,7 @@ impl ProductionDesktopState {
             }
             return Err(error);
         }
+        self.ensure_device_key_registered(correlation_id).await?;
         self.auth_status()
     }
 
@@ -4031,11 +4036,18 @@ impl ProductionDesktopState {
             }
             Err(error) => return Err(error),
         };
+        self.ensure_device_key_registered(&correlation_id).await?;
         match self
             .client
             .profile_key_rotation_recipients(&profile_id, &correlation_id)
             .await
         {
+            Ok(_)
+                if manifest.generation == 1
+                    && manifest.parent_generation.is_none()
+                    && manifest.payload_encryption.is_none()
+                    && manifest.objects.is_empty()
+                    && manifest.tombstones.is_empty() => {}
             Ok(_) => {
                 return Err(Problem::new(
                     "profile_key_rotation_required",
@@ -4362,32 +4374,6 @@ impl ProductionDesktopState {
             } else {
                 None
             };
-            let viewer_ticket = match self
-                .client
-                .issue_profile_viewer_ticket(&profile_id, &correlation_id)
-                .await
-            {
-                Ok(ticket) => ticket,
-                Err(mut error) => {
-                    if let Some(bridge) = proxy_bridge.take() {
-                        let _ = bridge.stop().await;
-                    }
-                    let _ = self
-                        .client
-                        .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
-                        .await;
-                    error.correlation_id = correlation_id.clone();
-                    return Err(error);
-                }
-            };
-            push_or_replace_arg(
-                &mut specification.args,
-                format!(
-                    "https://buglogin.com/profileId={}#viewer={}",
-                    profile_id.as_str(),
-                    viewer_ticket.ticket
-                ),
-            );
             let runtime_key = runtime_projection_idempotency_key(&idempotency_key, "started");
             let lease_for_projection = lease.clone();
             if let Err(error) =
@@ -4702,21 +4688,13 @@ impl ProductionDesktopState {
                     })?,
             );
         }
+        self.ensure_device_key_registered(&correlation_id).await?;
         let rotation_recipients = match self
             .client
             .profile_key_rotation_recipients(&profile_id, &correlation_id)
             .await
         {
-            Ok(recipients) => {
-                let supplied = confirmed_recipients.as_ref().ok_or_else(|| Problem::new(
-                    "profile_key_rotation_confirmation_required",
-                    "Review and confirm every active recipient device fingerprint before syncing this profile",
-                    409,
-                    &correlation_id,
-                ))?;
-                validate_key_rotation_confirmation(supplied, &recipients, &correlation_id)?;
-                Some(recipients)
-            }
+            Ok(recipients) => Some(recipients),
             Err(error) if error.code == "sync_key_rotation_not_pending" || error.status == 404 => {
                 if confirmed_recipients.is_some() {
                     return Err(Problem::new(
@@ -4734,6 +4712,7 @@ impl ProductionDesktopState {
                 }
                 None
             }
+            Err(error) if error.code == "profile_key_enrollment_required" => return Err(error),
             Err(error) => return Err(error),
         };
         let auth = self.auth(&correlation_id)?;
@@ -4776,6 +4755,41 @@ impl ProductionDesktopState {
             }
             Err(error) => return Err(error),
         };
+        let initial_owner_key_enrollment = rotation_recipients.as_ref().is_some_and(|recipients| {
+            previous.generation == 1
+                && previous.objects.is_empty()
+                && previous.payload_encryption.is_none()
+                && recipients.len() == 1
+                && recipients[0].device_keys.len() == 1
+                && recipients[0].device_keys[0].device_id == self.device_id
+        });
+        if let Some(recipients) = rotation_recipients.as_ref() {
+            if initial_owner_key_enrollment {
+                let recipient = &recipients[0].device_keys[0];
+                let private_key = self
+                    .device_key_vault
+                    .load_or_create(&self.device_id, &correlation_id)?;
+                let public_key = private_key.public_key()?;
+                let public_key_hex = encode_hex(public_key.as_bytes());
+                let fingerprint = format!("{:x}", Sha256::digest(public_key.as_bytes()));
+                if recipient.public_key != public_key_hex || recipient.fingerprint != fingerprint {
+                    return Err(Problem::new(
+                        "recipient_device_key_invalid",
+                        "The registered owner device key does not match this device",
+                        409,
+                        &correlation_id,
+                    ));
+                }
+            } else {
+                let supplied = confirmed_recipients.as_ref().ok_or_else(|| Problem::new(
+                    "profile_key_rotation_confirmation_required",
+                    "Review and confirm every active recipient device fingerprint before syncing this profile",
+                    409,
+                    &correlation_id,
+                ))?;
+                validate_key_rotation_confirmation(supplied, recipients, &correlation_id)?;
+            }
+        }
         let pending_proxy_assignment = self
             .client
             .profile_proxy_assignment(&binding.workspace_id, &profile_id, &correlation_id)
@@ -5041,7 +5055,7 @@ impl ProductionDesktopState {
                     &correlation_id,
                 )?
             };
-            let rotation_keys = if rotation_recipients.is_some() {
+            let rotation_keys = if rotation_recipients.is_some() && !initial_owner_key_enrollment {
                 Some(self.sync_key_vault.stage_rotation(
                     &binding.workspace_id,
                     &binding.resource_id,
@@ -5120,13 +5134,17 @@ impl ProductionDesktopState {
             }
             self.projection.clear_active_session(&profile_id)?;
             let key_rotation_error = if rotation_envelopes.is_some() {
-                self.sync_key_vault
-                    .activate_staged_rotation(
-                        &binding.workspace_id,
-                        &binding.resource_id,
-                        &correlation_id,
-                    )
-                    .err()
+                if rotation_keys.is_some() {
+                    self.sync_key_vault
+                        .activate_staged_rotation(
+                            &binding.workspace_id,
+                            &binding.resource_id,
+                            &correlation_id,
+                        )
+                        .err()
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -5157,7 +5175,7 @@ impl ProductionDesktopState {
                 "profileId": profile_id,
                 "generation": manifest.generation,
                 "rootChecksum": manifest.root_checksum,
-                "keyRotated": rotation_envelopes.is_some()
+                "keyRotated": rotation_keys.is_some()
             }))
         }
         .await;
@@ -6902,6 +6920,9 @@ impl DesktopState {
             state
                 .ensure_authenticated_coordination(correlation_id)
                 .await?;
+            if state.client.has_token()? {
+                state.ensure_device_key_registered(correlation_id).await?;
+            }
         }
         Ok(())
     }

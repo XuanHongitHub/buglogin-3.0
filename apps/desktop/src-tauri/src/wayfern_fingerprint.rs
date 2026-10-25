@@ -23,6 +23,10 @@ use url::Url;
 
 const CDP_TIMEOUT: Duration = Duration::from_secs(8);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const CDP_RETRY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const IDENTITY_CONNECT_ATTEMPTS: usize = 3;
+const PAGE_TARGET_STARTUP_GRACE: Duration = Duration::from_secs(2);
+const PAGE_TARGET_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(5);
 const FINGERPRINT_PATH: &str = "BugLogin/fingerprint.json";
 
 pub fn configure_local_cdp_args(
@@ -272,14 +276,15 @@ async fn generate(
         )
     })?;
     let (fingerprint, identity_id) = if supports_identity_api(runtime_version) {
-        let result = cdp_command(
-            &websocket_url,
-            "Wayfern.createIdentity",
+        let result = create_identity_with_retry(
+            cdp_port,
             json!({ "operatingSystem": operating_system }),
+            correlation_id,
         )
         .await
-        .map_err(|_| {
-            problem(
+        .map_err(|error| {
+            cdp_problem(
+                error,
                 "wayfern_fingerprint_provider_unavailable",
                 "Wayfern could not create a reproducible profile identity",
                 409,
@@ -312,8 +317,9 @@ async fn generate(
             json!({ "operatingSystem": operating_system }),
         )
         .await
-        .map_err(|_| {
-            problem(
+        .map_err(|error| {
+            cdp_problem(
+                error,
                 "wayfern_fingerprint_provider_unavailable",
                 "The configured Wayfern runtime cannot generate this fingerprint target",
                 409,
@@ -322,8 +328,9 @@ async fn generate(
         })?;
         let result = cdp_command(&websocket_url, "Wayfern.getFingerprint", json!({}))
             .await
-            .map_err(|_| {
-                problem(
+            .map_err(|error| {
+                cdp_problem(
+                    error,
                     "wayfern_fingerprint_readback_failed",
                     "Wayfern did not return its generated profile fingerprint",
                     409,
@@ -347,7 +354,51 @@ fn supports_identity_api(version: &str) -> bool {
     major >= 151
 }
 
+#[derive(Debug)]
+enum CdpCommandError {
+    Timeout,
+    ConnectTransport,
+    Transport,
+    InvalidResponse,
+    Protocol(Option<i64>),
+}
+
+impl CdpCommandError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::ConnectTransport => "transport",
+            Self::Transport => "transport",
+            Self::InvalidResponse => "invalid_response",
+            Self::Protocol(_) => "protocol_error",
+        }
+    }
+}
+
+fn cdp_problem(
+    error: CdpCommandError,
+    code: &'static str,
+    title: &'static str,
+    status: u16,
+    correlation_id: &str,
+) -> Problem {
+    let mut issue =
+        problem(code, title, status, correlation_id).with_field("cdpErrorClass", error.class());
+    if let CdpCommandError::Protocol(Some(protocol_code)) = error {
+        issue = issue.with_field("cdpProtocolCode", protocol_code);
+    }
+    issue
+}
+
 async fn cdp_websocket_url(cdp_port: u16, correlation_id: &str) -> Result<String, Problem> {
+    cdp_websocket_url_with_timeout(cdp_port, STARTUP_TIMEOUT, correlation_id).await
+}
+
+async fn cdp_websocket_url_with_timeout(
+    cdp_port: u16,
+    startup_timeout: Duration,
+    correlation_id: &str,
+) -> Result<String, Problem> {
     if cdp_port == 0 {
         return Err(problem(
             "wayfern_cdp_unavailable",
@@ -371,39 +422,32 @@ async fn cdp_websocket_url(cdp_port: u16, correlation_id: &str) -> Result<String
             )
         })?;
     let mut endpoint_responded = false;
+    let mut page_bootstrap_attempted = false;
+    let mut page_bootstrap_deadline = None;
     loop {
         if let Ok(response) = client.get(&endpoint).send().await
             && response.status().is_success()
         {
             endpoint_responded = true;
             if let Ok(targets) = response.json::<Vec<Value>>().await
-                && let Some(websocket_url) = targets
-                    .iter()
-                    .find_map(|target| target.get("webSocketDebuggerUrl").and_then(Value::as_str))
+                && let Some(websocket_url) = page_websocket_url(&targets)
             {
-                let parsed = Url::parse(websocket_url).map_err(|_| {
-                    problem(
-                        "wayfern_cdp_target_invalid",
-                        "Wayfern returned an invalid CDP target",
-                        502,
-                        correlation_id,
-                    )
-                })?;
-                if parsed.scheme() != "ws"
-                    || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
-                    || parsed.port() != Some(cdp_port)
-                {
-                    return Err(problem(
-                        "wayfern_cdp_target_invalid",
-                        "Wayfern returned a non-local CDP target",
-                        502,
-                        correlation_id,
-                    ));
-                }
-                return Ok(parsed.to_string());
+                return validate_local_websocket_url(websocket_url, cdp_port, correlation_id);
             }
         }
-        if start.elapsed() >= STARTUP_TIMEOUT {
+        if endpoint_responded
+            && !page_bootstrap_attempted
+            && start.elapsed() >= PAGE_TARGET_STARTUP_GRACE
+        {
+            page_bootstrap_attempted = true;
+            create_visible_blank_page(&client, cdp_port, correlation_id).await?;
+            page_bootstrap_deadline =
+                Some(tokio::time::Instant::now() + PAGE_TARGET_BOOTSTRAP_TIMEOUT);
+        }
+        let target_wait_expired =
+            page_bootstrap_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+        if target_wait_expired || (!page_bootstrap_attempted && start.elapsed() >= startup_timeout)
+        {
             let (code, title) = if endpoint_responded {
                 (
                     "wayfern_cdp_target_missing",
@@ -418,11 +462,151 @@ async fn cdp_websocket_url(cdp_port: u16, correlation_id: &str) -> Result<String
     }
 }
 
-async fn cdp_command(url: &str, method: &str, params: Value) -> Result<Value, ()> {
+fn page_websocket_url(targets: &[Value]) -> Option<&str> {
+    targets
+        .iter()
+        .filter(|target| target.get("type").and_then(Value::as_str) == Some("page"))
+        .find_map(|target| target.get("webSocketDebuggerUrl").and_then(Value::as_str))
+}
+
+fn validate_local_websocket_url(
+    websocket_url: &str,
+    cdp_port: u16,
+    correlation_id: &str,
+) -> Result<String, Problem> {
+    let parsed = Url::parse(websocket_url).map_err(|_| {
+        problem(
+            "wayfern_cdp_target_invalid",
+            "Wayfern returned an invalid CDP target",
+            502,
+            correlation_id,
+        )
+    })?;
+    if parsed.scheme() != "ws"
+        || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
+        || parsed.port() != Some(cdp_port)
+    {
+        return Err(problem(
+            "wayfern_cdp_target_invalid",
+            "Wayfern returned a non-local CDP target",
+            502,
+            correlation_id,
+        ));
+    }
+    Ok(parsed.to_string())
+}
+
+async fn create_visible_blank_page(
+    client: &reqwest::Client,
+    cdp_port: u16,
+    correlation_id: &str,
+) -> Result<(), Problem> {
+    let targets_endpoint = format!("http://127.0.0.1:{cdp_port}/json/list");
+    if let Ok(response) = client.get(&targets_endpoint).send().await
+        && response.status().is_success()
+        && let Ok(targets) = response.json::<Vec<Value>>().await
+        && page_websocket_url(&targets).is_some()
+    {
+        return Ok(());
+    }
+
+    let version_endpoint = format!("http://127.0.0.1:{cdp_port}/json/version");
+    let version = client
+        .get(version_endpoint)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|_| {
+            problem(
+                "wayfern_cdp_unavailable",
+                "Wayfern browser control endpoint is unavailable",
+                503,
+                correlation_id,
+            )
+        })?
+        .json::<Value>()
+        .await
+        .map_err(|_| {
+            problem(
+                "wayfern_cdp_target_invalid",
+                "Wayfern browser control target is invalid",
+                502,
+                correlation_id,
+            )
+        })?;
+    let browser_websocket = version
+        .get("webSocketDebuggerUrl")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            problem(
+                "wayfern_cdp_target_missing",
+                "Wayfern browser control target is missing",
+                503,
+                correlation_id,
+            )
+        })?;
+    let browser_websocket =
+        validate_local_websocket_url(browser_websocket, cdp_port, correlation_id)?;
+    let created = cdp_command(
+        &browser_websocket,
+        "Target.createTarget",
+        json!({ "url": "about:blank" }),
+    )
+    .await
+    .map_err(|error| {
+        cdp_problem(
+            error,
+            "wayfern_cdp_page_bootstrap_failed",
+            "Wayfern could not open a browser page for profile setup",
+            503,
+            correlation_id,
+        )
+    })?;
+    if created
+        .get("targetId")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(problem(
+            "wayfern_cdp_page_bootstrap_failed",
+            "Wayfern did not confirm the browser page it opened",
+            503,
+            correlation_id,
+        ));
+    }
+    Ok(())
+}
+
+async fn create_identity_with_retry(
+    cdp_port: u16,
+    params: Value,
+    correlation_id: &str,
+) -> Result<Value, CdpCommandError> {
+    for attempt in 0..IDENTITY_CONNECT_ATTEMPTS {
+        let discovery_timeout = if attempt == 0 {
+            STARTUP_TIMEOUT
+        } else {
+            CDP_RETRY_DISCOVERY_TIMEOUT
+        };
+        let websocket_url =
+            cdp_websocket_url_with_timeout(cdp_port, discovery_timeout, correlation_id)
+                .await
+                .map_err(|_| CdpCommandError::Transport)?;
+        match cdp_command(&websocket_url, "Wayfern.createIdentity", params.clone()).await {
+            Err(CdpCommandError::ConnectTransport) if attempt + 1 < IDENTITY_CONNECT_ATTEMPTS => {
+                sleep(Duration::from_millis(150)).await;
+            }
+            result => return result,
+        }
+    }
+    Err(CdpCommandError::ConnectTransport)
+}
+
+async fn cdp_command(url: &str, method: &str, params: Value) -> Result<Value, CdpCommandError> {
     let (mut socket, _) = timeout(CDP_TIMEOUT, connect_async(url))
         .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?;
+        .map_err(|_| CdpCommandError::Timeout)?
+        .map_err(|_| CdpCommandError::ConnectTransport)?;
     let id = 1_u64;
     socket
         .send(Message::Text(
@@ -431,26 +615,32 @@ async fn cdp_command(url: &str, method: &str, params: Value) -> Result<Value, ()
                 .into(),
         ))
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| CdpCommandError::Transport)?;
     loop {
         let message = timeout(CDP_TIMEOUT, socket.next())
             .await
-            .map_err(|_| ())?
-            .ok_or(())?
-            .map_err(|_| ())?;
+            .map_err(|_| CdpCommandError::Timeout)?
+            .ok_or(CdpCommandError::Transport)?
+            .map_err(|_| CdpCommandError::Transport)?;
         match message {
             Message::Text(text) => {
-                let value: Value = serde_json::from_str(&text).map_err(|_| ())?;
+                let value: Value =
+                    serde_json::from_str(&text).map_err(|_| CdpCommandError::InvalidResponse)?;
                 if value.get("id").and_then(Value::as_u64) != Some(id) {
                     continue;
                 }
-                if value.get("error").is_some() {
-                    return Err(());
+                if let Some(error) = value.get("error") {
+                    return Err(CdpCommandError::Protocol(
+                        error.get("code").and_then(Value::as_i64),
+                    ));
                 }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
             }
-            Message::Ping(data) => socket.send(Message::Pong(data)).await.map_err(|_| ())?,
-            Message::Close(_) => return Err(()),
+            Message::Ping(data) => socket
+                .send(Message::Pong(data))
+                .await
+                .map_err(|_| CdpCommandError::Transport)?,
+            Message::Close(_) => return Err(CdpCommandError::Transport),
             _ => {}
         }
     }
@@ -652,6 +842,21 @@ mod tests {
     }
 
     #[test]
+    fn cdp_problem_preserves_safe_protocol_classification() {
+        let issue = cdp_problem(
+            CdpCommandError::Protocol(Some(-32602)),
+            "wayfern_fingerprint_provider_unavailable",
+            "Wayfern could not create a reproducible profile identity",
+            409,
+            "test-correlation",
+        );
+
+        assert_eq!(issue.fields["cdpErrorClass"], "protocol_error");
+        assert_eq!(issue.fields["cdpProtocolCode"], -32602);
+        assert_eq!(issue.detail, None);
+    }
+
+    #[test]
     fn identity_payload_can_be_validated_from_platform_without_user_agent() {
         let target = ProfileFingerprintTarget {
             operating_system: FingerprintOperatingSystem::Windows,
@@ -695,8 +900,9 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let body =
-            format!(r#"[{{"webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/test"}}]"#);
+        let body = format!(
+            r#"[{{"type":"background_page","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/background"}},{{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/test"}}]"#
+        );
         let body_length = body.len();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -714,6 +920,107 @@ mod tests {
             websocket_url,
             format!("ws://127.0.0.1:{port}/devtools/page/test")
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cdp_discovery_rejects_a_nonlocal_page_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = format!(
+            r#"[{{"type":"background_page","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/background"}},{{"type":"page","webSocketDebuggerUrl":"ws://192.0.2.1:{port}/devtools/page/external"}}]"#
+        );
+        let body_length = body.len();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_length}\r\nConnection: close\r\n\r\n{body}"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let error = cdp_websocket_url(port, "test-cdp").await.unwrap_err();
+
+        assert_eq!(error.code, "wayfern_cdp_target_invalid");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cdp_bootstrap_opens_one_blank_page_through_the_local_browser_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                let length = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let length = stream.peek(&mut request).await.unwrap();
+                        if request[..length]
+                            .windows(4)
+                            .any(|window| window == b"\r\n\r\n")
+                        {
+                            return length;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("request headers should arrive");
+                let request = String::from_utf8_lossy(&request[..length]);
+                if request.starts_with("GET /json/") {
+                    let mut consumed = vec![0; length];
+                    stream.read_exact(&mut consumed).await.unwrap();
+                }
+                if request.starts_with("GET /json/list ") {
+                    let body = format!(
+                        r#"[{{"type":"background_page","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/background"}}]"#
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                } else if request.starts_with("GET /json/version ") {
+                    let body = format!(
+                        r#"{{"webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/browser/test"}}"#
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                } else {
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let message = socket.next().await.unwrap().unwrap();
+                    let Message::Text(text) = message else {
+                        panic!("expected browser CDP command");
+                    };
+                    let command: Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(command["method"], "Target.createTarget");
+                    assert_eq!(command["params"]["url"], "about:blank");
+                    let response = json!({
+                        "id": command["id"],
+                        "result": {"targetId": "test-page"}
+                    });
+                    socket
+                        .send(Message::Text(response.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        create_visible_blank_page(&client, port, "test-cdp")
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 }

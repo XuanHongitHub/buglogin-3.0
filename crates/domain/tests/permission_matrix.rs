@@ -20,6 +20,8 @@ fn member_principal(role: Role) -> Principal {
         account_id: Some(id("acct_1", AccountId::from_str)),
         member_id: Some(id("mem_1", MemberId::from_str)),
         workspace_ids: BTreeSet::from([id("ws_1", WorkspaceId::from_str)]),
+        blocked_organization_ids: BTreeSet::new(),
+        blocked_workspace_ids: BTreeSet::new(),
         roles: BTreeSet::from([role]),
         token_scopes: None,
     }

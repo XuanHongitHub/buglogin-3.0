@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use buglogin_domain::{
     errors::Problem,
-    ids::{OrganizationId, WorkspaceId},
+    ids::{AccountId, OrganizationId, WorkspaceId},
+    member::{Member, MemberStatus},
     organization::{Organization, OrganizationPolicy, OrganizationSnapshot},
     permissions::{Action, Capability, Grant, Principal, ResourceScope, is_allowed},
     workspace::{OfflineEntitlement, Workspace, WorkspaceUsage},
@@ -59,6 +60,55 @@ pub struct WorkspaceService {
 }
 
 impl WorkspaceService {
+    /// Returns a deterministic set of parent memberships implied by existing
+    /// organization owners and workspace memberships. Workspace status/role is
+    /// deliberately not changed by this compatibility backfill.
+    pub fn organization_membership_candidates(
+        &self,
+        members: &[Member],
+    ) -> Vec<(OrganizationId, AccountId)> {
+        let mut candidates = BTreeSet::new();
+        for (organization_id, record) in &self.organizations {
+            candidates.insert((
+                organization_id.clone(),
+                record.organization.account_id.clone(),
+            ));
+            for workspace_id in record.workspaces.keys() {
+                candidates.extend(
+                    members
+                        .iter()
+                        .filter(|member| {
+                            &member.workspace_id == workspace_id
+                                && member.status == MemberStatus::Active
+                                && member.invite_expires_at.is_none()
+                        })
+                        .map(|member| (organization_id.clone(), member.account_id.clone())),
+                );
+            }
+        }
+        candidates.into_iter().collect()
+    }
+
+    pub fn workspace_ids_in_organization(
+        &self,
+        organization_id: &OrganizationId,
+    ) -> Vec<WorkspaceId> {
+        self.organizations
+            .get(organization_id)
+            .map(|record| record.workspaces.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn organization_owner_is(
+        &self,
+        organization_id: &OrganizationId,
+        account_id: &AccountId,
+    ) -> bool {
+        self.organizations
+            .get(organization_id)
+            .is_some_and(|record| &record.organization.account_id == account_id)
+    }
+
     pub fn new(organization: Organization, policy: OrganizationPolicy) -> Result<Self, Problem> {
         validate_name(&organization.name)?;
         let mut service = Self::default();
@@ -256,6 +306,18 @@ impl WorkspaceService {
             .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))
     }
 
+    /// Returns the recorded parent organization for a workspace without
+    /// authorizing access to it. Callers must still apply their own policy.
+    pub(crate) fn organization_for_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Option<Organization> {
+        self.organizations
+            .values()
+            .find(|record| record.workspaces.contains_key(workspace_id))
+            .map(|record| record.organization.clone())
+    }
+
     /// Returns the parent organization only when the caller can manage it.
     /// This is used to inherit the organization's owner authority into a child
     /// workspace without treating organization access as a workspace membership.
@@ -272,6 +334,74 @@ impl WorkspaceService {
             .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))?;
         authorize_organization(principal, grants, &record.organization, Action::Manage)?;
         Ok(record.organization.clone())
+    }
+
+    /// Returns the organization only when the caller is its owner, a platform
+    /// administrator, or has an explicit organization-scoped capability grant.
+    pub fn authorize_organization_management(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization_id: &OrganizationId,
+        action: Action,
+    ) -> Result<Organization, Problem> {
+        let record = self
+            .organizations
+            .get(organization_id)
+            .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        if principal
+            .roles
+            .contains(&buglogin_domain::permissions::Role::PlatformAdmin)
+        {
+            return Ok(record.organization.clone());
+        }
+        let scope = ResourceScope {
+            account_id: Some(record.organization.account_id.clone()),
+            organization_id: Some(record.organization.id.clone()),
+            ..ResourceScope::default()
+        };
+        if principal.token_scopes.as_ref().is_some_and(|scopes| {
+            let action_name = match action {
+                Action::Read => "read",
+                Action::Create => "create",
+                Action::Update => "update",
+                Action::Delete => "delete",
+                Action::Execute => "execute",
+                Action::Share => "share",
+                Action::Manage => "manage",
+            };
+            !scopes.contains(&format!("CAP-ORG-001:{action_name}"))
+                && !scopes.contains("CAP-ORG-001:*")
+        }) {
+            return Err(problem("forbidden", "Organization access denied", 403));
+        }
+        let explicit_deny = grants.iter().any(|grant| {
+            grant.capability.as_str() == "CAP-ORG-001"
+                && grant.action == action
+                && grant.effect == buglogin_domain::permissions::Effect::Deny
+                && grant.scope.contains(&scope)
+                && grant
+                    .account_id
+                    .as_ref()
+                    .is_none_or(|id| principal.account_id.as_ref() == Some(id))
+                && grant
+                    .member_id
+                    .as_ref()
+                    .is_none_or(|id| principal.member_id.as_ref() == Some(id))
+        });
+        if !explicit_deny
+            && (principal.account_id.as_ref() == Some(&record.organization.account_id)
+                || is_allowed(
+                    principal,
+                    &Capability::new("CAP-ORG-001").expect("constant capability is valid"),
+                    action,
+                    &scope,
+                    grants,
+                ))
+        {
+            return Ok(record.organization.clone());
+        }
+        Err(problem("forbidden", "Organization access denied", 403))
     }
 
     pub fn managed_workspace_ids(
@@ -599,7 +729,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use buglogin_domain::{
-        ids::{AccountId, GrantId, OrganizationId, WorkspaceId},
+        ids::{AccountId, GrantId, MemberId, OrganizationId, TeamId, WorkspaceId},
+        member::{Member, MemberRole, MemberStatus},
         organization::{Organization, OrganizationPolicy},
         permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, Role},
         workspace::{Workspace, WorkspacePolicy},
@@ -773,6 +904,181 @@ mod tests {
                 .unwrap_err()
                 .code,
             "tenant_mismatch"
+        );
+    }
+
+    #[test]
+    fn organization_membership_backfill_candidates_exclude_invited_and_suspended_members() {
+        let organization = organization("org_backfill_candidates", "acct_org_owner");
+        let workspace = workspace("ws_backfill_candidates", &organization.id);
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        service
+            .create_workspace(&platform_admin(), &[], &organization.id, workspace.clone())
+            .unwrap();
+        let member = |id: &str, account_id: &str, status, invite_expires_at| Member {
+            id: MemberId::new(id).unwrap(),
+            account_id: AccountId::new(account_id).unwrap(),
+            workspace_id: workspace.id.clone(),
+            team_id: Option::<TeamId>::None,
+            role: MemberRole::Member,
+            status,
+            invite_expires_at,
+        };
+        let candidates = service.organization_membership_candidates(&[
+            member("mem_active", "acct_active", MemberStatus::Active, None),
+            member(
+                "mem_invited",
+                "acct_invited",
+                MemberStatus::Invited,
+                Some(99),
+            ),
+            member(
+                "mem_suspended",
+                "acct_suspended",
+                MemberStatus::Suspended,
+                None,
+            ),
+        ]);
+
+        assert_eq!(
+            candidates,
+            vec![
+                (
+                    organization.id.clone(),
+                    AccountId::new("acct_active").unwrap()
+                ),
+                (organization.id.clone(), organization.account_id.clone()),
+            ]
+        );
+    }
+
+    #[test]
+    fn organization_owner_gate_preserves_token_scopes_denies_and_platform_override() {
+        let organization = organization("org_owner_gate", "acct_owner_gate");
+        let service = WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let owner = Principal {
+            account_id: Some(organization.account_id.clone()),
+            roles: BTreeSet::from([Role::Account]),
+            ..Principal::default()
+        };
+        assert!(
+            service
+                .authorize_organization_management(&owner, &[], &organization.id, Action::Create,)
+                .is_ok()
+        );
+
+        let restricted_owner = Principal {
+            token_scopes: Some(BTreeSet::from(["CAP-ORG-001:read".to_owned()])),
+            ..owner.clone()
+        };
+        assert_eq!(
+            service
+                .authorize_organization_management(
+                    &restricted_owner,
+                    &[],
+                    &organization.id,
+                    Action::Create,
+                )
+                .unwrap_err()
+                .status,
+            403
+        );
+
+        let deny = Grant {
+            id: GrantId::new("grant_org_owner_deny").unwrap(),
+            account_id: Some(organization.account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-ORG-001").unwrap(),
+            action: Action::Create,
+            scope: ResourceScope {
+                account_id: Some(organization.account_id.clone()),
+                organization_id: Some(organization.id.clone()),
+                ..ResourceScope::default()
+            },
+            effect: Effect::Deny,
+        };
+        assert_eq!(
+            service
+                .authorize_organization_management(
+                    &owner,
+                    &[deny],
+                    &organization.id,
+                    Action::Create,
+                )
+                .unwrap_err()
+                .status,
+            403
+        );
+        assert!(
+            service
+                .authorize_organization_management(
+                    &Principal {
+                        roles: BTreeSet::from([Role::PlatformAdmin]),
+                        token_scopes: Some(BTreeSet::new()),
+                        ..Principal::default()
+                    },
+                    &[],
+                    &organization.id,
+                    Action::Create,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn delegated_workspace_admin_lead_can_manage_parent_with_org_scoped_grants() {
+        let organization = organization("org_delegated_lead", "acct_org_owner");
+        let service = WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let delegated_account = AccountId::new("acct_delegated_workspace_admin").unwrap();
+        let delegated_member = MemberId::new("mem_delegated_lead").unwrap();
+        let delegate = Principal {
+            account_id: Some(delegated_account.clone()),
+            member_id: Some(delegated_member.clone()),
+            roles: BTreeSet::from([Role::WorkspaceAdmin]),
+            ..Principal::default()
+        };
+        let scoped_grants = [Action::Read, Action::Create, Action::Manage]
+            .into_iter()
+            .enumerate()
+            .map(|(index, action)| Grant {
+                id: GrantId::new(format!("grant_delegated_org_{index}")).unwrap(),
+                account_id: Some(delegated_account.clone()),
+                member_id: Some(delegated_member.clone()),
+                capability: Capability::new("CAP-ORG-001").unwrap(),
+                action,
+                scope: ResourceScope {
+                    account_id: Some(organization.account_id.clone()),
+                    organization_id: Some(organization.id.clone()),
+                    ..ResourceScope::default()
+                },
+                effect: Effect::Allow,
+            })
+            .collect::<Vec<_>>();
+
+        for action in [Action::Read, Action::Create, Action::Manage] {
+            assert!(
+                service
+                    .authorize_organization_management(
+                        &delegate,
+                        &scoped_grants,
+                        &organization.id,
+                        action,
+                    )
+                    .is_ok(),
+                "delegated Lead/WorkspaceAdmin should receive only explicitly granted {action:?}"
+            );
+        }
+        assert!(
+            service
+                .authorize_organization_management(
+                    &delegate,
+                    &scoped_grants,
+                    &organization.id,
+                    Action::Delete,
+                )
+                .is_err(),
+            "the delegated role must not inherit ungranted organization actions"
         );
     }
 

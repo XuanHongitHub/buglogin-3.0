@@ -463,6 +463,8 @@ mod tests {
             account_id: Some(AccountId::new(account_id).unwrap()),
             member_id: None,
             workspace_ids: BTreeSet::from([workspace_id.clone()]),
+            blocked_organization_ids: BTreeSet::new(),
+            blocked_workspace_ids: BTreeSet::new(),
             roles: BTreeSet::new(),
             token_scopes: None,
         }

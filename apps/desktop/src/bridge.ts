@@ -40,8 +40,13 @@ import {
   type MemberInviteInput,
   type MemberRoleUpdateInput,
   type MigrationProfileDataImportInput,
+  type OrganizationAccountCreateInput,
   type OrganizationCreateInput,
   type OrganizationIdInput,
+  type OrganizationMember,
+  type OrganizationMemberPage,
+  type OrganizationMemberStatusUpdateInput,
+  type OrganizationMemberWorkspaceAssignInput,
   type OrganizationRecord,
   type OrganizationUpdateInput,
   type ProfileDeleteInput,
@@ -193,6 +198,20 @@ export interface DesktopApi {
   getOrganizationRecord(
     input: OrganizationIdInput,
   ): Promise<OrganizationRecord>;
+  listOrganizationMembers(
+    organizationId: string,
+  ): Promise<OrganizationMemberPage>;
+  createOrganizationAccount(
+    input: OrganizationAccountCreateInput,
+    idempotencyKey?: string,
+  ): Promise<AccountProvisioningReceipt>;
+  updateOrganizationMemberStatus(
+    input: OrganizationMemberStatusUpdateInput,
+  ): Promise<OrganizationMember>;
+  assignOrganizationMemberToWorkspace(
+    input: OrganizationMemberWorkspaceAssignInput,
+    idempotencyKey?: string,
+  ): Promise<Member>;
   createOrganization(input: OrganizationCreateInput): Promise<Organization>;
   updateOrganization(input: OrganizationUpdateInput): Promise<Organization>;
   listWorkspaces(organizationId: string): Promise<Page<Workspace>>;
@@ -329,6 +348,14 @@ const invokeNames = {
   organizationList: contractInvoke("organization.list"),
   organizationGet: contractInvoke("organization.get"),
   organizationRecordGet: contractInvoke("organization.record.get"),
+  organizationMembersList: contractInvoke("organization.members.list"),
+  organizationAccountCreate: contractInvoke("organization.account.create"),
+  organizationMemberStatusUpdate: contractInvoke(
+    "organization.member.status.update",
+  ),
+  organizationMemberWorkspaceAssign: contractInvoke(
+    "organization.member.workspace.assign",
+  ),
   organizationCreate: contractInvoke("organization.create"),
   organizationUpdate: contractInvoke("organization.update"),
   workspaceList: contractInvoke("workspace.list"),
@@ -637,6 +664,30 @@ export function createTauriDesktopApi(
       call<Organization>(invokeNames.organizationGet, input),
     getOrganizationRecord: (input) =>
       call<OrganizationRecord>(invokeNames.organizationRecordGet, input),
+    listOrganizationMembers: (organizationId) =>
+      call<OrganizationMemberPage>(invokeNames.organizationMembersList, {
+        organizationId,
+      }),
+    createOrganizationAccount: (input, idempotencyKey) =>
+      call<AccountProvisioningReceipt>(
+        invokeNames.organizationAccountCreate,
+        input,
+        true,
+        idempotencyKey,
+      ),
+    updateOrganizationMemberStatus: (input) =>
+      call<OrganizationMember>(
+        invokeNames.organizationMemberStatusUpdate,
+        input,
+        true,
+      ),
+    assignOrganizationMemberToWorkspace: (input, idempotencyKey) =>
+      call<Member>(
+        invokeNames.organizationMemberWorkspaceAssign,
+        input,
+        true,
+        idempotencyKey,
+      ),
     createOrganization: (input) =>
       call<Organization>(invokeNames.organizationCreate, input, true),
     updateOrganization: (input) =>

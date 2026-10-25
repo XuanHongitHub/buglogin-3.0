@@ -15,11 +15,11 @@ use buglogin_domain::{
     grant::ResourceGrant,
     ids::{
         AccountId, CredentialId, ExtensionGroupId, GrantId, GroupId, MemberId, MemberInvitationId,
-        OrganizationId, ProfileId, ProxyId, ResourceId, TeamId, WorkspaceId,
+        OrganizationId, OrganizationMemberId, ProfileId, ProxyId, ResourceId, TeamId, WorkspaceId,
     },
     member::{Member, MemberRole, MemberStatus},
     member_invitation::{MemberInvitation, MemberInvitationState},
-    organization::{Organization, OrganizationPolicy},
+    organization::{Organization, OrganizationMemberStatus, OrganizationPolicy},
     permissions::{Action, Capability, Effect, Principal, ResourceScope, is_allowed},
     profile::{
         ProfileArchiveState, ProfileCloneInput, ProfileKeyRotationEnvelopeUpdate, ProfileResource,
@@ -333,6 +333,35 @@ struct AccountStatusInput {
 struct OrganizationInput {
     organization: Organization,
     policy: OrganizationPolicy,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationAccountCreateInput {
+    organization_id: OrganizationId,
+    account_id: AccountId,
+    username: String,
+    email: String,
+    initial_password: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationMemberStatusUpdateInput {
+    organization_id: OrganizationId,
+    account_id: AccountId,
+    status: OrganizationMemberStatus,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationWorkspaceMemberAssignInput {
+    organization_id: OrganizationId,
+    workspace_id: WorkspaceId,
+    organization_member_id: OrganizationMemberId,
+    organization_member_revision: u64,
+    role: MemberRole,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1079,6 +1108,22 @@ pub(super) fn routes() -> Router<ApiState> {
         .route(
             "/v1/organizations/{organization_id}/record",
             get(get_organization_record),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/members",
+            get(list_organization_members),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/accounts",
+            post(create_organization_account),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/members/{account_id}",
+            axum::routing::patch(update_organization_member_status),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/workspaces/{workspace_id}/members",
+            post(assign_organization_member_to_workspace),
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces",
@@ -1933,8 +1978,24 @@ fn workspace_member_management_grants(
         )
     })?;
     let scope = ResourceScope::workspace(workspace_id.clone());
+    let organization_owner = if principal
+        .roles
+        .contains(&buglogin_domain::permissions::Role::PlatformAdmin)
+    {
+        false
+    } else {
+        let workspaces = state
+            .workspaces
+            .read()
+            .map_err(|_| service_unavailable("workspace"))?;
+        workspaces
+            .organization_for_workspace(workspace_id)
+            .is_some_and(|organization| {
+                principal.account_id.as_ref() == Some(&organization.account_id)
+            })
+    };
     if is_allowed(principal, &capability, action, &scope, grants) {
-        return Ok((grants.to_vec(), false));
+        return Ok((grants.to_vec(), organization_owner));
     }
     if principal.token_scopes.is_some() {
         return Err(problem_response(
@@ -1970,8 +2031,15 @@ fn workspace_member_management_grants(
         .workspaces
         .read()
         .map_err(|_| service_unavailable("workspace"))?
-        .managed_organization_for_workspace(principal, grants, workspace_id)
-        .map_err(response_problem)?;
+        .organization_for_workspace(workspace_id)
+        .ok_or_else(|| {
+            problem_response(
+                "workspace_not_found",
+                "Workspace not found",
+                404,
+                correlation_id.clone(),
+            )
+        })?;
     MemberService::authorize_org_owner_access(principal, grants, &organization, workspace_id)
         .map_err(response_problem)?;
     let actor_id = principal.account_id.clone().ok_or_else(|| {
@@ -3410,6 +3478,457 @@ async fn get_organization_record(
     Ok(Json(record))
 }
 
+async fn list_organization_members(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    let organization_id =
+        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let principal = authenticate(&state, &headers)?;
+    let grant_snapshot = grants(&state)?;
+    authorize_organization_management(
+        &state,
+        &principal,
+        &grant_snapshot,
+        &organization_id,
+        Action::Read,
+    )?;
+    let members = state
+        .organization_members
+        .read()
+        .map_err(|_| service_unavailable("organization_member"))?
+        .list_for_organization(&organization_id);
+    let items = members
+        .iter()
+        .map(|member| organization_member_resource(&state, member))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(json!({"items": items, "nextCursor": Value::Null})))
+}
+
+fn organization_member_resource(
+    state: &ApiState,
+    member: &buglogin_domain::organization::OrganizationMember,
+) -> Result<Value, Response> {
+    let identity = state
+        .control_persistence
+        .load::<AccountIdentity>("identity", "account_identity", member.account_id.as_str())
+        .map_err(response_problem)?
+        .ok_or_else(|| {
+            problem_response(
+                "organization_member_identity_missing",
+                "Organization member identity is unavailable",
+                500,
+                "organization.members.list".into(),
+            )
+        })?;
+    organization_member_resource_with_identity(member, &identity)
+}
+
+fn organization_member_resource_with_identity(
+    member: &buglogin_domain::organization::OrganizationMember,
+    identity: &AccountIdentity,
+) -> Result<Value, Response> {
+    let mut value = serde_json::to_value(member).map_err(internal)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        problem_response(
+            "organization_member_serialization_failed",
+            "Organization member could not be serialized",
+            500,
+            "organization.members.list".into(),
+        )
+    })?;
+    object.insert("username".into(), Value::String(identity.username.clone()));
+    object.insert("email".into(), Value::String(identity.email.clone()));
+    Ok(value)
+}
+
+async fn create_organization_account(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<OrganizationAccountCreateInput>,
+) -> Result<Response, Response> {
+    let organization_id =
+        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    if input.organization_id != organization_id {
+        return Err(problem_response(
+            "tenant_mismatch",
+            "Organization identifier does not match the request path",
+            403,
+            correlation(&headers),
+        ));
+    }
+    let principal = authenticate(&state, &headers)?;
+    let grant_snapshot = grants(&state)?;
+    let organization = authorize_organization_management(
+        &state,
+        &principal,
+        &grant_snapshot,
+        &organization_id,
+        Action::Create,
+    )?;
+    crate::services::credentials::CredentialService::validate_initial_password(
+        &input.initial_password,
+    )
+    .map_err(response_problem)?;
+    let credential_now =
+        crate::clock::unix_time_seconds(&correlation(&headers)).map_err(response_problem)?;
+    let mutation_input = serde_json::to_value(&input).map_err(internal)?;
+    let initial_password = Zeroizing::new(input.initial_password);
+    let account_id = input.account_id.clone();
+    let username = input.username.clone();
+    let email = input.email.clone();
+    let scope = ResourceScope {
+        account_id: Some(organization.account_id.clone()),
+        organization_id: Some(organization.id.clone()),
+        ..ResourceScope::default()
+    };
+    mutate_with_additional_puts_and_replay_check(
+        &state,
+        &headers,
+        &principal,
+        &grant_snapshot,
+        organization.id.as_str(),
+        "organization.account.create",
+        mutation_input,
+        scope,
+        account_id.as_str(),
+        || {
+            let credentials = crate::services::credentials::CredentialService::new(
+                state.control_persistence.clone(),
+            )
+            .map_err(response_problem)?;
+            if credentials
+                .matches_password_without_recording_attempt(&account_id, initial_password.as_str())
+                .map_err(response_problem)?
+            {
+                Ok(())
+            } else {
+                Err(response_problem(Problem::new(
+                    "idempotency_conflict",
+                    "Idempotency key was already used with a different initial password",
+                    409,
+                    "identity",
+                )))
+            }
+        },
+        || {
+            let (pending, mut account_puts) =
+                crate::services::account_provisioning::AccountProvisioningService::new(
+                    state.control_persistence.clone(),
+                )
+                .prepare_admin_provisioned_scoped(
+                    account_id.clone(),
+                    &username,
+                    &email,
+                    &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
+                )
+                .map_err(response_problem)?;
+            let credential_put = crate::services::credentials::CredentialService::new(
+                state.control_persistence.clone(),
+            )
+            .map_err(response_problem)?
+            .prepare_initial_password_put(
+                &pending.account.id,
+                initial_password.as_str(),
+                credential_now,
+            )
+            .map_err(response_problem)?;
+            account_puts.push(credential_put);
+            let organization_member = state
+                .organization_members
+                .write()
+                .map_err(|_| service_unavailable("organization_member"))?
+                .create_active(organization_id.clone(), pending.account.id.clone())
+                .map_err(response_problem)?;
+            let organization_member = json!({
+                "id": organization_member.id,
+                "organizationId": organization_member.organization_id,
+                "accountId": organization_member.account_id,
+                "status": organization_member.status,
+                "revision": organization_member.revision,
+                "username": pending.identity.username.clone(),
+                "email": pending.identity.email.clone(),
+            });
+            Ok((
+                json!({
+                    "account": pending.account,
+                    "identity": pending.identity,
+                    "organizationMember": organization_member,
+                    "replayed": pending.replayed,
+                    "onboardingStatus": "admin_provisioned",
+                    "loginEnabled": true,
+                }),
+                account_puts,
+                None,
+            ))
+        },
+    )
+    .await
+}
+
+async fn update_organization_member_status(
+    State(state): State<ApiState>,
+    Path((organization_id, account_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<OrganizationMemberStatusUpdateInput>,
+) -> Result<Response, Response> {
+    let organization_id =
+        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let account_id = AccountId::from_str(&account_id).map_err(|_| bad_id("account_id"))?;
+    if input.organization_id != organization_id || input.account_id != account_id {
+        return Err(problem_response(
+            "tenant_mismatch",
+            "Organization member identifiers do not match the request path",
+            403,
+            correlation(&headers),
+        ));
+    }
+    if input.expected_revision == 0 {
+        return Err(problem_response(
+            "invalid_revision",
+            "Expected revision must be positive",
+            400,
+            correlation(&headers),
+        ));
+    }
+    let principal = authenticate(&state, &headers)?;
+    let grant_snapshot = grants(&state)?;
+    let organization = authorize_organization_management(
+        &state,
+        &principal,
+        &grant_snapshot,
+        &organization_id,
+        Action::Manage,
+    )?;
+    if input.status == OrganizationMemberStatus::Suspended && organization.account_id == account_id
+    {
+        return Err(problem_response(
+            "organization_owner_protected",
+            "The organization owner cannot be suspended",
+            409,
+            correlation(&headers),
+        ));
+    }
+    let mutation_input = serde_json::to_value(&input).map_err(internal)?;
+    let scope = ResourceScope {
+        account_id: Some(organization.account_id),
+        organization_id: Some(organization_id.clone()),
+        ..ResourceScope::default()
+    };
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grant_snapshot,
+        organization_id.as_str(),
+        "organization.member.status.update",
+        mutation_input,
+        scope,
+        account_id.as_str(),
+        || {
+            state
+                .organization_members
+                .write()
+                .map_err(|_| service_unavailable("organization_member"))?
+                .update_status(
+                    &organization_id,
+                    &account_id,
+                    input.expected_revision,
+                    input.status,
+                )
+                .map_err(response_problem)
+        },
+    )
+    .await
+}
+
+async fn assign_organization_member_to_workspace(
+    State(state): State<ApiState>,
+    Path((organization_path, workspace_path)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<OrganizationWorkspaceMemberAssignInput>,
+) -> Result<Response, Response> {
+    let organization_id =
+        OrganizationId::from_str(&organization_path).map_err(|_| bad_id("organization_id"))?;
+    let workspace_id =
+        WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
+    if input.organization_id != organization_id || input.workspace_id != workspace_id {
+        return Err(problem_response(
+            "tenant_mismatch",
+            "Organization or workspace identifier does not match the request path",
+            403,
+            correlation(&headers),
+        ));
+    }
+    if input.organization_member_revision == 0 {
+        return Err(problem_response(
+            "invalid_revision",
+            "Organization member revision must be positive",
+            400,
+            correlation(&headers),
+        ));
+    }
+    let principal = authenticate(&state, &headers)?;
+    let grant_snapshot = grants(&state)?;
+    let organization = authorize_organization_management(
+        &state,
+        &principal,
+        &grant_snapshot,
+        &organization_id,
+        Action::Manage,
+    )?;
+    let workspace_ids = state
+        .workspaces
+        .read()
+        .map_err(|_| service_unavailable("workspace"))?
+        .workspace_ids_in_organization(&organization_id);
+    if !workspace_ids.contains(&workspace_id) {
+        return Err(problem_response(
+            "workspace_organization_mismatch",
+            "Workspace does not belong to this organization",
+            403,
+            correlation(&headers),
+        ));
+    }
+    let organization_owner = principal.account_id.as_ref() == Some(&organization.account_id);
+    let organization_member = state
+        .organization_members
+        .read()
+        .map_err(|_| service_unavailable("organization_member"))?
+        .list_for_organization(&organization_id)
+        .into_iter()
+        .find(|member| member.id == input.organization_member_id)
+        .ok_or_else(|| {
+            problem_response(
+                "organization_member_not_found",
+                "Organization member not found",
+                404,
+                correlation(&headers),
+            )
+        })?;
+    if organization_member.revision != input.organization_member_revision {
+        return Err(problem_response(
+            "revision_conflict",
+            "Organization member revision conflict",
+            409,
+            correlation(&headers),
+        ));
+    }
+    if organization_member.status != OrganizationMemberStatus::Active {
+        return Err(problem_response(
+            "organization_member_inactive",
+            "Suspended organization members cannot be assigned to a workspace",
+            409,
+            correlation(&headers),
+        ));
+    }
+    if organization_owner {
+        MemberService::authorize_org_owner_account_creation(
+            &principal,
+            &grant_snapshot,
+            &organization,
+            &workspace_id,
+            &input.role,
+        )
+        .map_err(response_problem)?;
+    }
+    let member = Member {
+        id: crate::services::account_provisioning::scoped_member_id(
+            &workspace_id,
+            &organization_member.account_id,
+        )
+        .map_err(response_problem)?,
+        account_id: organization_member.account_id.clone(),
+        workspace_id: workspace_id.clone(),
+        team_id: None,
+        role: input.role.clone(),
+        status: MemberStatus::Active,
+        invite_expires_at: None,
+    };
+    let mutation_input = serde_json::to_value(&input).map_err(internal)?;
+    let output_member = member.clone();
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grant_snapshot,
+        organization_id.as_str(),
+        "organization.member.workspace.assign",
+        mutation_input,
+        ResourceScope {
+            account_id: Some(organization_member.account_id.clone()),
+            organization_id: Some(organization_id.clone()),
+            workspace_id: Some(workspace_id.clone()),
+            ..ResourceScope::default()
+        },
+        organization_member.id.as_str(),
+        || {
+            // Hold the parent gate while committing the child membership so a
+            // concurrent suspension cannot create access after revocation.
+            let parent_members = state
+                .organization_members
+                .read()
+                .map_err(|_| service_unavailable("organization_member"))?;
+            let current_parent = parent_members
+                .list_for_organization(&organization_id)
+                .into_iter()
+                .find(|current| current.id == input.organization_member_id)
+                .ok_or_else(|| {
+                    response_problem(Problem::new(
+                        "organization_member_not_found",
+                        "Organization member not found",
+                        404,
+                        correlation(&headers),
+                    ))
+                })?;
+            if current_parent.status != OrganizationMemberStatus::Active
+                || current_parent.revision != input.organization_member_revision
+            {
+                return Err(response_problem(Problem::new(
+                    "revision_conflict",
+                    "Active organization member revision changed",
+                    409,
+                    correlation(&headers),
+                )));
+            }
+            let mut members = state
+                .members
+                .write()
+                .map_err(|_| service_unavailable("member"))?;
+            let assigned = if organization_owner {
+                members.assign_active_as_org_owner(
+                    &principal,
+                    &grant_snapshot,
+                    &organization,
+                    output_member.clone(),
+                )
+            } else {
+                members.provision_active(&principal, &grant_snapshot, output_member.clone())
+            }
+            .map_err(response_problem)?;
+            Ok(assigned)
+        },
+    )
+    .await
+}
+
+fn authorize_organization_management(
+    state: &ApiState,
+    principal: &Principal,
+    grants: &[buglogin_domain::permissions::Grant],
+    organization_id: &OrganizationId,
+    action: Action,
+) -> Result<Organization, Response> {
+    Ok(state
+        .workspaces
+        .read()
+        .map_err(|_| service_unavailable("workspace"))?
+        .authorize_organization_management(principal, grants, organization_id, action)
+        .map_err(response_problem)?)
+}
+
 async fn update_organization(
     State(state): State<ApiState>,
     Path(organization_id): Path<String>,
@@ -4318,6 +4837,34 @@ async fn activate_member(
         ResourceScope::workspace(workspace_id.clone()),
         member_id.as_str(),
         || {
+            let current_target = state
+                .members
+                .read()
+                .map_err(|_| service_unavailable("member"))?
+                .get_in_workspace(&principal, &member_grants, &member_id, &workspace_id)
+                .map_err(response_problem)?;
+            if current_target.status == MemberStatus::Suspended {
+                let workspace = state
+                    .workspaces
+                    .read()
+                    .map_err(|_| service_unavailable("workspace"))?
+                    .workspace_for_policy(&workspace_id)
+                    .map_err(response_problem)?;
+                let parent_status = state
+                    .organization_members
+                    .read()
+                    .map_err(|_| service_unavailable("organization_member"))?
+                    .get(&workspace.organization_id, &current_target.account_id)
+                    .map(|parent| parent.status.clone());
+                if parent_status == Some(OrganizationMemberStatus::Suspended) {
+                    return Err(response_problem(Problem::new(
+                        "organization_member_inactive",
+                        "Suspended organization members cannot be restored in a workspace",
+                        409,
+                        correlation(&headers),
+                    )));
+                }
+            }
             HostedProfileService::activate_member(
                 &state,
                 &principal,
@@ -5058,11 +5605,28 @@ async fn list_profile_key_rotation_recipients(
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let profile_id = ProfileId::from_str(&profile_path).map_err(|_| bad_id("profile_id"))?;
+    let token = bearer_token(&headers);
+    let now = super::request_now(&headers)?;
+    let (device_account, device_id) = state
+        .auth
+        .read()
+        .map_err(|_| service_unavailable("authentication"))?
+        .authenticate_device(token, now)
+        .map_err(response_problem)?;
+    if principal.account_id.as_ref() != Some(&device_account) {
+        return Err(problem_response(
+            "device_session_account_mismatch",
+            "Device session does not match the authenticated account",
+            403,
+            correlation(&headers),
+        ));
+    }
     let recipients = HostedProfileService::list_profile_key_rotation_recipients(
         &state,
         &principal,
         &grants,
         &profile_id,
+        &device_id,
     )
     .map_err(response_problem)?;
     Ok(Json(recipients))
@@ -5137,6 +5701,25 @@ async fn commit_resource_manifest(
         }
     };
     let principal = authenticate(&state, &headers)?;
+    let initial_envelope_device_id = if key_share_envelope_updates.is_empty() {
+        None
+    } else {
+        let (device_account, device_id) = state
+            .auth
+            .read()
+            .map_err(|_| service_unavailable("authentication"))?
+            .authenticate_device(bearer_token(&headers), super::request_now(&headers)?)
+            .map_err(response_problem)?;
+        if principal.account_id.as_ref() != Some(&device_account) {
+            return Err(problem_response(
+                "device_session_account_mismatch",
+                "Device session does not match the authenticated account",
+                403,
+                correlation(&headers),
+            ));
+        }
+        Some(device_id)
+    };
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     let grants = grants(&state)?;
@@ -5307,6 +5890,28 @@ async fn commit_resource_manifest(
                         "sync",
                     ))
                 })?;
+            let previous_manifest = state
+                .current_sync_manifest(&workspace_id, &resource_id)
+                .map_err(response_problem)?;
+            let is_initial_encrypted_manifest = previous_manifest.as_ref().is_some_and(|previous| {
+                previous.generation == 1
+                    && previous.objects.is_empty()
+                    && previous.payload_encryption.is_none()
+            }) && manifest
+                .payload_encryption
+                .as_ref()
+                .is_some_and(|encryption| {
+                    encryption.algorithm
+                        == buglogin_sync::manifest::PayloadEncryptionAlgorithm::Aes256GcmChunkV2
+                });
+            if is_initial_encrypted_manifest && key_share_envelope_updates.is_empty() {
+                return Err(response_problem(Problem::new(
+                    "profile_key_enrollment_required",
+                    "The first encrypted manifest requires an envelope for the authenticated workspace owner device",
+                    409,
+                    correlation(&headers),
+                )));
+            }
             if manifest.payload_encryption.is_some() {
                 crate::services::profile_hosted::HostedProfileService::ensure_encrypted_manifest_share_compatible(
                     &state,
@@ -5350,7 +5955,37 @@ async fn commit_resource_manifest(
             let rotation_pending = state
                 .resource_key_rotation_pending(&workspace_id, &resource_id)
                 .map_err(response_problem)?;
-            if rotation_pending {
+            if is_initial_encrypted_manifest {
+                let key_version = manifest
+                    .payload_encryption
+                    .as_ref()
+                    .and_then(|encryption| encryption.key_version.as_deref())
+                    .ok_or_else(|| {
+                        response_problem(Problem::new(
+                            "profile_key_version_missing",
+                            "Initial encrypted manifest has no resource key version",
+                            409,
+                            correlation(&headers),
+                        ))
+                    })?;
+                let device_id = initial_envelope_device_id.as_deref().ok_or_else(|| {
+                    response_problem(Problem::new(
+                        "device_session_required",
+                        "A connected device session is required for initial key enrollment",
+                        403,
+                        correlation(&headers),
+                    ))
+                })?;
+                HostedProfileService::activate_initial_owner_key_envelope(
+                    &state,
+                    &principal,
+                    &binding.profile_id,
+                    device_id,
+                    key_version,
+                    &key_share_envelope_updates,
+                )
+                .map_err(response_problem)?;
+            } else if rotation_pending {
                 let key_version = manifest
                     .payload_encryption
                     .as_ref()
@@ -5373,7 +6008,7 @@ async fn commit_resource_manifest(
             } else if !key_share_envelope_updates.is_empty() {
                 return Err(response_problem(Problem::new(
                     "sync_key_rotation_not_pending",
-                    "Key envelopes may be replaced only as part of a pending profile key rotation",
+                    "Key envelopes may be replaced only during a pending profile key rotation",
                     409,
                     correlation(&headers),
                 )));
@@ -7436,6 +8071,8 @@ where
         "profile.proxy.assignment.set"
             | "profile.manifest.commit"
             | "account.create.scoped"
+            | "organization.account.create"
+            | "organization.member.status.update"
             | "member.invitation.create"
             | "member.invitation.revoke"
             | "member.activate"
@@ -7526,6 +8163,50 @@ where
                 }
             }
             true
+        } else if matches!(
+            command,
+            "organization.account.create"
+                | "organization.member.status.update"
+                | "organization.member.workspace.assign"
+        ) {
+            let organization_id = scope.organization_id.as_ref().ok_or_else(|| {
+                problem_response(
+                    "invalid_scope",
+                    "Organization membership mutation requires an organization scope",
+                    400,
+                    correlation(headers),
+                )
+            })?;
+            state
+                .workspaces
+                .read()
+                .map_err(|_| service_unavailable("workspace"))?
+                .authorize_organization_management(
+                    &principal,
+                    &grants,
+                    organization_id,
+                    metadata.action,
+                )
+                .is_ok()
+        } else if command == "profile.manifest.commit" {
+            let workspace_id = scope
+                .workspace_id
+                .as_ref()
+                .ok_or_else(|| bad_id("workspace_id"))?;
+            let resource_id = scope
+                .resource_id
+                .as_ref()
+                .ok_or_else(|| bad_id("resource_id"))?;
+            crate::services::profile_sync::authorize_resource_access(
+                state,
+                &principal,
+                &grants,
+                workspace_id,
+                resource_id,
+                metadata.capability,
+                metadata.action,
+            )
+            .is_ok()
         } else if let Some(profile_id) = scope.profile_id.as_ref() {
             HostedProfileService::authorized(
                 state,
@@ -7618,7 +8299,11 @@ where
     let result = operation();
     let success_status = if matches!(
         command,
-        "profile.create" | "account.create.scoped" | "member.invitation.create"
+        "profile.create"
+            | "account.create.scoped"
+            | "organization.account.create"
+            | "organization.member.workspace.assign"
+            | "member.invitation.create"
     ) {
         StatusCode::CREATED
     } else {
@@ -7743,15 +8428,23 @@ fn same_grant_snapshot(
 }
 
 fn idempotency_input(command: &str, input: &serde_json::Value) -> serde_json::Value {
-    if !matches!(command, "profile.create" | "profile.provision") {
+    if !matches!(
+        command,
+        "profile.create" | "profile.provision" | "organization.account.create"
+    ) {
         return input.clone();
     }
     let mut canonical = input.clone();
+    if command == "organization.account.create"
+        && let Some(object) = canonical.as_object_mut()
+    {
+        object.remove("initialPassword");
+    }
     let Some(profile) = canonical
         .get_mut("profile")
         .and_then(serde_json::Value::as_object_mut)
     else {
-        return input.clone();
+        return canonical;
     };
     if matches!(command, "profile.create" | "profile.provision") {
         profile.remove("createdAt");
@@ -7845,6 +8538,598 @@ mod tests {
         PayloadEncryptionAlgorithm,
     };
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn organization_account_creation_membership_listing_and_suspension_are_atomic() {
+        let store = MemoryControlRecordStore::default();
+        let state =
+            ApiState::hosted_with_control_store(ProfileService::disabled(), store.clone()).unwrap();
+        let owner = state
+            .bootstrap_first_owner(crate::http::FirstOwnerBootstrapInput {
+                account_id: Some("org_account_owner".into()),
+                username: "org-account-owner".into(),
+                email: "org-account-owner@example.test".into(),
+                operator_attested_email: true,
+                password: zeroize::Zeroizing::new("organization account owner password".into()),
+                organization_name: "Org Account Test".into(),
+                workspace_name: "Default Workspace".into(),
+                max_workspaces: 2,
+                max_profiles: 20,
+                max_members: 10,
+                max_storage_bytes: 1_000_000,
+            })
+            .unwrap();
+        let removed_platform_admin = state
+            .platform_admin_accounts
+            .write()
+            .unwrap()
+            .remove(&owner.account_id);
+        assert!(removed_platform_admin);
+        state
+            .persist_control_aggregate(
+                "test.organization.owner.demote_platform_admin",
+                "organization-owner-platform-admin-demotion-test-01".into(),
+                owner.account_id.as_str().to_owned(),
+                true,
+                &"a".repeat(64),
+                serde_json::json!({"testOnly": true, "platformAdmin": false}),
+                200,
+                serde_json::json!({"platformAdmin": false}),
+            )
+            .unwrap();
+        state.reload_control_aggregate().unwrap();
+        let token = state.issue_token(owner.account_id.as_str()).unwrap();
+        let app = super::super::router(state.clone());
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/organizations/{}/accounts",
+                    owner.organization_id.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-account-create")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-account-create-test-1")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "accountId": "org_account_member",
+                        "username": "org-account-member",
+                        "email": "org-account-member@example.test",
+                        "initialPassword": "organization member password"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created_status = created.status();
+        let body = axum::body::to_bytes(created.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            created_status,
+            StatusCode::CREATED,
+            "organization account creation failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(created["loginEnabled"], true);
+        assert_eq!(created["organizationMember"]["status"], "active");
+        assert!(created.get("member").is_none());
+        assert_eq!(
+            state
+                .members
+                .read()
+                .unwrap()
+                .all_members()
+                .iter()
+                .filter(|member| member.account_id.as_str() == "org_account_member")
+                .count(),
+            0
+        );
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/organizations/{}/members",
+                    owner.organization_id.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-members-list")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(listed.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_slice(&body).unwrap();
+        let membership = listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["accountId"] == "org_account_member")
+            .unwrap();
+        assert_eq!(membership["status"], "active");
+        assert_eq!(membership["username"], "org-account-member");
+        assert_eq!(membership["email"], "org-account-member@example.test");
+
+        let assigned = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/organizations/{}/workspaces/{}/members",
+                    owner.organization_id.as_str(),
+                    owner.workspace_id.as_str(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-member-workspace-assign")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-member-workspace-assign-1")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "workspaceId": owner.workspace_id,
+                        "organizationMemberId": membership["id"],
+                        "organizationMemberRevision": membership["revision"],
+                        "role": "admin"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let assigned_status = assigned.status();
+        let body = axum::body::to_bytes(assigned.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            assigned_status,
+            StatusCode::CREATED,
+            "organization workspace assignment failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let assigned: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(assigned["accountId"], "org_account_member");
+        assert_eq!(assigned["workspaceId"], owner.workspace_id.as_str());
+        assert_eq!(assigned["role"], "admin");
+        assert_eq!(
+            state
+                .members
+                .read()
+                .unwrap()
+                .all_members()
+                .iter()
+                .filter(|member| member.account_id.as_str() == "org_account_member")
+                .count(),
+            1
+        );
+
+        let workspace_admin_token = state.issue_token("org_account_member").unwrap();
+        let workspace_admin_assignment = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/organizations/{}/workspaces/{}/members",
+                    owner.organization_id.as_str(),
+                    owner.workspace_id.as_str(),
+                ))
+                .header("authorization", format!("Bearer {workspace_admin_token}"))
+                .header("x-correlation-id", "workspace-admin-org-assignment-denied")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "workspace-admin-org-assignment-denied")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "workspaceId": owner.workspace_id,
+                        "organizationMemberId": membership["id"],
+                        "organizationMemberRevision": membership["revision"],
+                        "role": "member"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(workspace_admin_assignment.status(), StatusCode::FORBIDDEN);
+
+        // Organization-owner authority must remain visible even when the
+        // owner also has a direct membership grant for this workspace.
+        state.grants.write().unwrap().push(Grant {
+            id: buglogin_domain::ids::GrantId::new("organization-owner-direct-member-manage")
+                .unwrap(),
+            account_id: Some(owner.account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-MEM-001").unwrap(),
+            action: Action::Manage,
+            scope: ResourceScope::workspace(owner.workspace_id.clone()),
+            effect: Effect::Allow,
+        });
+        state.grants.write().unwrap().push(Grant {
+            id: buglogin_domain::ids::GrantId::new("organization-owner-direct-member-read")
+                .unwrap(),
+            account_id: Some(owner.account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-MEM-001").unwrap(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(owner.workspace_id.clone()),
+            effect: Effect::Allow,
+        });
+        let mut owner_headers = HeaderMap::new();
+        owner_headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        owner_headers.insert(
+            "x-correlation-id",
+            "organization-owner-direct-grant-ceiling".parse().unwrap(),
+        );
+        let owner_principal = authenticate(&state, &owner_headers).unwrap();
+        assert!(
+            !owner_principal
+                .roles
+                .contains(&buglogin_domain::permissions::Role::PlatformAdmin)
+        );
+        let grant_snapshot = grants(&state).unwrap();
+        let (_, is_organization_owner) = workspace_member_management_grants(
+            &state,
+            &owner_principal,
+            &grant_snapshot,
+            &owner.workspace_id,
+            Action::Manage,
+            "organization-owner-direct-grant-ceiling".into(),
+        )
+        .unwrap();
+        assert!(is_organization_owner);
+
+        let owner_role_update = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/role",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-owner-role-update-denied")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-owner-member-role-update-denied")
+                .body(Body::from(r#"{"role":"owner"}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner_role_update.status(), StatusCode::FORBIDDEN);
+
+        let owner_role_downgrade = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/role",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-owner-role-downgrade")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-owner-member-role-downgrade")
+                .body(Body::from(r#"{"role":"member"}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner_role_downgrade.status(), StatusCode::OK);
+
+        let workspace_member_token = state.issue_token("org_account_member").unwrap();
+
+        let workspace_member_suspended = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/suspend",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-owner-member-suspend")
+                .header("idempotency-key", "org-owner-member-suspend")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(workspace_member_suspended.status(), StatusCode::OK);
+
+        let self_restore_denied = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/activate",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {workspace_member_token}"))
+                .header("x-correlation-id", "suspended-member-self-restore-denied")
+                .header("idempotency-key", "suspended-member-self-restore")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(self_restore_denied.status(), StatusCode::FORBIDDEN);
+
+        let workspace_member_restored = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/activate",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-owner-member-restore")
+                .header("idempotency-key", "org-owner-member-restore")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(workspace_member_restored.status(), StatusCode::OK);
+
+        let owner_role_assignment = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/organizations/{}/workspaces/{}/members",
+                    owner.organization_id.as_str(),
+                    owner.workspace_id.as_str(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-member-owner-role-denied")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-member-workspace-owner-role-denied")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "workspaceId": owner.workspace_id,
+                        "organizationMemberId": membership["id"],
+                        "organizationMemberRevision": membership["revision"],
+                        "role": "owner"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner_role_assignment.status(), StatusCode::FORBIDDEN);
+
+        let cross_organization_workspace_assignment = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/organizations/{}/workspaces/ws_other_organization/members",
+                    owner.organization_id.as_str(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-member-cross-scope-denied")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-member-workspace-cross-scope-denied")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "workspaceId": "ws_other_organization",
+                        "organizationMemberId": membership["id"],
+                        "organizationMemberRevision": membership["revision"],
+                        "role": "member"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cross_organization_workspace_assignment.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let suspended = app
+            .clone()
+            .oneshot(
+                Request::patch(format!(
+                    "/v1/organizations/{}/members/org_account_member",
+                    owner.organization_id.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-member-suspend")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-account-suspend-test-1")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "accountId": "org_account_member",
+                        "status": "suspended",
+                        "expectedRevision": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(suspended.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(suspended.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        let suspended: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(suspended["status"], "suspended");
+        assert_eq!(suspended["revision"], 2);
+
+        let suspended_assignment = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/organizations/{}/workspaces/{}/members",
+                    owner.organization_id.as_str(),
+                    owner.workspace_id.as_str(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header(
+                    "x-correlation-id",
+                    "suspended-organization-member-assignment",
+                )
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-member-workspace-assign-suspended")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "workspaceId": owner.workspace_id,
+                        "organizationMemberId": membership["id"],
+                        "organizationMemberRevision": 2,
+                        "role": "member"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(suspended_assignment.status(), StatusCode::CONFLICT);
+
+        let child_suspended = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/suspend",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header(
+                    "x-correlation-id",
+                    "workspace-member-suspend-parent-suspended",
+                )
+                .header(
+                    "idempotency-key",
+                    "workspace-member-suspend-parent-suspended",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(child_suspended.status(), StatusCode::OK);
+
+        let child_restore_parent_suspended = app
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/activate",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header(
+                    "x-correlation-id",
+                    "workspace-member-restore-parent-suspended",
+                )
+                .header(
+                    "idempotency-key",
+                    "workspace-member-restore-parent-suspended",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            child_restore_parent_suspended.status(),
+            StatusCode::CONFLICT
+        );
+        let body =
+            axum::body::to_bytes(child_restore_parent_suspended.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+        let problem: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "organization_member_inactive");
+
+        let persistence = crate::services::control_persistence::ControlPersistence::new(store);
+        let (persisted, _) = persistence
+            .load_versioned::<super::super::ControlAggregate>(
+                super::super::CONTROL_TENANT,
+                super::super::CONTROL_STATE_TYPE,
+                super::super::CONTROL_STATE_ID,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted
+                .organization_members
+                .get(
+                    &owner.organization_id,
+                    &AccountId::new("org_account_member").unwrap()
+                )
+                .unwrap()
+                .status,
+            OrganizationMemberStatus::Suspended
+        );
+        assert!(
+            persistence
+                .load::<Account>("control", "account", "org_account_member")
+                .unwrap()
+                .is_some()
+        );
+
+        let organization_restored = app
+            .clone()
+            .oneshot(
+                Request::patch(format!(
+                    "/v1/organizations/{}/members/org_account_member",
+                    owner.organization_id.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-member-restore")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "org-account-restore-test-1")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "accountId": "org_account_member",
+                        "status": "active",
+                        "expectedRevision": 2
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(organization_restored.status(), StatusCode::OK);
+
+        let restored_child = app
+            .oneshot(
+                Request::put(format!(
+                    "/v1/workspaces/{}/members/{}/activate",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "workspace-member-restore-parent-active")
+                .header("idempotency-key", "workspace-member-restore-parent-active")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored_child.status(), StatusCode::OK);
+    }
 
     fn expiring_dispatch(
         state: &ApiState,

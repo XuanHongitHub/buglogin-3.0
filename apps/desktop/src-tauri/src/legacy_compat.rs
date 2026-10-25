@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 use tokio::time::sleep;
 
+use crate::app_instance::AppInstance;
 use crate::desktop_state::{DesktopAuthStatus, DesktopState};
 use crate::profile_lifecycle::canonical_dir_name;
 use crate::profile_password::{self, PasswordCheck};
@@ -990,8 +992,8 @@ pub async fn select_active_workspace(
     Ok(selected.clone())
 }
 
-async fn count_profiles_for_workspace(state: &DesktopState, workspace_id: &str) -> usize {
-    let mut total = 0;
+async fn count_profiles_for_workspace(state: &DesktopState, workspace_id: &str) -> Option<usize> {
+    let mut total: usize = 0;
     let mut cursor: Option<String> = None;
     let mut seen_cursors = std::collections::BTreeSet::new();
     loop {
@@ -1009,26 +1011,24 @@ async fn count_profiles_for_workspace(state: &DesktopState, workspace_id: &str) 
             .await
         {
             Ok(p_resp) => {
-                if let Some(items) = p_resp.data.get("items").and_then(Value::as_array) {
-                    total += items.len();
-                    let next = p_resp.data.get("nextCursor").and_then(Value::as_str);
-                    match next {
-                        Some(n)
-                            if !n.is_empty() && !seen_cursors.contains(n) && !items.is_empty() =>
-                        {
-                            seen_cursors.insert(n.to_string());
-                            cursor = Some(n.to_string());
-                        }
-                        _ => break,
+                let items = p_resp.data.get("items")?.as_array()?;
+                total = total.checked_add(items.len())?;
+                match p_resp.data.get("nextCursor") {
+                    None | Some(Value::Null) => return Some(total),
+                    Some(Value::String(next))
+                        if !next.is_empty()
+                            && !seen_cursors.contains(next)
+                            && !items.is_empty() =>
+                    {
+                        seen_cursors.insert(next.clone());
+                        cursor = Some(next.clone());
                     }
-                } else {
-                    break;
+                    _ => return None,
                 }
             }
-            Err(_) => break,
+            Err(_) => return None,
         }
     }
-    total
 }
 
 async fn get_available_workspace_records(
@@ -1676,12 +1676,31 @@ pub async fn launch_browser_profile(
     if has_profile_password(&profile_id) && !profile_password::take_unlock(&profile_id) {
         return Err(profile_password::locked_problem());
     }
-    run_operation(
-        &state,
-        "profile_launch",
-        json!({ "profileId": profile_id, "headless": false }),
-    )
-    .await?;
+    let correlation_id = request_id("profile_launch");
+    let launch = async {
+        crate::ensure_profile_runtime_installed(
+            app.clone(),
+            state.inner(),
+            &profile_id,
+            &correlation_id,
+        )
+        .await?;
+        run_operation(
+            &state,
+            "profile_launch",
+            json!({ "profileId": profile_id, "headless": false }),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = launch {
+        crate::diagnostics::report_problem_failure(
+            state.inner().clone(),
+            "profile.launch",
+            error.clone(),
+        );
+        return Err(error);
+    }
     app.emit(
         "profile-running-changed",
         json!({ "id": profile_id, "is_running": true }),
@@ -1720,6 +1739,11 @@ pub async fn kill_browser_profile(
     {
         // The process may already be closed while cloud sync is being retried.
         // Keep the UI's process state truthful even when the sync operation fails.
+        crate::diagnostics::report_problem_failure(
+            state.inner().clone(),
+            "profile.stop",
+            problem.clone(),
+        );
         return Err(problem);
     }
     if !process_stopped {
@@ -1825,7 +1849,7 @@ async fn run_operation(state: &DesktopState, command: &str, payload: Value) -> R
 
 pub(crate) fn load_local_profile_settings(profile_id: &str) -> Option<Value> {
     let profile_id = canonical_dir_name(profile_id).ok()?;
-    let data_dir = dirs::data_local_dir()?;
+    let data_dir = local_profile_settings_base()?;
     for root in [
         data_dir.join("BugLogin").join("profiles").join(profile_id),
         data_dir
@@ -1881,7 +1905,7 @@ fn save_local_profile_settings(
             "local-settings",
         )
     })?;
-    let data_dir = dirs::data_local_dir().ok_or_else(|| {
+    let data_dir = local_profile_settings_base().ok_or_else(|| {
         Problem::new(
             "data_dir_unavailable",
             "Data directory unavailable",
@@ -1903,6 +1927,15 @@ fn save_local_profile_settings(
     std::fs::write(&path, bytes)
         .map_err(|e| Problem::new("io_failed", e.to_string(), 500, "local-settings"))?;
     Ok(current)
+}
+
+fn local_profile_settings_base() -> Option<PathBuf> {
+    let base = if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
+        PathBuf::from(dir)
+    } else {
+        dirs::data_local_dir()?
+    };
+    Some(AppInstance::app_data_dir(base))
 }
 
 fn legacy_profile(profile: &Value) -> Value {
@@ -2315,9 +2348,12 @@ pub async fn remove_profile_password(
 #[cfg(test)]
 mod tests {
     use super::{
-        LegacyProxyExport, choose_workspace_selection, legacy_profile, normalize_runtime,
-        parse_txt_proxies, profile_argument, replacement_group_ids,
+        LegacyProxyExport, choose_workspace_selection, count_profiles_for_workspace,
+        legacy_profile, normalize_runtime, parse_txt_proxies, profile_argument,
+        replacement_group_ids,
     };
+    use crate::desktop_state::DesktopState;
+    use buglogin_domain::errors::Problem;
     use serde_json::json;
 
     #[test]
@@ -2400,6 +2436,17 @@ mod tests {
             Some("ws_beta")
         );
         assert_eq!(choose_workspace_selection(None, &[]), None);
+    }
+
+    #[tokio::test]
+    async fn inaccessible_profile_count_stays_unavailable_instead_of_becoming_zero() {
+        let state = DesktopState::Unavailable(Problem::new(
+            "profile_forbidden",
+            "Profile access denied",
+            403,
+            "count-test",
+        ));
+        assert_eq!(count_profiles_for_workspace(&state, "ws_count").await, None);
     }
 
     #[test]
