@@ -83,7 +83,12 @@ fn member_mutations_are_acl_backed_and_duplicate_invites_do_not_replace() {
         .unwrap();
     assert_eq!(
         service
-            .invite(&actor, &[], member("mem_1", "acct_2", MemberRole::Member), 1)
+            .invite(
+                &actor,
+                &[],
+                member("mem_1", "acct_2", MemberRole::Member),
+                1
+            )
             .unwrap_err()
             .code,
         "member_exists"
