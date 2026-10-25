@@ -33,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { awaitDesktopOperation } from "@/lib/await-desktop-operation";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import type { BrowserProfile, GroupWithCount } from "@/types";
@@ -75,6 +76,7 @@ export function TeamManagerView({
   const [stoppingProfileId, setStoppingProfileId] = useState<string | null>(
     null,
   );
+  const [isBulkStopping, setIsBulkStopping] = useState(false);
 
   // Search & Filters
   const [searchQuery, setSearchQuery] = useState("");
@@ -149,15 +151,21 @@ export function TeamManagerView({
     if (!session.profileId) return;
     setStoppingProfileId(session.profileId);
     try {
-      await desktopApi.stopProfile(session.profileId);
+      const accepted = await desktopApi.stopProfile(session.profileId);
+      const operation = await awaitDesktopOperation(accepted, (operationId) =>
+        desktopApi.getOperation(operationId),
+      );
+      if (operation.status !== "completed") {
+        throw new Error(
+          operation.error?.title ?? `Profile stop ${operation.status}`,
+        );
+      }
       showSuccessToast(
         t("teamManager.stopSuccess", {
           name: session.profileName,
           defaultValue: `Đã dừng profile "${session.profileName}"`,
         }),
       );
-      if (onRefreshProfiles) onRefreshProfiles();
-      void loadTeamData();
     } catch (err) {
       showErrorToast(
         t("teamManager.stopError", {
@@ -166,6 +174,8 @@ export function TeamManagerView({
       );
     } finally {
       setStoppingProfileId(null);
+      if (onRefreshProfiles) onRefreshProfiles();
+      void loadTeamData();
     }
   };
 
@@ -183,10 +193,20 @@ export function TeamManagerView({
       );
       return;
     }
+    setIsBulkStopping(true);
     try {
       for (const item of activeToStop) {
         if (item.profileId) {
-          await desktopApi.stopProfile(item.profileId);
+          const accepted = await desktopApi.stopProfile(item.profileId);
+          const operation = await awaitDesktopOperation(
+            accepted,
+            (operationId) => desktopApi.getOperation(operationId),
+          );
+          if (operation.status !== "completed") {
+            throw new Error(
+              operation.error?.title ?? `Profile stop ${operation.status}`,
+            );
+          }
         }
       }
       showSuccessToast(
@@ -196,14 +216,16 @@ export function TeamManagerView({
         }),
       );
       setSelectedIds(new Set());
-      if (onRefreshProfiles) onRefreshProfiles();
-      void loadTeamData();
     } catch (err) {
       showErrorToast(
         t("teamManager.bulkStopError", {
           defaultValue: `Lỗi dừng hàng loạt: ${String(err)}`,
         }),
       );
+    } finally {
+      setIsBulkStopping(false);
+      if (onRefreshProfiles) onRefreshProfiles();
+      void loadTeamData();
     }
   };
 
@@ -464,13 +486,16 @@ export function TeamManagerView({
               variant="destructive"
               size="sm"
               onClick={() => void handleBulkStop()}
+              disabled={isBulkStopping}
               className="h-7 px-3 text-xs gap-1.5 cursor-pointer font-medium"
             >
               <LuSquare className="size-3" />
               <span>
-                {t("teamManager.bulkStop", {
-                  defaultValue: "Dừng khẩn cấp các phiên đã chọn",
-                })}
+                {isBulkStopping
+                  ? t("teamManager.stopping", { defaultValue: "Đang dừng..." })
+                  : t("teamManager.bulkStop", {
+                      defaultValue: "Dừng khẩn cấp các phiên đã chọn",
+                    })}
               </span>
             </Button>
             <Button
@@ -784,12 +809,16 @@ export function TeamManagerView({
                               variant="destructive"
                               size="sm"
                               onClick={() => void handleStopProfile(session)}
-                              disabled={stoppingProfileId === session.profileId}
+                              disabled={
+                                isBulkStopping ||
+                                stoppingProfileId === session.profileId
+                              }
                               className="h-7 px-2.5 text-[11px] gap-1 cursor-pointer font-medium"
                             >
                               <LuSquare className="size-3" />
                               <span>
-                                {stoppingProfileId === session.profileId
+                                {isBulkStopping ||
+                                stoppingProfileId === session.profileId
                                   ? t("teamManager.stopping", {
                                       defaultValue: "Đang dừng...",
                                     })

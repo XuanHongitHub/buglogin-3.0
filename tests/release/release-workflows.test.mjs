@@ -365,6 +365,18 @@ test("evidence generators emit SBOM, hashes, and lock-bound provenance", async (
   }
 });
 
+test("API deployment marker accepts numbered checksum keys", async () => {
+  const deploy = await readFile(
+    "scripts/release/deploy-api-systemd-remote.sh",
+    "utf8",
+  );
+  assert.match(deploy, /\*\[!a-z0-9_\]\*/);
+  assert.match(
+    deploy,
+    /! is_deployment_id \"\$old_marker_deployment_id\" \|\| \\?\[\[/,
+  );
+});
+
 function run(script, ...args) {
   const result = spawnSync(process.execPath, [script, ...args], {
     encoding: "utf8",
