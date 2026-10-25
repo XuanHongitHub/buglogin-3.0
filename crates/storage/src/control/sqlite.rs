@@ -22,6 +22,7 @@ pub struct SqliteControlRecordStore {
     connection: Connection,
     database_path: PathBuf,
     advisory_locks: BTreeMap<i64, Connection>,
+    shared_advisory_locks: BTreeMap<i64, Vec<Connection>>,
 }
 
 impl SqliteControlRecordStore {
@@ -84,6 +85,7 @@ impl SqliteControlRecordStore {
             connection,
             database_path: path,
             advisory_locks: BTreeMap::new(),
+            shared_advisory_locks: BTreeMap::new(),
         })
     }
 
@@ -456,6 +458,62 @@ impl ControlRecordStore for SqliteControlRecordStore {
             .execute_batch("ROLLBACK")
             .map_err(|_| unavailable())
     }
+
+    fn try_shared_advisory_lock(&mut self, lock_id: i64) -> Result<bool, Problem> {
+        let path = self.lock_path(lock_id)?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )
+        .map_err(|_| unavailable())?;
+        connection
+            .busy_timeout(std::time::Duration::ZERO)
+            .map_err(|_| unavailable())?;
+        connection
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|_| unavailable())?;
+        match connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+            row.get::<_, i64>(0)
+        }) {
+            Ok(_) => {
+                self.shared_advisory_locks
+                    .entry(lock_id)
+                    .or_default()
+                    .push(connection);
+                Ok(true)
+            }
+            Err(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                let _ = connection.execute_batch("ROLLBACK");
+                Ok(false)
+            }
+            Err(_) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                Err(unavailable())
+            }
+        }
+    }
+
+    fn release_shared_advisory_lock(&mut self, lock_id: i64) -> Result<(), Problem> {
+        let connections = self
+            .shared_advisory_locks
+            .get_mut(&lock_id)
+            .ok_or_else(unavailable)?;
+        let connection = connections.pop().ok_or_else(unavailable)?;
+        connection
+            .execute_batch("COMMIT")
+            .map_err(|_| unavailable())?;
+        if connections.is_empty() {
+            self.shared_advisory_locks.remove(&lock_id);
+        }
+        Ok(())
+    }
 }
 
 fn decode_json(serialized: &str) -> Result<Value, Problem> {
@@ -788,6 +846,29 @@ mod tests {
         second.release_advisory_lock(42).unwrap();
         drop(first);
         drop(second);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn shared_advisory_locks_allow_parallel_writers_and_exclude_cleanup() {
+        let path = database_path("shared-lock");
+        let mut writer_one = SqliteControlRecordStore::open(&path).unwrap();
+        let mut writer_two = SqliteControlRecordStore::open(&path).unwrap();
+        let mut cleanup = SqliteControlRecordStore::open(&path).unwrap();
+
+        assert!(writer_one.try_shared_advisory_lock(43).unwrap());
+        assert!(writer_two.try_shared_advisory_lock(43).unwrap());
+        assert!(!cleanup.try_advisory_lock(43).unwrap());
+
+        writer_one.release_shared_advisory_lock(43).unwrap();
+        assert!(!cleanup.try_advisory_lock(43).unwrap());
+        writer_two.release_shared_advisory_lock(43).unwrap();
+        assert!(cleanup.try_advisory_lock(43).unwrap());
+        cleanup.release_advisory_lock(43).unwrap();
+
+        drop(writer_one);
+        drop(writer_two);
+        drop(cleanup);
         remove_database(&path);
     }
 }

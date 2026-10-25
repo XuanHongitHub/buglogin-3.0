@@ -8,6 +8,7 @@ use buglogin_domain::errors::Problem;
 use serde::de::{MapAccess, Visitor};
 
 use crate::adapter::{RuntimeTarget, RuntimeTargets};
+use crate::app_instance::AppInstance;
 use crate::device_identity::DeviceIdentityVault;
 
 const PRODUCTION_API_BASE_URL: &str = "https://api3.buglogin.com";
@@ -182,6 +183,7 @@ pub struct DesktopBootstrap {
 }
 
 pub fn open() -> Result<DesktopBootstrap, Problem> {
+    let app_instance = AppInstance::from_environment()?;
     let mode = if cfg!(debug_assertions) {
         match env::var("BUGLOGIN_DEPLOYMENT_MODE") {
             Ok(value) => DeploymentMode::parse(&value)?,
@@ -206,6 +208,7 @@ pub fn open() -> Result<DesktopBootstrap, Problem> {
                 .map(PathBuf::from)
                 .or_else(|| dirs::data_local_dir().map(|path| path.join("BugLogin-Local")))
                 .ok_or_else(|| problem("data_root_unavailable", "Data root unavailable", 503))?;
+            let data_root = app_instance.namespace_path(data_root);
             (
                 Some(data_root.join("repository")),
                 data_root.join("profiles"),
@@ -244,15 +247,16 @@ pub fn open() -> Result<DesktopBootstrap, Problem> {
                         503,
                     )
                 })?;
+            let cache_root = app_instance.namespace_path(cache_root);
             let identity_vault = DeviceIdentityVault::native();
-            let device_id = if local_development_api {
-                identity_vault.load_or_create_in_namespace(
-                    "buglogin-device-identity-local-api",
-                    "desktop-bootstrap",
-                )?
-            } else {
-                identity_vault.load_or_create("desktop-bootstrap")?
-            };
+            let identity_namespace =
+                app_instance.device_identity_namespace(if local_development_api {
+                    "buglogin-device-identity-local-api"
+                } else {
+                    "buglogin-device-identity"
+                });
+            let device_id = identity_vault
+                .load_or_create_in_namespace(&identity_namespace, "desktop-bootstrap")?;
             (
                 None,
                 cache_root,

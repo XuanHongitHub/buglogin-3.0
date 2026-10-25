@@ -72,6 +72,9 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "organization.get",
     "organization.create",
     "organization.update",
+    "organization.members.list",
+    "organization.account.create",
+    "organization.member.status.update",
     "workspace.list",
     "workspace.get",
     "workspace.create",
@@ -257,7 +260,7 @@ impl RuntimeTargets {
                 profile.name.as_str(),
                 profile.id.as_str(),
             );
-            append_wayfern_default_start_page(&mut specification.args, profile.id.as_str());
+            append_wayfern_default_start_page(&mut specification.args, profile_path);
         }
         let fingerprint_target =
             target_from_runtime_config(profile.runtime_config.as_ref(), "runtime")?;
@@ -352,14 +355,39 @@ pub(crate) fn profile_color_for_id(profile_id: &str) -> String {
     format!("#{red:02x}{green:02x}{blue:02x}")
 }
 
-fn append_wayfern_default_start_page(args: &mut Vec<String>, profile_id: &str) {
-    // The first tab in a BugLogin-managed launch must point to BugLogin rather
-    // than a vendor landing page. New tabs created after launch continue to use
-    // the runtime NTP, which receives a BugLogin custom shortcut in Preferences.
-    args.retain(|argument| argument.starts_with('-'));
+fn append_wayfern_default_start_page(args: &mut Vec<String>, profile_path: &Path) {
     push_or_replace_arg(args, "--no-first-run".to_owned());
     push_or_replace_arg(args, "--no-default-browser-check".to_owned());
-    push_or_replace_arg(args, format!("https://buglogin.com/profileId={profile_id}"));
+    if has_saved_wayfern_session(profile_path) {
+        push_or_replace_arg(args, "--restore-last-session".to_owned());
+    } else if !args.iter().any(|argument| !argument.starts_with('-')) {
+        args.push("about:blank".to_owned());
+    }
+}
+
+fn has_saved_wayfern_session(profile_path: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(profile_path.join("Default").join("Sessions")) else {
+        return false;
+    };
+    let mut has_session = false;
+    let mut has_tabs = false;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        has_session |= name.starts_with("Session_");
+        has_tabs |= name.starts_with("Tabs_");
+        if has_session && has_tabs {
+            return true;
+        }
+    }
+    false
 }
 
 fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (u8, u8, u8) {
@@ -589,6 +617,9 @@ impl AdapterState {
                 | "organization_record_get"
                 | "organization_create"
                 | "organization_update"
+                | "organization_members_list"
+                | "organization_account_create"
+                | "organization_member_status_update"
                 | "workspace_list"
                 | "workspace_get"
                 | "workspace_record_get"
@@ -2961,22 +2992,47 @@ mod tests {
     }
 
     #[test]
-    fn wayfern_start_page_disables_first_run_and_opens_buglogin() {
-        let mut args = vec![
-            "--user-data-dir=C:\\BugLogin\\profile".to_owned(),
-            "https://donutbrowser.com".to_owned(),
-        ];
+    fn wayfern_fresh_start_disables_first_run_and_uses_blank_page() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "buglogin-start-page-fresh-{}-{}",
+            std::process::id(),
+            crate::clock::unix_time_nanos("test").unwrap()
+        ));
+        fs::create_dir_all(&profile_path).unwrap();
+        let mut args = vec![format!(
+            "--user-data-dir={}",
+            profile_path.to_string_lossy()
+        )];
 
-        append_wayfern_default_start_page(&mut args, "prf_test_001");
+        append_wayfern_default_start_page(&mut args, &profile_path);
 
         assert!(args.iter().any(|arg| arg == "--no-first-run"));
         assert!(args.iter().any(|arg| arg == "--no-default-browser-check"));
-        assert!(
-            args.iter()
-                .any(|arg| arg == "https://buglogin.com/profileId=prf_test_001")
-        );
-        assert!(!args.iter().any(|arg| arg == "chrome://newtab/"));
-        assert!(!args.iter().any(|arg| arg.contains("donutbrowser.com")));
+        assert!(args.iter().any(|arg| arg == "about:blank"));
+        assert!(!args.iter().any(|arg| arg == "--restore-last-session"));
+        fs::remove_dir_all(profile_path).unwrap();
+    }
+
+    #[test]
+    fn wayfern_saved_session_restores_tabs_and_preserves_explicit_start_url() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "buglogin-start-page-restore-{}-{}",
+            std::process::id(),
+            crate::clock::unix_time_nanos("test").unwrap()
+        ));
+        let sessions = profile_path.join("Default").join("Sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("Session_123"), b"session fixture").unwrap();
+        fs::write(sessions.join("Tabs_123"), b"tabs fixture").unwrap();
+        let user_start_url = "https://example.org/start";
+        let mut args = vec![user_start_url.to_owned()];
+
+        append_wayfern_default_start_page(&mut args, &profile_path);
+
+        assert!(args.iter().any(|arg| arg == "--restore-last-session"));
+        assert!(args.iter().any(|arg| arg == user_start_url));
+        assert!(!args.iter().any(|arg| arg == "about:blank"));
+        fs::remove_dir_all(profile_path).unwrap();
     }
 
     #[derive(Clone, Default)]

@@ -814,6 +814,40 @@ commands:
     input: OrganizationUpdateInput
     output: Organization
     idempotency: required
+  - id: organization.members.list
+    kind: query
+    capability: CAP-ORG-001
+    action: read
+    adapters: [tauri, rest, mcp]
+    input: OrganizationIdInput
+    output: OrganizationMemberPage
+  - id: organization.account.create
+    kind: command
+    capability: CAP-ORG-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: OrganizationAccountCreateInput
+    output: AccountProvisioningReceipt
+    idempotency: required
+    preconditions: [organization-owner-or-platform-admin, account-does-not-exist, active-organization-membership, no-workspace-membership]
+  - id: organization.member.status.update
+    kind: command
+    capability: CAP-ORG-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: OrganizationMemberStatusUpdateInput
+    output: OrganizationMember
+    idempotency: required
+    preconditions: [organization-owner-or-platform-admin, organization-owner-membership-protected, expected-revision-current]
+  - id: organization.member.workspace.assign
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    adapters: [tauri, rest, mcp]
+    input: OrganizationMemberWorkspaceAssignInput
+    output: Member
+    idempotency: required
+    preconditions: [organization-owner-or-platform-admin, active-organization-membership, workspace-in-organization, expected-revision-current, role-ceiling, no-existing-workspace-membership]
   - id: workspace.list
     kind: query
     capability: CAP-WS-001

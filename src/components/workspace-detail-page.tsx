@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   LuArrowLeft,
   LuCheck,
@@ -12,6 +12,7 @@ import {
   LuUsers,
 } from "react-icons/lu";
 import { MemberManagementDialog } from "@/components/member-management-dialog";
+import type { OrgWorkspaceRoute } from "@/components/org-workspace-route";
 import { ResourceInventoryPanel } from "@/components/resource-inventory-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -58,6 +59,9 @@ export function WorkspaceDetailPage({
   onBack,
   initialTab = "overview",
   initialInvitePage = false,
+  initialGroupId,
+  initialProfileId,
+  onRouteChange,
 }: {
   organizationId: string;
   organizationName: string;
@@ -66,10 +70,14 @@ export function WorkspaceDetailPage({
   onBack: () => void;
   initialTab?: WorkspaceTab;
   initialInvitePage?: boolean;
+  initialGroupId?: string;
+  initialProfileId?: string;
+  onRouteChange?: (route: OrgWorkspaceRoute) => void;
 }) {
   const [tab, setTab] = useState<WorkspaceTab>(initialTab);
   const [groups, setGroups] = useState<GroupRecord[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
+  const [groupsLoaded, setGroupsLoaded] = useState(false);
   const [groupsError, setGroupsError] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [editingGroup, setEditingGroup] = useState<GroupRecord | null>(null);
@@ -87,9 +95,14 @@ export function WorkspaceDetailPage({
     useState<GroupShareGrant["action"]>("read");
   const [accessError, setAccessError] = useState<string | null>(null);
   const [accessBusy, setAccessBusy] = useState(false);
+  const openedInitialGroup = useRef<string | null>(null);
+
+  useEffect(() => setTab(initialTab), [initialTab]);
+  useEffect(() => setInvitePageOpen(initialInvitePage), [initialInvitePage]);
 
   const loadGroups = useCallback(async () => {
     setGroupsLoading(true);
+    setGroupsLoaded(false);
     setGroupsError(null);
     try {
       setGroups(await desktopApi.listGroups(workspaceId));
@@ -97,6 +110,7 @@ export function WorkspaceDetailPage({
       setGroupsError(error instanceof Error ? error.message : String(error));
     } finally {
       setGroupsLoading(false);
+      setGroupsLoaded(true);
     }
   }, [workspaceId]);
 
@@ -178,27 +192,60 @@ export function WorkspaceDetailPage({
     }
   };
 
-  const loadGroupAccess = async (record: GroupRecord) => {
-    setAccessGroup(record);
-    setAccessError(null);
-    setAccessBusy(true);
-    try {
-      const [shares, members] = await Promise.all([
-        desktopApi.listGroupShares({ workspaceId, groupId: record.group.id }),
-        desktopApi.listMembers(workspaceId),
-      ]);
-      setGroupShares(shares);
-      const activeMembers = members.items.filter(
-        (member) => member.status === "active" && member.identity,
-      );
-      setWorkspaceMembers(activeMembers);
-      setShareMemberId(activeMembers[0]?.id ?? "");
-    } catch (error) {
-      setAccessError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAccessBusy(false);
+  const loadGroupAccess = useCallback(
+    async (record: GroupRecord) => {
+      setAccessGroup(record);
+      setAccessError(null);
+      setAccessBusy(true);
+      try {
+        const [shares, members] = await Promise.all([
+          desktopApi.listGroupShares({ workspaceId, groupId: record.group.id }),
+          desktopApi.listMembers(workspaceId),
+        ]);
+        setGroupShares(shares);
+        const activeMembers = members.items.filter(
+          (member) => member.status === "active" && member.identity,
+        );
+        setWorkspaceMembers(activeMembers);
+        setShareMemberId(activeMembers[0]?.id ?? "");
+      } catch (error) {
+        setAccessError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAccessBusy(false);
+      }
+    },
+    [workspaceId],
+  );
+
+  useEffect(() => {
+    if (!initialGroupId) {
+      setAccessGroup(null);
+      openedInitialGroup.current = null;
+      return;
     }
-  };
+    if (!groupsLoaded || groupsLoading || groupsError) return;
+    if (openedInitialGroup.current === initialGroupId) return;
+    const record = groups.find((item) => item.group.id === initialGroupId);
+    if (record) {
+      openedInitialGroup.current = initialGroupId;
+      void loadGroupAccess(record);
+    } else if (groups.length === 0) {
+      onRouteChange?.({ organizationId, workspaceId, section: "groups" });
+      showErrorToast(
+        "Group trong liên kết không còn tồn tại trong workspace này.",
+      );
+    }
+  }, [
+    groups,
+    groupsError,
+    groupsLoaded,
+    groupsLoading,
+    initialGroupId,
+    loadGroupAccess,
+    onRouteChange,
+    organizationId,
+    workspaceId,
+  ]);
 
   const addGroupShare = async () => {
     if (!accessGroup || !shareMemberId || accessBusy) return;
@@ -266,9 +313,27 @@ export function WorkspaceDetailPage({
             <LuArrowLeft className="size-4" />
           </Button>
           <div className="min-w-0">
-            <p className="truncate text-xs text-muted-foreground">
-              Organizations / {organizationName} /
-            </p>
+            <nav
+              aria-label="Breadcrumb"
+              className="flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground"
+            >
+              <button
+                type="button"
+                className="truncate hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={onBack}
+              >
+                Organizations
+              </button>
+              <span aria-hidden="true">/</span>
+              <button
+                type="button"
+                className="truncate hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={onBack}
+              >
+                {organizationName}
+              </button>
+              <span aria-hidden="true">/</span>
+            </nav>
             <h1 className="truncate text-base font-semibold">
               {workspaceName}
             </h1>
@@ -281,7 +346,12 @@ export function WorkspaceDetailPage({
               type="button"
               size="sm"
               variant={tab === id ? "secondary" : "ghost"}
-              onClick={() => setTab(id)}
+              onClick={() => {
+                setTab(id);
+                setInvitePageOpen(false);
+                setAccessGroup(null);
+                onRouteChange?.({ organizationId, workspaceId, section: id });
+              }}
               aria-current={tab === id ? "page" : undefined}
             >
               <Icon className="mr-1.5 size-3.5" />
@@ -316,6 +386,15 @@ export function WorkspaceDetailPage({
           initialWorkspaceId={workspaceId}
           initialWorkspaceName={workspaceName}
           initialKind="profile"
+          initialResourceId={initialProfileId}
+          onResourceRouteChange={(profileId) =>
+            onRouteChange?.({
+              organizationId,
+              workspaceId,
+              section: "profiles",
+              profileId: profileId ?? undefined,
+            })
+          }
           showWorkspaceSelector={false}
         />
       ) : tab === "groups" ? (
@@ -483,7 +562,17 @@ export function WorkspaceDetailPage({
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  onClick={() => void loadGroupAccess(record)}
+                                  onClick={() => {
+                                    openedInitialGroup.current =
+                                      record.group.id;
+                                    void loadGroupAccess(record);
+                                    onRouteChange?.({
+                                      organizationId,
+                                      workspaceId,
+                                      section: "groups",
+                                      groupId: record.group.id,
+                                    });
+                                  }}
                                 >
                                   Quyền truy cập
                                 </Button>
@@ -541,7 +630,14 @@ export function WorkspaceDetailPage({
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() => setAccessGroup(null)}
+                    onClick={() => {
+                      setAccessGroup(null);
+                      onRouteChange?.({
+                        organizationId,
+                        workspaceId,
+                        section: "groups",
+                      });
+                    }}
                   >
                     Đóng
                   </Button>

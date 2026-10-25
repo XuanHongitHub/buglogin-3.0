@@ -16,7 +16,7 @@ $artifactRoot = (Resolve-Path $ArtifactDirectory).Path
 $apiPath = Join-Path $artifactRoot "buglogin-api"
 $adminPath = Join-Path $artifactRoot "buglogin-admin-password-reset"
 $manifestPath = Join-Path $artifactRoot "release-manifest.json"
-$openApiPath = Join-Path $artifactRoot "openapi-v1.yaml"
+$openApiPath = Join-Path $repoRoot "crates/api/openapi/openapi-v1.yaml"
 $remoteHelper = Join-Path $PSScriptRoot "deploy-api-systemd-remote.sh"
 
 function Get-CommandOutput([string]$FilePath, [string[]]$Arguments) {
@@ -91,7 +91,7 @@ Assert-LinuxExecutable $apiPath $manifest.artifacts.bugloginApiSha256
 Assert-LinuxExecutable $adminPath $manifest.artifacts.adminPasswordResetSha256
 $openApiHash = Get-Sha256 $openApiPath
 if ($manifest.artifacts.openApiSha256.ToLowerInvariant() -ne $openApiHash) {
-    throw "Release OpenAPI hash does not match the CI artifact."
+    throw "Release OpenAPI hash does not match the current checkout."
 }
 $repositoryUrl = Get-CommandOutput "git.exe" @("-C", $repoRoot, "remote", "get-url", "origin")
 $repositoryUrl = $repositoryUrl -replace "\.git$", ""

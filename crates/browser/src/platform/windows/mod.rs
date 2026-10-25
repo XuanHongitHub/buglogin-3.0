@@ -322,7 +322,7 @@ pub struct StopPolicy {
 impl Default for StopPolicy {
     fn default() -> Self {
         Self {
-            graceful_timeout: Duration::from_secs(3),
+            graceful_timeout: Duration::from_secs(15),
             poll_interval: Duration::from_millis(50),
         }
     }
@@ -514,11 +514,21 @@ impl OwnedProcessTree for WindowsJobProcess {
             // the owned process tree is already gone and stopping is complete.
             return Ok(());
         }
-        if inspect_process(&self.powershell, &self.identity) == ProcessTreeStatus::Running {
+        let graceful_close_requested =
+            request_main_window_close(&self.powershell, self.identity.root.pid);
+        if !graceful_close_requested
+            && inspect_process(&self.powershell, &self.identity) == ProcessTreeStatus::Running
+        {
             let _ = run_taskkill(&self.taskkill, self.identity.root.pid, false);
         }
         if self.wait_for_exit(self.stop_policy.graceful_timeout)? {
             return Ok(());
+        }
+        if graceful_close_requested {
+            let _ = run_taskkill(&self.taskkill, self.identity.root.pid, false);
+            if self.wait_for_exit(Duration::from_secs(3))? {
+                return Ok(());
+            }
         }
         self.force_close_job()
     }
@@ -589,6 +599,25 @@ fn run_taskkill(taskkill: &Path, pid: u32, force: bool) -> Result<(), Problem> {
     } else {
         Err(stop_failed())
     }
+}
+
+fn request_main_window_close(powershell: &Path, pid: u32) -> bool {
+    let script = format!(
+        "$target = Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($null -ne $target -and $target.MainWindowHandle -ne [IntPtr]::Zero -and $target.CloseMainWindow()) {{ exit 0 }}; exit 1"
+    );
+    run_output(
+        Command::new(powershell)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script.as_str(),
+            ])
+            .creation_flags(CREATE_NO_WINDOW),
+        Duration::from_secs(5),
+    )
+    .is_some_and(|output| output.status.success())
 }
 
 fn run_output(command: &mut Command, timeout: Duration) -> Option<std::process::Output> {

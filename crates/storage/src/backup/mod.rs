@@ -376,6 +376,18 @@ fn make_writable(root: &Path) -> Result<(), Problem> {
         let mut permissions = fs::metadata(&path)
             .map_err(|e| io_problem("inspect snapshot permissions", &e))?
             .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(permissions.mode() | 0o200);
+        }
+        #[cfg(windows)]
+        {
+            // Windows uses the read-only file attribute; it has no Unix mode bits.
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+        }
+        #[cfg(not(any(unix, windows)))]
         permissions.set_readonly(false);
         fs::set_permissions(path, permissions)
             .map_err(|e| io_problem("unlock snapshot file", &e))?;

@@ -11,10 +11,12 @@ use std::{
 
 use async_trait::async_trait;
 use buglogin_domain::{
+    account::AccountIdentity,
     entities::{Profile, ProfileCreateInput, ProfileRecord, Proxy, ProxyProtocol},
     errors::Problem,
     ids::{
-        AccountId, GrantId, MemberId, OrganizationId, ProfileId, ResourceId, TeamId, WorkspaceId,
+        AccountId, GrantId, MemberId, OrganizationId, OrganizationMemberId, ProfileId, ResourceId,
+        TeamId, WorkspaceId,
     },
     organization::{Organization, OrganizationPolicy},
     permissions::{Action, Capability, Principal, ResourceScope, Role},
@@ -1418,6 +1420,33 @@ fn serialization_problem(error: serde_json::Error) -> Problem {
     Problem::new("serialization_failed", error.to_string(), 400, "mcp")
 }
 
+fn organization_member_value(
+    state: &ApiState,
+    member: &buglogin_domain::organization::OrganizationMember,
+) -> Result<Value, Problem> {
+    let identity = state
+        .control_persistence
+        .load::<AccountIdentity>("identity", "account_identity", member.account_id.as_str())?
+        .ok_or_else(|| {
+            problem(
+                "organization_member_identity_missing",
+                "Organization member identity is unavailable",
+                500,
+            )
+        })?;
+    let mut value = serde_json::to_value(member).map_err(serialization_problem)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        problem(
+            "organization_member_serialization_failed",
+            "Organization member could not be serialized",
+            500,
+        )
+    })?;
+    object.insert("username".into(), Value::String(identity.username));
+    object.insert("email".into(), Value::String(identity.email));
+    Ok(value)
+}
+
 fn sha256_hash(value: &serde_json::Value) -> String {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(value).unwrap_or_default();
@@ -1426,8 +1455,10 @@ fn sha256_hash(value: &serde_json::Value) -> String {
 
 fn idempotency_hash_input(command_id: &str, input: &Value) -> Value {
     let mut canonical = input.clone();
-    if command_id == "account.create.scoped"
-        && let Some(object) = canonical.as_object_mut()
+    if matches!(
+        command_id,
+        "account.create.scoped" | "organization.account.create"
+    ) && let Some(object) = canonical.as_object_mut()
     {
         object.remove("initialPassword");
     }
@@ -1526,6 +1557,32 @@ fn resolve_scope(
                 ..ResourceScope::default()
             })
         }
+        "organization.members.list" | "organization.account.create" => Ok(ResourceScope {
+            organization_id: Some(required_id(
+                input,
+                "organizationId",
+                OrganizationId::from_str,
+            )?),
+            ..ResourceScope::default()
+        }),
+        "organization.member.workspace.assign" => Ok(ResourceScope {
+            organization_id: Some(required_id(
+                input,
+                "organizationId",
+                OrganizationId::from_str,
+            )?),
+            workspace_id: Some(required_id(input, "workspaceId", WorkspaceId::from_str)?),
+            ..ResourceScope::default()
+        }),
+        "organization.member.status.update" => Ok(ResourceScope {
+            account_id: Some(required_id(input, "accountId", AccountId::from_str)?),
+            organization_id: Some(required_id(
+                input,
+                "organizationId",
+                OrganizationId::from_str,
+            )?),
+            ..ResourceScope::default()
+        }),
         "workspace.list" => Ok(ResourceScope {
             organization_id: Some(required_id(
                 input,
@@ -2029,6 +2086,36 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             require_platform_admin(principal)?;
         }
         let grants = self.state.grants()?;
+        if matches!(
+            command.id.as_str(),
+            "organization.members.list"
+                | "organization.account.create"
+                | "organization.member.status.update"
+                | "organization.member.workspace.assign"
+        ) {
+            let organization_id = scope.organization_id.as_ref().ok_or_else(|| {
+                Problem::new("scope_required", "organizationId is required", 400, "mcp")
+            })?;
+            return self
+                .state
+                .workspaces
+                .read()
+                .map_err(|_| {
+                    Problem::new(
+                        "workspace_unavailable",
+                        "Workspace service unavailable",
+                        503,
+                        "mcp",
+                    )
+                })?
+                .authorize_organization_management(
+                    principal,
+                    &grants,
+                    organization_id,
+                    command.action,
+                )
+                .map(|_| ());
+        }
         let capability = Capability::new(command.capability)
             .map_err(|_| Problem::new("invalid_capability", "Invalid capability", 500, "mcp"))?;
         if !self.state.local_authority_enabled()
@@ -2133,7 +2220,10 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             .as_ref()
             .map(|id| id.as_str())
             .unwrap_or("anonymous");
-        if command.id.as_str() == "account.create.scoped" {
+        if matches!(
+            command.id.as_str(),
+            "account.create.scoped" | "organization.account.create"
+        ) {
             // Never persist a plaintext password or a fast digest derived from it as the
             // MCP idempotency input hash. The replay path binds the supplied password to
             // the durable Argon2 verifier instead.
@@ -2185,7 +2275,10 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
                     })?;
                     Ok(IdempotencyClaim::ReplayError(error))
                 } else {
-                    if command.id.as_str() == "account.create.scoped" {
+                    if matches!(
+                        command.id.as_str(),
+                        "account.create.scoped" | "organization.account.create"
+                    ) {
                         let account_id = required_id(input, "accountId", AccountId::from_str)?;
                         let password = input
                             .get("initialPassword")
@@ -3073,6 +3166,283 @@ impl McpExecutor for ProductionMcpExecutor {
                     })?
                     .update_organization(&principal, &grants, &org_id, update)?;
                 Ok(serde_json::to_value(record.organization).map_err(serialization_problem)?)
+            }
+            "organization.members.list" => {
+                let organization_id =
+                    required_id(&input, "organizationId", OrganizationId::from_str)?;
+                let members = state
+                    .organization_members
+                    .read()
+                    .map_err(|_| {
+                        problem(
+                            "organization_member_unavailable",
+                            "Organization membership state unavailable",
+                            503,
+                        )
+                    })?
+                    .list_for_organization(&organization_id);
+                let items = members
+                    .iter()
+                    .map(|member| organization_member_value(state, member))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(serde_json::json!({"items": items, "nextCursor": Value::Null}))
+            }
+            "organization.account.create" => {
+                let organization_id =
+                    required_id(&input, "organizationId", OrganizationId::from_str)?;
+                let account_id = required_id(&input, "accountId", AccountId::from_str)?;
+                let username = input
+                    .get("username")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "username is required", 400))?;
+                let email = input
+                    .get("email")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "email is required", 400))?;
+                let initial_password = input
+                    .get("initialPassword")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| problem("invalid_input", "initialPassword is required", 400))?;
+                crate::services::credentials::CredentialService::validate_initial_password(
+                    initial_password,
+                )?;
+                let initial_password = zeroize::Zeroizing::new(initial_password.to_owned());
+                let created_at = crate::clock::rfc3339(&request.correlation_id)?;
+                let credential_now = crate::clock::unix_time_seconds(&request.correlation_id)?;
+                let (pending, mut account_puts) =
+                    crate::services::account_provisioning::AccountProvisioningService::new(
+                        state.control_persistence.clone(),
+                    )
+                    .prepare_admin_provisioned_scoped(
+                        account_id.clone(),
+                        username,
+                        email,
+                        &created_at,
+                    )?;
+                let credential_put = crate::services::credentials::CredentialService::new(
+                    state.control_persistence.clone(),
+                )?
+                .prepare_initial_password_put(
+                    &pending.account.id,
+                    initial_password.as_str(),
+                    credential_now,
+                )?;
+                account_puts.push(credential_put);
+                let organization_member = state
+                    .organization_members
+                    .write()
+                    .map_err(|_| {
+                        problem(
+                            "organization_member_unavailable",
+                            "Organization membership state unavailable",
+                            503,
+                        )
+                    })?
+                    .create_active(organization_id, pending.account.id.clone())?;
+                let mut organization_member =
+                    serde_json::to_value(organization_member).map_err(serialization_problem)?;
+                let organization_member_object =
+                    organization_member.as_object_mut().ok_or_else(|| {
+                        problem(
+                            "organization_member_serialization_failed",
+                            "Organization member could not be serialized",
+                            500,
+                        )
+                    })?;
+                organization_member_object.insert(
+                    "username".into(),
+                    Value::String(pending.identity.username.clone()),
+                );
+                organization_member_object.insert(
+                    "email".into(),
+                    Value::String(pending.identity.email.clone()),
+                );
+                let response = serde_json::json!({
+                    "account": pending.account,
+                    "identity": pending.identity,
+                    "organizationMember": organization_member,
+                    "replayed": pending.replayed,
+                    "onboardingStatus": "admin_provisioned",
+                    "loginEnabled": true
+                });
+                reject_mcp_output_secrets(request.command, &response)?;
+                self.additional_control_puts.extend(account_puts);
+                Ok(response)
+            }
+            "organization.member.status.update" => {
+                let organization_id =
+                    required_id(&input, "organizationId", OrganizationId::from_str)?;
+                let account_id = required_id(&input, "accountId", AccountId::from_str)?;
+                let status: buglogin_domain::organization::OrganizationMemberStatus =
+                    serde_json::from_value(input.get("status").cloned().unwrap_or(Value::Null))
+                        .map_err(serialization_problem)?;
+                let expected_revision = input
+                    .get("expectedRevision")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| problem("invalid_input", "expectedRevision is required", 400))?;
+                let organization = state
+                    .workspaces
+                    .read()
+                    .map_err(|_| {
+                        problem(
+                            "workspace_unavailable",
+                            "Workspace service unavailable",
+                            503,
+                        )
+                    })?
+                    .authorize_organization_management(
+                        &principal,
+                        &grants,
+                        &organization_id,
+                        Action::Manage,
+                    )?;
+                if status == buglogin_domain::organization::OrganizationMemberStatus::Suspended
+                    && account_id == organization.account_id
+                {
+                    return Err(problem(
+                        "organization_owner_protected",
+                        "The organization owner cannot be suspended",
+                        409,
+                    ));
+                }
+                let updated = state
+                    .organization_members
+                    .write()
+                    .map_err(|_| {
+                        problem(
+                            "organization_member_unavailable",
+                            "Organization membership state unavailable",
+                            503,
+                        )
+                    })?
+                    .update_status(&organization_id, &account_id, expected_revision, status)?;
+                Ok(serde_json::to_value(updated).map_err(serialization_problem)?)
+            }
+            "organization.member.workspace.assign" => {
+                let organization_id =
+                    required_id(&input, "organizationId", OrganizationId::from_str)?;
+                let workspace_id = required_id(&input, "workspaceId", WorkspaceId::from_str)?;
+                let organization_member_id = required_id(
+                    &input,
+                    "organizationMemberId",
+                    OrganizationMemberId::from_str,
+                )?;
+                let expected_revision = input
+                    .get("organizationMemberRevision")
+                    .and_then(Value::as_u64)
+                    .filter(|revision| *revision > 0)
+                    .ok_or_else(|| {
+                        problem(
+                            "invalid_revision",
+                            "organizationMemberRevision must be positive",
+                            400,
+                        )
+                    })?;
+                let role: buglogin_domain::member::MemberRole =
+                    serde_json::from_value(input.get("role").cloned().unwrap_or(Value::Null))
+                        .map_err(serialization_problem)?;
+                let organization = state
+                    .workspaces
+                    .read()
+                    .map_err(|_| {
+                        problem(
+                            "workspace_unavailable",
+                            "Workspace service unavailable",
+                            503,
+                        )
+                    })?
+                    .authorize_organization_management(
+                        &principal,
+                        &grants,
+                        &organization_id,
+                        Action::Manage,
+                    )?;
+                if !state
+                    .workspaces
+                    .read()
+                    .map_err(|_| {
+                        problem(
+                            "workspace_unavailable",
+                            "Workspace service unavailable",
+                            503,
+                        )
+                    })?
+                    .workspace_ids_in_organization(&organization_id)
+                    .contains(&workspace_id)
+                {
+                    return Err(problem(
+                        "workspace_organization_mismatch",
+                        "Workspace does not belong to this organization",
+                        403,
+                    ));
+                }
+                let organization_owner =
+                    principal.account_id.as_ref() == Some(&organization.account_id);
+                let parent_members = state.organization_members.read().map_err(|_| {
+                    problem(
+                        "organization_member_unavailable",
+                        "Organization membership state unavailable",
+                        503,
+                    )
+                })?;
+                let parent_member = parent_members
+                    .list_for_organization(&organization_id)
+                    .into_iter()
+                    .find(|member| member.id == organization_member_id)
+                    .ok_or_else(|| {
+                        problem(
+                            "organization_member_not_found",
+                            "Organization member not found",
+                            404,
+                        )
+                    })?;
+                if parent_member.revision != expected_revision
+                    || parent_member.status
+                        != buglogin_domain::organization::OrganizationMemberStatus::Active
+                {
+                    return Err(problem(
+                        "organization_member_inactive",
+                        "Organization member is suspended or has changed",
+                        409,
+                    ));
+                }
+                let member = buglogin_domain::member::Member {
+                    id: crate::services::account_provisioning::scoped_member_id(
+                        &workspace_id,
+                        &parent_member.account_id,
+                    )?,
+                    account_id: parent_member.account_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    team_id: None,
+                    role,
+                    status: buglogin_domain::member::MemberStatus::Active,
+                    invite_expires_at: None,
+                };
+                if organization_owner {
+                    crate::services::members::MemberService::authorize_org_owner_account_creation(
+                        &principal,
+                        &grants,
+                        &organization,
+                        &workspace_id,
+                        &member.role,
+                    )?;
+                }
+                let assigned = {
+                    let mut members = state.members.write().map_err(|_| {
+                        problem("member_unavailable", "Member service unavailable", 503)
+                    })?;
+                    if organization_owner {
+                        members.assign_active_as_org_owner(
+                            &principal,
+                            &grants,
+                            &organization,
+                            member,
+                        )?
+                    } else {
+                        members.provision_active(&principal, &grants, member)?
+                    }
+                };
+                Ok(serde_json::to_value(assigned).map_err(serialization_problem)?)
             }
             "workspace.create" => {
                 let org_id: OrganizationId = serde_json::from_value(
@@ -6141,6 +6511,210 @@ mod input_fixture_tests {
         assert!(members.iter().any(|member| {
             member.account_id == account_id && member.workspace_id == owner.workspace_id
         }));
+    }
+
+    #[test]
+    fn organization_member_mcp_create_list_status_and_scope_denial() {
+        let (state, owner, principal) = scoped_account_test_state();
+        let account_id = AccountId::from_str("acct_mcp_org_member").unwrap();
+        let create_command = CommandRegistry::get("organization.account.create").unwrap();
+        let create_input = serde_json::json!({
+            "organizationId": owner.organization_id,
+            "accountId": account_id,
+            "username": "mcp-org-member",
+            "email": "mcp-org-member@example.test",
+            "initialPassword": "org-member-password-123"
+        });
+        let mut policy = ProductionMcpPolicy::new(state.clone());
+        let create_scope = policy
+            .resolve_scope(&principal, create_command, &create_input)
+            .unwrap();
+        policy
+            .authorize(&principal, create_command, &create_scope)
+            .expect("organization owner should create an org-level account");
+        assert!(matches!(
+            policy
+                .claim_idempotency(
+                    &principal,
+                    create_command,
+                    &create_scope,
+                    "mcp-org-account-create-1",
+                    &create_input,
+                )
+                .unwrap(),
+            IdempotencyClaim::Execute
+        ));
+        let mut executor = ProductionMcpExecutor::new(state.clone());
+        let created = executor
+            .execute(ExecutionRequest {
+                command: create_command,
+                correlation_id: "mcp-org-account-create-test".into(),
+                principal: principal.clone(),
+                scope: create_scope.clone(),
+                input: create_input,
+                idempotency_key: Some("mcp-org-account-create-1".into()),
+                coordination_auth: None,
+                bearer_token: None,
+            })
+            .expect("organization account creation should succeed");
+        assert_eq!(created["account"]["id"], account_id.as_str());
+        assert_eq!(created["organizationMember"]["status"], "active");
+        assert_eq!(created["organizationMember"]["username"], "mcp-org-member");
+        assert_eq!(
+            created["organizationMember"]["email"],
+            "mcp-org-member@example.test"
+        );
+        assert!(created["member"].is_null());
+        let result = Ok(created.clone());
+        policy
+            .complete_idempotency_with_audit_and_puts(
+                &principal,
+                create_command,
+                &result,
+                AuditRecord {
+                    actor_id: Some(owner.account_id.as_str().into()),
+                    command_id: create_command.id.as_str(),
+                    correlation_id: "mcp-org-account-create-test".into(),
+                    scope: create_scope.clone(),
+                    outcome: AuditOutcome::Succeeded,
+                    metadata: BTreeMap::new(),
+                },
+                executor.take_additional_control_puts(),
+            )
+            .expect("account identity, credential, org member, audit and idempotency commit");
+        assert!(
+            state
+                .members
+                .read()
+                .unwrap()
+                .all_members()
+                .iter()
+                .all(|member| { member.account_id != account_id })
+        );
+        assert!(
+            state
+                .control_persistence
+                .load::<buglogin_domain::account::Account>(
+                    "control",
+                    "account",
+                    account_id.as_str()
+                )
+                .unwrap()
+                .is_some()
+        );
+
+        let list_command = CommandRegistry::get("organization.members.list").unwrap();
+        let list_input = serde_json::json!({"organizationId": owner.organization_id});
+        let list_scope = policy
+            .resolve_scope(&principal, list_command, &list_input)
+            .unwrap();
+        policy
+            .authorize(&principal, list_command, &list_scope)
+            .expect("organization owner should list organization members");
+        let listed = ProductionMcpExecutor::new(state.clone())
+            .execute(ExecutionRequest {
+                command: list_command,
+                correlation_id: "mcp-org-members-list-test".into(),
+                principal: principal.clone(),
+                scope: list_scope,
+                input: list_input.clone(),
+                idempotency_key: None,
+                coordination_auth: None,
+                bearer_token: None,
+            })
+            .expect("authorized MCP member list should succeed");
+        let listed_member = listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["accountId"] == account_id.as_str())
+            .expect("new organization account should be listed");
+        assert_eq!(listed_member["username"], "mcp-org-member");
+        assert_eq!(listed_member["email"], "mcp-org-member@example.test");
+        assert_eq!(listed_member["status"], "active");
+
+        let status_command = CommandRegistry::get("organization.member.status.update").unwrap();
+        let status_input = serde_json::json!({
+            "organizationId": owner.organization_id,
+            "accountId": account_id,
+            "status": "suspended",
+            "expectedRevision": 1
+        });
+        let status_scope = policy
+            .resolve_scope(&principal, status_command, &status_input)
+            .unwrap();
+        policy
+            .authorize(&principal, status_command, &status_scope)
+            .expect("organization owner should manage organization member status");
+        assert!(matches!(
+            policy
+                .claim_idempotency(
+                    &principal,
+                    status_command,
+                    &status_scope,
+                    "mcp-org-member-status-1",
+                    &status_input,
+                )
+                .unwrap(),
+            IdempotencyClaim::Execute
+        ));
+        let mut executor = ProductionMcpExecutor::new(state.clone());
+        let suspended = executor
+            .execute(ExecutionRequest {
+                command: status_command,
+                correlation_id: "mcp-org-member-status-test".into(),
+                principal: principal.clone(),
+                scope: status_scope.clone(),
+                input: status_input,
+                idempotency_key: Some("mcp-org-member-status-1".into()),
+                coordination_auth: None,
+                bearer_token: None,
+            })
+            .expect("MCP member status update should succeed");
+        assert_eq!(suspended["status"], "suspended");
+        policy
+            .complete_idempotency_with_audit_and_puts(
+                &principal,
+                status_command,
+                &Ok(suspended),
+                AuditRecord {
+                    actor_id: Some(owner.account_id.as_str().into()),
+                    command_id: status_command.id.as_str(),
+                    correlation_id: "mcp-org-member-status-test".into(),
+                    scope: status_scope,
+                    outcome: AuditOutcome::Succeeded,
+                    metadata: BTreeMap::new(),
+                },
+                executor.take_additional_control_puts(),
+            )
+            .expect("status and audit should be durable");
+        assert_eq!(
+            state
+                .organization_members
+                .read()
+                .unwrap()
+                .get(&owner.organization_id, &account_id)
+                .unwrap()
+                .status,
+            buglogin_domain::organization::OrganizationMemberStatus::Suspended
+        );
+
+        let unauthorized = Principal {
+            account_id: Some(AccountId::from_str("acct_mcp_unrelated").unwrap()),
+            roles: BTreeSet::from([Role::WorkspaceAdmin]),
+            ..Principal::default()
+        };
+        let denied_scope = policy
+            .resolve_scope(&unauthorized, list_command, &list_input)
+            .unwrap();
+        assert_eq!(
+            policy
+                .authorize(&unauthorized, list_command, &denied_scope)
+                .unwrap_err()
+                .status,
+            403,
+            "a workspace role without organization scope must not expose member identity"
+        );
     }
 
     #[test]

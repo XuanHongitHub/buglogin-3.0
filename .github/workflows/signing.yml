@@ -87,6 +87,8 @@ jobs:
           pnpm --dir apps/desktop tauri:build --target $env:TARGET --bundles nsis --config "$env:RUNNER_TEMP\windows-release.json"
       - name: Verify Windows installer and updater signature
         shell: pwsh
+        env:
+          BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: ${{ vars.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY }}
         run: |
           $releaseRoot = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release"
           $bundleRoot = Join-Path $releaseRoot 'bundle\nsis'
@@ -98,6 +100,7 @@ jobs:
           $updaterSignatures = @(Get-ChildItem -LiteralPath $bundleRoot -Filter *.exe.sig -File)
           if ($updaterSignatures.Count -ne 1 -or $updaterSignatures[0].BaseName -ne $installers[0].Name) { throw 'Expected the Tauri updater signature for the NSIS installer' }
           Copy-Item $updaterSignatures.FullName dist-release
+          node scripts/release/verify-tauri-signature.mjs (Join-Path 'dist-release' $installers[0].Name) (Join-Path 'dist-release' $updaterSignatures[0].Name)
       - name: Generate SBOM, hashes, provenance
         shell: bash
         run: |
@@ -230,6 +233,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD || secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY: ${{ vars.BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           BUNDLE_ROOT="$CARGO_TARGET_DIR/$TARGET/release/bundle"
@@ -250,6 +254,7 @@ jobs:
             UPDATER_ARCHIVE="$candidate"
           done < <(find "$BUNDLE_ROOT" -type f -name '*.app.tar.gz' -print0)
           [[ -n "$UPDATER_ARCHIVE" && -f "$UPDATER_ARCHIVE.sig" ]] || { echo 'Expected one signed app updater archive and its .sig file'; exit 1; }
+          node scripts/release/verify-tauri-signature.mjs "$UPDATER_ARCHIVE" "$UPDATER_ARCHIVE.sig"
           cp "$UPDATER_ARCHIVE" "$UPDATER_ARCHIVE.sig" dist-release/
       - name: Generate SBOM, hashes, provenance
         shell: bash

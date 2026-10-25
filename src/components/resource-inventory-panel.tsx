@@ -45,12 +45,16 @@ export function ResourceInventoryPanel({
   initialOrganizationId,
   initialWorkspaceName,
   initialKind,
+  initialResourceId,
+  onResourceRouteChange,
   showWorkspaceSelector = true,
 }: {
   initialWorkspaceId?: string;
   initialOrganizationId?: string;
   initialWorkspaceName?: string;
   initialKind?: ResourceKind;
+  initialResourceId?: string;
+  onResourceRouteChange?: (resourceId: string | null) => void;
   showWorkspaceSelector?: boolean;
 } = {}) {
   const { t } = useTranslation();
@@ -95,12 +99,16 @@ export function ResourceInventoryPanel({
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [resourceRouteIssue, setResourceRouteIssue] = useState<string | null>(
+    null,
+  );
   const [hasNextPage, setHasNextPage] = useState(false);
   const [currentNextCursor, setCurrentNextCursor] = useState<string | null>(
     null,
   );
   const requestRef = useRef(0);
   const detailRequestRef = useRef(0);
+  const initialResourceRequestRef = useRef<string | null>(null);
   const activeFilters = useMemo(
     () => ({
       search: search.trim() || undefined,
@@ -288,42 +296,86 @@ export function ResourceInventoryPanel({
     await loadPage(workspaceId, previous, pageStack, activeFilters);
   };
 
-  const openDetail = async (resource: Resource) => {
-    setSelected(resource);
-    setSelectedProfile(null);
-    setDraftGroupIds([]);
-    setIsLoadingDetail(true);
-    setDetailError(null);
-    setGrantError(null);
-    setSelectedGrants([]);
-    const request = ++detailRequestRef.current;
-    try {
-      const [detail, grants, members, profile] = await Promise.all([
-        desktopApi.getResource({ workspaceId, resourceId: resource.id }),
-        desktopApi.listGrants(workspaceId, resource.id),
-        desktopApi.listMembers(workspaceId),
-        resource.kind === "profile"
-          ? desktopApi.getProfile({ profileId: resource.id })
-          : Promise.resolve(null),
-      ]);
-      if (request !== detailRequestRef.current) return;
-      setSelected(detail);
-      setSelectedProfile(profile);
-      setDraftGroupIds(profile?.groupIds ?? []);
-      setMembers(members.items);
-      setGrantMemberId(
-        members.items.find(
-          (member) => member.status === "active" && member.identity,
-        )?.id ?? "",
-      );
-      setSelectedGrants(grants.items);
-    } catch (error) {
-      if (request === detailRequestRef.current)
-        setDetailError(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (request === detailRequestRef.current) setIsLoadingDetail(false);
+  const openDetail = useCallback(
+    async (resource: Resource) => {
+      setSelected(resource);
+      setSelectedProfile(null);
+      setDraftGroupIds([]);
+      setIsLoadingDetail(true);
+      setDetailError(null);
+      setGrantError(null);
+      setSelectedGrants([]);
+      const request = ++detailRequestRef.current;
+      try {
+        const [detail, grants, members, profile] = await Promise.all([
+          desktopApi.getResource({ workspaceId, resourceId: resource.id }),
+          desktopApi.listGrants(workspaceId, resource.id),
+          desktopApi.listMembers(workspaceId),
+          resource.kind === "profile"
+            ? desktopApi.getProfile({ profileId: resource.id })
+            : Promise.resolve(null),
+        ]);
+        if (request !== detailRequestRef.current) return;
+        setSelected(detail);
+        setSelectedProfile(profile);
+        setDraftGroupIds(profile?.groupIds ?? []);
+        setMembers(members.items);
+        setGrantMemberId(
+          members.items.find(
+            (member) => member.status === "active" && member.identity,
+          )?.id ?? "",
+        );
+        setSelectedGrants(grants.items);
+      } catch (error) {
+        if (request === detailRequestRef.current)
+          setDetailError(
+            error instanceof Error ? error.message : String(error),
+          );
+      } finally {
+        if (request === detailRequestRef.current) setIsLoadingDetail(false);
+      }
+    },
+    [workspaceId],
+  );
+
+  useEffect(() => {
+    if (!initialResourceId && selectedProfile) {
+      detailRequestRef.current += 1;
+      setSelected(null);
+      setSelectedProfile(null);
+      setDraftGroupIds([]);
     }
-  };
+    if (!initialResourceId) initialResourceRequestRef.current = null;
+  }, [initialResourceId, selectedProfile]);
+
+  useEffect(() => {
+    if (!initialResourceId || !workspaceId || isLoadingWorkspaces) return;
+    const requestKey = `${workspaceId}:${initialResourceId}`;
+    if (initialResourceRequestRef.current === requestKey) return;
+    initialResourceRequestRef.current = requestKey;
+    void desktopApi
+      .getResource({ workspaceId, resourceId: initialResourceId })
+      .then((resource) => {
+        if (resource.kind !== "profile")
+          throw new Error(
+            "Liên kết này không trỏ tới profile trong workspace.",
+          );
+        setResourceRouteIssue(null);
+        return openDetail(resource);
+      })
+      .catch((error) => {
+        setResourceRouteIssue(
+          `Không thể mở profile từ liên kết này: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        onResourceRouteChange?.(null);
+      });
+  }, [
+    initialResourceId,
+    isLoadingWorkspaces,
+    openDetail,
+    onResourceRouteChange,
+    workspaceId,
+  ]);
 
   const saveProfileGroups = async () => {
     if (!workspaceId || !selectedProfile || groupsError || isLoadingGroups)
@@ -681,6 +733,14 @@ export function ResourceInventoryPanel({
           </Button>
         </div>
       )}
+      {resourceRouteIssue ? (
+        <p
+          role="status"
+          className="rounded-md border border-amber-500/40 p-2 text-xs text-amber-700"
+        >
+          {resourceRouteIssue}
+        </p>
+      ) : null}
       {isLoadingWorkspaces ? (
         <p
           role="status"
@@ -739,7 +799,14 @@ export function ResourceInventoryPanel({
                   <button
                     type="button"
                     className="rounded px-1 text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onClick={() => void openDetail(resource)}
+                    onClick={() => {
+                      void openDetail(resource);
+                      if (resource.kind === "profile")
+                        initialResourceRequestRef.current = `${workspaceId}:${resource.id}`;
+                      onResourceRouteChange?.(
+                        resource.kind === "profile" ? resource.id : null,
+                      );
+                    }}
                   >
                     {resource.displayName ||
                       t("resourceInventory.unnamed", {
@@ -854,6 +921,7 @@ export function ResourceInventoryPanel({
               onClick={() => {
                 detailRequestRef.current += 1;
                 setSelected(null);
+                onResourceRouteChange?.(null);
               }}
             >
               Đóng

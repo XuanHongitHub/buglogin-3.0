@@ -156,6 +156,29 @@ pub(crate) fn authorize_resource_access(
         )? {
             return Ok(());
         }
+        // An Operate share permits a member to launch and use an encrypted
+        // profile. Allow that same device-authorized session to upload the
+        // resulting browser snapshot under its lease, without granting profile
+        // metadata updates or access to unencrypted/shared read-only profiles.
+        // The pending-key-rotation branch above deliberately runs first and
+        // continues to require the profile owner/update authority.
+        if action == Action::Update
+            && capability_name == "profile.update"
+            && state
+                .current_sync_manifest(workspace_id, resource_id)?
+                .is_some_and(|manifest| manifest.payload_encryption.is_some())
+            && !profile_update_is_restricted(principal, grants, &binding)
+            && crate::services::profile_hosted::HostedProfileService::authorized(
+                state,
+                principal,
+                grants,
+                &binding.profile_id,
+                Action::Execute,
+                "profile.launch",
+            )?
+        {
+            return Ok(());
+        }
     }
     let capability = Capability::new(capability_name)
         .map_err(|_| problem("invalid_capability", "Invalid capability", 500))?;
@@ -174,6 +197,36 @@ pub(crate) fn authorize_resource_access(
             403,
         ))
     }
+}
+
+fn profile_update_is_restricted(
+    principal: &Principal,
+    grants: &[Grant],
+    binding: &buglogin_domain::profile::ProfileResource,
+) -> bool {
+    let capability = Capability::new("profile.update").expect("static capability");
+    let scope = ResourceScope {
+        workspace_id: Some(binding.workspace_id.clone()),
+        resource_id: Some(binding.resource_id.clone()),
+        profile_id: Some(binding.profile_id.clone()),
+        ..ResourceScope::default()
+    };
+    principal.token_scopes.as_ref().is_some_and(|scopes| {
+        !scopes.contains("profile.update:update") && !scopes.contains("profile.update:*")
+    }) || grants.iter().any(|grant| {
+        grant.capability == capability
+            && grant.action == Action::Update
+            && grant.effect == buglogin_domain::permissions::Effect::Deny
+            && grant.scope.contains(&scope)
+            && grant
+                .account_id
+                .as_ref()
+                .is_none_or(|id| principal.account_id.as_ref() == Some(id))
+            && grant
+                .member_id
+                .as_ref()
+                .is_none_or(|id| principal.member_id.as_ref() == Some(id))
+    })
 }
 
 pub(crate) fn reconcile_managed_profile_resource_registration(
@@ -387,10 +440,305 @@ mod tests {
     use buglogin_browser::profile::ProfileService;
     use buglogin_domain::{
         entities::{Profile, ProfileState, Runtime, SyncMode},
-        ids::ProfileId,
-        profile::{ProfileArchiveState, ProfileResource},
+        grant::ResourceGrant,
+        ids::{AccountId, GrantId, MemberId, ProfileId},
+        member::{Member, MemberRole, MemberStatus},
+        permissions::{Effect, Role},
+        profile::{
+            ConfirmedProfileKeyShareEnvelope, ProfileArchiveState, ProfileKeyShareEnvelope,
+            ProfileResource,
+        },
+        resource::{Resource, ResourceKind, ResourceState},
     };
     use buglogin_storage::control::MemoryControlRecordStore;
+    use buglogin_sync::manifest::{
+        ManifestObject, ManifestObjectReference, ManifestPayloadEncryption,
+        PayloadEncryptionAlgorithm, SyncManifest,
+    };
+
+    #[test]
+    fn encrypted_operate_share_can_sync_under_lease_without_metadata_update_authority() {
+        let workspace = WorkspaceId::new("ws_operate_sync_write").unwrap();
+        let resource = ResourceId::new("res_operate_sync_write").unwrap();
+        let profile = ProfileId::new("prf_operate_sync_write").unwrap();
+        let owner_id = AccountId::new("acct_operate_sync_owner").unwrap();
+        let recipient_id = AccountId::new("acct_operate_sync_recipient").unwrap();
+        let member_id = MemberId::new("mem_operate_sync_recipient").unwrap();
+        let state = ApiState::hosted_with_control_store(
+            ProfileService::disabled(),
+            MemoryControlRecordStore::default(),
+        )
+        .unwrap()
+        .with_profile_resource(ProfileResource {
+            profile_id: profile.clone(),
+            resource_id: resource.clone(),
+            workspace_id: workspace.clone(),
+            archive_state: ProfileArchiveState::Active,
+        });
+        let owner = Principal {
+            account_id: Some(owner_id),
+            roles: [Role::PlatformAdmin].into_iter().collect(),
+            ..Principal::default()
+        };
+        state
+            .members
+            .write()
+            .unwrap()
+            .invite(
+                &owner,
+                &[],
+                Member {
+                    id: member_id.clone(),
+                    account_id: recipient_id.clone(),
+                    workspace_id: workspace.clone(),
+                    team_id: None,
+                    role: MemberRole::Member,
+                    status: MemberStatus::Invited,
+                    invite_expires_at: Some(100),
+                },
+                1,
+            )
+            .unwrap();
+        let recipient = Principal {
+            account_id: Some(recipient_id),
+            workspace_ids: [workspace.clone()].into_iter().collect(),
+            ..Principal::default()
+        };
+        state
+            .members
+            .write()
+            .unwrap()
+            .activate(&recipient, &[], &workspace, &member_id, 2)
+            .unwrap();
+        state
+            .resources
+            .write()
+            .unwrap()
+            .register(
+                &owner,
+                &[],
+                Resource {
+                    id: resource.clone(),
+                    workspace_id: workspace.clone(),
+                    kind: ResourceKind::Profile,
+                    state: ResourceState::Active,
+                    display_name: "Shared encrypted profile".into(),
+                },
+            )
+            .unwrap();
+        for (id, action) in [
+            ("rg_operate_sync_read", Action::Read),
+            ("rg_operate_sync_execute", Action::Execute),
+        ] {
+            state
+                .resources
+                .write()
+                .unwrap()
+                .grant(
+                    &owner,
+                    &[],
+                    ResourceGrant {
+                        id: GrantId::new(id).unwrap(),
+                        workspace_id: workspace.clone(),
+                        resource_id: resource.clone(),
+                        member_id: member_id.clone(),
+                        action,
+                        effect: Effect::Allow,
+                    },
+                )
+                .unwrap();
+        }
+
+        let unencrypted = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            1,
+            1,
+            None,
+            b"unencrypted-genesis",
+            Vec::new(),
+        )
+        .unwrap();
+        state.replace_sync_manifest(unencrypted).unwrap();
+        assert!(
+            authorize_resource_access(
+                &state,
+                &recipient,
+                &[],
+                &workspace,
+                &resource,
+                "profile.update",
+                Action::Update,
+            )
+            .is_err()
+        );
+
+        let envelope_object = ManifestObject::new(
+            buglogin_sync::manifest::RESOURCE_KEY_ENVELOPE_KEY,
+            b"envelope",
+        )
+        .unwrap();
+        let key_version = "a".repeat(64);
+        let mut encrypted = SyncManifest::new(
+            workspace.clone(),
+            resource.clone(),
+            1,
+            2,
+            Some(1),
+            b"encrypted-profile",
+            vec![envelope_object.clone()],
+        )
+        .unwrap();
+        encrypted.payload_encryption = Some(ManifestPayloadEncryption {
+            schema_version: 1,
+            algorithm: PayloadEncryptionAlgorithm::Aes256GcmChunkV2,
+            key_version: Some(key_version.clone()),
+            resource_key_envelope: ManifestObjectReference::from(&envelope_object),
+        });
+        state.replace_sync_manifest(encrypted).unwrap();
+        state
+            .replace_profile_key_share_envelope_set(
+                &profile,
+                &workspace,
+                &resource,
+                vec![(
+                    member_id.clone(),
+                    vec![ConfirmedProfileKeyShareEnvelope {
+                        envelope: ProfileKeyShareEnvelope {
+                            schema_version: 2,
+                            workspace_id: workspace.clone(),
+                            resource_id: resource.clone(),
+                            recipient_device_id: "device_operate_sync_recipient".into(),
+                            key_version,
+                            encapped_key: vec![1; 32],
+                            ciphertext: vec![2; 80],
+                        },
+                        confirmed_fingerprint: "b".repeat(64),
+                    }],
+                )],
+            )
+            .unwrap();
+
+        authorize_resource_access(
+            &state,
+            &recipient,
+            &[],
+            &workspace,
+            &resource,
+            "profile.update",
+            Action::Update,
+        )
+        .unwrap();
+        assert!(
+            !crate::services::profile_hosted::HostedProfileService::authorized(
+                &state,
+                &recipient,
+                &[],
+                &profile,
+                Action::Update,
+                "profile.update",
+            )
+            .unwrap(),
+            "Operate must not grant profile metadata updates"
+        );
+
+        let update_capability = Capability::new("profile.update").unwrap();
+        let scope = ResourceScope::resource(workspace.clone(), resource.clone());
+        let explicit_deny = Grant {
+            id: GrantId::new("grant_operate_sync_update_deny").unwrap(),
+            account_id: recipient.account_id.clone(),
+            member_id: None,
+            capability: update_capability.clone(),
+            action: Action::Update,
+            scope: scope.clone(),
+            effect: Effect::Deny,
+        };
+        assert!(
+            authorize_resource_access(
+                &state,
+                &recipient,
+                std::slice::from_ref(&explicit_deny),
+                &workspace,
+                &resource,
+                "profile.update",
+                Action::Update,
+            )
+            .is_err()
+        );
+        let scoped_recipient = Principal {
+            token_scopes: Some(["profile.launch:execute".to_owned()].into_iter().collect()),
+            ..recipient.clone()
+        };
+        assert!(
+            authorize_resource_access(
+                &state,
+                &scoped_recipient,
+                &[],
+                &workspace,
+                &resource,
+                "profile.update",
+                Action::Update,
+            )
+            .is_err()
+        );
+
+        state
+            .resources
+            .write()
+            .unwrap()
+            .revoke(
+                &owner,
+                &[],
+                &GrantId::new("rg_operate_sync_execute").unwrap(),
+            )
+            .unwrap();
+        assert!(
+            authorize_resource_access(
+                &state,
+                &recipient,
+                &[],
+                &workspace,
+                &resource,
+                "profile.update",
+                Action::Update,
+            )
+            .is_err(),
+            "read-only shares must not upload snapshots"
+        );
+        state
+            .resources
+            .write()
+            .unwrap()
+            .grant(
+                &owner,
+                &[],
+                ResourceGrant {
+                    id: GrantId::new("rg_operate_sync_execute_again").unwrap(),
+                    workspace_id: workspace.clone(),
+                    resource_id: resource.clone(),
+                    member_id,
+                    action: Action::Execute,
+                    effect: Effect::Allow,
+                },
+            )
+            .unwrap();
+        state
+            .mark_resource_key_rotation_pending(&workspace, &resource)
+            .unwrap();
+        assert!(
+            authorize_resource_access(
+                &state,
+                &recipient,
+                &[],
+                &workspace,
+                &resource,
+                "profile.update",
+                Action::Update,
+            )
+            .is_err(),
+            "Operate cannot bypass pending key rotation"
+        );
+    }
 
     #[test]
     fn proxy_update_is_blocked_while_a_bound_profile_is_running() {

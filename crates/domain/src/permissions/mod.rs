@@ -130,6 +130,10 @@ pub struct Principal {
     pub account_id: Option<AccountId>,
     pub member_id: Option<MemberId>,
     pub workspace_ids: BTreeSet<WorkspaceId>,
+    #[serde(default)]
+    pub blocked_organization_ids: BTreeSet<OrganizationId>,
+    #[serde(default)]
+    pub blocked_workspace_ids: BTreeSet<WorkspaceId>,
     pub roles: BTreeSet<Role>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_scopes: Option<BTreeSet<String>>,
@@ -176,6 +180,18 @@ pub fn is_allowed(
     scope: &ResourceScope,
     grants: &[Grant],
 ) -> bool {
+    if !principal.roles.contains(&Role::PlatformAdmin)
+        && (scope
+            .organization_id
+            .as_ref()
+            .is_some_and(|id| principal.blocked_organization_ids.contains(id))
+            || scope
+                .workspace_id
+                .as_ref()
+                .is_some_and(|id| principal.blocked_workspace_ids.contains(id)))
+    {
+        return false;
+    }
     if principal.token_scopes.as_ref().is_some_and(|scopes| {
         let action = match action {
             Action::Read => "read",
@@ -298,5 +314,82 @@ fn role_allows(
                 )
         }
         Role::LocalOwner | Role::PlatformAdmin | Role::Service => false,
+    }
+}
+
+#[cfg(test)]
+mod organization_parent_gate_tests {
+    use super::*;
+
+    #[test]
+    fn suspended_parent_denies_role_and_explicit_workspace_grants_but_not_other_orgs() {
+        let account = AccountId::new("acct_parent_gate").unwrap();
+        let blocked = WorkspaceId::new("ws_parent_blocked").unwrap();
+        let allowed = WorkspaceId::new("ws_parent_allowed").unwrap();
+        let capability = Capability::new("CAP-PROF-001").unwrap();
+        let principal = Principal {
+            account_id: Some(account.clone()),
+            workspace_ids: BTreeSet::from([blocked.clone(), allowed.clone()]),
+            blocked_workspace_ids: BTreeSet::from([blocked.clone()]),
+            roles: BTreeSet::from([Role::WorkspaceAdmin]),
+            ..Principal::default()
+        };
+        let direct_grant = Grant {
+            id: GrantId::new("grant_parent_gate").unwrap(),
+            account_id: Some(account),
+            member_id: None,
+            capability: capability.clone(),
+            action: Action::Read,
+            scope: ResourceScope::workspace(blocked.clone()),
+            effect: Effect::Allow,
+        };
+
+        assert!(!is_allowed(
+            &principal,
+            &capability,
+            Action::Read,
+            &ResourceScope::workspace(blocked),
+            &[direct_grant]
+        ));
+        assert!(is_allowed(
+            &principal,
+            &capability,
+            Action::Read,
+            &ResourceScope::workspace(allowed),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn platform_admin_overrides_parent_membership_gate_and_legacy_principals_deserialize() {
+        let organization = OrganizationId::new("org_parent_gate").unwrap();
+        let workspace = WorkspaceId::new("ws_parent_gate").unwrap();
+        let principal = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            blocked_organization_ids: BTreeSet::from([organization.clone()]),
+            blocked_workspace_ids: BTreeSet::from([workspace.clone()]),
+            ..Principal::default()
+        };
+        let capability = Capability::new("CAP-WS-001").unwrap();
+        assert!(is_allowed(
+            &principal,
+            &capability,
+            Action::Read,
+            &ResourceScope {
+                organization_id: Some(organization),
+                ..ResourceScope::workspace(workspace)
+            },
+            &[]
+        ));
+
+        let legacy: Principal = serde_json::from_value(serde_json::json!({
+            "accountId": "acct_legacy_principal",
+            "memberId": null,
+            "workspaceIds": [],
+            "tokenScopes": null,
+            "roles": ["account"]
+        }))
+        .unwrap();
+        assert!(legacy.blocked_workspace_ids.is_empty());
     }
 }

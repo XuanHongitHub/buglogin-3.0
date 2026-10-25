@@ -845,6 +845,36 @@ paths:
     get:
       operationId: organization.record.get
       responses: { "200": { description: Revision-aware organization record, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/members:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: organization.members.list
+      responses: { "200": { description: Organization-level parent memberships (workspace roles and access are separate), content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMemberPage' } } } }, "403": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/accounts:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    post:
+      operationId: organization.account.create
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationAccountCreateInput' } } } }
+      responses: { "201": { description: Direct account creation with an active organization membership and no workspace membership, content: { application/json: { schema: { $ref: '#/components/schemas/AccountProvisioningReceipt' } } } }, "400": { $ref: '#/components/responses/Problem' }, "403": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/members/{accountId}:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/AccountId' }
+    patch:
+      operationId: organization.member.status.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMemberStatusUpdateInput' } } } }
+      responses: { "200": { description: Updated organization membership; child workspace membership and grants are preserved, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMember' } } } }, "403": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/workspaces/{workspaceId}/members:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/WorkspaceId' }
+    post:
+      operationId: organization.member.workspace.assign
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMemberWorkspaceAssignInput' } } } }
+      responses: { "201": { description: Assigned active organization member to a workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Member' } } } }, "400": { $ref: '#/components/responses/Problem' }, "403": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
   /v1/organizations/{organizationId}/workspaces:
     parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
     get:
@@ -1103,13 +1133,16 @@ paths:
       - { $ref: '#/components/parameters/MemberId' }
     put:
       operationId: member.activate
+      description: Managers may activate a valid pending invitation or restore a suspended workspace membership. A suspended member cannot restore itself, and restoration is rejected while its parent organization membership is suspended.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       responses:
         "200":
-          description: Activated member
+          description: Activated or restored member
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Member' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
   /v1/workspaces/{workspaceId}/members/{memberId}/suspend:
     parameters:
       - { $ref: '#/components/parameters/WorkspaceId' }
@@ -1444,7 +1477,7 @@ components:
     WorkspaceAccountCreateInput: { type: object, required: [workspaceId, accountId, username, email, role, initialPassword], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 }, role: { $ref: '#/components/schemas/MemberRole' }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Direct provision input. Bulk creation is one request per row with its own initialPassword. }
     AccountIdentityVerification: { type: string, enum: [pending, admin_provisioned, verified] }
     AccountIdentity: { type: object, required: [accountId, username, canonicalUsername, email, canonicalEmail, verification, revision, createdAt, updatedAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, canonicalUsername: { type: string }, email: { type: string, format: email }, canonicalEmail: { type: string, format: email }, verification: { $ref: '#/components/schemas/AccountIdentityVerification' }, revision: { type: integer, minimum: 1 }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
-    AccountProvisioningReceipt: { type: object, required: [account, identity, replayed, onboardingStatus, loginEnabled], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { $ref: '#/components/schemas/AccountIdentity' }, member: { $ref: '#/components/schemas/Member', description: Present for scoped account creation after an active workspace membership and role are assigned. }, replayed: { type: boolean }, onboardingStatus: { type: string, enum: [pending_verification, admin_provisioned] }, loginEnabled: { type: boolean } }, additionalProperties: false, description: Global pending account creation returns pending_verification/loginEnabled false. Scoped direct creation returns admin_provisioned/loginEnabled true while email remains unverified. }
+    AccountProvisioningReceipt: { type: object, required: [account, identity, replayed, onboardingStatus, loginEnabled], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { $ref: '#/components/schemas/AccountIdentity' }, member: { $ref: '#/components/schemas/Member', description: Present for scoped account creation after an active workspace membership and role are assigned. }, organizationMember: { $ref: '#/components/schemas/OrganizationMemberView', description: Present for organization account creation without workspace membership or role assignment. }, replayed: { type: boolean }, onboardingStatus: { type: string, enum: [pending_verification, admin_provisioned] }, loginEnabled: { type: boolean } }, additionalProperties: false, description: Global pending account creation returns pending_verification/loginEnabled false. Scoped direct creation returns admin_provisioned/loginEnabled true while email remains unverified. Organization direct creation creates a login-enabled identity and parent membership but no child workspace membership. }
     OrganizationSnapshot: { type: object, required: [organization, policy, workspaceIds], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, workspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
     WorkspaceUsage: { type: object, required: [profiles, members, storageBytes], properties: { profiles: { type: integer, minimum: 0 }, members: { type: integer, minimum: 0 }, storageBytes: { type: integer, minimum: 0 } }, additionalProperties: false }
     UsageCheckResult: { type: object, required: [ok], properties: { ok: { type: boolean } }, additionalProperties: false }
@@ -1459,6 +1492,13 @@ components:
     ProfileDeleteBody: { type: object, required: [revision, confirmation], properties: { revision: { type: integer, minimum: 1 }, confirmation: { const: QUARANTINE_PROFILE_DATA } }, additionalProperties: false }
     ProfileRevisionBody: { type: object, required: [revision], properties: { revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     Organization: { type: object, required: [id, accountId, name, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, createdAt: { type: string, format: date-time } }, additionalProperties: false }
+    OrganizationMemberStatus: { type: string, enum: [active, suspended] }
+    OrganizationMember: { type: object, required: [id, organizationId, accountId, status, revision], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OrganizationMemberView: { type: object, required: [id, organizationId, accountId, status, revision, username, email], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, revision: { type: integer, minimum: 1 }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 } }, additionalProperties: false, description: Organization identity fields are disclosed only to callers authorized to manage or read organization membership. }
+    OrganizationMemberPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/OrganizationMemberView' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
+    OrganizationAccountCreateInput: { type: object, required: [organizationId, accountId, username, email, initialPassword], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Directly creates a login-enabled account and active organization membership. This is distinct from invitation and does not assign a workspace role or access. Email verification remains pending. The password is never returned or retained as plaintext. }
+    OrganizationMemberStatusUpdateInput: { type: object, required: [organizationId, accountId, status, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OrganizationMemberWorkspaceAssignInput: { type: object, required: [organizationId, workspaceId, organizationMemberId, organizationMemberRevision, role], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberRevision: { type: integer, minimum: 1 }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false }
     OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
     OrganizationRecord: { type: object, required: [organization, policy, revision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     WorkspaceRecord: { type: object, required: [workspace, revision], properties: { workspace: { $ref: '#/components/schemas/Workspace' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }

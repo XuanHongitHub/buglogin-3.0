@@ -405,6 +405,71 @@ assert.match(
   /^idem_/,
 );
 
+const orgMemberCallStart = calls.length;
+await api.listOrganizationMembers("org_1");
+await api.createOrganizationAccount(
+  {
+    organizationId: "org_1",
+    accountId: "acct_org_created",
+    username: "new-user",
+    email: "new-user@example.test",
+    initialPassword: "correct horse battery",
+  },
+  "organization-account-create-idempotency-01",
+);
+await api.updateOrganizationMemberStatus({
+  organizationId: "org_1",
+  accountId: "acct_org_created",
+  status: "suspended",
+  expectedRevision: 3,
+});
+assert.deepEqual(
+  calls.slice(orgMemberCallStart).map(({ command, args }) => ({
+    command,
+    payload: args?.payload,
+    correlationId: args?.correlationId,
+    idempotencyKey: args?.idempotencyKey,
+  })),
+  [
+    {
+      command: "organization_members_list",
+      payload: { organizationId: "org_1" },
+      correlationId: calls[orgMemberCallStart]?.args?.correlationId,
+      idempotencyKey: undefined,
+    },
+    {
+      command: "organization_account_create",
+      payload: {
+        organizationId: "org_1",
+        accountId: "acct_org_created",
+        username: "new-user",
+        email: "new-user@example.test",
+        initialPassword: "correct horse battery",
+      },
+      correlationId: calls[orgMemberCallStart + 1]?.args?.correlationId,
+      idempotencyKey: "organization-account-create-idempotency-01",
+    },
+    {
+      command: "organization_member_status_update",
+      payload: {
+        organizationId: "org_1",
+        accountId: "acct_org_created",
+        status: "suspended",
+        expectedRevision: 3,
+      },
+      correlationId: calls[orgMemberCallStart + 2]?.args?.correlationId,
+      idempotencyKey: calls[orgMemberCallStart + 2]?.args?.idempotencyKey,
+    },
+  ],
+);
+for (const call of calls.slice(orgMemberCallStart)) {
+  assert.match(String(call.args?.correlationId), /^cor_/);
+}
+assert.match(
+  String(calls[orgMemberCallStart + 2]?.args?.idempotencyKey),
+  /^idem_/,
+);
+
 const authEvents: Event[] = [];
 Object.defineProperty(globalThis, "window", {
   configurable: true,

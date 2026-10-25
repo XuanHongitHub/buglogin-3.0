@@ -65,6 +65,11 @@ import { extractRootError, formatError } from "@/lib/error-utils";
 import { MOTION_EASE_OUT } from "@/lib/motion";
 import type { ProfileSearchContext } from "@/lib/profile-search";
 import {
+  hasProfilesForWorkspace,
+  visibleProfilesForWorkspace,
+  workspaceProfileCount,
+} from "@/lib/profile-workspace-state";
+import {
   matchesGroupDigit,
   matchesShortcut,
   SHORTCUTS,
@@ -127,16 +132,25 @@ function DesktopHome({
   const { t } = useTranslation();
   // Use the profile events hook for centralized profile management
   const {
-    profiles,
+    profiles: loadedProfiles,
     runningProfiles,
     isLoading: profilesLoading,
     isRefreshing: profilesRefreshing,
     error: profilesError,
     loadProfiles: refreshProfiles,
+    clearError: clearProfileError,
     loadGroups,
   } = useProfileEvents();
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
+  const [profilesWorkspaceId, setProfilesWorkspaceId] = useState<string | null>(
+    null,
+  );
+  const [workspaceProfilesLoading, setWorkspaceProfilesLoading] =
+    useState(false);
+  const [workspaceProfilesFailed, setWorkspaceProfilesFailed] = useState(false);
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
+  const workspaceSelectionRequestRef = useRef(0);
   const [_workspaceLoading, setWorkspaceLoading] = useState(true);
   const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
   const [memberManagementOpen, setMemberManagementOpen] = useState(false);
@@ -156,9 +170,19 @@ function DesktopHome({
     return () => window.removeEventListener("scroll", pin, true);
   }, []);
 
-  // Keep active workspace's profile count synchronized with live profiles state
+  const profilesReadyForWorkspace = hasProfilesForWorkspace(
+    selectedWorkspaceId,
+    profilesWorkspaceId,
+    workspaceSwitching,
+  );
+  const profiles = visibleProfilesForWorkspace(
+    loadedProfiles,
+    profilesReadyForWorkspace,
+  );
+
+  // Keep the active workspace count tied only to a successful profile response
   useEffect(() => {
-    if (!selectedWorkspaceId || profilesLoading) return;
+    if (!profilesReadyForWorkspace || profilesLoading) return;
     setWorkspaces((prev) =>
       prev.map((ws) =>
         ws.id === selectedWorkspaceId
@@ -166,21 +190,106 @@ function DesktopHome({
           : { ...ws, selected: false },
       ),
     );
-  }, [selectedWorkspaceId, profiles.length, profilesLoading]);
+  }, [
+    selectedWorkspaceId,
+    profiles.length,
+    profilesLoading,
+    profilesReadyForWorkspace,
+  ]);
 
   const handleWorkspaceSelect = useCallback(
     async (workspaceId: string) => {
+      const request = ++workspaceSelectionRequestRef.current;
+      setWorkspaceSwitching(true);
+      setWorkspaceProfilesLoading(true);
+      setWorkspaceProfilesFailed(false);
+      clearProfileError();
+      setSelectedProfiles([]);
+      setSelectedProfilesForCookies([]);
+      setSelectedProfilesForGroup([]);
+      setSelectedProfilesForProxy([]);
+      setSelectedProfilesForExtensionGroup([]);
+      setSelectedGroupId("__all__");
+      setProfileInfoDialog(null);
+      setCurrentProfileForCookieManagement(null);
+      setCookieManagementDialogOpen(false);
+      setCookieCopyDialogOpen(false);
+      setCurrentProfileForWayfernConfig(null);
+      setWayfernConfigDialogOpen(false);
+      setCloneProfile(null);
+      setPasswordDialogProfile(null);
+      setConsistencyWarning(null);
+      setGroupAssignmentDialogOpen(false);
+      setExtensionGroupAssignmentDialogOpen(false);
+      setProxyAssignmentDialogOpen(false);
+      setPendingBulkAction(null);
+      setShowBulkDeleteConfirmation(false);
       try {
         await invoke("select_active_workspace", { workspaceId });
+        if (request !== workspaceSelectionRequestRef.current) return;
         setSelectedWorkspaceId(workspaceId);
-        await Promise.all([refreshProfiles(), loadGroups()]);
+        setProfilesWorkspaceId(null);
+        const [profilesLoaded] = await Promise.all([
+          refreshProfiles(),
+          loadGroups(),
+        ]);
+        if (request !== workspaceSelectionRequestRef.current) return;
+        if (profilesLoaded) {
+          setProfilesWorkspaceId(workspaceId);
+        } else {
+          setWorkspaceProfilesFailed(true);
+          showErrorToast(
+            t("errors.loadProfilesFailed", {
+              error: t("errors.loadWorkspaceFailed"),
+            }),
+          );
+        }
       } catch (error) {
-        showErrorToast(t("errors.loadWorkspaceFailed"));
+        if (request === workspaceSelectionRequestRef.current) {
+          showErrorToast(t("errors.loadWorkspaceFailed"));
+        }
         console.error("Workspace selection failed:", error);
+      } finally {
+        if (request === workspaceSelectionRequestRef.current) {
+          setWorkspaceSwitching(false);
+          setWorkspaceProfilesLoading(false);
+        }
       }
     },
-    [t, refreshProfiles, loadGroups],
+    [t, refreshProfiles, loadGroups, clearProfileError],
   );
+
+  const refreshSelectedWorkspaceProfiles = useCallback(async () => {
+    const workspaceId = selectedWorkspaceId;
+    if (!workspaceId) return;
+    const request = workspaceSelectionRequestRef.current;
+    setWorkspaceProfilesLoading(true);
+    setWorkspaceProfilesFailed(false);
+    clearProfileError();
+    try {
+      const loaded = await refreshProfiles();
+      if (
+        request !== workspaceSelectionRequestRef.current ||
+        workspaceId !== selectedWorkspaceId
+      ) {
+        return;
+      }
+      if (loaded) {
+        setProfilesWorkspaceId(workspaceId);
+      } else {
+        setWorkspaceProfilesFailed(true);
+        showErrorToast(
+          t("errors.loadProfilesFailed", {
+            error: t("errors.loadWorkspaceFailed"),
+          }),
+        );
+      }
+    } finally {
+      if (request === workspaceSelectionRequestRef.current) {
+        setWorkspaceProfilesLoading(false);
+      }
+    }
+  }, [selectedWorkspaceId, refreshProfiles, clearProfileError, t]);
 
   useEffect(() => {
     let disposed = false;
@@ -232,16 +341,37 @@ function DesktopHome({
           setWorkspaces(mapped);
           const selected =
             mapped.find((workspace) => workspace.selected) || mapped[0];
-          if (selected) setSelectedWorkspaceId(selected.id);
+          if (selected) {
+            setSelectedWorkspaceId(selected.id);
+            setWorkspaceProfilesLoading(true);
+            clearProfileError();
+            const profilesLoaded = await refreshProfiles();
+            if (disposed) return;
+            if (profilesLoaded) {
+              setProfilesWorkspaceId(selected.id);
+              setWorkspaceProfilesFailed(false);
+            } else {
+              setWorkspaceProfilesFailed(true);
+              showErrorToast(
+                t("errors.loadProfilesFailed", {
+                  error: t("errors.loadWorkspaceFailed"),
+                }),
+              );
+            }
+            setWorkspaceProfilesLoading(false);
+          }
         } else {
           setWorkspaces([]);
           setSelectedWorkspaceId("");
+          setProfilesWorkspaceId(null);
+          setWorkspaceProfilesFailed(false);
         }
       } catch (error: unknown) {
         if (!disposed) {
           console.warn("Workspace list remote init error:", error);
           setWorkspaces([]);
           setSelectedWorkspaceId("");
+          setProfilesWorkspaceId(null);
         }
       } finally {
         if (!disposed) setWorkspaceLoading(false);
@@ -250,7 +380,7 @@ function DesktopHome({
     return () => {
       disposed = true;
     };
-  }, [t]);
+  }, [t, refreshProfiles, clearProfileError]);
   const { downloadBrowser, loadDownloadedVersions, loadVersions } =
     useBrowserDownload();
 
@@ -612,10 +742,14 @@ function DesktopHome({
 
   // Handle profile errors from useProfileEvents hook
   useEffect(() => {
-    if (profilesError && !profilesError.includes("api_unavailable")) {
+    if (
+      profilesError &&
+      !workspaceProfilesFailed &&
+      !profilesError.includes("api_unavailable")
+    ) {
       showErrorToast(profilesError);
     }
-  }, [profilesError]);
+  }, [profilesError, workspaceProfilesFailed]);
 
   // Handle group errors from useGroupEvents hook
   useEffect(() => {
@@ -1516,7 +1650,10 @@ function DesktopHome({
         selectedWorkspaceId={selectedWorkspaceId}
         onWorkspaceSelect={handleWorkspaceSelect}
         onManageWorkspaces={() => handleRailNavigate("workspaces")}
-        totalProfilesCount={profilesLoading ? undefined : profiles.length}
+        totalProfilesCount={workspaceProfileCount(
+          profiles.length,
+          profilesReadyForWorkspace && !profilesLoading,
+        )}
       />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <HomeHeader pageTitle={subPageTitle} />
@@ -1530,8 +1667,15 @@ function DesktopHome({
             >
               <ProfilesDataTable
                 workspaceId={selectedWorkspaceId}
-                isLoading={isLoading && profiles.length === 0}
-                showOnboardingEmptyState={profiles.length === 0}
+                isLoading={
+                  workspaceProfilesLoading ||
+                  (isLoading && profiles.length === 0)
+                }
+                showOnboardingEmptyState={
+                  profilesReadyForWorkspace &&
+                  !workspaceProfilesFailed &&
+                  profiles.length === 0
+                }
                 profiles={profileFilters.rows}
                 filterControls={
                   <TableFilterControls
@@ -1566,7 +1710,7 @@ function DesktopHome({
                 onRemovePassword={handleRemovePassword}
                 onDeleteProfile={handleDeleteProfile}
                 onRenameProfile={handleRenameProfile}
-                onRefreshProfiles={refreshProfiles}
+                onRefreshProfiles={refreshSelectedWorkspaceProfiles}
                 isRefreshingProfiles={profilesRefreshing}
                 onConfigureWayfern={handleConfigureWayfern}
                 onCopyCookiesToProfile={handleCopyCookiesToProfile}

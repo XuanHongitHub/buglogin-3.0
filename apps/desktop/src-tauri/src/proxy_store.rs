@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use crate::app_instance::AppInstance;
 use crate::clock::unix_time_seconds;
 use crate::proxy_bridge::ProxyBridgeSpec;
 use sha2::{Digest, Sha256};
@@ -285,7 +286,15 @@ fn proxy_id(row: &ProxyRow) -> Result<ProxyId, Problem> {
 }
 
 fn credential_key(reference: &CredentialId) -> Result<SecretKey, Problem> {
-    SecretKey::new("proxy-credentials", reference.as_str()).map_err(secret_problem)
+    let namespace = AppInstance::from_environment()?.vault_namespace("proxy-credentials");
+    credential_key_in_namespace(&namespace, reference)
+}
+
+fn credential_key_in_namespace(
+    namespace: &str,
+    reference: &CredentialId,
+) -> Result<SecretKey, Problem> {
+    SecretKey::new(namespace, reference.as_str()).map_err(secret_problem)
 }
 
 fn endpoint_key(proxy: &Proxy) -> String {
@@ -435,6 +444,25 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         (LocalRepository::open(root.clone()).unwrap(), root)
+    }
+
+    #[test]
+    fn credential_vault_namespace_is_instance_scoped_and_default_is_unchanged() {
+        let reference = CredentialId::new("credential_instance_test").unwrap();
+        let first = AppInstance::from_id(Some("qa-a")).unwrap();
+        let second = AppInstance::from_id(Some("qa-b")).unwrap();
+
+        let first_key =
+            credential_key_in_namespace(&first.vault_namespace("proxy-credentials"), &reference)
+                .unwrap();
+        let second_key =
+            credential_key_in_namespace(&second.vault_namespace("proxy-credentials"), &reference)
+                .unwrap();
+        let default_key = credential_key_in_namespace("proxy-credentials", &reference).unwrap();
+
+        assert_ne!(first_key, second_key);
+        assert_eq!(default_key.namespace(), "proxy-credentials");
+        assert_eq!(default_key.name(), reference.as_str());
     }
 
     #[test]

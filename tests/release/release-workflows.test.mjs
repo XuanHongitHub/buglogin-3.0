@@ -16,6 +16,11 @@ test("release workflows satisfy fail-closed static policy", async () => {
     await verifyReleaseWorkflows();
   assert.match(release, /workflow_dispatch:/);
   assert.match(signing, /Create Windows updater build configuration/);
+  assert.equal(
+    (signing.match(/node scripts\/release\/verify-tauri-signature\.mjs/g) ?? [])
+      .length,
+    2,
+  );
   assert.doesNotMatch(
     signing,
     /WINDOWS_CERTIFICATE_PFX_BASE64|Get-AuthenticodeSignature/,

@@ -602,7 +602,7 @@ mod live_redis {
         };
         let namespace = format!("test-manifest-{}", std::process::id());
         let backend = RedisCoordination::connect(
-            RedisCoordinationConfig::new(url, namespace),
+            RedisCoordinationConfig::new(url.clone(), namespace.clone()),
             Arc::new(AllowAll),
         )
         .await
@@ -805,6 +805,8 @@ mod live_redis {
         assert_eq!(current.generation, 3);
         assert_eq!(current.fencing_token, lease2.fencing_token);
 
+        // Seed a valid existing manifest above Lua's exact integer range so
+        // the Redis Lua successor logic is tested without skipping genesis.
         let high_generation_resource = ResourceId::new("resource-high-generation").unwrap();
         let high_generation_lease = backend
             .acquire_lease_idempotent(
@@ -826,13 +828,29 @@ mod live_redis {
             vec![],
         )
         .unwrap();
-        backend
-            .commit_manifest(
-                scope(),
-                &high_generation_resource,
-                &high_generation_lease.owner_token,
-                high_generation_manifest,
-            )
+        let high_generation_payload = serde_json::to_string(&high_generation_manifest).unwrap();
+        let manifest_key = format!(
+            "buglogin:{{{namespace}:{}}}:manifest:{}",
+            workspace.as_str(),
+            high_generation_resource.as_str()
+        );
+        let client = redis::Client::open(url).unwrap();
+        let mut connection = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("HSET")
+            .arg(&manifest_key)
+            .arg("generation")
+            .arg(high_generation.to_string())
+            .arg("parent_generation")
+            .arg((high_generation - 1).to_string())
+            .arg("workspace_id")
+            .arg(workspace.as_str())
+            .arg("resource_id")
+            .arg(high_generation_resource.as_str())
+            .arg("fencing_token")
+            .arg(high_generation_lease.fencing_token.to_string())
+            .arg("payload")
+            .arg(high_generation_payload)
+            .query_async(&mut connection)
             .await
             .unwrap();
         let high_generation_successor = buglogin_sync::manifest::SyncManifest::new(
@@ -886,7 +904,11 @@ mod live_redis {
         };
 
         let first = backend
-            .publish_event(scope(), "idem-gap-1", event("actor-1", "evt-1", 1))
+            .publish_event(
+                scope(),
+                "idem-gap-resnapshot-0001",
+                event("actor-1", "evt-1", 1),
+            )
             .await
             .unwrap();
 

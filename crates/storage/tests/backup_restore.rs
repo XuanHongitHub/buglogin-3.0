@@ -93,7 +93,14 @@ fn tampered_snapshot_blocks_restore_before_destination_write() {
 
     let stored = backups.join("tamper/files/value");
     make_writable(&stored);
-    fs::write(stored, b"tampered").unwrap();
+    fs::write(&stored, b"tampered").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&stored).unwrap().permissions().mode();
+        assert_ne!(mode & 0o200, 0, "owner must be able to modify cleanup copy");
+        assert_eq!(mode & 0o022, 0, "cleanup must not grant group/world write");
+    }
     let destination = root.path().join("destination");
     let error = restore_snapshot(&snapshot, &destination, RestoreBoundary::CreateOnly).unwrap_err();
 
@@ -170,6 +177,17 @@ fn make_tree_writable(root: &Path) {
 fn make_writable(path: &Path) {
     if let Ok(metadata) = fs::metadata(path) {
         let mut permissions = metadata.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(permissions.mode() | 0o200);
+        }
+        #[cfg(windows)]
+        {
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+        }
+        #[cfg(not(any(unix, windows)))]
         permissions.set_readonly(false);
         let _ = fs::set_permissions(path, permissions);
     }

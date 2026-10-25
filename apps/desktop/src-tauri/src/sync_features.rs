@@ -11,13 +11,14 @@ use crate::desktop_state::DesktopState;
 use crate::profile_lifecycle::canonical_dir_name;
 
 fn get_app_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
+    let base = if let Ok(dir) = std::env::var("BUGLOGIN_DATA_DIR") {
         PathBuf::from(dir)
     } else if let Some(base) = dirs::data_dir() {
         base.join("buglogin")
     } else {
         PathBuf::from(".buglogin")
-    }
+    };
+    crate::app_instance::AppInstance::app_data_dir(base)
 }
 
 fn get_db_path() -> PathBuf {

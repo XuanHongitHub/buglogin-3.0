@@ -69,6 +69,11 @@ pub enum CommandSchema {
     OrganizationIdInput,
     OrganizationListInput,
     OrganizationPage,
+    OrganizationMember,
+    OrganizationMemberPage,
+    OrganizationAccountCreateInput,
+    OrganizationMemberStatusUpdateInput,
+    OrganizationMemberWorkspaceAssignInput,
     OrganizationUpdateInput,
     Workspace,
     WorkspaceRecord,
@@ -283,6 +288,13 @@ impl CommandSchema {
             Self::OrganizationIdInput => "OrganizationIdInput",
             Self::OrganizationListInput => "OrganizationListInput",
             Self::OrganizationPage => "OrganizationPage",
+            Self::OrganizationMember => "OrganizationMember",
+            Self::OrganizationMemberPage => "OrganizationMemberPage",
+            Self::OrganizationAccountCreateInput => "OrganizationAccountCreateInput",
+            Self::OrganizationMemberStatusUpdateInput => "OrganizationMemberStatusUpdateInput",
+            Self::OrganizationMemberWorkspaceAssignInput => {
+                "OrganizationMemberWorkspaceAssignInput"
+            }
             Self::OrganizationUpdateInput => "OrganizationUpdateInput",
             Self::Workspace => "Workspace",
             Self::WorkspaceRecord => "WorkspaceRecord",

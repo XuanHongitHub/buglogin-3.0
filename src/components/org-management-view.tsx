@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuArrowRight,
@@ -20,6 +20,15 @@ import {
   LuUsers,
 } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
+import { canOpenOrganizationMembers } from "@/components/org-member-access";
+import {
+  type OrgWorkspaceRoute,
+  parseOrgWorkspaceRoute,
+  sameOrgWorkspaceRoute,
+  serializeOrgWorkspaceRoute,
+} from "@/components/org-workspace-route";
+import { OrganizationMembersPage } from "@/components/organization-members-page";
+import { OrganizationWorkspaceAccess } from "@/components/organization-workspace-access";
 import { ResourceInventoryPanel } from "@/components/resource-inventory-panel";
 import { ScopedAccountCreationPage } from "@/components/scoped-account-creation-page";
 import { Badge } from "@/components/ui/badge";
@@ -104,7 +113,7 @@ export function OrgManagementCenter({
 }: OrgManagementCenterProps) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<
-    "members" | "workspaces" | "resources" | "security" | "billing"
+    "members" | "access" | "workspaces" | "resources" | "security" | "billing"
   >("members");
 
   const [employees, setEmployees] = useState<OrgEmployee[]>([]);
@@ -112,11 +121,13 @@ export function OrgManagementCenter({
   const [currentUser, setCurrentUser] = useState<{
     id: string;
     email: string;
+    platformAdmin: boolean;
     role: HierarchicalRole;
     workspaceRoles: Record<string, HierarchicalRole>;
   }>({
     id: "",
     email: "",
+    platformAdmin: false,
     role: "member",
     workspaceRoles: {},
   });
@@ -127,11 +138,20 @@ export function OrgManagementCenter({
   // Sub-modal states
   const [editOrgModalOpen, setEditOrgModalOpen] = useState(false);
   const [accountCreationPageOpen, setAccountCreationPageOpen] = useState(false);
+  const [organizationMembersPageOpen, setOrganizationMembersPageOpen] =
+    useState(false);
   const [accountWorkspaceId, setAccountWorkspaceId] = useState("");
   const [workspaceDetailPage, setWorkspaceDetailPage] =
     useState<OrgWorkspaceItem | null>(null);
   const [workspaceDetailInviteOpen, setWorkspaceDetailInviteOpen] =
     useState(false);
+  const [route, setRoute] = useState<OrgWorkspaceRoute>(() =>
+    typeof window === "undefined"
+      ? {}
+      : parseOrgWorkspaceRoute(window.location.search),
+  );
+  const routeRef = useRef(route);
+  const [routeIssue, setRouteIssue] = useState<string | null>(null);
   const [editWsModal, setEditWsModal] = useState<OrgWorkspaceItem | null>(null);
   const [deleteWsModal, setDeleteWsModal] = useState<OrgWorkspaceItem | null>(
     null,
@@ -148,6 +168,40 @@ export function OrgManagementCenter({
     maxWorkspaces: number;
     offlineEntitled: boolean;
   }>({ maxWorkspaces: 0, offlineEntitled: false });
+
+  const navigateRoute = useCallback(
+    (next: OrgWorkspaceRoute, replace = false) => {
+      if (typeof window === "undefined") return;
+      const normalized = {
+        ...next,
+        section: next.workspaceId ? (next.section ?? "overview") : undefined,
+        groupId: next.section === "groups" ? next.groupId : undefined,
+        profileId: next.section === "profiles" ? next.profileId : undefined,
+      };
+      if (sameOrgWorkspaceRoute(routeRef.current, normalized)) return;
+      const url = serializeOrgWorkspaceRoute(
+        window.location.search,
+        normalized,
+      );
+      if (replace) window.history.replaceState(null, "", url);
+      else window.history.pushState(null, "", url);
+      routeRef.current = normalized;
+      setRoute(normalized);
+      setRouteIssue(null);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = parseOrgWorkspaceRoute(window.location.search);
+      routeRef.current = next;
+      setRoute(next);
+      setRouteIssue(null);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   const [deleteConfirmationName, setDeleteConfirmationName] = useState("");
   const [deleteHandleProfilesAction, setDeleteHandleProfilesAction] = useState<
@@ -354,6 +408,7 @@ export function OrgManagementCenter({
   };
 
   const loadRealData = useCallback(async () => {
+    const requestedRoute = routeRef.current;
     setIsLoading(true);
     try {
       const [account, organizations] = await Promise.all([
@@ -362,7 +417,10 @@ export function OrgManagementCenter({
       ]);
       const userId = account.accountId;
       const userEmail = getActiveUserEmail() || "";
-      const primaryOrg = organizations.items[0] ?? null;
+      const requestedOrg = organizations.items.find(
+        (org) => org.id === requestedRoute.organizationId,
+      );
+      const primaryOrg = requestedOrg ?? organizations.items[0] ?? null;
       if (primaryOrg) {
         const organizationRecord = await desktopApi.getOrganizationRecord({
           organizationId: primaryOrg.id,
@@ -401,6 +459,40 @@ export function OrgManagementCenter({
           cloudSync: false,
         }),
       );
+      if (requestedRoute.workspaceId) {
+        const requestedWorkspace = loadedWorkspaces.find(
+          (workspace) =>
+            workspace.id === requestedRoute.workspaceId &&
+            (!requestedRoute.organizationId ||
+              workspace.organizationId === requestedRoute.organizationId),
+        );
+        if (requestedWorkspace) {
+          setWorkspaceDetailPage(requestedWorkspace);
+          setWorkspaceDetailInviteOpen(false);
+          setRouteIssue(null);
+          navigateRoute(
+            {
+              organizationId: requestedWorkspace.organizationId,
+              workspaceId: requestedWorkspace.id,
+              section: requestedRoute.section ?? "overview",
+              groupId: requestedRoute.groupId,
+              profileId: requestedRoute.profileId,
+            },
+            true,
+          );
+        } else {
+          setWorkspaceDetailPage(null);
+          setRouteIssue(
+            "Workspace này không còn khả dụng hoặc tài khoản hiện tại không có quyền truy cập. Đang quay lại danh sách tổ chức.",
+          );
+          navigateRoute({ organizationId: primaryOrg?.id }, true);
+        }
+      } else if (requestedRoute.organizationId && !requestedOrg) {
+        setRouteIssue(
+          "Tổ chức này không còn khả dụng hoặc tài khoản hiện tại không có quyền truy cập.",
+        );
+        navigateRoute({ organizationId: primaryOrg?.id }, true);
+      }
       const loadedMembers: OrgEmployee[] = memberPages.flatMap(
         ({ workspace, page }) =>
           page.items.map((member) => {
@@ -451,6 +543,7 @@ export function OrgManagementCenter({
       setCurrentUser({
         id: userId,
         email: userEmail,
+        platformAdmin: account.platformAdmin,
         role: (ownMembership?.role as HierarchicalRole) ?? "member",
         workspaceRoles,
       });
@@ -468,16 +561,57 @@ export function OrgManagementCenter({
       );
     } catch (error) {
       showErrorToast(`Không thể tải dữ liệu quản trị: ${String(error)}`);
+      if (requestedRoute.workspaceId) {
+        setWorkspaceDetailPage(null);
+        setRouteIssue(
+          "Không thể xác nhận quyền truy cập workspace từ liên kết này. Đang quay lại phạm vi tổ chức.",
+        );
+        navigateRoute({ organizationId: requestedRoute.organizationId }, true);
+      } else if (requestedRoute.organizationId) {
+        setRouteIssue(
+          "Không thể xác nhận quyền truy cập tổ chức từ liên kết này.",
+        );
+      }
     } finally {
       setIsLoading(false);
     }
-  }, [t]);
+  }, [navigateRoute, t]);
 
   useEffect(() => {
     if (isOpen) {
       void loadRealData();
     }
   }, [isOpen, loadRealData]);
+
+  useEffect(() => {
+    if (!isOpen || isLoading) return;
+    if ((route.organizationId ?? null) !== orgId) void loadRealData();
+  }, [isOpen, isLoading, loadRealData, orgId, route.organizationId]);
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (!route.workspaceId) {
+      setWorkspaceDetailPage(null);
+      setWorkspaceDetailInviteOpen(false);
+      return;
+    }
+    const workspace = workspaces.find(
+      (item) =>
+        item.id === route.workspaceId &&
+        (!route.organizationId || item.organizationId === route.organizationId),
+    );
+    if (workspace) {
+      setWorkspaceDetailPage(workspace);
+      if (workspaceDetailPage?.id !== workspace.id)
+        setWorkspaceDetailInviteOpen(false);
+      return;
+    }
+    setWorkspaceDetailPage(null);
+    setRouteIssue(
+      "Workspace này không còn khả dụng hoặc tài khoản hiện tại không có quyền truy cập.",
+    );
+    navigateRoute({ organizationId: route.organizationId }, true);
+  }, [isLoading, navigateRoute, route, workspaceDetailPage?.id, workspaces]);
 
   // Filtered employees
   const filteredEmployees = useMemo(() => {
@@ -530,6 +664,11 @@ export function OrgManagementCenter({
       : Math.round((totalMembersUsed / totalMembersMax) * 100);
 
   const totalWorkspacesUsed = workspaces.length;
+  const canManageOrganizationAccounts = canOpenOrganizationMembers({
+    platformAdmin: currentUser.platformAdmin,
+    organizationOwner: !!orgAccountId && currentUser.id === orgAccountId,
+    workspaceRoles: Object.values(currentUser.workspaceRoles),
+  });
 
   const handleToggleEmployeeSuspend = async (employeeId: string) => {
     const employee = employees.find((item) => item.id === employeeId);
@@ -622,6 +761,11 @@ export function OrgManagementCenter({
             <LuCrown className="size-6 text-primary" />
           </div>
           <div>
+            {routeIssue ? (
+              <p role="status" className="mb-1 text-xs text-amber-600">
+                {routeIssue}
+              </p>
+            ) : null}
             <div className="flex items-center gap-2">
               <h2 className="text-base font-bold text-foreground">
                 TRUNG TÂM QUẢN TRỊ DOANH NGHIỆP (ORGANIZATION SETTINGS)
@@ -766,6 +910,22 @@ export function OrgManagementCenter({
           <span>Quản Lý Workspaces ({workspaces.length})</span>
         </button>
 
+        {canManageOrganizationAccounts ? (
+          <button
+            type="button"
+            onClick={() => setActiveTab("access")}
+            className={cn(
+              "px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150 cursor-pointer flex items-center gap-1.5",
+              activeTab === "access"
+                ? "bg-accent text-accent-foreground shadow-2xs"
+                : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+            )}
+          >
+            <LuShield className="size-3.5" />
+            <span>Workspace Access</span>
+          </button>
+        ) : null}
+
         <button
           type="button"
           onClick={() => setActiveTab("resources")}
@@ -873,6 +1033,18 @@ export function OrgManagementCenter({
               </Select>
             </div>
             <div className="flex items-center gap-2">
+              {canManageOrganizationAccounts && orgId && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setOrganizationMembersPageOpen(true)}
+                  className="h-8 gap-1.5 text-xs"
+                >
+                  <LuUsers className="size-3.5" />
+                  Tài khoản tổ chức
+                </Button>
+              )}
               {Object.keys(currentUser.workspaceRoles).length > 0 && (
                 <Select
                   value={accountWorkspaceId}
@@ -919,6 +1091,11 @@ export function OrgManagementCenter({
                   if (workspace) {
                     setWorkspaceDetailInviteOpen(true);
                     setWorkspaceDetailPage(workspace);
+                    navigateRoute({
+                      organizationId: workspace.organizationId,
+                      workspaceId: workspace.id,
+                      section: "members",
+                    });
                   }
                 }}
                 disabled={!accountWorkspaceId}
@@ -1313,6 +1490,11 @@ export function OrgManagementCenter({
                             onClick={() => {
                               setWorkspaceDetailInviteOpen(false);
                               setWorkspaceDetailPage(ws);
+                              navigateRoute({
+                                organizationId: ws.organizationId,
+                                workspaceId: ws.id,
+                                section: "overview",
+                              });
                             }}
                             className="h-7 px-2 text-[10px] gap-1 cursor-pointer font-medium"
                           >
@@ -1393,6 +1575,17 @@ export function OrgManagementCenter({
           )}
         </div>
       )}
+
+      {activeTab === "access" && canManageOrganizationAccounts && orgId ? (
+        <OrganizationWorkspaceAccess
+          organizationId={orgId}
+          workspaces={workspaces.map(({ id, name }) => ({ id, name }))}
+          allowOwner={currentUser.platformAdmin}
+          listOrganizationMembers={desktopApi.listOrganizationMembers}
+          listWorkspaceMembers={desktopApi.listMembers}
+          assignMember={desktopApi.assignOrganizationMemberToWorkspace}
+        />
+      ) : null}
 
       {activeTab === "resources" && <ResourceInventoryPanel />}
 
@@ -1820,6 +2013,53 @@ export function OrgManagementCenter({
     </div>
   );
 
+  if (organizationMembersPageOpen) {
+    if (!canManageOrganizationAccounts || !orgId) {
+      return (
+        <main className="flex min-h-0 flex-1 flex-col bg-background">
+          <div className="border-b border-border/60 px-4 py-3 md:px-6">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setOrganizationMembersPageOpen(false)}
+            >
+              Quay lại tổ chức
+            </Button>
+          </div>
+          <p role="alert" className="p-6 text-sm text-destructive">
+            Bạn không có quyền quản lý tài khoản tổ chức này.
+          </p>
+        </main>
+      );
+    }
+    const inviteWorkspace =
+      workspaces.find((workspace) => workspace.id === accountWorkspaceId) ??
+      workspaces.find((workspace) => currentUser.workspaceRoles[workspace.id]);
+    return (
+      <OrganizationMembersPage
+        organizationId={orgId}
+        organizationName={orgName}
+        canInviteMember={Boolean(inviteWorkspace)}
+        onBack={() => setOrganizationMembersPageOpen(false)}
+        onInviteMember={() => {
+          if (!inviteWorkspace) return;
+          setOrganizationMembersPageOpen(false);
+          setWorkspaceDetailInviteOpen(true);
+          setWorkspaceDetailPage(inviteWorkspace);
+          navigateRoute({
+            organizationId: inviteWorkspace.organizationId,
+            workspaceId: inviteWorkspace.id,
+            section: "members",
+          });
+        }}
+        listMembers={desktopApi.listOrganizationMembers}
+        createAccount={desktopApi.createOrganizationAccount}
+        updateMemberStatus={desktopApi.updateOrganizationMemberStatus}
+      />
+    );
+  }
+
   if (workspaceDetailPage) {
     return (
       <WorkspaceDetailPage
@@ -1827,12 +2067,19 @@ export function OrgManagementCenter({
         organizationName={orgName}
         workspaceId={workspaceDetailPage.id}
         workspaceName={workspaceDetailPage.name}
-        initialTab="members"
+        initialTab={
+          route.workspaceId === workspaceDetailPage.id
+            ? route.section
+            : "overview"
+        }
+        initialGroupId={route.groupId}
+        initialProfileId={route.profileId}
         initialInvitePage={workspaceDetailInviteOpen}
+        onRouteChange={(next) => navigateRoute(next)}
         onBack={() => {
           setWorkspaceDetailPage(null);
           setWorkspaceDetailInviteOpen(false);
-          void loadRealData();
+          navigateRoute({ organizationId: workspaceDetailPage.organizationId });
         }}
       />
     );

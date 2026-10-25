@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BugLogin profile sync fixture</title>
+    <style>
+      :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+      body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+      h1 { line-height: 1.2; }
+      label, button { display: block; margin: 0.8rem 0; }
+      input { box-sizing: border-box; width: min(100%, 34rem); padding: 0.55rem; }
+      button { padding: 0.55rem 0.8rem; }
+      code { overflow-wrap: anywhere; }
+      .status { border: 1px solid #8888; border-radius: 0.35rem; padding: 0.8rem; }
+      .pass { color: #16803c; }
+      .fail { color: #c33; }
+    </style>
+  </head>
+  <body>
+    <h1>BugLogin profile sync fixture</h1>
+    <p>This page stores synthetic values in this browser profile. It does not call BugLogin sync APIs.</p>
+
+    <label for="case-id">Fixture ID (use the same ID on both devices)</label>
+    <input id="case-id" value="acceptance-001" autocomplete="off" />
+    <label for="marker">Value to persist in browser storage</label>
+    <input id="marker" value="written-on-device-a" autocomplete="off" />
+
+    <button id="save" type="button">Save values in cookie, localStorage, and IndexedDB</button>
+    <button id="read" type="button">Read back values from this device</button>
+    <button id="tab" type="button">Open a second fixture tab</button>
+
+    <section aria-live="polite" class="status" id="status">Waiting for a fixture action.</section>
+
+    <h2>Acceptance checklist</h2>
+    <ol>
+      <li>On device A, save <code>written-on-device-a</code>; verify all three storage checks pass.</li>
+      <li>Bookmark this page in the browser with its built-in bookmark command.</li>
+      <li>Open the second fixture tab and leave both tabs open before stopping A.</li>
+      <li>On device B, use the same fixture ID, read the synced profile, and verify the saved marker.</li>
+      <li>Change the marker on B to <code>written-on-device-b</code>, save it, and stop B.</li>
+      <li>On device A, read again and verify <code>written-on-device-b</code> after sync.</li>
+      <li>Check the bookmark and both tabs after each device restores the browser profile.</li>
+    </ol>
+
+    <script>
+      const caseInput = document.querySelector("#case-id");
+      const markerInput = document.querySelector("#marker");
+      const status = document.querySelector("#status");
+      const databaseName = "buglogin-profile-sync-fixture-v1";
+      const storeName = "records";
+
+      function openDatabase() {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(databaseName, 1);
+          request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains(storeName)) {
+              request.result.createObjectStore(storeName, { keyPath: "caseId" });
+            }
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      }
+
+      async function writeIndexedDb(record) {
+        const database = await openDatabase();
+        await new Promise((resolve, reject) => {
+          const transaction = database.transaction(storeName, "readwrite");
+          transaction.objectStore(storeName).put(record);
+          transaction.oncomplete = resolve;
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error);
+        });
+        database.close();
+      }
+
+      async function readIndexedDb(caseId) {
+        const database = await openDatabase();
+        const result = await new Promise((resolve, reject) => {
+          const request = database.transaction(storeName, "readonly").objectStore(storeName).get(caseId);
+          request.onsuccess = () => resolve(request.result ?? null);
+          request.onerror = () => reject(request.error);
+        });
+        database.close();
+        return result;
+      }
+
+      function cookieValue(name) {
+        const prefix = `${name}=`;
+        const item = document.cookie.split("; ").find((entry) => entry.startsWith(prefix));
+        return item ? decodeURIComponent(item.slice(prefix.length)) : null;
+      }
+
+      function showChecks(title, checks) {
+        const heading = document.createElement("strong");
+        heading.textContent = title;
+        const list = document.createElement("ul");
+        for (const { name, actual, expected } of checks) {
+          const passed = actual === expected;
+          const safeActual = actual === null ? "(missing)" : actual;
+          const item = document.createElement("li");
+          item.className = passed ? "pass" : "fail";
+          item.textContent = `${name}: ${passed ? "PASS" : "FAIL"}; found ${safeActual}; expected ${expected}`;
+          list.append(item);
+        }
+        status.replaceChildren(heading, list);
+      }
+
+      document.querySelector("#save").addEventListener("click", async () => {
+        try {
+          const caseId = caseInput.value.trim();
+          const marker = markerInput.value.trim();
+          if (!/^[a-zA-Z0-9._-]{1,64}$/.test(caseId)) {
+            throw new Error("Fixture ID must use 1–64 letters, digits, dots, underscores, or hyphens.");
+          }
+          if (!marker || marker.length > 128) {
+            throw new Error("Marker must contain 1–128 characters.");
+          }
+          const record = { caseId, marker, savedAt: new Date().toISOString() };
+          document.cookie = `buglogin_fixture_${encodeURIComponent(caseId)}=${encodeURIComponent(marker)}; Max-Age=2592000; Path=/; SameSite=Lax`;
+          localStorage.setItem(`buglogin_fixture_${caseId}`, marker);
+          await writeIndexedDb(record);
+          await readValues();
+        } catch (error) {
+          status.textContent = `Fixture write failed: ${error instanceof Error ? error.message : String(error)}`;
+          status.className = "status fail";
+        }
+      });
+
+      async function readValues() {
+        try {
+          const caseId = caseInput.value.trim();
+          const expected = markerInput.value.trim();
+          const idbRecord = await readIndexedDb(caseId);
+          showChecks("Browser storage readback", [
+            { name: "Cookie", actual: cookieValue(`buglogin_fixture_${caseId}`), expected },
+            { name: "localStorage", actual: localStorage.getItem(`buglogin_fixture_${caseId}`), expected },
+            { name: "IndexedDB", actual: idbRecord?.marker ?? null, expected },
+          ]);
+          status.className = "status";
+        } catch (error) {
+          status.textContent = `Fixture read failed: ${error instanceof Error ? error.message : String(error)}`;
+          status.className = "status fail";
+        }
+      }
+
+      document.querySelector("#read").addEventListener("click", readValues);
+      document.querySelector("#tab").addEventListener("click", () => {
+        window.open("/tab-two", "_blank", "noopener");
+      });
+
+      if (location.pathname === "/tab-two") {
+        document.title = "BugLogin profile sync fixture — tab two";
+        document.querySelector("h1").textContent = "BugLogin profile sync fixture — tab two";
+      }
+    </script>
+  </body>
+</html>

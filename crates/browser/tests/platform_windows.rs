@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use buglogin_browser::lifecycle::LifecycleManager;
 use buglogin_browser::platform::windows::{StopPolicy, WindowsJobController};
 use buglogin_browser::platform::{OwnedProcessTree, ProcessTreeStatus};
 use buglogin_browser::process::{
@@ -81,6 +82,28 @@ fn process_exists(pid: u32) -> bool {
             "-Command",
             &format!("Get-Process -Id {pid} -ErrorAction Stop | Out-Null"),
         ])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn wayfern_process_exists(pid: u32, binary: &Path, _profile_path: &Path) -> bool {
+    let Ok(binary) = binary.canonicalize() else {
+        return false;
+    };
+    let script = r#"
+$process = Get-CimInstance Win32_Process -Filter "ProcessId = $env:BUGLOGIN_TEST_PID" -ErrorAction SilentlyContinue
+if ($null -ne $process -and
+    [String]::Equals($process.ExecutablePath, $env:BUGLOGIN_TEST_EXE, [StringComparison]::OrdinalIgnoreCase)) { exit 0 }
+exit 1
+"#;
+    Command::new(powershell())
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("BUGLOGIN_TEST_PID", pid.to_string())
+        .env(
+            "BUGLOGIN_TEST_EXE",
+            binary.to_string_lossy().trim_start_matches(r"\\?\"),
+        )
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
@@ -163,6 +186,26 @@ fn job_stop_cleans_the_owned_process_tree() {
 }
 
 #[test]
+fn stopping_one_job_tree_keeps_an_independent_job_running() {
+    let a_pid_file = child_pid_file("parallel-a");
+    let b_pid_file = child_pid_file("parallel-b");
+    let controller = WindowsJobController::system().unwrap();
+    let mut a = launch_tree(&controller, &a_pid_file);
+    let mut b = launch_tree(&controller, &b_pid_file);
+    let b_pid = wait_for_pid_file(&b_pid_file);
+
+    a.stop().unwrap();
+    assert_eq!(a.status().unwrap(), ProcessTreeStatus::Exited);
+    assert_eq!(b.status().unwrap(), ProcessTreeStatus::Running);
+    assert!(process_exists(b_pid), "stopping job A terminated job B");
+
+    b.stop().unwrap();
+    wait_for_absent(b_pid);
+    let _ = std::fs::remove_file(&a_pid_file);
+    let _ = std::fs::remove_file(&b_pid_file);
+}
+
+#[test]
 fn dropping_job_handle_cleans_descendants() {
     let pid_file = child_pid_file("drop");
     let controller = WindowsJobController::system().unwrap();
@@ -178,6 +221,114 @@ fn dropping_job_handle_cleans_descendants() {
 
     wait_for_absent(child_pid);
     let _ = std::fs::remove_file(&pid_file);
+}
+
+#[test]
+fn stopping_one_wayfern_job_keeps_an_independent_wayfern_running() {
+    let Some(binary) = std::env::var_os("BUGLOGIN_WAYFERN_LIFECYCLE_BINARY") else {
+        if std::env::var("BUGLOGIN_WAYFERN_LIFECYCLE_STRICT")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
+            panic!("BUGLOGIN_WAYFERN_LIFECYCLE_BINARY is required in strict mode");
+        }
+        return;
+    };
+    let binary = PathBuf::from(binary);
+    let root = std::env::temp_dir().join(format!(
+        "buglogin-wayfern-job-{}-{}",
+        std::process::id(),
+        FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let a_path = root.join("a");
+    let b_path = root.join("b");
+    std::fs::create_dir_all(&a_path).unwrap();
+    std::fs::create_dir_all(&b_path).unwrap();
+    let controller = WindowsJobController::system().unwrap();
+    let launch = |profile_path: &Path| {
+        controller
+            .launch(
+                &binary,
+                &[
+                    format!("--user-data-dir={}", profile_path.display()),
+                    "--no-first-run".into(),
+                    "--headless".into(),
+                    "about:blank".into(),
+                ],
+                false,
+                profile_path,
+            )
+            .unwrap()
+    };
+    let mut a = launch(&a_path);
+    let mut b = launch(&b_path);
+    let b_pid = b.identity().root.pid;
+    assert!(
+        wayfern_process_exists(b_pid, &binary, &b_path),
+        "Wayfern B did not stay alive after launch"
+    );
+    a.stop().unwrap();
+    thread::sleep(Duration::from_millis(500));
+    let b_alive_after_stopping_a = wayfern_process_exists(b_pid, &binary, &b_path);
+    let _ = b.stop();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        b_alive_after_stopping_a,
+        "stopping Wayfern A terminated Wayfern B"
+    );
+}
+
+#[test]
+fn lifecycle_manager_stops_only_the_requested_wayfern_profile() {
+    let Some(binary) = std::env::var_os("BUGLOGIN_WAYFERN_LIFECYCLE_BINARY") else {
+        if std::env::var("BUGLOGIN_WAYFERN_LIFECYCLE_STRICT")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
+            panic!("BUGLOGIN_WAYFERN_LIFECYCLE_BINARY is required in strict mode");
+        }
+        return;
+    };
+    let binary = PathBuf::from(binary);
+    let root = std::env::temp_dir().join(format!(
+        "buglogin-wayfern-lifecycle-manager-{}-{}",
+        std::process::id(),
+        FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let a_path = root.join("a");
+    let b_path = root.join("b");
+    std::fs::create_dir_all(&a_path).unwrap();
+    std::fs::create_dir_all(&b_path).unwrap();
+    let executable = ApprovedExecutable::new(&binary).unwrap();
+    let controller = SystemProcessController::new([executable]);
+    let mut manager = LifecycleManager::new(controller);
+    let launch = |profile_path: &Path| LaunchSpecification {
+        runtime: Runtime::Wayfern,
+        version: "native-test".into(),
+        executable: binary.clone(),
+        profile_path: profile_path.to_path_buf(),
+        args: vec![
+            format!("--user-data-dir={}", profile_path.display()),
+            "--no-first-run".into(),
+            "--headless".into(),
+            "about:blank".into(),
+        ],
+    };
+    let a_identity = manager.launch(&a_path, &launch(&a_path)).unwrap();
+    let b_identity = manager.launch(&b_path, &launch(&b_path)).unwrap();
+    assert!(wayfern_process_exists(a_identity.pid, &binary, &a_path));
+    assert!(wayfern_process_exists(b_identity.pid, &binary, &b_path));
+    manager.stop(&a_path).unwrap();
+    thread::sleep(Duration::from_millis(500));
+    let b_alive_after_stopping_a = wayfern_process_exists(b_identity.pid, &binary, &b_path);
+    let _ = manager.stop(&b_path);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        b_alive_after_stopping_a,
+        "LifecycleManager stopping profile A terminated profile B"
+    );
 }
 
 #[test]
@@ -260,7 +411,9 @@ fn system_controller_uses_job_owned_process_tree() {
     let executable = powershell().canonicalize().unwrap();
     let controller = SystemProcessController::new([ApprovedExecutable::new(&executable).unwrap()]);
     let specification = LaunchSpecification {
-        runtime: Runtime::Wayfern,
+        // This fixture launches PowerShell rather than Wayfern. Avoid the
+        // Wayfern-only window identity path, which appends Chromium flags.
+        runtime: Runtime::Bugox,
         version: "test".into(),
         executable,
         profile_path: std::env::temp_dir(),
