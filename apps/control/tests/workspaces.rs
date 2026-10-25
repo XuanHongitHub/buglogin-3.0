@@ -14,6 +14,7 @@ fn principal(role: Role, workspace: &str) -> Principal {
         workspace_ids: BTreeSet::from([WorkspaceId::from_str(workspace).unwrap()]),
         roles: BTreeSet::from([role]),
         token_scopes: None,
+        ..Principal::default()
     }
 }
 
