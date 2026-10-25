@@ -13,6 +13,7 @@ fn admin() -> Principal {
         workspace_ids: BTreeSet::from([WorkspaceId::from_str("ws_1").unwrap()]),
         roles: BTreeSet::from([Role::WorkspaceAdmin]),
         token_scopes: None,
+        ..Principal::default()
     }
 }
 
@@ -82,7 +83,7 @@ fn member_mutations_are_acl_backed_and_duplicate_invites_do_not_replace() {
         .unwrap();
     assert_eq!(
         service
-            .invite(&actor, &[], member("mem_1", "acct_2", MemberRole::Admin), 1)
+            .invite(&actor, &[], member("mem_1", "acct_2", MemberRole::Member), 1)
             .unwrap_err()
             .code,
         "member_exists"

@@ -20,6 +20,7 @@ fn principal(value: &str) -> Principal {
         workspace_ids: BTreeSet::new(),
         roles: BTreeSet::new(),
         token_scopes: None,
+        ..Principal::default()
     }
 }
 fn grant(actor: &str, workspace_id: &WorkspaceId, action: Action) -> Grant {

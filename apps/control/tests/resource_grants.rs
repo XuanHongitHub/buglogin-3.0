@@ -14,6 +14,7 @@ fn admin() -> Principal {
         workspace_ids: BTreeSet::from([WorkspaceId::from_str("ws_1").unwrap()]),
         roles: BTreeSet::from([Role::WorkspaceAdmin]),
         token_scopes: None,
+        ..Principal::default()
     }
 }
 
