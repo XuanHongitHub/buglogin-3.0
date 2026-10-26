@@ -396,6 +396,9 @@
       "edit": "Edit",
       "delete": "Delete",
       "copyCookies": "Copy Cookies",
+      "addOptions": "More options...",
+      "resources": "Resources",
+      "members": "Members & Permissions",
       "configure": "Configure",
       "clone": "Clone Profile",
       "viewNetwork": "View Network",
@@ -470,6 +473,9 @@
       "assignProxy": "Assign Proxy",
       "assignExtensionGroup": "Assign Extension Group",
       "copyCookies": "Copy Cookies",
+      "addOptions": "More options...",
+      "resources": "Resources",
+      "members": "Members & Permissions",
       "runSelected": "Run selected",
       "stopSelected": "Stop selected",
       "proRequired": "Pro plan required for bulk run/stop",
@@ -2363,6 +2369,21 @@
       "uploading": "Uploading",
       "downloading": "Downloading",
       "startingUpdate": "Starting update..."
+    },
+    "viewNotes": "What's new",
+    "restartNow": "Restart now",
+    "updateReadyTooltip": "Update v{{version}} is ready to install",
+    "dialog": {
+      "title": "New Software Update",
+      "official": "Official Release",
+      "changelogTitle": "What's new in this release",
+      "viewOnWeb": "View on web",
+      "readyToInstall": "Update package is ready to install",
+      "securityVerified": "Verified secure: Valid Ed25519 signature (Release Feed: Verified)",
+      "autoUpdateLabel": "Automatically download new updates",
+      "restartAndApply": "Restart now",
+      "downloadNow": "Download update",
+      "eta": "Remaining"
     }
   },
   "browserDownload": {
@@ -2803,7 +2824,8 @@
     },
     "network": "Network",
     "integrations": "Integrations",
-    "account": "Account"
+    "account": "Account",
+    "members": "Members"
   },
   "pageTitle": {
     "profiles": "Profiles",
@@ -2818,7 +2840,8 @@
     "integrations": "Integrations",
     "account": "Account",
     "accountManagement": "Account management",
-    "shortcuts": "Keyboard shortcuts"
+    "shortcuts": "Keyboard shortcuts",
+    "members": "Workspace Members"
   },
   "encryption": {
     "required": {

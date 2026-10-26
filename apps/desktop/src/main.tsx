@@ -23,6 +23,7 @@ function DesktopRoot() {
   return (
     <>
       <DesktopHome
+        appUpdates={appUpdates}
         onCheckForUpdates={appUpdates.checkForAppUpdatesManual}
         isCheckingForUpdates={appUpdates.isCheckingForUpdates}
         onShareProfiles={(profiles, workspaceId) =>

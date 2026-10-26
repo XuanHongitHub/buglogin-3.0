@@ -303,12 +303,58 @@ pub async fn save_sync_settings(
 }
 
 #[tauri::command]
-pub async fn request_profile_sync(app: AppHandle, profile_id: String) -> Result<(), String> {
+pub async fn request_profile_sync(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    profile_id: String,
+) -> Result<(), String> {
+    let request_id = crate::clock::unix_time_nanos("profile-sync")
+        .map_err(|problem| problem.code)?
+        .to_string();
+    let correlation_id = format!("profile-sync-{request_id}");
+    let idempotency_key = format!("profile-sync-manual-{request_id}");
+
     let _ = app.emit(
-        "profile-sync-progress",
-        json!({ "profileId": profile_id, "status": "synced" }),
+        "profile-sync-status",
+        json!({ "profile_id": profile_id, "status": "syncing" }),
     );
-    Ok(())
+    let result = state
+        .invoke(
+            "profile_stop",
+            &correlation_id,
+            Some(&idempotency_key),
+            json!({ "profileId": profile_id }),
+        )
+        .await;
+
+    match result {
+        Ok(_) => {
+            let _ = app.emit(
+                "profile-sync-status",
+                json!({ "profile_id": profile_id, "status": "synced" }),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            crate::diagnostics::report_problem_failure(
+                state.inner().clone(),
+                "profile.sync",
+                error.clone(),
+            );
+            let _ = app.emit(
+                "profile-sync-status",
+                json!({
+                    "profile_id": profile_id,
+                    "status": "error",
+                    "error": error.code,
+                }),
+            );
+            Err(format!(
+                "{} (correlation {})",
+                error.code, error.correlation_id
+            ))
+        }
+    }
 }
 
 #[tauri::command]

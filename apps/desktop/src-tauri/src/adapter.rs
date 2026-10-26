@@ -361,7 +361,7 @@ fn append_wayfern_default_start_page(args: &mut Vec<String>, profile_path: &Path
     if has_saved_wayfern_session(profile_path) {
         push_or_replace_arg(args, "--restore-last-session".to_owned());
     } else if !args.iter().any(|argument| !argument.starts_with('-')) {
-        args.push("about:blank".to_owned());
+        args.push("https://buglogin.com/".to_owned());
     }
 }
 
@@ -2992,7 +2992,7 @@ mod tests {
     }
 
     #[test]
-    fn wayfern_fresh_start_disables_first_run_and_uses_blank_page() {
+    fn wayfern_fresh_start_disables_first_run_and_uses_buglogin_homepage() {
         let profile_path = std::env::temp_dir().join(format!(
             "buglogin-start-page-fresh-{}-{}",
             std::process::id(),
@@ -3008,7 +3008,8 @@ mod tests {
 
         assert!(args.iter().any(|arg| arg == "--no-first-run"));
         assert!(args.iter().any(|arg| arg == "--no-default-browser-check"));
-        assert!(args.iter().any(|arg| arg == "about:blank"));
+        assert!(args.iter().any(|arg| arg == "https://buglogin.com/"));
+        assert!(!args.iter().any(|arg| arg == "about:blank"));
         assert!(!args.iter().any(|arg| arg == "--restore-last-session"));
         fs::remove_dir_all(profile_path).unwrap();
     }

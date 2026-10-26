@@ -1021,6 +1021,7 @@ export function MemberManagementDialog({
                     <th className="py-2.5 px-3">Thành viên & Email</th>
                     <th className="py-2.5 px-3 w-36">Vai trò</th>
                     <th className="py-2.5 px-3 w-28">Trạng thái</th>
+                    <th className="py-2.5 px-3 min-w-[160px]">Phạm vi nhóm</th>
                     <th className="py-2.5 px-3 w-28 text-center">Thao tác</th>
                   </tr>
                 </thead>
@@ -1028,7 +1029,7 @@ export function MemberManagementDialog({
                   {isLoading ? (
                     <tr>
                       <td
-                        colSpan={5}
+                        colSpan={6}
                         className="py-8 text-center text-muted-foreground"
                       >
                         {t("common.buttons.loading", {
@@ -1039,7 +1040,7 @@ export function MemberManagementDialog({
                   ) : filteredMembers.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={5}
+                        colSpan={6}
                         className="py-8 text-center text-muted-foreground"
                       >
                         {t("members.noMembersFound", {
@@ -1158,6 +1159,22 @@ export function MemberManagementDialog({
                           </td>
                           <td className="py-2.5 px-3">
                             {getStatusBadge(member.status)}
+                          </td>
+                          <td className="py-2.5 px-3 text-xs">
+                            {member.role === "owner" ||
+                            member.role === "admin" ? (
+                              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                                🌟 Toàn bộ nhóm
+                              </span>
+                            ) : member.status === "suspended" ? (
+                              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-destructive bg-destructive/10 px-2 py-0.5 rounded border border-destructive/20">
+                                ⛔ Đã thu hồi quyền
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground bg-muted/60 px-2 py-0.5 rounded border border-border/50">
+                                📁 Nhóm được phân quyền
+                              </span>
+                            )}
                           </td>
                           <td className="py-2.5 px-3 text-right whitespace-nowrap">
                             {isSelf ? (

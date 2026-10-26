@@ -29,10 +29,14 @@ No screen enters implementation from prose alone. Each major screen needs an app
 
 Reference artifacts may be high-fidelity design files, implementation-native HTML prototypes, or annotated screenshots. Static image-only references are insufficient for complex keyboard, table, dialog, migration, or responsive behavior.
 
-Current draft packages:
+Current packages:
 
 - [DES-01 key-rotation recipient review](references/DES-01-key-rotation-review.md) — Donut component mapping and state contract drafted; screenshot/interaction evidence and product-owner approval remain pending. This draft does not authorize production UI implementation.
-- [DES-01 workspace switch and unified head table](references/DES-01-workspace-switch-head-table.md) — Unified search, faceted filter, multi-level sort, and workspace switcher layout conforming to Donut upstream and Lucide icon tokens.
+- [DES-01 workspace switch and unified head table](references/DES-01-workspace-switch-head-table.md) — (Superseded by DES-02 and DES-03).
+- [DES-02 unified switcher and context action hub](references/DES-02-unified-switcher-action-hub.md) — Approved specification for Context Switcher (Org/WS + Role Badge + Quota) and Role-Adaptive Action Hub (+).
+- [DES-03 workspace resource and member management](references/DES-03-org-workspace-member-management.md) — Approved specification for Inline Compact Metrics Ribbon (h-7), 3-Tier Access Model (Org/WS/Group), Proxies, and Audit Trail.
+- [DES-04 seamless app update lifecycle experience](references/DES-04-app-update-experience.md) — Approved specification for Titlebar Update Anchor, In-App Notification Banner (h-8), and Release Notes & Progress Dialog.
+- [DES-05 dedicated mcp api key and agent quick-connect](references/DES-05-mcp-agent-key-experience.md) — Approved specification for Single Dedicated MCP Key, Local Vault Persistence, Mask/Unmask (Show/Hide), Direct Key Copy, and Auto-Injected 1-Click Agent Setup.
 
 ## 2. Approved reference checklist
 

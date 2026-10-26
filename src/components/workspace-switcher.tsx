@@ -55,6 +55,7 @@ interface WorkspaceSwitcherProps {
   collapsed?: boolean;
   totalProfilesCount?: number;
   isLoading?: boolean;
+  variant?: "rail" | "header";
 }
 
 export function WorkspaceSwitcher({
@@ -67,6 +68,7 @@ export function WorkspaceSwitcher({
   collapsed = false,
   totalProfilesCount,
   isLoading = false,
+  variant = "rail",
 }: WorkspaceSwitcherProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);

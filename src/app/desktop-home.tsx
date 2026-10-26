@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import { AboutDialog } from "@/components/about-dialog";
 import { AccountManagementPanel } from "@/components/account-management-panel";
 import { AccountPage } from "@/components/account-page";
+import AppUpdateDialog from "@/components/app-update-dialog";
 import { AuditLogView } from "@/components/audit-log-view";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
 import { CloseConfirmDialog } from "@/components/close-confirm-dialog";
@@ -27,6 +28,7 @@ import { ExtensionManagementDialog } from "@/components/extension-management-dia
 import { GroupAssignmentDialog } from "@/components/group-assignment-dialog";
 import { GroupManagementDialog } from "@/components/group-management-dialog";
 import HomeHeader from "@/components/home-header";
+import InlineUpdateBanner from "@/components/inline-update-banner";
 import { IntegrationsDialog } from "@/components/integrations-dialog";
 import { MemberManagementDialog } from "@/components/member-management-dialog";
 import { OrgManagementCenter } from "@/components/org-management-view";
@@ -50,7 +52,9 @@ import { WayfernConfigDialog } from "@/components/wayfern-config-dialog";
 import { WayfernTermsDialog } from "@/components/wayfern-terms-dialog";
 import { WindowResizeWarningDialog } from "@/components/window-resize-warning-dialog";
 import { WorkspaceManagementDialog } from "@/components/workspace-management-dialog";
+import WorkspaceNavStrip from "@/components/workspace-nav-strip";
 import { type WorkspaceItem } from "@/components/workspace-switcher";
+import type { useAppUpdateNotifications } from "@/hooks/use-app-update-notifications";
 import { useBrowserDownload } from "@/hooks/use-browser-download";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { useGroupEvents } from "@/hooks/use-group-events";
@@ -104,10 +108,12 @@ export default function Home({
   onShareProfiles,
   onCheckForUpdates,
   isCheckingForUpdates,
+  appUpdates,
 }: {
   onShareProfiles?: ShareProfilesHandler;
   onCheckForUpdates?: () => void;
   isCheckingForUpdates?: boolean;
+  appUpdates?: ReturnType<typeof useAppUpdateNotifications>;
 } = {}) {
   return process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "web" ? (
     <WebRouteHost initialPath="/" />
@@ -116,6 +122,7 @@ export default function Home({
       onShareProfiles={onShareProfiles}
       onCheckForUpdates={onCheckForUpdates}
       isCheckingForUpdates={isCheckingForUpdates}
+      appUpdates={appUpdates}
     />
   );
 }
@@ -124,10 +131,12 @@ function DesktopHome({
   onShareProfiles,
   onCheckForUpdates,
   isCheckingForUpdates,
+  appUpdates,
 }: {
   onShareProfiles?: ShareProfilesHandler;
   onCheckForUpdates?: () => void;
   isCheckingForUpdates?: boolean;
+  appUpdates?: ReturnType<typeof useAppUpdateNotifications>;
 } = {}) {
   const { t } = useTranslation();
   // Use the profile events hook for centralized profile management
@@ -178,6 +187,12 @@ function DesktopHome({
     selectedWorkspaceId,
     profilesWorkspaceId,
     workspaceSwitching,
+  );
+  const activeWorkspace = useMemo(
+    () =>
+      workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ??
+      null,
+    [workspaces, selectedWorkspaceId],
   );
   const profiles = visibleProfilesForWorkspace(
     loadedProfiles,
@@ -1663,7 +1678,51 @@ function DesktopHome({
         )}
       />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <HomeHeader pageTitle={subPageTitle} />
+        <HomeHeader
+          pageTitle={subPageTitle}
+          workspaces={workspaces}
+          selectedWorkspaceId={selectedWorkspaceId}
+          onWorkspaceSelect={handleWorkspaceSelect}
+          onManageWorkspaces={() => handleRailNavigate("workspaces")}
+          onOpenOrgCenter={() => handleRailNavigate("orgCenter")}
+          activeWorkspace={activeWorkspace}
+          onCreateProfile={() => setCreateProfileDialogOpen(true)}
+          onCreateGroup={() => setGroupManagementDialogOpen(true)}
+          onAddProxy={() => {
+            setProxyManagementInitialTab("proxies");
+            setProxyManagementDialogOpen(true);
+          }}
+          onInviteMember={() => setMemberManagementOpen(true)}
+          updateInfo={appUpdates?.updateInfo}
+          updateReady={appUpdates?.updateReady}
+          isUpdating={appUpdates?.isUpdating}
+          isCheckingForUpdates={
+            appUpdates?.isCheckingForUpdates ?? isCheckingForUpdates
+          }
+          updateProgress={appUpdates?.updateProgress}
+          onOpenUpdateDialog={() => appUpdates?.setIsUpdateDialogOpen(true)}
+        />
+        {appUpdates?.updateReady &&
+          !appUpdates.bannerDismissed &&
+          appUpdates.updateInfo && (
+            <InlineUpdateBanner
+              updateInfo={appUpdates.updateInfo}
+              onRestart={appUpdates.handleRestart}
+              onOpenDetails={() => appUpdates.setIsUpdateDialogOpen(true)}
+              onDismiss={appUpdates.dismissBanner}
+            />
+          )}
+        <WorkspaceNavStrip
+          currentPage={currentPage}
+          onNavigate={handleRailNavigate}
+          profilesCount={profiles.length}
+          groupsCount={groupsData.length}
+          proxiesCount={storedProxies.length}
+          workspaceName={activeWorkspace?.name}
+          workspaceRole={activeWorkspace?.role}
+          organizationName={activeWorkspace?.organizationName}
+          maxProfiles={activeWorkspace?.maxProfiles}
+        />
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {currentPage === "profiles" && (
             <motion.div
@@ -1765,6 +1824,20 @@ function DesktopHome({
                   setCreateProfileDialogOpen(true);
                 }}
                 workspaceSelected={Boolean(selectedWorkspaceId)}
+                onOpenGroupManagement={() => {
+                  setGroupManagementDialogOpen(true);
+                }}
+                onOpenProxyManagement={() => {
+                  setProxyManagementInitialTab("proxies");
+                  setProxyManagementDialogOpen(true);
+                }}
+                onOpenMemberManagement={() => {
+                  setMemberManagementOpen(true);
+                }}
+                workspaceName={activeWorkspace?.name}
+                workspaceRole={activeWorkspace?.role}
+                organizationName={activeWorkspace?.organizationName}
+                maxProfiles={activeWorkspace?.maxProfiles}
               />
             </motion.div>
           )}
@@ -1859,6 +1932,24 @@ function DesktopHome({
                 }
               }}
             />
+          )}
+
+          {currentPage === "members" && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
+              className="flex min-h-0 flex-1 flex-col overflow-hidden p-3"
+            >
+              <MemberManagementDialog
+                mode="page"
+                isOpen={true}
+                onClose={() => setCurrentPage("profiles")}
+                workspaceId={selectedWorkspaceId}
+                workspaceName={activeWorkspace?.name}
+                organizationName={activeWorkspace?.organizationName}
+              />
+            </motion.div>
           )}
 
           {currentPage === "orgCenter" && (
@@ -2090,6 +2181,21 @@ function DesktopHome({
         selectedProfiles={selectedProfilesForGroup}
         onAssignmentComplete={handleGroupAssignmentComplete}
       />
+
+      {appUpdates && (
+        <AppUpdateDialog
+          isOpen={appUpdates.isUpdateDialogOpen}
+          onClose={() => appUpdates.setIsUpdateDialogOpen(false)}
+          updateInfo={appUpdates.updateInfo}
+          isUpdating={appUpdates.isUpdating}
+          updateProgress={appUpdates.updateProgress}
+          updateReady={appUpdates.updateReady}
+          onUpdate={() => void appUpdates.handleAppUpdate()}
+          onRestart={appUpdates.handleRestart}
+          autoUpdatesEnabled={appUpdates.autoUpdatesEnabled}
+          onToggleAutoUpdates={appUpdates.setAutoUpdatesEnabled}
+        />
+      )}
 
       <ExtensionGroupAssignmentDialog
         isOpen={extensionGroupAssignmentDialogOpen}

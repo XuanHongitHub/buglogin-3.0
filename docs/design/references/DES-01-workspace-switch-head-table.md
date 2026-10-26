@@ -1,6 +1,6 @@
 # DES-01 Reference Package: Workspace Switcher & Unified Head Table
 
-Status: draft reference package  
+Status: superseded by DES-02 and DES-03  
 Screen: DES-01 Profiles Home (Titlebar, Workspace Switch, and Table Header)  
 Authority: `docs/design/ui-authority.md`, `DESIGN.md`, `docs/design/information-architecture.md`, pinned Donut upstream source (`.tmp/donutbrowser-upstream`).  
 Last updated: 2026-10-19  
