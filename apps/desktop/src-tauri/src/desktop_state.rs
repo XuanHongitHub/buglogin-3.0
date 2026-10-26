@@ -4688,39 +4688,11 @@ impl ProductionDesktopState {
                     })?,
             );
         }
-        self.ensure_device_key_registered(&correlation_id).await?;
-        let rotation_recipients = match self
-            .client
-            .profile_key_rotation_recipients(&profile_id, &correlation_id)
-            .await
-        {
-            Ok(recipients) => Some(recipients),
-            Err(error) if error.code == "sync_key_rotation_not_pending" || error.status == 404 => {
-                if confirmed_recipients.is_some() {
-                    return Err(Problem::new(
-                        "profile_key_rotation_snapshot_stale",
-                        "The profile no longer has the reviewed pending key rotation",
-                        409,
-                        &correlation_id,
-                    ));
-                }
-                None
-            }
-            Err(error) if error.code == "profile_forbidden" => {
-                if confirmed_recipients.is_some() {
-                    return Err(error);
-                }
-                None
-            }
-            Err(error) if error.code == "profile_key_enrollment_required" => return Err(error),
-            Err(error) => return Err(error),
-        };
         let auth = self.auth(&correlation_id)?;
         let scope = CoordinationScope {
             workspace_id: &binding.workspace_id,
             auth: &auth,
         };
-        let profile = self.client.profile(&profile_id, &correlation_id).await?;
         let (previous, stale_proxy_dependency) = match self
             .client
             .current_manifest(scope.clone(), &binding.resource_id)
@@ -4755,6 +4727,61 @@ impl ProductionDesktopState {
             }
             Err(error) => return Err(error),
         };
+        if let Some(stopped) = preheld_stop.as_ref().filter(|stopped| stopped.was_launched) {
+            let lease = stopped.lease.as_ref().ok_or_else(|| {
+                Problem::new(
+                    "production_write_authority_required",
+                    "Production write authority is required",
+                    409,
+                    &correlation_id,
+                )
+            })?;
+            self.client
+                .runtime_stopped(
+                    &profile_id,
+                    auth.actor_id(),
+                    previous.generation,
+                    &previous.root_checksum,
+                    lease,
+                    &runtime_projection_idempotency_key(
+                        &idempotency_key,
+                        "process-stopped-preflight",
+                    ),
+                    &correlation_id,
+                )
+                .await?;
+        }
+        // Publish the stopped state before device-key enrollment and key-rotation
+        // checks. Those can reject the sync after the browser is already closed;
+        // the remote profile must not remain marked Running in that case.
+        self.ensure_device_key_registered(&correlation_id).await?;
+        let rotation_recipients = match self
+            .client
+            .profile_key_rotation_recipients(&profile_id, &correlation_id)
+            .await
+        {
+            Ok(recipients) => Some(recipients),
+            Err(error) if error.code == "sync_key_rotation_not_pending" || error.status == 404 => {
+                if confirmed_recipients.is_some() {
+                    return Err(Problem::new(
+                        "profile_key_rotation_snapshot_stale",
+                        "The profile no longer has the reviewed pending key rotation",
+                        409,
+                        &correlation_id,
+                    ));
+                }
+                None
+            }
+            Err(error) if error.code == "profile_forbidden" => {
+                if confirmed_recipients.is_some() {
+                    return Err(error);
+                }
+                None
+            }
+            Err(error) if error.code == "profile_key_enrollment_required" => return Err(error),
+            Err(error) => return Err(error),
+        };
+        let profile = self.client.profile(&profile_id, &correlation_id).await?;
         let initial_owner_key_enrollment = rotation_recipients.as_ref().is_some_and(|recipients| {
             previous.generation == 1
                 && previous.objects.is_empty()
@@ -4964,6 +4991,30 @@ impl ProductionDesktopState {
                     )
                     .await?;
                 stopped.was_launched = was_launched;
+                if was_launched {
+                    let refreshed_lease = stopped.lease.as_ref().ok_or_else(|| {
+                        Problem::new(
+                            "production_write_authority_required",
+                            "Production write authority is required",
+                            409,
+                            &correlation_id,
+                        )
+                    })?;
+                    self.client
+                        .runtime_stopped(
+                            &profile_id,
+                            auth.actor_id(),
+                            previous.generation,
+                            &previous.root_checksum,
+                            refreshed_lease,
+                            &runtime_projection_idempotency_key(
+                                &idempotency_key,
+                                "process-stopped-fence-refresh",
+                            ),
+                            &correlation_id,
+                        )
+                        .await?;
+                }
             }
             let lease = stopped.lease.as_ref().ok_or_else(|| {
                 Problem::new(
@@ -4983,19 +5034,6 @@ impl ProductionDesktopState {
                     409,
                     correlation_id,
                 ));
-            }
-            if stopped.was_launched {
-                self.client
-                    .runtime_stopped(
-                        &profile_id,
-                        auth.actor_id(),
-                        previous.generation,
-                        &previous.root_checksum,
-                        lease,
-                        &runtime_projection_idempotency_key(&idempotency_key, "process-stopped"),
-                        &correlation_id,
-                    )
-                    .await?;
             }
             if pending_proxy_assignment
                 .as_ref()
