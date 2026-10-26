@@ -211,6 +211,49 @@ impl MemberService {
         Ok(member)
     }
 
+    /// Restore the organization owner's workspace-owner membership when a
+    /// legacy workspace has no active owner. This is an idempotent control
+    /// state backfill; an existing active owner is always preserved.
+    pub fn backfill_workspace_owners(&mut self, candidates: Vec<Member>) -> usize {
+        let mut changed = 0;
+        for mut candidate in candidates {
+            if self.members.values().any(|member| {
+                member.workspace_id == candidate.workspace_id
+                    && member.role == MemberRole::Owner
+                    && member.status == MemberStatus::Active
+            }) {
+                continue;
+            }
+            let existing = self.members.values().find(|member| {
+                member.workspace_id == candidate.workspace_id
+                    && member.account_id == candidate.account_id
+            });
+            if let Some(existing) = existing {
+                if existing.status != MemberStatus::Active {
+                    continue;
+                }
+                if existing.role == MemberRole::Owner {
+                    continue;
+                }
+                let id = existing.id.clone();
+                if let Some(existing) = self.members.get_mut(&id) {
+                    existing.role = MemberRole::Owner;
+                    changed += 1;
+                }
+                continue;
+            }
+            if self.members.contains_key(&candidate.id) {
+                continue;
+            }
+            candidate.role = MemberRole::Owner;
+            candidate.status = MemberStatus::Active;
+            candidate.invite_expires_at = None;
+            self.members.insert(candidate.id.clone(), candidate);
+            changed += 1;
+        }
+        changed
+    }
+
     pub fn active_in_workspace(&self, id: &MemberId, workspace_id: &WorkspaceId) -> bool {
         self.members.get(id).is_some_and(|member| {
             &member.workspace_id == workspace_id && member.status == MemberStatus::Active
@@ -825,6 +868,25 @@ mod tests {
             status: MemberStatus::Invited,
             invite_expires_at: Some(100),
         }
+    }
+
+    #[test]
+    fn workspace_owner_backfill_is_idempotent_and_preserves_existing_owners() {
+        let workspace_id = WorkspaceId::new("ws_owner_backfill").unwrap();
+        let owner = Member {
+            id: MemberId::new("mem_owner_backfill").unwrap(),
+            account_id: AccountId::new("acct_owner_backfill").unwrap(),
+            workspace_id: workspace_id.clone(),
+            team_id: None,
+            role: MemberRole::Owner,
+            status: MemberStatus::Active,
+            invite_expires_at: None,
+        };
+        let mut service = MemberService::default();
+
+        assert_eq!(service.backfill_workspace_owners(vec![owner.clone()]), 1);
+        assert_eq!(service.backfill_workspace_owners(vec![owner.clone()]), 0);
+        assert_eq!(service.active_for_account(&owner.account_id), vec![owner]);
     }
 
     #[test]

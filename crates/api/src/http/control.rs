@@ -4096,13 +4096,21 @@ async fn create_workspace(
         scope,
         workspace.id.as_str(),
         || {
-            state
+            let mut workspaces = state
                 .workspaces
                 .write()
-                .map_err(|_| service_unavailable("workspace"))?
+                .map_err(|_| service_unavailable("workspace"))?;
+            let mut members = state
+                .members
+                .write()
+                .map_err(|_| service_unavailable("member"))?;
+            workspaces
                 .create_workspace(&principal, &grants, &organization_id, workspace.clone())
-                .map_err(response_problem)
-                .map(|_| workspace.clone())
+                .map_err(response_problem)?;
+            let owner_candidates =
+                workspaces.workspace_owner_membership_candidates(&members.all_members());
+            members.backfill_workspace_owners(owner_candidates);
+            Ok(workspace.clone())
         },
     )
     .await

@@ -219,10 +219,19 @@ fn persist_organization_member_backfill(
     mut revision: u64,
 ) -> Result<(ControlAggregate, u64), Problem> {
     for _ in 0..3 {
-        let candidates = aggregate
+        let organization_candidates = aggregate
             .workspaces
             .organization_membership_candidates(&aggregate.members.all_members());
-        let inserted = aggregate.organization_members.backfill_active(candidates);
+        let organization_inserted = aggregate
+            .organization_members
+            .backfill_active(organization_candidates);
+        let workspace_owner_candidates = aggregate
+            .workspaces
+            .workspace_owner_membership_candidates(&aggregate.members.all_members());
+        let workspace_owner_inserted = aggregate
+            .members
+            .backfill_workspace_owners(workspace_owner_candidates);
+        let inserted = organization_inserted + workspace_owner_inserted;
         if inserted == 0 || revision == 0 {
             return Ok((aggregate, revision));
         }
@@ -236,8 +245,8 @@ fn persist_organization_member_backfill(
         })?;
         let result = persistence.execute(ExecuteControlCommand {
             tenant_id: CONTROL_TENANT.into(),
-            command_id: "migration.organization_member.backfill.v1".into(),
-            idempotency_key: format!("organization-member-backfill-v1-{revision}"),
+            command_id: "migration.workspace_owner_membership.backfill.v1".into(),
+            idempotency_key: format!("workspace-owner-membership-backfill-v1-{revision}"),
             expected_revisions: BTreeMap::from([(
                 ControlRecordKey {
                     tenant_id: CONTROL_TENANT.into(),
@@ -256,12 +265,13 @@ fn persist_organization_member_backfill(
             deletes: Vec::new(),
             audit: ControlAuditEntry {
                 tenant_id: CONTROL_TENANT.into(),
-                command_id: "migration.organization_member.backfill.v1".into(),
-                actor_id: "system:organization-member-backfill".into(),
+                command_id: "migration.workspace_owner_membership.backfill.v1".into(),
+                actor_id: "system:workspace-owner-membership-backfill".into(),
                 allowed: true,
                 detail: serde_json::json!({
-                    "insertedMemberships": inserted,
-                    "source": "existing_organization_owners_and_workspace_memberships",
+                    "insertedOrganizationMemberships": organization_inserted,
+                    "backfilledWorkspaceOwnerMemberships": workspace_owner_inserted,
+                    "source": "organization_owner_and_existing_workspace_membership_records",
                 }),
             },
             response: HttpResponse {

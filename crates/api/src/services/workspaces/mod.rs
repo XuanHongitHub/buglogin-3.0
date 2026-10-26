@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use buglogin_domain::{
     errors::Problem,
-    ids::{AccountId, OrganizationId, WorkspaceId},
-    member::{Member, MemberStatus},
+    ids::{AccountId, MemberId, OrganizationId, WorkspaceId},
+    member::{Member, MemberRole, MemberStatus},
     organization::{Organization, OrganizationPolicy, OrganizationSnapshot},
     permissions::{Action, Capability, Grant, Principal, ResourceScope, is_allowed},
     workspace::{OfflineEntitlement, Workspace, WorkspaceUsage},
@@ -87,6 +88,60 @@ impl WorkspaceService {
             }
         }
         candidates.into_iter().collect()
+    }
+
+    /// Add the owning account as a workspace owner when a workspace has no
+    /// active owner. Older workspace creation paths did not create this
+    /// membership, which prevents the owner device from receiving the first
+    /// encrypted profile key envelope.
+    pub fn workspace_owner_membership_candidates(&self, members: &[Member]) -> Vec<Member> {
+        let mut candidates = Vec::new();
+        for record in self.organizations.values() {
+            for workspace_id in record.workspaces.keys() {
+                if members.iter().any(|member| {
+                    &member.workspace_id == workspace_id
+                        && member.role == MemberRole::Owner
+                        && member.status == MemberStatus::Active
+                }) {
+                    continue;
+                }
+
+                let owner_account = &record.organization.account_id;
+                if let Some(existing) = members.iter().find(|member| {
+                    &member.workspace_id == workspace_id && &member.account_id == owner_account
+                }) {
+                    if existing.status != MemberStatus::Active {
+                        continue;
+                    }
+                    let mut owner = existing.clone();
+                    owner.role = MemberRole::Owner;
+                    candidates.push(owner);
+                    continue;
+                }
+
+                let id_digest = sha2::Sha256::digest(workspace_id.as_str().as_bytes());
+                let member_id = format!(
+                    "mem_workspace_owner_{}",
+                    id_digest[..12]
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                );
+                let Ok(id) = MemberId::new(member_id) else {
+                    continue;
+                };
+                candidates.push(Member {
+                    id,
+                    account_id: owner_account.clone(),
+                    workspace_id: workspace_id.clone(),
+                    team_id: None,
+                    role: MemberRole::Owner,
+                    status: MemberStatus::Active,
+                    invite_expires_at: None,
+                });
+            }
+        }
+        candidates
     }
 
     pub fn workspace_ids_in_organization(
@@ -951,6 +1006,47 @@ mod tests {
                 (organization.id.clone(), organization.account_id.clone()),
             ]
         );
+    }
+
+    #[test]
+    fn workspace_owner_backfill_targets_org_owner_only_when_no_active_owner_exists() {
+        let organization = organization("org_owner_backfill", "acct_org_owner");
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let missing_owner_workspace = workspace("ws_missing_owner", &organization.id);
+        let existing_owner_workspace = workspace("ws_existing_owner", &organization.id);
+        service
+            .create_workspace(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                missing_owner_workspace.clone(),
+            )
+            .unwrap();
+        service
+            .create_workspace(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                existing_owner_workspace.clone(),
+            )
+            .unwrap();
+        let existing_owner = Member {
+            id: MemberId::new("mem_existing_workspace_owner").unwrap(),
+            account_id: AccountId::new("acct_other_owner").unwrap(),
+            workspace_id: existing_owner_workspace.id.clone(),
+            team_id: None,
+            role: MemberRole::Owner,
+            status: MemberStatus::Active,
+            invite_expires_at: None,
+        };
+
+        let candidates = service.workspace_owner_membership_candidates(&[existing_owner]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].workspace_id, missing_owner_workspace.id);
+        assert_eq!(candidates[0].account_id, organization.account_id);
+        assert_eq!(candidates[0].role, MemberRole::Owner);
+        assert_eq!(candidates[0].status, MemberStatus::Active);
     }
 
     #[test]
