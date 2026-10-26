@@ -51,7 +51,6 @@ import { ProfileHandoffStatus } from "@/components/profile-handoff-status";
 import { ProfileLaunchActivity } from "@/components/profile-launch-activity";
 import { ProfileMetadataCard } from "@/components/profile-metadata-card";
 import { ExportProfileSection } from "@/components/profile-transfer";
-import { RestorePoints } from "@/components/restore-points";
 import { SharedFingerprintConfigForm } from "@/components/shared-fingerprint-config-form";
 import { ProfileTotpSection } from "@/components/totp-code";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -1478,7 +1477,7 @@ function ProfileInfoLayout({
                 isRunning={isRunning}
                 isDisabled={isDisabled}
                 onCopyCookies={cookiesCopyAction?.onClick}
-                onManageCookies={() => onOpenCookieManagement?.(profile)}
+                onManageCookies={cookiesManageAction?.onClick}
                 t={t}
               />
             ))}
@@ -1896,9 +1895,6 @@ function SyncSectionInline({
             </p>
           )}
         </div>
-      )}
-      {syncMode !== "Disabled" && (
-        <RestorePoints profileId={profile.id} isDisabled={isDisabled} />
       )}
       {error && <p className="text-xs text-destructive-text">{error}</p>}
     </div>

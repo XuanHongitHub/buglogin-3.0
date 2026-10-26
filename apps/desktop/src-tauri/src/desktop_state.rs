@@ -2627,12 +2627,69 @@ impl ProductionDesktopState {
                 let synced = manifest.as_ref().is_some_and(|manifest| {
                     manifest.generation > 1 || manifest.payload_encryption.is_some()
                 });
+                let local_changes_pending = manifest
+                    .as_ref()
+                    .map(|manifest| {
+                        self.projection
+                            .dirty_local_generation(&profile_id, manifest)
+                            .map(|path| path.is_some())
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                let (can_open, can_open_error) = match manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.payload_encryption.as_ref())
+                {
+                    None => (true, None),
+                    Some(encryption) => {
+                        let key_version = encryption.key_version.as_deref();
+                        match key_version {
+                            Some(key_version)
+                                if self
+                                    .sync_key_vault
+                                    .load_for_manifest(
+                                        &binding.workspace_id,
+                                        &binding.resource_id,
+                                        key_version,
+                                        correlation_id,
+                                    )
+                                    .is_ok_and(|keys| keys.is_some()) =>
+                            {
+                                (true, None)
+                            }
+                            Some(key_version) => {
+                                match self
+                                    .recover_profile_key_envelope(
+                                        &binding,
+                                        &profile_id,
+                                        key_version,
+                                        correlation_id,
+                                    )
+                                    .await
+                                {
+                                    Ok(_) => (true, None),
+                                    Err(error)
+                                        if error.code == "sync_key_recovery_required"
+                                            || error.code == "profile_forbidden" =>
+                                    {
+                                        (false, Some(error.code))
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            None => (false, Some("profile_key_version_missing".to_owned())),
+                        }
+                    }
+                };
                 Ok(result(
                     "profile.sync.status.get",
                     correlation_id,
                     json!({
-                        "status": if synced { "synced" } else { "waiting" },
-                        "generation": generation
+                        "status": if synced && !local_changes_pending { "synced" } else { "waiting" },
+                        "generation": generation,
+                        "local_changes_pending": local_changes_pending,
+                        "can_open": can_open,
+                        "can_open_error": can_open_error
                     }),
                 ))
             }
@@ -2847,6 +2904,34 @@ impl ProductionDesktopState {
         key_version: &str,
         correlation_id: &str,
     ) -> Result<crate::sync_key_vault::ResourceKeys, Problem> {
+        match self.client.fetch_profile_managed_key(profile_id, correlation_id).await {
+            Ok(mut managed) => {
+                let mut raw = decode_profile_key_hex(&managed.resource_key).ok_or_else(|| {
+                    Problem::new("managed_profile_key_invalid", "Managed profile key is invalid", 502, correlation_id)
+                })?;
+                managed.resource_key.zeroize();
+                let client = buglogin_sync::crypto::ClientKey::from_bytes(raw);
+                raw.zeroize();
+                if format!("{:x}", Sha256::digest(client.as_bytes())) != key_version {
+                    return Err(Problem::new("profile_key_version_mismatch", "Managed profile key does not match the active manifest", 409, correlation_id));
+                }
+                let recovery = buglogin_sync::crypto::RecoveryKey::generate()?;
+                self.sync_key_vault.replace_recovered_for_manifest(
+                    &binding.workspace_id, &binding.resource_id, client, recovery,
+                    key_version, correlation_id,
+                )?;
+                return self.sync_key_vault.load_for_manifest(
+                    &binding.workspace_id, &binding.resource_id, key_version, correlation_id,
+                )?.ok_or_else(|| Problem::new(
+                    "sync_key_vault_unavailable",
+                    "Managed profile key was not persisted on this device",
+                    503,
+                    correlation_id,
+                ));
+            }
+            Err(error) if error.code == "managed_profile_key_not_enrolled" => {}
+            Err(error) => return Err(error),
+        }
         self.ensure_device_key_registered(correlation_id).await?;
         let envelope = match self
             .client
@@ -2904,17 +2989,8 @@ impl ProductionDesktopState {
         &self,
         correlation_id: &str,
         idempotency_key: Option<&str>,
-        mut payload: Value,
+        payload: Value,
     ) -> Result<CommandResult<Value>, Problem> {
-        let confirmations = payload
-            .as_object_mut()
-            .and_then(|payload| payload.remove("confirmedDeviceFingerprints"))
-            .map(|value| {
-                serde_json::from_value::<Vec<ConfirmedDeviceFingerprint>>(value)
-                    .map_err(|_| invalid_input("confirmedDeviceFingerprints", correlation_id))
-            })
-            .transpose()?
-            .unwrap_or_default();
         let mut request: ProfileShareInput = serde_json::from_value(payload)
             .map_err(|_| invalid_input("profileShare", correlation_id))?;
         let binding = self
@@ -2946,17 +3022,15 @@ impl ProductionDesktopState {
                         correlation_id,
                     )
                 })?;
-            let keys = self
+            let keys = match self
                 .sync_key_vault
                 .load(&binding.workspace_id, &binding.resource_id, correlation_id)?
-                .ok_or_else(|| {
-                    Problem::new(
-                        "sync_key_recovery_required",
-                        "Recover this profile's sync keys on this device before sharing it",
-                        409,
-                        correlation_id,
-                    )
-                })?;
+            {
+                Some(keys) => keys,
+                None => self.recover_profile_key_envelope(
+                    &binding, &request.profile_id, key_version, correlation_id,
+                ).await?,
+            };
             let actual_key_version = format!("{:x}", Sha256::digest(keys.client.as_bytes()));
             if actual_key_version != key_version {
                 return Err(Problem::new(
@@ -2967,87 +3041,12 @@ impl ProductionDesktopState {
                 ));
             }
 
-            let device_keys = self
-                .client
-                .profile_share_recipient_device_keys(
-                    &request.profile_id,
-                    &request.member_id,
-                    correlation_id,
-                )
-                .await?;
-            if device_keys.is_empty()
-                || device_keys.len() > 64
-                || confirmations.len() != device_keys.len()
-            {
-                return Err(Problem::new(
-                    "recipient_device_fingerprint_review_required",
-                    "Review every active recipient device fingerprint before sharing this encrypted profile",
-                    409,
-                    correlation_id,
-                ));
-            }
-            let mut confirmed_by_device = BTreeMap::new();
-            for confirmation in confirmations {
-                if DeviceId::new(confirmation.device_id.clone()).is_err()
-                    || confirmation.fingerprint.len() != 64
-                    || !confirmation
-                        .fingerprint
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit())
-                    || confirmed_by_device
-                        .insert(confirmation.device_id.clone(), confirmation.fingerprint)
-                        .is_some()
-                {
-                    return Err(invalid_input("confirmedDeviceFingerprints", correlation_id));
-                }
-            }
-            if confirmed_by_device.len() != device_keys.len() {
-                return Err(Problem::new(
-                    "recipient_device_fingerprint_review_required",
-                    "Review every active recipient device fingerprint before sharing this encrypted profile",
-                    409,
-                    correlation_id,
-                ));
-            }
-
-            let mut envelopes = Vec::with_capacity(device_keys.len());
-            for device in device_keys {
-                let confirmed_fingerprint = confirmed_by_device
-                    .remove(&device.device_id)
-                    .filter(|fingerprint| *fingerprint == device.fingerprint)
-                    .ok_or_else(|| {
-                        Problem::new(
-                            "recipient_device_fingerprint_changed",
-                            "A recipient device fingerprint changed; review devices again",
-                            409,
-                            correlation_id,
-                        )
-                    })?;
-                let public_key = parse_device_public_key(&device.public_key, correlation_id)?;
-                let public_key_fingerprint = format!("{:x}", Sha256::digest(public_key.as_bytes()));
-                if public_key_fingerprint != device.fingerprint {
-                    return Err(Problem::new(
-                        "recipient_device_key_invalid",
-                        "Recipient device key does not match its registered fingerprint",
-                        409,
-                        correlation_id,
-                    ));
-                }
-                let envelope = buglogin_sync::crypto::seal_profile_key_share(
-                    binding.workspace_id.clone(),
-                    binding.resource_id.clone(),
-                    device.device_id,
-                    key_version.to_owned(),
-                    &public_key,
-                    &keys.client,
-                    &keys.recovery,
-                )?;
-                envelopes.push(ConfirmedProfileKeyShareEnvelope {
-                    envelope,
-                    confirmed_fingerprint,
-                });
-            }
-            request.recipient_key_envelopes = envelopes;
+            self.client.enroll_profile_managed_key(
+                &request.profile_id,
+                &encode_hex(keys.client.as_bytes()),
+                correlation_id,
+            ).await?;
+            request.recipient_key_envelopes.clear();
         } else {
             request.recipient_key_envelopes.clear();
         }
@@ -3951,18 +3950,27 @@ impl ProductionDesktopState {
                 .await?
                 .iter()
                 .any(|running| running == &profile_id);
+        let mut pending_session_sync_error = None;
         if pending_local_session {
             // Finish the prior session's sync/lease release before opening a
             // new browser process for the same profile.
-            self.stop_profile(
-                profile_id.clone(),
-                runtime_projection_idempotency_key(&idempotency_key, "exited-session-recovery"),
-                correlation_id.clone(),
-                None,
-                None,
-                None,
-            )
-            .await?;
+            match self
+                .stop_profile(
+                    profile_id.clone(),
+                    runtime_projection_idempotency_key(&idempotency_key, "exited-session-recovery"),
+                    correlation_id.clone(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if error.code == "sync_manifest_conflict" => {
+                    pending_session_sync_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
             profile = self.client.profile(&profile_id, &correlation_id).await?;
         }
         if !launch_state_allows_start(
@@ -4033,6 +4041,30 @@ impl ProductionDesktopState {
             workspace_id: &binding.workspace_id,
             auth: &auth,
         };
+        // Optional extension preparation never changes profile authorization or sync authority.
+        // Read group sources through the authenticated API, then install on this device in Rust.
+        let extension_preparation: Result<crate::extension_features::PreparedExtensions, Problem> = async {
+            let Some(group_id) = profile.value.extension_group_id.as_ref() else {
+                return Ok(crate::extension_features::PreparedExtensions::default());
+            };
+            let response = self.client.invoke("extension_group_get", &correlation_id, None,
+                json!({"workspaceId": binding.workspace_id, "extensionGroupId": group_id})).await?;
+            let group: buglogin_domain::entities::ExtensionGroup = serde_json::from_value(response.data["group"].clone())
+                .map_err(|_| serialization(&correlation_id))?;
+            crate::extension_features::prepare_for_profile(profile_id.as_str(), &group.extension_ids, &group.extension_sources).await
+                .map_err(|message| Problem::new("extension_prepare_failed", "Extensions could not be prepared", 503, &correlation_id).with_detail(message))
+        }.await;
+        let prepared_extensions = match extension_preparation {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.extensions.prepare", error.clone());
+                crate::extension_features::PreparedExtensions { paths: Vec::new(), warnings: vec![error.title] }
+            }
+        };
+        for warning in &prepared_extensions.warnings {
+            crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.extensions.update",
+                Problem::new("extension_update_deferred", "Extension update deferred", 503, &correlation_id).with_detail(warning.clone()));
+        }
         let (mut manifest, manifest_proxy_stale) = match self
             .client
             .current_manifest(scope.clone(), &binding.resource_id)
@@ -4104,28 +4136,82 @@ impl ProductionDesktopState {
             .or(self
                 .projection
                 .dirty_local_generation(&profile_id, &manifest)?);
+        let mut deferred_recovery_error = None;
+        let mut local_recovery_receipt = None;
         if recovery_path.is_some() || stale_proxy_dependency {
-            self.stop_profile(
-                profile_id.clone(),
-                runtime_projection_idempotency_key(&idempotency_key, "local-recovery-sync"),
-                correlation_id.clone(),
-                None,
-                None,
-                None,
-            )
-            .await?;
-            manifest = self
-                .client
-                .current_manifest(scope.clone(), &binding.resource_id)
-                .await?
-                .ok_or_else(|| {
-                    Problem::new(
-                        "production_manifest_not_found",
-                        "Production profile manifest not found after local recovery sync",
-                        409,
-                        &correlation_id,
-                    )
-                })?;
+            let recovery_sync = if let Some(error) = pending_session_sync_error.take() {
+                Err(error)
+            } else {
+                self.stop_profile(
+                    profile_id.clone(),
+                    runtime_projection_idempotency_key(&idempotency_key, "local-recovery-sync"),
+                    correlation_id.clone(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            };
+            match recovery_sync {
+                Ok(_) => {
+                    manifest = self
+                        .client
+                        .current_manifest(scope.clone(), &binding.resource_id)
+                        .await?
+                        .ok_or_else(|| {
+                            Problem::new(
+                                "production_manifest_not_found",
+                                "Production profile manifest not found after local recovery sync",
+                                409,
+                                &correlation_id,
+                            )
+                        })?;
+                }
+                Err(error) if error.code == "sync_manifest_conflict" => {
+                    // A failed upload must not prevent opening a still-current,
+                    // locally decrypted generation. Never use this fallback if
+                    // the process is alive, the remote base moved, or the local
+                    // generation cannot be tied to the manifest.
+                    let still_running = self
+                        .profile_runtime
+                        .active_profiles()
+                        .await?
+                        .iter()
+                        .any(|running| running == &profile_id);
+                    if still_running || stale_proxy_dependency {
+                        return Err(error);
+                    }
+                    let current = self
+                        .client
+                        .current_manifest(scope.clone(), &binding.resource_id)
+                        .await?
+                        .ok_or_else(|| {
+                            Problem::new(
+                                "production_manifest_not_found",
+                                "Production profile manifest not found after local recovery sync",
+                                409,
+                                &correlation_id,
+                            )
+                        })?;
+                    if current != manifest {
+                        return Err(error);
+                    }
+                    local_recovery_receipt = self
+                        .projection
+                        .verified_local_recovery_receipt(&profile_id, &current)?;
+                    let Some(_) = local_recovery_receipt else {
+                        return Err(error);
+                    };
+                    crate::diagnostics::report_problem_failure(
+                        DesktopState::Production(self.clone()),
+                        "profile.launch.deferred_sync",
+                        error.clone(),
+                    );
+                    deferred_recovery_error = Some(error);
+                    manifest = current;
+                }
+                Err(error) => return Err(error),
+            }
             profile = self.client.profile(&profile_id, &correlation_id).await?;
             fingerprint_target =
                 target_from_runtime_config(profile.value.runtime_config.as_ref(), &correlation_id)?;
@@ -4200,18 +4286,22 @@ impl ProductionDesktopState {
             None
         };
         for attempt in 0..2 {
-            let (projection, mut proxy_credentials) = self
-                .projection
-                .hydrate_encrypted_with_proxy_credentials(
-                    &self.client,
-                    &auth,
-                    &profile_id,
-                    &manifest,
-                    workspace_keys.as_ref().map(|keys| &keys.client),
-                    workspace_keys.as_ref().map(|keys| &keys.recovery),
-                    &correlation_id,
-                )
-                .await?;
+            let (projection, mut proxy_credentials) =
+                if let Some(receipt) = local_recovery_receipt.clone() {
+                    (receipt, Vec::new())
+                } else {
+                    self.projection
+                        .hydrate_encrypted_with_proxy_credentials(
+                            &self.client,
+                            &auth,
+                            &profile_id,
+                            &manifest,
+                            workspace_keys.as_ref().map(|keys| &keys.client),
+                            workspace_keys.as_ref().map(|keys| &keys.recovery),
+                            &correlation_id,
+                        )
+                        .await?
+                };
             let lease_key = lease_idempotency_key(&idempotency_key, manifest.generation);
             let lease = self
                 .client
@@ -4263,6 +4353,8 @@ impl ProductionDesktopState {
                     .retryable(true));
                 }
                 manifest = latest;
+                local_recovery_receipt = None;
+                deferred_recovery_error = None;
                 continue;
             }
             let launch_specification = self
@@ -4281,6 +4373,10 @@ impl ProductionDesktopState {
                     return Err(error);
                 }
             };
+            if !prepared_extensions.paths.is_empty() {
+                let paths = prepared_extensions.paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>().join(",");
+                push_or_replace_arg(&mut specification.args, format!("--load-extension={paths}"));
+            }
             let mut proxy_bridge = None;
             if let Some(proxy) = proxy_launch.as_ref() {
                 let proxy_server = if proxy.has_credential {
@@ -4438,11 +4534,12 @@ impl ProductionDesktopState {
             {
                 Ok(receipt) => receipt,
                 Err(mut error) => {
-                    let _ = self.projection.clear_active_session(&profile_id);
+                    let _ = self.projection.clear_active_session_marker(&profile_id);
                     error.correlation_id = correlation_id.clone();
                     return Err(error);
                 }
             };
+            let mut fingerprint_warning = None;
             if let Some(target) = fingerprint_target.as_ref() {
                 let cdp_port = match fingerprint_cdp_port {
                     Some(port) => port,
@@ -4453,7 +4550,7 @@ impl ProductionDesktopState {
                             cleanup_error.correlation_id = correlation_id.clone();
                             return Err(cleanup_error);
                         }
-                        let _ = self.projection.clear_active_session(&profile_id);
+                        let _ = self.projection.clear_active_session_marker(&profile_id);
                         return Err(Problem::new(
                             "wayfern_cdp_unavailable",
                             "Wayfern local control port was not configured",
@@ -4462,7 +4559,7 @@ impl ProductionDesktopState {
                         ));
                     }
                 };
-                if let Err(error) = apply_wayfern_fingerprint(
+                match apply_wayfern_fingerprint(
                     &profile_path,
                     target,
                     profile.value.runtime_version.as_deref().unwrap_or_default(),
@@ -4471,14 +4568,22 @@ impl ProductionDesktopState {
                 )
                 .await
                 {
+                    Ok(warning) => {
+                        if let Some(warning) = warning {
+                            crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.fingerprint.default", warning.clone());
+                            fingerprint_warning = Some(warning);
+                        }
+                    }
+                    Err(error) => {
                     if let Err(mut cleanup_error) =
                         self.profile_runtime.stop(profile_id.clone()).await
                     {
                         cleanup_error.correlation_id = correlation_id.clone();
                         return Err(cleanup_error);
                     }
-                    let _ = self.projection.clear_active_session(&profile_id);
+                    let _ = self.projection.clear_active_session_marker(&profile_id);
                     return Err(error);
+                    }
                 }
             }
             if let Err(error) = self
@@ -4505,7 +4610,11 @@ impl ProductionDesktopState {
                 "profileId": profile_id,
                 "processId": receipt.process_id,
                 "generation": generation,
-                "rootChecksum": root_checksum
+                "rootChecksum": root_checksum,
+                "syncDeferred": deferred_recovery_error.is_some(),
+                "extensionWarnings": prepared_extensions.warnings,
+                "extensionCount": prepared_extensions.paths.len(),
+                "fingerprintWarning": fingerprint_warning
             }));
         }
         unreachable!()
@@ -5200,6 +5309,25 @@ impl ProductionDesktopState {
                         &correlation_id,
                     )
                     .await?;
+            }
+            let managed_key_enrollment = self
+                .client
+                .enroll_profile_managed_key(
+                    &profile_id,
+                    &encode_hex(keys_for_snapshot.client.as_bytes()),
+                    &correlation_id,
+                )
+                .await?;
+            if !managed_key_enrollment.enrolled
+                || managed_key_enrollment.key_version
+                    != format!("{:x}", Sha256::digest(keys_for_snapshot.client.as_bytes()))
+            {
+                return Err(Problem::new(
+                    "managed_profile_key_enrollment_failed",
+                    "The synced profile key could not be registered for authorized device recovery",
+                    502,
+                    &correlation_id,
+                ));
             }
             self.projection.clear_active_session(&profile_id)?;
             let key_rotation_error = if rotation_envelopes.is_some() {
@@ -7411,6 +7539,17 @@ fn encode_hex(bytes: &[u8]) -> String {
         encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
     }
     encoded
+}
+
+fn decode_profile_key_hex(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut key = [0_u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(key)
 }
 
 fn parse_device_public_key(

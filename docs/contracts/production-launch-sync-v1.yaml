@@ -469,6 +469,32 @@ migrationEnvelope:
     - repairStaleProxy reads with profile.read and profile.update may expose that active manifest only to re-encrypt against current proxy state; commits and launches still require current dependency revisions
     - proxy credential state requires a separate opaque encrypted envelope object; new commits also bind its opaque credentialVersion to the canonical proxy record
 
+serviceManagedProfileKeys:
+  status: implementation-in-progress
+  wrapping:
+    algorithm: AES-256-GCM authenticated envelope
+    keySource: BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX injected by deployment secret manager
+    associatedData: buglogin/managed-resource-key/v1/{workspaceId}/{resourceId}/{keyVersion}
+    envelopeScope: workspaceId+resourceId+keyVersion
+    durableStore: PostgreSQL control aggregate
+  enrollment:
+    operation: profile.sync.managedkey.enroll
+    transport: authenticated desktop device session over TLS
+    authorization: profile.update
+    idempotency: profileId+keyVersion
+  delivery:
+    operation: profile.sync.managedkey.fetch
+    transport: authenticated desktop device session over TLS
+    authorization: profile.read
+    audit: actor+profile+keyVersion+correlationId; secret values excluded
+    clientPersistence: Rust desktop OS vault only
+    forbiddenSinks: [React, browser UI, MCP, logs, audit detail]
+  revocation: blocks subsequent key delivery after profile ACL refresh; cannot erase keys or plaintext already held by an authorized client
+  limitations:
+    - This environment-key adapter is envelope encryption, not a remote KMS integration; hosted key custody and rotation procedures must be verified before production readiness.
+    - Existing client-managed profile keys are enrolled on the next authorized sync from a device that still has the key in its OS vault.
+    - If every existing device has lost the legacy key, the encrypted profile payload is unrecoverable.
+
 errors:
   - binding_not_found
   - resource_lease_held

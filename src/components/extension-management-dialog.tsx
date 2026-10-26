@@ -82,7 +82,13 @@ type SyncStatus = "disabled" | "syncing" | "synced" | "error" | "waiting";
 
 /** A payload staged in the UI, before it is handed to the backend. */
 type PendingSource =
-  | { kind: "archive"; fileName: string; data: number[] }
+  | {
+      kind: "archive";
+      fileName: string;
+      data: number[];
+      gitSource?: Extension["git_source"];
+      sourceRevision?: string | null;
+    }
   | { kind: "folder"; path: string };
 
 const ARCHIVE_EXTENSIONS = [".crx", ".zip"];
@@ -235,10 +241,6 @@ export function ExtensionManagementDialog({
   const loadData = useCallback(async () => {
     setIsLoading(true);
     let groupFailed = false;
-    // Extension package inventory is a separate CAP-EXT-001 API surface. This
-    // screen currently owns the production CAP-EXT-002 group workflow only.
-    setExtensions([]);
-
     try {
       if (!workspaceId)
         throw new Error("Select a workspace to manage extension groups.");
@@ -256,6 +258,14 @@ export function ExtensionManagementDialog({
     }
 
     if (groupFailed) {
+      showErrorToast(t("extensions.listFailed"));
+    }
+    try {
+      const localExtensions = await invoke<Extension[]>("list_extensions");
+      setExtensions(localExtensions ?? []);
+    } catch (error) {
+      console.error("Failed to load extension packages:", error);
+      setExtensions([]);
       showErrorToast(t("extensions.listFailed"));
     }
     setIsLoading(false);
@@ -546,6 +556,8 @@ export function ExtensionManagementDialog({
         data: Array.from(atob(fetched.file_data), (character) =>
           character.charCodeAt(0),
         ),
+        gitSource: fetched.git_source,
+        sourceRevision: fetched.source_revision,
       });
       setExtensionName(identity || fetched.file_name.replace(/\.zip$/i, ""));
       setLinkFolder(false);
@@ -579,6 +591,8 @@ export function ExtensionManagementDialog({
           name: extensionName.trim(),
           fileName: pendingSource.fileName,
           fileData: pendingSource.data,
+          gitSource: pendingSource.gitSource ?? null,
+          sourceRevision: pendingSource.sourceRevision ?? null,
         });
       }
       showSuccessToast(t("extensions.uploadSuccess"));
@@ -858,6 +872,23 @@ export function ExtensionManagementDialog({
    * the store, or a folder loaded in place from the user's disk. */
   const renderSource = useCallback(
     (ext: Extension) => {
+      if (ext.git_source) {
+        return (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="block min-w-0 truncate text-xs text-muted-foreground">
+                GitHub · {ext.git_source.reference}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {t("extensions.gitSourceHint", {
+                url: ext.git_source.repositoryUrl,
+                branch: ext.git_source.reference,
+              })}
+            </TooltipContent>
+          </Tooltip>
+        );
+      }
       if (ext.linked_path) {
         return (
           <Tooltip>
@@ -1419,11 +1450,19 @@ export function ExtensionManagementDialog({
           <div className="@container relative flex min-h-0 w-full flex-1 flex-col">
             <AnimatedTabs
               value={activeTab}
-              onValueChange={() => setActiveTab("groups")}
+              onValueChange={(value) =>
+                setActiveTab(value as "extensions" | "groups")
+              }
               className="flex min-h-0 flex-1 flex-col"
             >
               <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
                 <AnimatedTabsList>
+                  <AnimatedTabsTrigger value="extensions">
+                    <span>{t("extensions.extensionsTab")}</span>
+                    <span className="text-xs tabular-nums">
+                      {extensions.length}
+                    </span>
+                  </AnimatedTabsTrigger>
                   <AnimatedTabsTrigger value="groups">
                     <span>{t("extensions.groupsTab")}</span>
                     <span className="text-xs tabular-nums">
@@ -1514,11 +1553,6 @@ export function ExtensionManagementDialog({
                     </Tooltip>
                   )}
                 </div>
-              </div>
-
-              {/* Notice */}
-              <div className="mt-4 shrink-0 rounded-md bg-muted/50 p-3 text-sm text-muted-foreground">
-                {t("extensions.catalogUnavailable")}
               </div>
 
               <AnimatedTabsContent

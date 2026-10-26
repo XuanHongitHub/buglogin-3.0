@@ -61,6 +61,73 @@ pub struct WorkspaceService {
 }
 
 impl WorkspaceService {
+    pub fn delete_organization(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization_id: &OrganizationId,
+        expected_revision: u64,
+    ) -> Result<Organization, Problem> {
+        self.authorize_organization_management(principal, grants, organization_id, Action::Delete)?;
+        let record = self.organizations.get(organization_id)
+            .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        check_revision(record.revision, expected_revision)?;
+        if !record.workspaces.is_empty() {
+            return Err(problem("organization_not_empty", "Remove the organization's workspaces before deleting it", 409)
+                .with_field("workspaceCount", record.workspaces.len()));
+        }
+        let organization = record.organization.clone();
+        self.organizations.remove(organization_id);
+        Ok(organization)
+    }
+
+    pub fn delete_workspace(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization_id: &OrganizationId,
+        workspace_id: &WorkspaceId,
+        expected_revision: u64,
+    ) -> Result<Workspace, Problem> {
+        if self.authorize_organization_management(principal, grants, organization_id, Action::Delete).is_err() {
+            authorize(principal, grants, workspace_id, Action::Delete)?;
+        }
+        let record = self.organizations.get_mut(organization_id)
+            .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        let workspace = record.workspaces.get(workspace_id)
+            .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))?.clone();
+        check_revision(record.workspace_revisions.get(workspace_id).copied().unwrap_or_else(initial_revision), expected_revision)?;
+        record.workspaces.remove(workspace_id);
+        record.workspace_revisions.remove(workspace_id);
+        record.revision = next_revision(record.revision)?;
+        Ok(workspace)
+    }
+
+    pub fn transfer_organization_owner(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization_id: &OrganizationId,
+        account_id: &AccountId,
+        expected_revision: u64,
+    ) -> Result<Organization, Problem> {
+        let organization = self.authorize_organization_management(principal, grants, organization_id, Action::Manage)?;
+        if principal.account_id.as_ref() != Some(&organization.account_id)
+            && !principal.roles.contains(&buglogin_domain::permissions::Role::PlatformAdmin)
+        {
+            return Err(problem("owner_transfer_forbidden", "Only the organization owner or platform administrator may transfer ownership", 403));
+        }
+        let record = self.organizations.get_mut(organization_id)
+            .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        check_revision(record.revision, expected_revision)?;
+        if &record.organization.account_id == account_id {
+            return Err(problem("owner_unchanged", "The selected account already owns this organization", 409));
+        }
+        record.revision = next_revision(record.revision)?;
+        record.organization.account_id = account_id.clone();
+        Ok(record.organization.clone())
+    }
+
     /// Returns a deterministic set of parent memberships implied by existing
     /// organization owners and workspace memberships. Workspace status/role is
     /// deliberately not changed by this compatibility backfill.

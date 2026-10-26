@@ -1437,6 +1437,7 @@ fn convert_extension_group(
             .map_err(|_| invalid("extensionGroupId", &record.id))?,
         name: record.data.name.clone(),
         extension_ids,
+        extension_sources: Default::default(),
         sync_mode: Some(parse_sync_mode(
             &record.data.sync_mode,
             "extensionGroupId",
