@@ -1394,12 +1394,12 @@ mod tests {
     }
 
     #[test]
-    fn wayfern_launch_hides_new_tab_shortcuts_and_preserves_profile_preferences() {
+    fn wayfern_launch_repairs_generated_shortcut_and_preserves_profile_preferences() {
         let path = profile_path("new-tab-preferences");
         fs::create_dir_all(path.join("Default")).unwrap();
         fs::write(
             path.join("Default/Preferences"),
-            br#"{"profile":{"name":"preserve-me"},"ntp":{"shortcust_visible":true}}"#,
+            br#"{"profile":{"name":"preserve-me"},"ntp":{"shortcust_visible":true},"custom_links":{"initialized":true,"list":["https://buglogin.com/","https://example.org/"]}}"#,
         )
         .unwrap();
 
@@ -1409,11 +1409,11 @@ mod tests {
             serde_json::from_slice(&fs::read(path.join("Default/Preferences")).unwrap()).unwrap();
         assert_eq!(preferences["profile"]["name"], "preserve-me");
         assert_eq!(preferences["ntp"]["shortcust_visible"], true);
-        assert_eq!(preferences["ntp"]["custom_links_visible"], true);
         assert_eq!(
             preferences["custom_links"]["list"],
-            serde_json::json!(["https://buglogin.com/"])
+            serde_json::json!(["https://example.org/"])
         );
+        assert!(preferences["custom_links"].get("initialized").is_none());
         let _ = fs::remove_dir_all(path);
     }
 
