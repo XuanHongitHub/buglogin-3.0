@@ -3213,6 +3213,7 @@ mod tests {
         profile_id
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn initialize_supported_cookie_store(state: &AdapterState, profile_id: &str) {
         let profile_id = ProfileId::from_str(profile_id).unwrap();
         let profile_root = state
@@ -3484,6 +3485,9 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // These integration cases exercise the native OS secret vault. Ubuntu CI
+    // has no interactive Secret Service; Windows/macOS runners do.
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn cookie_stage_returns_opaque_id_without_echoing_secret() {
         let (state, _, root) = state("cookie-stage");
@@ -3516,6 +3520,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn cookie_import_persists_generation_and_rejects_stale_cas() {
         let (state, _, root) = state("cookie-import");
@@ -3637,6 +3642,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn cookie_copy_uses_local_authority_and_destination_generation() {
         let (state, _, root) = state("cookie-copy");
