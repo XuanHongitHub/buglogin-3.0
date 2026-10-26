@@ -21,14 +21,18 @@ pub struct ResourceService {
 
 impl ResourceService {
     pub(crate) fn remove_member_references(&mut self, workspace: &WorkspaceId, member: &MemberId) {
-        self.grants.retain(|_, grant| {
-            &grant.workspace_id != workspace || &grant.member_id != member
-        });
+        self.grants
+            .retain(|_, grant| &grant.workspace_id != workspace || &grant.member_id != member);
     }
 
     pub(crate) fn has_workspace_records(&self, workspace_id: &WorkspaceId) -> bool {
-        self.resources.values().any(|record| &record.workspace_id == workspace_id)
-            || self.grants.values().any(|grant| &grant.workspace_id == workspace_id)
+        self.resources
+            .values()
+            .any(|record| &record.workspace_id == workspace_id)
+            || self
+                .grants
+                .values()
+                .any(|grant| &grant.workspace_id == workspace_id)
     }
 
     pub(crate) fn reconcile_managed_profile_registration(

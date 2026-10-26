@@ -34,6 +34,12 @@ const en = {
   unavailable: "Unavailable",
   profileLimit: "Profile limit",
   memberLimit: "Member seats",
+  defaultExtensionGroup: "Default extension group for new profiles",
+  noDefaultExtensionGroup: "No default extension group",
+  defaultExtensionGroupHint:
+    "New profiles in this workspace will inherit this group. Git sources update when the profile opens.",
+  extensionGroupsUnavailable:
+    "Extension groups could not be loaded; the default was not changed.",
   currentUsage: "Usage / limit",
   profiles: "Profiles",
   members: "Members",
@@ -200,6 +206,12 @@ const vi: typeof en = {
   unavailable: "Chưa có thông tin",
   profileLimit: "Hạn mức profile",
   memberLimit: "Ghế thành viên",
+  defaultExtensionGroup: "Nhóm tiện ích mặc định cho profile mới",
+  noDefaultExtensionGroup: "Không dùng nhóm mặc định",
+  defaultExtensionGroupHint:
+    "Profile mới trong workspace này tự nhận nhóm; nguồn Git được cập nhật khi mở profile.",
+  extensionGroupsUnavailable:
+    "Không tải được nhóm tiện ích; chưa thay đổi mặc định.",
   currentUsage: "Đang dùng / hạn mức",
   profiles: "Profiles",
   members: "Thành viên",

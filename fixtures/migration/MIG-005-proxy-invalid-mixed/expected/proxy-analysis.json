@@ -4,10 +4,35 @@
   "validRecords": 2,
   "invalidRecords": 3,
   "rows": [
-    {"sourceRef":"proxies/invalid-json.json","sourceId":null,"status":"invalid","code":"migration_proxy_json_invalid"},
-    {"sourceRef":"proxies/invalid-port.json","sourceId":"invalid-port","status":"invalid","code":"migration_proxy_port_invalid"},
-    {"sourceRef":"proxies/invalid-protocol.json","sourceId":"invalid-protocol","status":"invalid","code":"migration_proxy_protocol_invalid"},
-    {"sourceRef":"proxies/valid-http.json","sourceId":"valid-http","status":"valid","code":null},
-    {"sourceRef":"proxies/valid-socks5.json","sourceId":"valid-socks5","status":"valid","code":null}
+    {
+      "sourceRef": "proxies/invalid-json.json",
+      "sourceId": null,
+      "status": "invalid",
+      "code": "migration_proxy_json_invalid"
+    },
+    {
+      "sourceRef": "proxies/invalid-port.json",
+      "sourceId": "invalid-port",
+      "status": "invalid",
+      "code": "migration_proxy_port_invalid"
+    },
+    {
+      "sourceRef": "proxies/invalid-protocol.json",
+      "sourceId": "invalid-protocol",
+      "status": "invalid",
+      "code": "migration_proxy_protocol_invalid"
+    },
+    {
+      "sourceRef": "proxies/valid-http.json",
+      "sourceId": "valid-http",
+      "status": "valid",
+      "code": null
+    },
+    {
+      "sourceRef": "proxies/valid-socks5.json",
+      "sourceId": "valid-socks5",
+      "status": "valid",
+      "code": null
+    }
   ]
 }

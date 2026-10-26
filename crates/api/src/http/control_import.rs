@@ -1536,6 +1536,7 @@ fn merge_workspaces(
                 offline_entitled: record.data.policy.offline_entitled,
             },
             created_at,
+            default_extension_group_id: None,
         });
     }
 

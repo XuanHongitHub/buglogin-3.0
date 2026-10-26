@@ -39,6 +39,7 @@ fn workspace(id: &str, organization_id: &OrganizationId) -> Workspace {
             offline_entitled: true,
         },
         created_at: "2026-07-20T00:00:00Z".into(),
+        default_extension_group_id: None,
     }
 }
 

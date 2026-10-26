@@ -70,7 +70,9 @@ fn has_managed_profile_key(
     profile_id: &ProfileId,
     binding: &ProfileResource,
 ) -> Result<bool, Problem> {
-    let Some(manifest) = state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)? else {
+    let Some(manifest) =
+        state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
+    else {
         return Ok(false);
     };
     let Some(key_version) = manifest
@@ -88,6 +90,40 @@ fn has_managed_profile_key(
 }
 
 impl HostedProfileService {
+    pub fn apply_workspace_extension_default(
+        state: &ApiState,
+        workspace_id: &WorkspaceId,
+        profile: &mut Profile,
+    ) -> Result<(), Problem> {
+        let workspace = state
+            .workspaces
+            .read()
+            .map_err(|_| {
+                problem(
+                    "workspace_unavailable",
+                    "Workspace service unavailable",
+                    503,
+                )
+            })?
+            .find_workspace_by_id(workspace_id)?;
+        let Some(group_id) = workspace.default_extension_group_id else {
+            return Ok(());
+        };
+        state
+            .extension_groups
+            .read()
+            .map_err(|_| {
+                problem(
+                    "extension_group_unavailable",
+                    "Extension groups unavailable",
+                    503,
+                )
+            })?
+            .get_in_workspace(workspace_id, &group_id)?;
+        profile.extension_group_id = Some(group_id);
+        Ok(())
+    }
+
     pub fn activate_member(
         state: &ApiState,
         principal: &Principal,
@@ -1433,6 +1469,7 @@ impl HostedProfileService {
                 &binding.workspace_id,
                 &target_resource_id,
             )?;
+            Self::apply_workspace_extension_default(state, &binding.workspace_id, &mut target)?;
             let plan = Self::prepare_provision(target, binding.workspace_id.clone())?;
             state
                 .resources
@@ -2247,6 +2284,7 @@ mod authorization_tests {
                         offline_entitled: false,
                     },
                     created_at: "2026-10-12T00:00:00Z".into(),
+                    default_extension_group_id: None,
                 },
             )
             .unwrap();
@@ -2324,6 +2362,7 @@ mod authorization_tests {
                         offline_entitled: false,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
+                    default_extension_group_id: None,
                 },
             )
             .unwrap();

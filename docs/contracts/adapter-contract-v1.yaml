@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: 7615becac231fd63eb91cefdb9a0cc5585937476bad4d8366463b3483f65a52a
-projectionCount: 159
+sourceSha256: 618d36b9e80e4589d4dab05dc98eaf37a50195bef1a6ac51f2743d4f4f652e53
+projectionCount: 161
 projections:
   - commandId: runtime.catalog.get
     kind: query
@@ -379,10 +379,10 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 120000
-    events: &a47
+    events: &a49
       - operation.updated
       - profile.runtime.updated
-    preconditions: &a48
+    preconditions: &a50
       - profile-update-authorized
       - rotation-pending
       - exact-recipient-device-fingerprint-confirmation
@@ -525,7 +525,7 @@ projections:
     audit: metadata-only
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a49
+    preconditions: &a51
       - active-profile-binding
       - local-profile-key-present
     adapters:
@@ -542,7 +542,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a50
+    preconditions: &a52
       - active-profile-binding
       - recovery-code-valid
       - local-vault-write
@@ -550,6 +550,42 @@ projections:
       - tauri
     names:
       tauri: profile_sync_recover
+  - commandId: profile.sync.managedkey.enroll
+    kind: command
+    capability: profile.update
+    action: update
+    inputSchema: ProfileManagedKeyEnrollInput
+    outputSchema: ProfileManagedKeyEnrollReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    preconditions: &a21
+      - authenticated-desktop-device
+      - current-profile-update-authorization
+      - service-key-configured
+    adapters:
+      - rest
+    names:
+      rest: profile.sync.managedkey.enroll
+  - commandId: profile.sync.managedkey.fetch
+    kind: query
+    capability: profile.read
+    action: read
+    inputSchema: ProfileIdInput
+    outputSchema: ProfileManagedKeyEnvelope
+    auth: required
+    audit: metadata-only
+    idempotency: none
+    timeoutMs: 30000
+    preconditions: &a22
+      - authenticated-desktop-device
+      - current-profile-read-authorization
+      - os-vault-persistence
+    adapters:
+      - rest
+    names:
+      rest: profile.sync.managedkey.fetch
   - commandId: profile.runtime.get
     kind: query
     capability: profile.read
@@ -683,7 +719,7 @@ projections:
     audit: metadata-only
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a21
+    preconditions: &a23
       - device-session-bound-to-target-device
     adapters:
       - rest
@@ -713,7 +749,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a51
+    preconditions: &a53
       - profile-not-running
       - destination-lease
       - expected-generation-current
@@ -732,7 +768,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a52
+    preconditions: &a54
       - source-profile-not-running
       - destination-profile-not-running
       - destination-lease
@@ -769,7 +805,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 120000
-    preconditions: &a53
+    preconditions: &a55
       - workspace-authorized
       - credential-stored-in-device-vault
     adapters:
@@ -890,7 +926,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 300000
-    events: &a22
+    events: &a24
       - operation.updated
     adapters:
       - tauri
@@ -908,10 +944,10 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 0
-    events: &a23
+    events: &a25
       - operation.updated
       - migration.item.updated
-    preconditions: &a24
+    preconditions: &a26
       - source-read-only
       - snapshot-present
       - dry-run-approved
@@ -931,10 +967,10 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 0
-    events: &a54
+    events: &a56
       - operation.updated
       - migration.item.updated
-    preconditions: &a55
+    preconditions: &a57
       - profile-update-authorized
       - active-profile-resource-binding
       - empty-genesis-manifest
@@ -953,7 +989,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a25
+    preconditions: &a27
       - verified-control-graph
       - package-identity-bound
       - dry-run-before-activation
@@ -971,7 +1007,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a26
+    preconditions: &a28
       - exact-rollback-confirmation
       - imported-graph-unchanged
     adapters:
@@ -988,7 +1024,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 0
-    preconditions: &a27
+    preconditions: &a29
       - active-profile-resource-binding
       - destination-lease
       - verified-sync-export
@@ -1050,7 +1086,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a28
+    preconditions: &a30
       - cryptographic-device-code-issuance
     adapters:
       - rest
@@ -1066,7 +1102,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a29
+    preconditions: &a31
       - configured-provider
       - device-bound-state
       - system-browser
@@ -1084,7 +1120,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a30
+    preconditions: &a32
       - single-use-state
       - device-bound-session
       - server-side-token-exchange
@@ -1102,7 +1138,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a31
+    preconditions: &a33
       - same-origin-https
       - argon2id-credential-verification
     adapters:
@@ -1119,7 +1155,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a32
+    preconditions: &a34
       - argon2id-credential-verification
       - device-bound-session
     adapters:
@@ -1136,7 +1172,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a33
+    preconditions: &a35
       - browser-session
     adapters:
       - rest
@@ -1152,7 +1188,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a34
+    preconditions: &a36
       - browser-session
       - raw-token-one-time
     adapters:
@@ -1169,7 +1205,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a35
+    preconditions: &a37
       - browser-session
       - owner-scoped
     adapters:
@@ -1186,7 +1222,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a36
+    preconditions: &a38
       - same-origin-https
       - generic-enumeration-response
       - configured-recovery-delivery
@@ -1204,7 +1240,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a37
+    preconditions: &a39
       - same-origin-https
       - single-use-recovery-token
       - atomic-password-reset
@@ -1223,7 +1259,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a38
+    preconditions: &a40
       - http-only-session-cookie
     adapters:
       - rest
@@ -1239,7 +1275,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a39
+    preconditions: &a41
       - http-only-session-cookie
     adapters:
       - rest
@@ -1255,7 +1291,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a40
+    preconditions: &a42
       - session-owner
       - csrf-token
     adapters:
@@ -1314,7 +1350,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a41
+    preconditions: &a43
       - authenticated-account
     adapters:
       - rest
@@ -1330,7 +1366,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a42
+    preconditions: &a44
       - single-use-device-authorization
     adapters:
       - rest
@@ -1346,7 +1382,7 @@ projections:
     audit: required
     idempotency: none
     timeoutMs: 30000
-    preconditions: &a43
+    preconditions: &a45
       - single-use-device-refresh-credential
       - device-bound-session
     adapters:
@@ -1363,7 +1399,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a44
+    preconditions: &a46
       - device-bound-session
       - immutable-device-key
     adapters:
@@ -1380,7 +1416,7 @@ projections:
     audit: required
     idempotency: none
     timeoutMs: 30000
-    preconditions: &a45
+    preconditions: &a47
       - single-use-session-rotation
     adapters:
       - rest
@@ -1396,7 +1432,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a46
+    preconditions: &a48
       - session-revocation
     adapters:
       - rest
@@ -4639,6 +4675,42 @@ rest:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: profile.sync.managedkey.enroll
+      commandId: profile.sync.managedkey.enroll
+      kind: command
+      capability: profile.update
+      action: update
+      inputSchema: ProfileManagedKeyEnrollInput
+      outputSchema: ProfileManagedKeyEnrollReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      preconditions: *a21
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: profile.sync.managedkey.fetch
+      commandId: profile.sync.managedkey.fetch
+      kind: query
+      capability: profile.read
+      action: read
+      inputSchema: ProfileIdInput
+      outputSchema: ProfileManagedKeyEnvelope
+      auth: required
+      audit: metadata-only
+      idempotency: none
+      timeoutMs: 30000
+      preconditions: *a22
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
     - operationId: profile.runtime.get
       commandId: profile.runtime.get
       kind: query
@@ -4775,7 +4847,7 @@ rest:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a21
+      preconditions: *a23
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -4894,7 +4966,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 300000
-      events: *a22
+      events: *a24
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -4913,8 +4985,8 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 0
-      events: *a23
-      preconditions: *a24
+      events: *a25
+      preconditions: *a26
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -4933,7 +5005,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a25
+      preconditions: *a27
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -4952,7 +5024,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a26
+      preconditions: *a28
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -4971,7 +5043,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 0
-      preconditions: *a27
+      preconditions: *a29
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5044,7 +5116,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a28
+      preconditions: *a30
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5061,7 +5133,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a29
+      preconditions: *a31
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5080,7 +5152,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a30
+      preconditions: *a32
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5099,7 +5171,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a31
+      preconditions: *a33
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5116,7 +5188,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a32
+      preconditions: *a34
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5133,7 +5205,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a33
+      preconditions: *a35
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5150,7 +5222,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a34
+      preconditions: *a36
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5167,7 +5239,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a35
+      preconditions: *a37
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5186,7 +5258,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a36
+      preconditions: *a38
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5203,7 +5275,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a37
+      preconditions: *a39
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5222,7 +5294,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a38
+      preconditions: *a40
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5239,7 +5311,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a39
+      preconditions: *a41
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5256,7 +5328,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a40
+      preconditions: *a42
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5275,7 +5347,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a41
+      preconditions: *a43
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5292,7 +5364,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a42
+      preconditions: *a44
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5309,7 +5381,7 @@ rest:
       audit: required
       idempotency: none
       timeoutMs: 30000
-      preconditions: *a43
+      preconditions: *a45
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5326,7 +5398,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a44
+      preconditions: *a46
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5345,7 +5417,7 @@ rest:
       audit: required
       idempotency: none
       timeoutMs: 30000
-      preconditions: *a45
+      preconditions: *a47
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5362,7 +5434,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a46
+      preconditions: *a48
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -6972,8 +7044,8 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 120000
-      events: *a47
-      preconditions: *a48
+      events: *a49
+      preconditions: *a50
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7027,7 +7099,7 @@ tauri:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a49
+      preconditions: *a51
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7044,7 +7116,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a50
+      preconditions: *a52
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7165,7 +7237,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a51
+      preconditions: *a53
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7183,7 +7255,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a52
+      preconditions: *a54
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7217,7 +7289,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 120000
-      preconditions: *a53
+      preconditions: *a55
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7334,7 +7406,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 300000
-      events: *a22
+      events: *a24
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7352,8 +7424,8 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 0
-      events: *a23
-      preconditions: *a24
+      events: *a25
+      preconditions: *a26
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7371,8 +7443,8 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 0
-      events: *a54
-      preconditions: *a55
+      events: *a56
+      preconditions: *a57
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl

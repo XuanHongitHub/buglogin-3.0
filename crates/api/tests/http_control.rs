@@ -992,6 +992,7 @@ async fn control_http_flow_enforces_acl_replay_audit_and_redaction() {
                     offline_entitled: true,
                 },
                 created_at: "2026-07-20T00:00:00Z".into(),
+                default_extension_group_id: None,
             },
         )
         .unwrap();

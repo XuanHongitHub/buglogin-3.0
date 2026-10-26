@@ -69,7 +69,7 @@ jobs:
           mkdir -p incoming/windows incoming/macos
           gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-windows-x64-signed" --dir incoming/windows
           gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-macos-arm64-signed" --dir incoming/macos
-          COSIGN_IDENTITY='^https://github\.com/keyduc91/Malvanut-Login/\.github/workflows/(release|signing)\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
+          COSIGN_IDENTITY='^https://github\.com/(?:keyduc91/Malvanut-Login|XuanHongitHub/buglogin-3\.0)/\.github/workflows/(release|signing)\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
           cosign verify-blob incoming/windows/SHA256SUMS.txt --bundle incoming/windows/provenance.sigstore.json --certificate-identity-regexp "$COSIGN_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com
           cosign verify-blob incoming/macos/SHA256SUMS.txt --bundle incoming/macos/provenance.sigstore.json --certificate-identity-regexp "$COSIGN_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com
           node -e 'const fs=require("node:fs");for(const [dir,platform] of [["incoming/windows","windows-x64"],["incoming/macos","macos-arm64"]]){const p=JSON.parse(fs.readFileSync(`${dir}/provenance.json`,`utf8`));if(p.source.repository!==process.env.GH_REPO||p.source.sha!==process.env.SOURCE_SHA||p.source.ref!==process.env.SOURCE_SHA||p.platform!==platform)throw Error(`${platform}: candidate provenance mismatch`)}'

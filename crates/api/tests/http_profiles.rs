@@ -780,6 +780,7 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
                     offline_entitled: false,
                 },
                 created_at: "2026-07-22T00:00:00Z".into(),
+                default_extension_group_id: None,
             },
         )
         .unwrap();
@@ -1381,6 +1382,7 @@ async fn hosted_profile_archive_restore_replays_and_survives_restart() {
                     offline_entitled: false,
                 },
                 created_at: "2026-07-22T00:00:00Z".into(),
+                default_extension_group_id: None,
             },
         )
         .unwrap();

@@ -98,14 +98,18 @@ pub struct GroupService {
 
 impl GroupService {
     pub(crate) fn remove_member_references(&mut self, workspace: &WorkspaceId, member: &MemberId) {
-        self.share_grants.retain(|_, grant| {
-            &grant.workspace_id != workspace || &grant.member_id != member
-        });
+        self.share_grants
+            .retain(|_, grant| &grant.workspace_id != workspace || &grant.member_id != member);
     }
 
     pub(crate) fn has_workspace_records(&self, workspace_id: &WorkspaceId) -> bool {
-        self.groups.values().any(|record| &record.workspace_id == workspace_id)
-            || self.share_grants.values().any(|grant| &grant.workspace_id == workspace_id)
+        self.groups
+            .values()
+            .any(|record| &record.workspace_id == workspace_id)
+            || self
+                .share_grants
+                .values()
+                .any(|grant| &grant.workspace_id == workspace_id)
     }
 
     pub(crate) fn all_share_grants(&self) -> impl Iterator<Item = &GroupShareGrant> {

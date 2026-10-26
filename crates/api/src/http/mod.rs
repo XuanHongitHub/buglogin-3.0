@@ -71,8 +71,8 @@ use buglogin_sync::coordination::{
     AuthorizationRequest, CoordinationAuth, CoordinationAuthorizer, CoordinationBackend,
     CoordinationOperation, CoordinationScope,
 };
-use buglogin_sync::manifest::SyncManifest;
 use buglogin_sync::crypto::{ClientKey, ManagedResourceKeyEnvelope};
+use buglogin_sync::manifest::SyncManifest;
 use futures_util::{Stream, stream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -726,7 +726,9 @@ impl ApiState {
             profile_key_share_envelopes: Arc::new(RwLock::new(
                 aggregate.profile_key_share_envelopes,
             )),
-            managed_profile_key_envelopes: Arc::new(RwLock::new(aggregate.managed_profile_key_envelopes)),
+            managed_profile_key_envelopes: Arc::new(RwLock::new(
+                aggregate.managed_profile_key_envelopes,
+            )),
             blob_idempotency: Arc::new(RwLock::new(aggregate.blob_idempotency)),
             sync_blob_reservations: Arc::new(RwLock::new(aggregate.sync_blob_reservations)),
             runtime_projections: Arc::new(RwLock::new(aggregate.runtime_projections)),
@@ -859,23 +861,29 @@ impl ApiState {
 
     pub async fn readiness(&self) -> Result<(), Problem> {
         self.control_persistence.readiness()?;
+        if !self.local_account_provisioning && !self.external_object_storage {
+            return Err(problem(
+                "object_storage_not_configured",
+                "Remote object storage is not configured",
+                503,
+            ));
+        }
         if !self.local_account_provisioning
             && self
                 .profile_key_wrapping_key
                 .read()
-                .map_err(|_| problem("readiness_unavailable", "Service readiness check failed", 503))?
+                .map_err(|_| {
+                    problem(
+                        "readiness_unavailable",
+                        "Service readiness check failed",
+                        503,
+                    )
+                })?
                 .is_none()
         {
             return Err(problem(
                 "profile_key_provider_not_configured",
                 "Profile key management is not configured",
-                503,
-            ));
-        }
-        if !self.local_account_provisioning && !self.external_object_storage {
-            return Err(problem(
-                "object_storage_not_configured",
-                "Remote object storage is not configured",
                 503,
             ));
         }
@@ -953,9 +961,21 @@ impl ApiState {
     fn profile_key_wrapping_key(&self) -> Result<ClientKey, Problem> {
         self.profile_key_wrapping_key
             .read()
-            .map_err(|_| problem("profile_key_provider_unavailable", "Profile key management is unavailable", 503))?
+            .map_err(|_| {
+                problem(
+                    "profile_key_provider_unavailable",
+                    "Profile key management is unavailable",
+                    503,
+                )
+            })?
             .clone()
-            .ok_or_else(|| problem("profile_key_provider_not_configured", "Profile key management is not configured", 503))
+            .ok_or_else(|| {
+                problem(
+                    "profile_key_provider_not_configured",
+                    "Profile key management is not configured",
+                    503,
+                )
+            })
     }
 
     pub fn with_concurrent_remote_chunks(
@@ -1278,6 +1298,7 @@ impl ApiState {
                 offline_entitled: false,
             },
             created_at: created_at.clone(),
+            default_extension_group_id: None,
         };
         aggregate.workspaces.create_workspace(
             &platform_principal,
@@ -4857,6 +4878,7 @@ impl ApiState {
                                 offline_entitled: false,
                             },
                             created_at: created_at.clone(),
+                            default_extension_group_id: None,
                         },
                     )?;
                     (organization.id.clone(), false, workspace_id, true)
@@ -4907,6 +4929,7 @@ impl ApiState {
                             offline_entitled: false,
                         },
                         created_at: created_at.clone(),
+                        default_extension_group_id: None,
                     },
                 )?;
                 aggregate.workspaces = workspaces;
@@ -9161,23 +9184,66 @@ async fn enroll_profile_resource_key(
     let profile_id = ProfileId::from_str(&profile_path)
         .map_err(|_| response(problem("invalid_profile_id", "Invalid profile ID", 400)))?;
     let grants = grants(&state)?;
-    if !authorized(&state, &principal, &grants, &profile_id, Action::Update, "profile.update")? {
-        return Err(response(problem("profile_forbidden", "Profile access denied", 403)));
+    if !authorized(
+        &state,
+        &principal,
+        &grants,
+        &profile_id,
+        Action::Update,
+        "profile.update",
+    )? {
+        return Err(response(problem(
+            "profile_forbidden",
+            "Profile access denied",
+            403,
+        )));
     }
-    let binding = state.profile_resource_record(&profile_id).map_err(response)?.ok_or_else(|| {
-        response(problem("binding_not_found", "Profile binding not found", 404))
-    })?;
-    let manifest = state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)
-        .map_err(response)?.ok_or_else(|| response(problem("profile_manifest_missing", "Profile sync manifest not found", 404)))?;
-    let key_version = manifest.payload_encryption.as_ref()
+    let binding = state
+        .profile_resource_record(&profile_id)
+        .map_err(response)?
+        .ok_or_else(|| {
+            response(problem(
+                "binding_not_found",
+                "Profile binding not found",
+                404,
+            ))
+        })?;
+    let manifest = state
+        .current_sync_manifest(&binding.workspace_id, &binding.resource_id)
+        .map_err(response)?
+        .ok_or_else(|| {
+            response(problem(
+                "profile_manifest_missing",
+                "Profile sync manifest not found",
+                404,
+            ))
+        })?;
+    let key_version = manifest
+        .payload_encryption
+        .as_ref()
         .and_then(|encryption| encryption.key_version.as_deref())
-        .ok_or_else(|| response(problem("profile_key_version_missing", "Profile sync manifest has no active resource key version", 409)))?;
+        .ok_or_else(|| {
+            response(problem(
+                "profile_key_version_missing",
+                "Profile sync manifest has no active resource key version",
+                409,
+            ))
+        })?;
     if input.resource_key.len() != 64 {
         input.resource_key.zeroize();
-        return Err(response(problem("invalid_profile_key", "Profile key is invalid", 400)));
+        return Err(response(problem(
+            "invalid_profile_key",
+            "Profile key is invalid",
+            400,
+        )));
     }
-    let mut raw_key = decode_profile_key(&input.resource_key)
-        .ok_or_else(|| response(problem("invalid_profile_key", "Profile key is invalid", 400)))?;
+    let mut raw_key = decode_profile_key(&input.resource_key).ok_or_else(|| {
+        response(problem(
+            "invalid_profile_key",
+            "Profile key is invalid",
+            400,
+        ))
+    })?;
     let input_hash = key_version.to_owned();
     input.resource_key.zeroize();
     let resource_key = ClientKey::from_bytes(raw_key);
@@ -9187,28 +9253,71 @@ async fn enroll_profile_resource_key(
         binding.resource_id.clone(),
         &state.profile_key_wrapping_key().map_err(response)?,
         &resource_key,
-    ).map_err(response)?;
+    )
+    .map_err(response)?;
     if envelope.key_version != key_version {
-        return Err(response(problem("profile_key_version_mismatch", "Profile key does not match the active manifest", 409)));
+        return Err(response(problem(
+            "profile_key_version_mismatch",
+            "Profile key does not match the active manifest",
+            409,
+        )));
     }
-    if let Some(existing) = state.managed_profile_key_envelopes
-        .read().map_err(|_| response(problem("control_unavailable", "Control state unavailable", 503)))?
-        .get(&managed_profile_key_envelope_record_key(&binding.resource_id))
-        .filter(|record| record.profile_id == profile_id && record.envelope.key_version == key_version)
+    if let Some(existing) = state
+        .managed_profile_key_envelopes
+        .read()
+        .map_err(|_| {
+            response(problem(
+                "control_unavailable",
+                "Control state unavailable",
+                503,
+            ))
+        })?
+        .get(&managed_profile_key_envelope_record_key(
+            &binding.resource_id,
+        ))
+        .filter(|record| {
+            record.profile_id == profile_id && record.envelope.key_version == key_version
+        })
     {
-        let existing_key = existing.envelope.unwrap(
-            &binding.workspace_id, &binding.resource_id, key_version,
-            &state.profile_key_wrapping_key().map_err(response)?,
-        ).map_err(response)?;
+        let existing_key = existing
+            .envelope
+            .unwrap(
+                &binding.workspace_id,
+                &binding.resource_id,
+                key_version,
+                &state.profile_key_wrapping_key().map_err(response)?,
+            )
+            .map_err(response)?;
         if existing_key != resource_key {
-            return Err(response(problem("profile_key_version_conflict", "Different profile keys use the active key version", 409)));
+            return Err(response(problem(
+                "profile_key_version_conflict",
+                "Different profile keys use the active key version",
+                409,
+            )));
         }
-        let mutation = state.control_mutation().lock().map_err(|_| response(problem("control_unavailable", "Control state unavailable", 503)))?;
-        state.clear_resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id).map_err(response)?;
+        let mutation = state.control_mutation().lock().map_err(|_| {
+            response(problem(
+                "control_unavailable",
+                "Control state unavailable",
+                503,
+            ))
+        })?;
+        state
+            .clear_resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)
+            .map_err(response)?;
         let persisted = state.persist_control_aggregate(
             "profile.sync.key.enroll",
-            format!("profile-sync-key-enroll:{}:{}", profile_id.as_str(), key_version),
-            principal.account_id.as_ref().map(|account| account.as_str()).unwrap_or("service").to_owned(),
+            format!(
+                "profile-sync-key-enroll:{}:{}",
+                profile_id.as_str(),
+                key_version
+            ),
+            principal
+                .account_id
+                .as_ref()
+                .map(|account| account.as_str())
+                .unwrap_or("service")
+                .to_owned(),
             true,
             &input_hash,
             json!({ "profileId": profile_id, "keyVersion": key_version }),
@@ -9220,7 +9329,10 @@ async fn enroll_profile_resource_key(
             let _ = state.reload_control_aggregate();
             return Err(response(error));
         }
-        return Ok(Json(ProfileResourceKeyWrapResponse { enrolled: true, key_version: key_version.to_owned() }));
+        return Ok(Json(ProfileResourceKeyWrapResponse {
+            enrolled: true,
+            key_version: key_version.to_owned(),
+        }));
     }
     let record = StoredManagedProfileKeyEnvelope {
         profile_id: profile_id.clone(),
@@ -9229,13 +9341,40 @@ async fn enroll_profile_resource_key(
         envelope,
     };
     let key = managed_profile_key_envelope_record_key(&binding.resource_id);
-    let mutation = state.control_mutation().lock().map_err(|_| response(problem("control_unavailable", "Control state unavailable", 503)))?;
-    state.managed_profile_key_envelopes.write().map_err(|_| response(problem("control_unavailable", "Control state unavailable", 503)))?.insert(key, record);
-    state.clear_resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id).map_err(response)?;
+    let mutation = state.control_mutation().lock().map_err(|_| {
+        response(problem(
+            "control_unavailable",
+            "Control state unavailable",
+            503,
+        ))
+    })?;
+    state
+        .managed_profile_key_envelopes
+        .write()
+        .map_err(|_| {
+            response(problem(
+                "control_unavailable",
+                "Control state unavailable",
+                503,
+            ))
+        })?
+        .insert(key, record);
+    state
+        .clear_resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)
+        .map_err(response)?;
     let persisted = state.persist_control_aggregate(
         "profile.sync.key.enroll",
-        format!("profile-sync-key-enroll:{}:{}", profile_id.as_str(), key_version),
-        principal.account_id.as_ref().map(|account| account.as_str()).unwrap_or("service").to_owned(),
+        format!(
+            "profile-sync-key-enroll:{}:{}",
+            profile_id.as_str(),
+            key_version
+        ),
+        principal
+            .account_id
+            .as_ref()
+            .map(|account| account.as_str())
+            .unwrap_or("service")
+            .to_owned(),
         true,
         &input_hash,
         json!({ "profileId": profile_id, "keyVersion": key_version }),
@@ -9247,7 +9386,10 @@ async fn enroll_profile_resource_key(
         let _ = state.reload_control_aggregate();
         return Err(response(error));
     }
-    Ok(Json(ProfileResourceKeyWrapResponse { enrolled: true, key_version: key_version.to_owned() }))
+    Ok(Json(ProfileResourceKeyWrapResponse {
+        enrolled: true,
+        key_version: key_version.to_owned(),
+    }))
 }
 
 async fn fetch_profile_resource_key(
@@ -9260,47 +9402,108 @@ async fn fetch_profile_resource_key(
     let profile_id = ProfileId::from_str(&profile_path)
         .map_err(|_| response(problem("invalid_profile_id", "Invalid profile ID", 400)))?;
     authorize_profile(&state, &principal, &grants(&state)?, &profile_id)?;
-    let binding = state.profile_resource_record(&profile_id).map_err(response)?.ok_or_else(|| {
-        response(problem("binding_not_found", "Profile binding not found", 404))
+    let binding = state
+        .profile_resource_record(&profile_id)
+        .map_err(response)?
+        .ok_or_else(|| {
+            response(problem(
+                "binding_not_found",
+                "Profile binding not found",
+                404,
+            ))
+        })?;
+    let manifest = state
+        .current_sync_manifest(&binding.workspace_id, &binding.resource_id)
+        .map_err(response)?
+        .ok_or_else(|| {
+            response(problem(
+                "profile_manifest_missing",
+                "Profile sync manifest not found",
+                404,
+            ))
+        })?;
+    let encryption = manifest.payload_encryption.as_ref().ok_or_else(|| {
+        response(problem(
+            "profile_payload_encryption_required",
+            "Profile manifest has no encrypted payload metadata",
+            409,
+        ))
     })?;
-    let manifest = state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)
-        .map_err(response)?.ok_or_else(|| response(problem("profile_manifest_missing", "Profile sync manifest not found", 404)))?;
-    let encryption = manifest.payload_encryption.as_ref().ok_or_else(|| response(problem("profile_payload_encryption_required", "Profile manifest has no encrypted payload metadata", 409)))?;
-    let expected_key_version = encryption.key_version.as_deref().ok_or_else(|| response(problem("profile_key_version_missing", "Profile sync manifest has no active resource key version", 409)))?;
-    let envelope = state.managed_profile_key_envelopes
+    let expected_key_version = encryption.key_version.as_deref().ok_or_else(|| {
+        response(problem(
+            "profile_key_version_missing",
+            "Profile sync manifest has no active resource key version",
+            409,
+        ))
+    })?;
+    let envelope = state
+        .managed_profile_key_envelopes
         .read()
-        .map_err(|_| response(problem("control_unavailable", "Control state unavailable", 503)))?
-        .get(&managed_profile_key_envelope_record_key(&binding.resource_id))
-        .filter(|record| record.profile_id == profile_id && record.workspace_id == binding.workspace_id && record.resource_id == binding.resource_id)
+        .map_err(|_| {
+            response(problem(
+                "control_unavailable",
+                "Control state unavailable",
+                503,
+            ))
+        })?
+        .get(&managed_profile_key_envelope_record_key(
+            &binding.resource_id,
+        ))
+        .filter(|record| {
+            record.profile_id == profile_id
+                && record.workspace_id == binding.workspace_id
+                && record.resource_id == binding.resource_id
+        })
         .map(|record| record.envelope.clone())
-        .ok_or_else(|| response(problem("managed_profile_key_not_enrolled", "This profile has not yet been enrolled in service-managed key recovery", 409)))?;
+        .ok_or_else(|| {
+            response(problem(
+                "managed_profile_key_not_enrolled",
+                "This profile has not yet been enrolled in service-managed key recovery",
+                409,
+            ))
+        })?;
     let wrapping_key = state.profile_key_wrapping_key().map_err(response)?;
-    let resource_key = envelope.unwrap(
-        &binding.workspace_id,
-        &binding.resource_id,
-        expected_key_version,
-        &wrapping_key,
-    ).map_err(response)?;
+    let resource_key = envelope
+        .unwrap(
+            &binding.workspace_id,
+            &binding.resource_id,
+            expected_key_version,
+            &wrapping_key,
+        )
+        .map_err(response)?;
     let result = Json(ProfileResourceKeyUnwrapResponse {
         resource_key: encode_profile_key(resource_key.as_bytes()),
     });
     let correlation_id = correlation(&headers)?;
-    let actor_id = principal.account_id.as_ref()
+    let actor_id = principal
+        .account_id
+        .as_ref()
         .map(|account| account.as_str())
         .unwrap_or("service")
         .to_owned();
-    let mutation = state.control_mutation().lock()
-        .map_err(|_| response(problem("control_unavailable", "Control state unavailable", 503)))?;
-    state.persist_control_aggregate(
-        "profile.sync.key.fetch",
-        format!("profile-sync-key-fetch:{}:{}", profile_id.as_str(), correlation_id),
-        actor_id,
-        true,
-        expected_key_version,
-        json!({ "profileId": profile_id, "keyVersion": expected_key_version }),
-        200,
-        json!({ "delivered": true }),
-    ).map_err(response)?;
+    let mutation = state.control_mutation().lock().map_err(|_| {
+        response(problem(
+            "control_unavailable",
+            "Control state unavailable",
+            503,
+        ))
+    })?;
+    state
+        .persist_control_aggregate(
+            "profile.sync.key.fetch",
+            format!(
+                "profile-sync-key-fetch:{}:{}",
+                profile_id.as_str(),
+                correlation_id
+            ),
+            actor_id,
+            true,
+            expected_key_version,
+            json!({ "profileId": profile_id, "keyVersion": expected_key_version }),
+            200,
+            json!({ "delivered": true }),
+        )
+        .map_err(response)?;
     drop(mutation);
     Ok(result)
 }
@@ -9311,13 +9514,23 @@ fn require_profile_key_device_session(
     principal: &Principal,
 ) -> Result<(), Response> {
     let account_id = principal.account_id.as_ref().ok_or_else(|| {
-        response(problem("account_missing", "Authenticated account is missing", 401))
+        response(problem(
+            "account_missing",
+            "Authenticated account is missing",
+            401,
+        ))
     })?;
     let raw_token = bearer_token(headers)?;
     let (device_account_id, _) = state
         .auth
         .read()
-        .map_err(|_| response(problem("auth_unavailable", "Authentication unavailable", 503)))?
+        .map_err(|_| {
+            response(problem(
+                "auth_unavailable",
+                "Authentication unavailable",
+                503,
+            ))
+        })?
         .authenticate_device(raw_token, request_now(headers)?)
         .map_err(response)?;
     if &device_account_id != account_id {
@@ -9330,7 +9543,9 @@ fn require_profile_key_device_session(
     Ok(())
 }
 
-fn managed_profile_key_envelope_record_key(resource_id: &buglogin_domain::ids::ResourceId) -> String {
+fn managed_profile_key_envelope_record_key(
+    resource_id: &buglogin_domain::ids::ResourceId,
+) -> String {
     format!("{}:managed", resource_id.as_str())
 }
 

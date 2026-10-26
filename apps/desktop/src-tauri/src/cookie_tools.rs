@@ -732,7 +732,7 @@ pub async fn import_pasted_cookies(
 
 #[cfg(test)]
 mod tests {
-    use super::group_cookie_values;
+    use super::{group_cookie_values, parse_pasted_cookie_text};
     use serde_json::json;
 
     #[test]
@@ -759,5 +759,63 @@ mod tests {
         assert!(domains[0].cookies[0].is_secure);
         assert!(domains[0].cookies[0].is_http_only);
         assert_eq!(domains[0].cookies[1].path, "/");
+    }
+
+    #[test]
+    fn pasted_cookie_editor_json_accepts_extension_shape_and_site_fallback() {
+        let (cookies, issues, format) = parse_pasted_cookie_text(
+            r#"[{"name":"session","value":"a=b","domain":".example.com","path":"/","expirationDate":1900000000,"secure":true,"httpOnly":true,"sameSite":"lax"}]"#,
+            None,
+        );
+
+        assert_eq!(format.as_deref(), Some("json"));
+        assert!(issues.is_empty());
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].value, "a=b");
+        assert_eq!(cookies[0].domain, ".example.com");
+        assert_eq!(cookies[0].expires, 1_900_000_000);
+        assert!(cookies[0].secure);
+        assert!(cookies[0].http_only);
+        assert_eq!(cookies[0].same_site, 1);
+
+        let (cookies, issues, _) = parse_pasted_cookie_text(
+            r#"{"cookies":[{"name":"sid","value":"42","session":true}]}"#,
+            Some("https://login.example.com/path"),
+        );
+        assert!(issues.is_empty());
+        assert_eq!(cookies[0].domain, "login.example.com");
+        assert_eq!(cookies[0].expires, 0);
+    }
+
+    #[test]
+    fn pasted_cookie_text_accepts_netscape_set_cookie_and_cookie_headers() {
+        let (netscape, issues, format) = parse_pasted_cookie_text(
+            "# Netscape HTTP Cookie File\n#HttpOnly_.example.com\tTRUE\t/\tTRUE\t1900000000\tsession\tsecret",
+            None,
+        );
+        assert_eq!(format.as_deref(), Some("netscape"));
+        assert!(issues.is_empty());
+        assert_eq!(netscape.len(), 1);
+        assert_eq!(netscape[0].domain, ".example.com");
+        assert!(netscape[0].secure);
+        assert!(netscape[0].http_only);
+
+        let (set_cookie, issues, _) = parse_pasted_cookie_text(
+            "Set-Cookie: sid=abc; Domain=.example.com; Path=/app; Max-Age=3600; Secure; HttpOnly; SameSite=Strict",
+            None,
+        );
+        assert!(issues.is_empty());
+        assert_eq!(set_cookie.len(), 1);
+        assert_eq!(set_cookie[0].domain, ".example.com");
+        assert_eq!(set_cookie[0].path, "/app");
+        assert_eq!(set_cookie[0].same_site, 2);
+        assert!(set_cookie[0].secure && set_cookie[0].http_only);
+
+        let (header, issues, format) =
+            parse_pasted_cookie_text("Cookie: sid=abc; theme=dark", Some("example.com"));
+        assert_eq!(format.as_deref(), Some("nameValue"));
+        assert!(issues.is_empty());
+        assert_eq!(header.len(), 2);
+        assert!(header.iter().all(|cookie| cookie.domain == "example.com"));
     }
 }

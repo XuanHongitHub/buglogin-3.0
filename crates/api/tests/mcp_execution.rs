@@ -340,6 +340,7 @@ fn seed_workspace(
                     offline_entitled: false,
                 },
                 created_at: "2026-07-22T00:00:00Z".into(),
+                default_extension_group_id: None,
             },
         )
         .unwrap();
@@ -1636,6 +1637,7 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
             offline_entitled: false,
         },
         created_at: created_at.into(),
+        default_extension_group_id: None,
     };
     let created_workspace = dispatcher
         .dispatch(production_request(

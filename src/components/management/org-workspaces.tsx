@@ -54,6 +54,7 @@ import { showSuccessToast } from "@/lib/toast-utils";
 import { createTauriDesktopApi } from "../../../apps/desktop/src/bridge";
 import type {
   AccountView,
+  ExtensionGroupRecord,
   Organization,
   OrganizationMemberView,
   OrganizationRecord,
@@ -1328,6 +1329,12 @@ function WorkspaceEditor({
       String(entry?.workspace.policy.maxMembers ?? 10),
     );
   const [record, setRecord] = useState<WorkspaceRecord | null>(null),
+    [extensionGroups, setExtensionGroups] = useState<ExtensionGroupRecord[]>(
+      [],
+    ),
+    [extensionGroupsUnavailable, setExtensionGroupsUnavailable] =
+      useState(false),
+    [defaultExtensionGroupId, setDefaultExtensionGroupId] = useState(""),
     [error, setError] = useState<string | null>(null),
     [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(Boolean(entry));
@@ -1345,6 +1352,9 @@ function WorkspaceEditor({
           setName(value.workspace.name);
           setProfiles(String(value.workspace.policy.maxProfiles));
           setMembers(String(value.workspace.policy.maxMembers));
+          setDefaultExtensionGroupId(
+            value.workspace.defaultExtensionGroupId ?? "",
+          );
         }
       })
       .catch((err) => {
@@ -1352,6 +1362,21 @@ function WorkspaceEditor({
       })
       .finally(() => {
         if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [entry]);
+  useEffect(() => {
+    let active = true;
+    if (!entry) return;
+    void api
+      .listExtensionGroups(entry.workspace.id)
+      .then((items) => {
+        if (active) setExtensionGroups(items);
+      })
+      .catch(() => {
+        if (active) setExtensionGroupsUnavailable(true);
       });
     return () => {
       active = false;
@@ -1393,6 +1418,7 @@ function WorkspaceEditor({
             workspace: {
               ...record.workspace,
               name: name.trim(),
+              defaultExtensionGroupId: defaultExtensionGroupId || undefined,
               policy: {
                 ...record.workspace.policy,
                 maxProfiles: Number(profiles),
@@ -1508,6 +1534,39 @@ function WorkspaceEditor({
               />
             </div>
           </div>
+          {entry ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="management-workspace-default-extension-group">
+                {t("defaultExtensionGroup")}
+              </Label>
+              <Select
+                value={defaultExtensionGroupId || "__none__"}
+                onValueChange={(value) =>
+                  setDefaultExtensionGroupId(value === "__none__" ? "" : value)
+                }
+                disabled={busy || loading || extensionGroupsUnavailable}
+              >
+                <SelectTrigger id="management-workspace-default-extension-group">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">
+                    {t("noDefaultExtensionGroup")}
+                  </SelectItem>
+                  {extensionGroups.map((item) => (
+                    <SelectItem key={item.group.id} value={item.group.id}>
+                      {item.group.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {extensionGroupsUnavailable
+                  ? t("extensionGroupsUnavailable")
+                  : t("defaultExtensionGroupHint")}
+              </p>
+            </div>
+          ) : null}
           {entry ? (
             <p className="text-xs text-muted-foreground">
               {t("currentUsage")}:{" "}
