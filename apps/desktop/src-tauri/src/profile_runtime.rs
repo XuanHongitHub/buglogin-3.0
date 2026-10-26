@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use buglogin_browser::{
@@ -23,6 +23,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::clock::unix_time_millis;
 use crate::proxy_bridge::ProxyBridgeHandle;
+
+const MAX_STOP_SYNC_HOLD: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub struct ManagedCoordination {
@@ -394,6 +396,7 @@ struct RunningProfile {
     was_launched: bool,
     process_stopped: bool,
     sync_pending: bool,
+    sync_started_at: Option<Instant>,
     proxy_bridge: Option<ProxyBridgeHandle>,
 }
 
@@ -642,6 +645,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 was_launched: true,
                 process_stopped: false,
                 sync_pending: false,
+                sync_started_at: None,
                 proxy_bridge,
             },
         );
@@ -695,6 +699,9 @@ impl<C: ProcessController> ProfileRuntime<C> {
             proxy_bridge.stop().await?;
         }
         if let Some(running) = self.running.get_mut(profile_id) {
+            if !running.sync_pending {
+                running.sync_started_at = Some(Instant::now());
+            }
             running.sync_pending = true;
         }
         Ok(StopReceipt {
@@ -756,6 +763,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 was_launched: false,
                 process_stopped: true,
                 sync_pending: true,
+                sync_started_at: Some(Instant::now()),
                 proxy_bridge: None,
             },
         );
@@ -801,6 +809,20 @@ impl<C: ProcessController> ProfileRuntime<C> {
             })
             .collect::<Vec<_>>();
         for (profile_id, lease) in leases {
+            let stop_sync_expired = self.running.get(&profile_id).is_some_and(|running| {
+                running.process_stopped
+                    && running.sync_pending
+                    && sync_hold_expired(running.sync_started_at, Instant::now())
+            });
+            if stop_sync_expired {
+                // Never keep a team lock forever after the browser is stopped.
+                // Fencing makes a late upload fail once this lease is released;
+                // the local profile files remain available for retry/recovery.
+                let _ = release(self.coordination.clone(), &lease).await;
+                self.running.remove(&profile_id);
+                self.unexpectedly_stopped.remove(&profile_id);
+                continue;
+            }
             if self
                 .running
                 .get(&profile_id)
@@ -889,6 +911,11 @@ impl<C: ProcessController> ProfileRuntime<C> {
         }
         Ok(())
     }
+}
+
+fn sync_hold_expired(started_at: Option<Instant>, now: Instant) -> bool {
+    started_at
+        .is_some_and(|started_at| now.saturating_duration_since(started_at) >= MAX_STOP_SYNC_HOLD)
 }
 
 fn lease_ownership_lost(error: &Problem) -> bool {
@@ -1056,6 +1083,20 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn stopped_sync_lease_has_a_bounded_hold_window() {
+        let started_at = Instant::now();
+        assert!(!sync_hold_expired(
+            Some(started_at),
+            started_at + MAX_STOP_SYNC_HOLD - Duration::from_secs(1)
+        ));
+        assert!(sync_hold_expired(
+            Some(started_at),
+            started_at + MAX_STOP_SYNC_HOLD
+        ));
+        assert!(!sync_hold_expired(None, started_at + MAX_STOP_SYNC_HOLD));
+    }
 
     #[derive(Clone, Default)]
     struct TestController {
