@@ -2805,10 +2805,16 @@ async fn profile_sync_recovery_code_get(
 async fn profile_sync_recover(
     state: State<'_, DesktopState>,
     correlation_id: String,
+    idempotency_key: Option<String>,
     payload: Value,
 ) -> Result<CommandResult<Value>, Problem> {
     let result = state
-        .invoke("profile_sync_recover", &correlation_id, None, payload)
+        .invoke(
+            "profile_sync_recover",
+            &correlation_id,
+            idempotency_key.as_deref(),
+            payload,
+        )
         .await;
     report_profile_command_result(&state, "profile.sync_recover", result)
 }
