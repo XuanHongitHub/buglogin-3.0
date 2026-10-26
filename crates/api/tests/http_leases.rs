@@ -1730,9 +1730,12 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
         .unwrap();
     let chunked_commit = app.clone().oneshot(chunked_commit_request).await.unwrap();
     assert_eq!(chunked_commit.status(), StatusCode::CONFLICT);
-    let chunked_commit: Value =
-        serde_json::from_slice(&to_bytes(chunked_commit.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let chunked_commit: Value = serde_json::from_slice(
+        &to_bytes(chunked_commit.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(chunked_commit["code"], "profile_key_enrollment_required");
 
     let get = Request::builder()
