@@ -1,18 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { resolveTeamLockState } from "@/lib/team-lock-state";
 import type { ProfileLockInfo } from "@/types";
 
 const BUGLOGIN_DESKTOP =
   process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop";
-const RUNTIME_LEASE_TTL_MS = 60_000;
-const RUNTIME_HEARTBEAT_INTERVAL_MS = 15_000;
-const RUNTIME_HEARTBEAT_JITTER_MS = 3_000;
-const MIN_LEASE_REMAINING_FOR_RUNNING_MS =
-  RUNTIME_LEASE_TTL_MS -
-  RUNTIME_HEARTBEAT_INTERVAL_MS -
-  RUNTIME_HEARTBEAT_JITTER_MS;
-
 type CommandResult<T> = { data: T };
 type ProfileBinding = {
   profileId: string;
@@ -92,50 +85,44 @@ export function useTeamLocks(
                 checked.add(profileId);
                 return;
               }
-              const [leaseResult, runtimeResult] = await Promise.all([
-                invoke<CommandResult<LeaseStatus | null>>(
-                  "resource_lease_get",
-                  {
-                    correlationId: `lease-status-${crypto.randomUUID()}`,
-                    payload: {
-                      workspaceId: binding.workspaceId,
-                      resourceId: binding.resourceId,
-                    },
-                  },
-                ),
-                invoke<CommandResult<RuntimeProjection>>(
-                  "profile_runtime_get",
-                  {
-                    correlationId: `runtime-status-${crypto.randomUUID()}`,
-                    payload: { profileId },
-                  },
-                ),
-              ]);
+              const leaseResult = await invoke<
+                CommandResult<LeaseStatus | null>
+              >("resource_lease_get", {
+                correlationId: `lease-status-${crypto.randomUUID()}`,
+                payload: {
+                  workspaceId: binding.workspaceId,
+                  resourceId: binding.resourceId,
+                },
+              });
               const lease = leaseResult.data;
-              const runtime = runtimeResult.data;
               checked.add(profileId);
-              const recentlyRenewed =
-                lease !== null &&
-                lease.expiresAtMs - Date.now() >
-                  MIN_LEASE_REMAINING_FOR_RUNNING_MS;
-              const runtimeMatchesLease =
-                lease !== null &&
-                runtime?.ownerId === lease.ownerId &&
-                Boolean(runtime.deviceId);
-              if (
-                lease &&
-                runtime?.state === "running" &&
-                runtimeMatchesLease &&
-                recentlyRenewed
-              ) {
-                if (
-                  localDeviceId === null ||
-                  (runtime.deviceId === localDeviceId &&
-                    !locallyRunningProfileIds.has(profileId))
-                ) {
-                  unconfirmed.add(profileId);
-                  return;
-                }
+              if (!lease) return;
+
+              let runtime: RuntimeProjection;
+              try {
+                const runtimeResult = await invoke<
+                  CommandResult<RuntimeProjection>
+                >("profile_runtime_get", {
+                  correlationId: `runtime-status-${crypto.randomUUID()}`,
+                  payload: { profileId },
+                });
+                runtime = runtimeResult.data;
+              } catch {
+                unconfirmed.add(profileId);
+                return;
+              }
+
+              const lockState = resolveTeamLockState(
+                lease,
+                runtime,
+                localDeviceId,
+                locallyRunningProfileIds.has(profileId),
+              );
+              if (lockState.unknown) {
+                unconfirmed.add(profileId);
+                return;
+              }
+              if (lockState.runningRemotely && runtime) {
                 runtimeRunning.add(profileId);
                 nextLocks.push({
                   profileId,
@@ -145,10 +132,6 @@ export function useTeamLocks(
                   lockedAt: new Date(lease.issuedAtMs).toISOString(),
                   expiresAt: new Date(lease.expiresAtMs).toISOString(),
                 });
-              } else if (lease) {
-                // A lease can outlive a crashed app or protect an in-progress sync.
-                // It blocks relaunch, but does not prove a browser process is alive.
-                unconfirmed.add(profileId);
               }
             } catch {
               // A failed read is unknown, not evidence of an active lock.

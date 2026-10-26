@@ -1,12 +1,12 @@
 {
   "name": "@buglogin/desktop",
-  "version": "3.0.13",
+  "version": "3.0.14",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --config vite.config.ts",
     "build": "vite build",
-    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts && node --experimental-strip-types src/profile-workflow.self-test.ts && node --experimental-strip-types src/resource-inventory-pagination.self-test.ts && node --experimental-strip-types src/member-invitation-input.self-test.ts && node --experimental-strip-types src/profile-group-bulk.self-test.ts && node --experimental-strip-types src/org-workspace-route.self-test.ts && node --experimental-strip-types src/organization-account-input.self-test.ts && node --experimental-strip-types ../../src/lib/await-desktop-operation.self-test.ts && node --experimental-strip-types ../../src/components/org-member-access.self-test.ts && node --experimental-strip-types --test ../../tests/ui/profile-workspace-state.test.mjs",
+    "test": "node --experimental-strip-types src/model.self-test.ts && node --experimental-strip-types src/bridge.self-test.ts && node --experimental-strip-types src/profile-workflow.self-test.ts && node --experimental-strip-types src/resource-inventory-pagination.self-test.ts && node --experimental-strip-types src/member-invitation-input.self-test.ts && node --experimental-strip-types src/profile-group-bulk.self-test.ts && node --experimental-strip-types src/org-workspace-route.self-test.ts && node --experimental-strip-types src/organization-account-input.self-test.ts && node --experimental-strip-types ../../src/lib/await-desktop-operation.self-test.ts && node --experimental-strip-types ../../src/lib/team-lock-state.self-test.ts && node --experimental-strip-types ../../src/components/org-member-access.self-test.ts && node --experimental-strip-types --test ../../tests/ui/profile-workspace-state.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "tauri:dev": "pnpm tauri:dev:local-api",
     "tauri:dev:local-api": "node ../../scripts/tauri-dev-local-api.mjs",
