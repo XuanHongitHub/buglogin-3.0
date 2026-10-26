@@ -33,6 +33,7 @@ jobs:
       - uses: ./.github/actions/setup-buglogin
         with:
           install-node-dependencies: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Build native API and password reset operator
         run: cargo build --locked --release -p buglogin-api --bin buglogin-api --bin buglogin-admin-password-reset
       - name: Assemble provenance manifest
@@ -69,10 +70,16 @@ jobs:
               encoding="utf-8",
           )
           PY
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
-        with:
-          subject-path: dist/native-api/*
+      - name: Sign native API release manifest with keyless Sigstore
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign-blob dist/native-api/release-manifest.json --bundle dist/native-api/release-manifest.sigstore.json --yes
+      - name: Verify native API release manifest signature
+        run: >-
+          cosign verify-blob dist/native-api/release-manifest.json
+          --bundle dist/native-api/release-manifest.sigstore.json
+          --certificate-identity-regexp '^https://github\.com/keyduc91/Malvanut-Login/\.github/workflows/native-api-artifact\.yml@refs/heads/main$'
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: buglogin-native-api-${{ github.sha }}
