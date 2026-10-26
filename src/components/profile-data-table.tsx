@@ -27,6 +27,7 @@ import {
   LuCopy,
   LuEllipsis,
   LuFolder,
+  LuFolderPlus,
   LuGlobe,
   LuInfo,
   LuLock,
@@ -34,10 +35,12 @@ import {
   LuPlus,
   LuPuzzle,
   LuRefreshCw,
+  LuShieldCheck,
   LuSparkles,
   LuSquare,
   LuTrash2,
   LuTriangleAlert,
+  LuUserPlus,
   LuUserSearch,
   LuUsers,
 } from "react-icons/lu";
@@ -1697,6 +1700,13 @@ interface ProfilesDataTableProps {
   filterControls?: React.ReactNode;
   groups?: Array<{ id: string; name: string; profile_count?: number }>;
   totalProfilesCount?: number;
+  onOpenGroupManagement?: () => void;
+  onOpenProxyManagement?: () => void;
+  onOpenMemberManagement?: () => void;
+  workspaceName?: string;
+  workspaceRole?: string;
+  organizationName?: string;
+  maxProfiles?: number;
   onGroupSelect?: (groupId: string) => void;
 }
 
@@ -1747,6 +1757,13 @@ export function ProfilesDataTable({
   groups = [],
   totalProfilesCount,
   onGroupSelect,
+  onOpenGroupManagement,
+  onOpenProxyManagement,
+  onOpenMemberManagement,
+  workspaceName,
+  workspaceRole,
+  organizationName,
+  maxProfiles,
 }: ProfilesDataTableProps) {
   const { t } = useTranslation();
   const profileDrag = useProfileGroupDrag();
@@ -3939,6 +3956,50 @@ export function ProfilesDataTable({
               </Button>
             );
           })}
+
+          {onOpenGroupManagement && (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              title={t("groups.createTitle", { defaultValue: "Tạo nhóm mới" })}
+              onClick={onOpenGroupManagement}
+            >
+              <LuFolderPlus className="size-3.5" />
+            </Button>
+          )}
+
+          {(workspaceName ||
+            organizationName ||
+            (typeof maxProfiles === "number" && maxProfiles > 0)) && (
+            <div className="hidden lg:flex items-center gap-2 pl-2 text-[11px] text-muted-foreground/80 font-mono select-none">
+              <span className="text-muted-foreground/30">•</span>
+              {organizationName && (
+                <span className="font-sans font-medium text-foreground/80">
+                  {organizationName}
+                </span>
+              )}
+              {workspaceRole && (
+                <span className="rounded bg-primary/10 px-1 py-0.2 text-[9px] font-semibold uppercase text-primary tracking-wider">
+                  {workspaceRole}
+                </span>
+              )}
+              {typeof maxProfiles === "number" && maxProfiles > 0 && (
+                <>
+                  <span className="text-muted-foreground/30">•</span>
+                  <span>
+                    {totalProfilesCount ?? profiles.length}/{maxProfiles} (
+                    {Math.round(
+                      ((totalProfilesCount ?? profiles.length) / maxProfiles) *
+                        100,
+                    )}
+                    %)
+                  </span>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
@@ -3962,14 +4023,103 @@ export function ProfilesDataTable({
             </Button>
           )}
           {onCreateProfile && (
-            <Button
-              size="sm"
-              onClick={onCreateProfile}
-              className="h-7 shrink-0 gap-1.5 rounded-md px-3 text-xs font-medium shadow-xs"
-            >
-              <LuPlus className="size-3.5" />
-              <span>{t("header.newProfile")}</span>
-            </Button>
+            <DropdownMenu>
+              <div className="flex items-center rounded-md bg-primary text-primary-foreground shadow-xs">
+                <Button
+                  size="sm"
+                  onClick={onCreateProfile}
+                  className="h-7 gap-1.5 rounded-l-md rounded-r-none px-2.5 text-xs font-medium bg-transparent hover:bg-white/10 text-primary-foreground shadow-none border-r border-primary-foreground/20"
+                >
+                  <LuPlus className="size-3.5" />
+                  <span>{t("header.newProfile", { defaultValue: "Mới" })}</span>
+                </Button>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="icon"
+                    className="h-7 w-6 rounded-l-none rounded-r-md bg-transparent hover:bg-white/10 text-primary-foreground shadow-none px-0"
+                    title={t("actions.addOptions", {
+                      defaultValue: "Thêm mục khác...",
+                    })}
+                  >
+                    <LuChevronDown className="size-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </div>
+
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                  📦 {t("actions.resources", { defaultValue: "Tài nguyên" })}
+                </DropdownMenuLabel>
+                <DropdownMenuItem
+                  onClick={onCreateProfile}
+                  className="gap-2 cursor-pointer text-xs"
+                >
+                  <LuGlobe className="size-3.5 text-primary" />
+                  <div className="flex flex-1 items-center justify-between">
+                    <span>
+                      {t("createProfile.title", {
+                        defaultValue: "Tạo hồ sơ mới",
+                      })}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground font-mono">
+                      Ctrl+N
+                    </span>
+                  </div>
+                </DropdownMenuItem>
+                {onOpenGroupManagement && (
+                  <DropdownMenuItem
+                    onClick={onOpenGroupManagement}
+                    className="gap-2 cursor-pointer text-xs"
+                  >
+                    <LuFolderPlus className="size-3.5 text-primary" />
+                    <div className="flex flex-1 items-center justify-between">
+                      <span>
+                        {t("groups.createTitle", {
+                          defaultValue: "Tạo nhóm mới",
+                        })}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground font-mono">
+                        Ctrl+G
+                      </span>
+                    </div>
+                  </DropdownMenuItem>
+                )}
+                {onOpenProxyManagement && (
+                  <DropdownMenuItem
+                    onClick={onOpenProxyManagement}
+                    className="gap-2 cursor-pointer text-xs"
+                  >
+                    <LuShieldCheck className="size-3.5 text-primary" />
+                    <span>
+                      {t("proxies.newProxy", { defaultValue: "Thêm Proxy" })}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+
+                {onOpenMemberManagement && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      👥{" "}
+                      {t("actions.members", {
+                        defaultValue: "Nhân sự & Thành viên",
+                      })}
+                    </DropdownMenuLabel>
+                    <DropdownMenuItem
+                      onClick={onOpenMemberManagement}
+                      className="gap-2 cursor-pointer text-xs"
+                    >
+                      <LuUserPlus className="size-3.5 text-primary" />
+                      <span>
+                        {t("members.inviteMember", {
+                          defaultValue: "Mời thành viên",
+                        })}
+                      </span>
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
       </div>

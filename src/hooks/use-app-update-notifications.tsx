@@ -340,49 +340,19 @@ export function useAppUpdateNotifications() {
     handleAppUpdate,
   ]);
 
-  // Show the manual choice immediately, then show restart only after preparation.
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
+
+  // Auto-reset banner dismissal when a fresh update becomes ready
   useEffect(() => {
-    if (!isClient) return;
-
-    const showManualToast =
-      (manualUpdatePrompt || updateInfo?.manual_update_required) && !isUpdating;
-    if (!updateReady && !showManualToast) {
-      return;
+    if (updateReady || manualUpdatePrompt) {
+      setBannerDismissed(false);
     }
-    if (!updateInfo) return;
+  }, [updateReady, manualUpdatePrompt]);
 
-    toast.custom(
-      () => (
-        <AppUpdateToast
-          updateInfo={updateInfo}
-          onRestart={handleRestart}
-          onUpdate={handleManualUpdate}
-          onDismiss={dismissAppUpdate}
-          updateReady={updateReady}
-          updateAvailable={manualUpdatePrompt}
-        />
-      ),
-      {
-        id: "app-update",
-        duration: Number.POSITIVE_INFINITY,
-        position: "top-left",
-        style: {
-          zIndex: 99999,
-          pointerEvents: "auto",
-          marginTop: "16px",
-        },
-      },
-    );
-  }, [
-    updateInfo,
-    handleRestart,
-    dismissAppUpdate,
-    updateReady,
-    manualUpdatePrompt,
-    handleManualUpdate,
-    isUpdating,
-    isClient,
-  ]);
+  const dismissBanner = useCallback(() => {
+    setBannerDismissed(true);
+  }, []);
 
   // Check for app updates on startup
   useEffect(() => {
@@ -403,8 +373,17 @@ export function useAppUpdateNotifications() {
     isCheckingForUpdates,
     updateProgress,
     updateReady,
+    manualUpdatePrompt,
+    bannerDismissed,
+    isUpdateDialogOpen,
+    setIsUpdateDialogOpen,
+    dismissBanner,
     checkForAppUpdates,
     checkForAppUpdatesManual,
+    handleAppUpdate: handleManualUpdate,
+    handleRestart,
     dismissAppUpdate,
+    autoUpdatesEnabled,
+    setAutoUpdatesEnabled,
   };
 }

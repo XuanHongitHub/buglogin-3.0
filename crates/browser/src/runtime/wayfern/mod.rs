@@ -19,9 +19,11 @@ const CAPABILITIES: &[RuntimeCapability] = &[
     RuntimeCapability::Cdp,
 ];
 const BUGLOGIN_NEW_TAB_SHORTCUT: &str = "https://buglogin.com/";
+const LEGACY_DONUT_TOP_SITES: &[&str] =
+    &["https://donutbrowser.com/", "https://www.donutbrowser.com/"];
 
-/// Remove the exact BugLogin NTP shortcut emitted by older builds. Wayfern 155
-/// can crash on that generated string entry; retain unrelated user shortcuts.
+/// Repair the BugLogin NTP state. Wayfern 155 can crash on a generated string
+/// shortcut, so remove that legacy entry and blacklist the former Donut home.
 pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
     let preferences_path = profile_path.join("Default").join("Preferences");
     let bytes = match fs::read(&preferences_path) {
@@ -52,42 +54,61 @@ pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
             "wayfern-new-tab",
         ));
     };
-    let Some(custom_links) = root
+    let mut changed = false;
+    let ntp = root
+        .entry("ntp")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(ntp) = ntp.as_object_mut() {
+        let blacklist = ntp
+            .entry("most_visited_blacklist")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(blacklist) = blacklist.as_object_mut() {
+            for url in LEGACY_DONUT_TOP_SITES {
+                if !blacklist.contains_key(*url) {
+                    blacklist.insert((*url).to_owned(), serde_json::Value::Null);
+                    changed = true;
+                }
+            }
+        }
+    }
+    if let Some(custom_links) = root
         .get_mut("custom_links")
         .and_then(serde_json::Value::as_object_mut)
-    else {
-        return Ok(());
-    };
-    let has_buglogin_shortcut = custom_links
-        .get("list")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|links| {
-            links
-                .iter()
-                .any(|link| link.as_str() == Some(BUGLOGIN_NEW_TAB_SHORTCUT))
-        });
-    if !has_buglogin_shortcut {
-        return Ok(());
-    }
-    if let Some(links) = custom_links
-        .get_mut("list")
-        .and_then(serde_json::Value::as_array_mut)
     {
-        links.retain(|link| link.as_str() != Some(BUGLOGIN_NEW_TAB_SHORTCUT));
+        let has_buglogin_shortcut = custom_links
+            .get("list")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|links| {
+                links
+                    .iter()
+                    .any(|link| link.as_str() == Some(BUGLOGIN_NEW_TAB_SHORTCUT))
+            });
+        if has_buglogin_shortcut {
+            if let Some(links) = custom_links
+                .get_mut("list")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                links.retain(|link| link.as_str() != Some(BUGLOGIN_NEW_TAB_SHORTCUT));
+            }
+            if custom_links
+                .get("list")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                custom_links.remove("list");
+            }
+            if custom_links.get("initialized") == Some(&serde_json::Value::Bool(true)) {
+                custom_links.remove("initialized");
+            }
+            let remove_custom_links = custom_links.is_empty();
+            if remove_custom_links {
+                root.remove("custom_links");
+            }
+            changed = true;
+        }
     }
-    if custom_links
-        .get("list")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(Vec::is_empty)
-    {
-        custom_links.remove("list");
-    }
-    if custom_links.get("initialized") == Some(&serde_json::Value::Bool(true)) {
-        custom_links.remove("initialized");
-    }
-    let remove_custom_links = custom_links.is_empty();
-    if remove_custom_links {
-        root.remove("custom_links");
+    if !changed {
+        return Ok(());
     }
     let encoded = serde_json::to_vec(&preferences).map_err(|_| {
         Problem::new(
@@ -371,6 +392,16 @@ mod tests {
             "existing NTP settings remain untouched"
         );
         assert_eq!(
+            preferences["ntp"]["most_visited_blacklist"]["preexisting"],
+            serde_json::Value::Null
+        );
+        for url in LEGACY_DONUT_TOP_SITES {
+            assert_eq!(
+                preferences["ntp"]["most_visited_blacklist"][*url],
+                serde_json::Value::Null
+            );
+        }
+        assert_eq!(
             preferences["custom_links"]["list"],
             serde_json::json!(["https://example.org/"])
         );
@@ -425,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn new_tab_repair_leaves_unmarked_user_shortcuts_untouched() {
+    fn new_tab_repair_preserves_user_shortcuts_and_blacklists_legacy_top_sites() {
         let profile_path = std::env::temp_dir().join(format!(
             "buglogin-wayfern-ntp-user-links-{}-{}",
             std::process::id(),
@@ -442,7 +473,18 @@ mod tests {
 
         configure_new_tab_shortcuts(&profile_path).unwrap();
 
-        assert_eq!(fs::read(&preferences_path).unwrap(), bytes);
+        let preferences: serde_json::Value =
+            serde_json::from_slice(&fs::read(&preferences_path).unwrap()).unwrap();
+        assert_eq!(
+            preferences["custom_links"]["list"],
+            serde_json::json!(["https://example.org/"])
+        );
+        for url in LEGACY_DONUT_TOP_SITES {
+            assert_eq!(
+                preferences["ntp"]["most_visited_blacklist"][*url],
+                serde_json::Value::Null
+            );
+        }
         fs::remove_dir_all(profile_path).unwrap();
     }
 }

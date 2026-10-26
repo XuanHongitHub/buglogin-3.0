@@ -25,7 +25,7 @@ const CDP_TIMEOUT: Duration = Duration::from_secs(8);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const CDP_RETRY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const IDENTITY_CONNECT_ATTEMPTS: usize = 3;
-const PAGE_TARGET_STARTUP_GRACE: Duration = Duration::from_secs(2);
+const PAGE_TARGET_STARTUP_GRACE: Duration = Duration::from_secs(8);
 const PAGE_TARGET_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(5);
 const FINGERPRINT_PATH: &str = "BugLogin/fingerprint.json";
 
@@ -550,7 +550,7 @@ async fn create_visible_blank_page(
     let created = cdp_command(
         &browser_websocket,
         "Target.createTarget",
-        json!({ "url": "about:blank" }),
+        json!({ "url": "https://buglogin.com/" }),
     )
     .await
     .map_err(|error| {
@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cdp_bootstrap_opens_one_blank_page_through_the_local_browser_target() {
+    async fn cdp_bootstrap_opens_one_buglogin_page_through_the_local_browser_target() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1004,7 +1004,7 @@ mod tests {
                     };
                     let command: Value = serde_json::from_str(&text).unwrap();
                     assert_eq!(command["method"], "Target.createTarget");
-                    assert_eq!(command["params"]["url"], "about:blank");
+                    assert_eq!(command["params"]["url"], "https://buglogin.com/");
                     let response = json!({
                         "id": command["id"],
                         "result": {"targetId": "test-page"}

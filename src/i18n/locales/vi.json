@@ -396,6 +396,9 @@
       "edit": "Chỉnh sửa",
       "delete": "Xóa",
       "copyCookies": "Sao chép Cookie",
+      "addOptions": "Thêm mục khác...",
+      "resources": "Tài nguyên",
+      "members": "Nhân sự & Thành viên",
       "configure": "Cấu hình",
       "clone": "Nhân bản hồ sơ",
       "viewNetwork": "Xem mạng",
@@ -470,6 +473,9 @@
       "assignProxy": "Gán Proxy",
       "assignExtensionGroup": "Gán nhóm tiện ích",
       "copyCookies": "Sao chép Cookie",
+      "addOptions": "Thêm mục khác...",
+      "resources": "Tài nguyên",
+      "members": "Nhân sự & Thành viên",
       "runSelected": "Chạy mục đã chọn",
       "stopSelected": "Dừng mục đã chọn",
       "proRequired": "Cần gói Pro để chạy/dừng hàng loạt",
@@ -2363,6 +2369,21 @@
       "uploading": "Đang tải lên",
       "downloading": "Đang tải xuống",
       "startingUpdate": "Đang bắt đầu cập nhật..."
+    },
+    "viewNotes": "Xem điểm mới",
+    "restartNow": "Khởi động lại ngay",
+    "updateReadyTooltip": "Bản cập nhật v{{version}} đã sẵn sàng cài đặt",
+    "dialog": {
+      "title": "Bản Cập Nhật Phần Mềm Mới",
+      "official": "Bản Chính Thức",
+      "changelogTitle": "Điểm mới trong bản cập nhật này",
+      "viewOnWeb": "Xem trên web",
+      "readyToInstall": "Gói cập nhật đã sẵn sàng cài đặt",
+      "securityVerified": "Xác minh an toàn: Chữ ký số Ed25519 hợp lệ (Release Feed: Verified)",
+      "autoUpdateLabel": "Tự động tải các bản cập nhật mới",
+      "restartAndApply": "Khởi động lại ngay",
+      "downloadNow": "Tải bản cập nhật",
+      "eta": "Còn"
     }
   },
   "browserDownload": {
@@ -2803,7 +2824,8 @@
     },
     "network": "Mạng",
     "integrations": "Tích hợp",
-    "account": "Tài khoản"
+    "account": "Tài khoản",
+    "members": "Thành viên"
   },
   "pageTitle": {
     "profiles": "Profile",
@@ -2818,7 +2840,8 @@
     "integrations": "Tích hợp",
     "account": "Tài khoản",
     "accountManagement": "Quản lý tài khoản",
-    "shortcuts": "Phím tắt"
+    "shortcuts": "Phím tắt",
+    "members": "Quản Lý Thành Viên Workspace"
   },
   "encryption": {
     "required": {

@@ -12,6 +12,7 @@ import {
   LuCloud,
   LuCookie,
   LuFileText,
+  LuFolderKanban,
   LuInfo,
   LuKeyboard,
   LuLightbulb,
@@ -39,6 +40,7 @@ export type AppPage =
   | "proxies"
   | "extensions"
   | "groups"
+  | "members"
   | "cookieBot"
   | "agent"
   | "settings"
@@ -255,9 +257,10 @@ interface RailItem {
 
 const TOP_ITEMS: RailItem[] = [
   { page: "profiles", Icon: LuUser, labelKey: "rail.profiles" },
+  { page: "groups", Icon: LuFolderKanban, labelKey: "rail.groups" },
+  { page: "members", Icon: LuUsers, labelKey: "rail.members" },
   { page: "proxies", Icon: FiWifi, labelKey: "rail.network" },
   { page: "extensions", Icon: LuPuzzle, labelKey: "rail.extensions" },
-  { page: "groups", Icon: LuUsers, labelKey: "rail.groups" },
   { page: "cookieBot", Icon: LuCookie, labelKey: "rail.cookieBot" },
   { page: "agent", Icon: LuBot, labelKey: "rail.agent" },
   { page: "integrations", Icon: LuPlug, labelKey: "rail.integrations" },
