@@ -151,7 +151,11 @@ function DesktopHome({
   const [workspaceProfilesFailed, setWorkspaceProfilesFailed] = useState(false);
   const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
   const workspaceSelectionRequestRef = useRef(0);
-  const [_workspaceLoading, setWorkspaceLoading] = useState(true);
+  const [workspaceLoading, setWorkspaceLoading] = useState(true);
+  const [workspaceListRevision, setWorkspaceListRevision] = useState(0);
+  const refreshWorkspaceList = useCallback(() => {
+    setWorkspaceListRevision((revision) => revision + 1);
+  }, []);
   const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
   const [memberManagementOpen, setMemberManagementOpen] = useState(false);
   const [pendingInvitesOpen, setPendingInvitesOpen] = useState(false);
@@ -291,8 +295,10 @@ function DesktopHome({
     }
   }, [selectedWorkspaceId, refreshProfiles, clearProfileError, t]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: workspaceListRevision explicitly reloads data after organization/workspace mutations.
   useEffect(() => {
     let disposed = false;
+    setWorkspaceLoading(true);
     void (async () => {
       try {
         const available = await invoke<Array<any>>("get_available_workspaces");
@@ -380,7 +386,7 @@ function DesktopHome({
     return () => {
       disposed = true;
     };
-  }, [t, refreshProfiles, clearProfileError]);
+  }, [t, refreshProfiles, clearProfileError, workspaceListRevision]);
   const { downloadBrowser, loadDownloadedVersions, loadVersions } =
     useBrowserDownload();
 
@@ -1650,6 +1656,7 @@ function DesktopHome({
         selectedWorkspaceId={selectedWorkspaceId}
         onWorkspaceSelect={handleWorkspaceSelect}
         onManageWorkspaces={() => handleRailNavigate("workspaces")}
+        workspaceLoading={workspaceLoading || workspaceSwitching}
         totalProfilesCount={workspaceProfileCount(
           profiles.length,
           profilesReadyForWorkspace && !profilesLoading,
@@ -1947,6 +1954,7 @@ function DesktopHome({
                 onWorkspaceSwitched={(id) => {
                   handleWorkspaceSelect(id);
                 }}
+                onWorkspaceDataChanged={refreshWorkspaceList}
                 onNavigateHome={() => setCurrentPage("profiles")}
               />
             </motion.div>
@@ -2220,6 +2228,7 @@ function DesktopHome({
         onClose={() => setWorkspaceManagementOpen(false)}
         activeWorkspaceId={selectedWorkspaceId}
         onWorkspaceSwitched={handleWorkspaceSelect}
+        onWorkspaceDataChanged={refreshWorkspaceList}
       />
 
       <MemberManagementDialog

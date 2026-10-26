@@ -61,6 +61,7 @@ interface WorkspaceManagementDialogProps {
   onClose?: () => void;
   activeWorkspaceId: string;
   onWorkspaceSwitched: (workspaceId: string) => void;
+  onWorkspaceDataChanged?: () => void;
   onNavigateHome?: () => void;
 }
 
@@ -72,11 +73,16 @@ export function WorkspaceManagementDialog({
   onClose = () => {},
   activeWorkspaceId,
   onWorkspaceSwitched,
+  onWorkspaceDataChanged,
   onNavigateHome,
 }: WorkspaceManagementDialogProps) {
   const { t } = useTranslation();
   const isPageMode = mode === "page";
   const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [isLoadingOrgs, setIsLoadingOrgs] = useState(true);
+  const [organizationLoadError, setOrganizationLoadError] = useState<
+    string | null
+  >(null);
   const [selectedOrgId, setSelectedOrgId] = useState<string>("");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -102,6 +108,7 @@ export function WorkspaceManagementDialog({
     "overview" | "members" | "groups" | "profiles"
   >("overview");
   const workspaceRequestRef = useRef(0);
+  const organizationRequestRef = useRef(0);
 
   // Form states for Create Workspace
   const [wsName, setWsName] = useState("");
@@ -133,18 +140,32 @@ export function WorkspaceManagementDialog({
   const [isSubmittingOrg, setIsSubmittingOrg] = useState(false);
 
   // Load organizations
-  const loadOrgs = useCallback(async () => {
+  const loadOrgs = useCallback(async (preferredOrgId?: string) => {
+    const requestId = ++organizationRequestRef.current;
+    setIsLoadingOrgs(true);
     try {
       const orgPage = await desktopApi.listOrganizations();
+      if (requestId !== organizationRequestRef.current) return orgPage.items;
       setOrganizations(orgPage.items);
+      setOrganizationLoadError(null);
       setSelectedOrgId((current) =>
-        orgPage.items.some((organization) => organization.id === current)
-          ? current
-          : (orgPage.items[0]?.id ?? ""),
+        preferredOrgId && orgPage.items.some((org) => org.id === preferredOrgId)
+          ? preferredOrgId
+          : orgPage.items.some((organization) => organization.id === current)
+            ? current
+            : (orgPage.items[0]?.id ?? ""),
       );
+      return orgPage.items;
     } catch (err) {
+      if (requestId !== organizationRequestRef.current) return null;
       console.error("Failed to load organizations:", err);
+      setOrganizationLoadError(
+        err instanceof Error ? err.message : String(err),
+      );
       showErrorToast(String(err));
+      return null;
+    } finally {
+      if (requestId === organizationRequestRef.current) setIsLoadingOrgs(false);
     }
   }, []);
 
@@ -235,7 +256,8 @@ export function WorkspaceManagementDialog({
       );
       setWsName("");
       setCreateWsOpen(false);
-      void loadWorkspaces();
+      await loadWorkspaces();
+      onWorkspaceDataChanged?.();
     } catch (err) {
       console.error("Failed to create workspace:", err);
       showErrorToast(String(err));
@@ -252,7 +274,7 @@ export function WorkspaceManagementDialog({
     try {
       const orgId = `org_${crypto.randomUUID()}`;
       const account = await desktopApi.getAccount();
-      await desktopApi.createOrganization({
+      const createdOrganization = await desktopApi.createOrganization({
         organization: {
           id: orgId,
           accountId: account.accountId,
@@ -272,8 +294,24 @@ export function WorkspaceManagementDialog({
       );
       setOrgName("");
       setCreateOrgOpen(false);
-      await loadOrgs();
-      setSelectedOrgId(orgId);
+      workspaceRequestRef.current += 1;
+      setWorkspaces([]);
+      setWorkspaceLoadError(null);
+      setIsLoading(true);
+      const refreshedOrganizations = await loadOrgs(orgId);
+      setOrganizations((current) =>
+        current.some((organization) => organization.id === orgId)
+          ? current
+          : [...current, createdOrganization],
+      );
+      if (
+        !refreshedOrganizations?.some(
+          (organization) => organization.id === orgId,
+        )
+      ) {
+        setSelectedOrgId(orgId);
+      }
+      onWorkspaceDataChanged?.();
     } catch (err) {
       console.error("Failed to create organization:", err);
       showErrorToast(String(err));
@@ -311,7 +349,8 @@ export function WorkspaceManagementDialog({
         }),
       );
       setEditingWs(null);
-      void loadWorkspaces();
+      await loadWorkspaces();
+      onWorkspaceDataChanged?.();
     } catch (err) {
       console.error("Failed to update workspace:", err);
       showErrorToast(String(err));
@@ -626,7 +665,10 @@ export function WorkspaceManagementDialog({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => void loadWorkspaces()}
+              onClick={() => {
+                void loadOrgs();
+                void loadWorkspaces();
+              }}
               disabled={isLoading || !selectedOrgId}
               className="h-8 gap-1.5 text-xs"
             >
@@ -666,8 +708,13 @@ export function WorkspaceManagementDialog({
             </Button>
           </div>
         ) : null}
-        <div className={cn("overflow-y-auto", !isPageMode && "max-h-[300px]")}>
-          <table className="w-full text-left text-xs">
+        <div
+          className={cn(
+            "overflow-x-auto",
+            isPageMode ? "" : "max-h-[300px] overflow-y-auto",
+          )}
+        >
+          <table className="w-full min-w-[1140px] text-left text-xs">
             <thead className="bg-muted/50 border-b border-border sticky top-0 font-medium text-muted-foreground text-[11px]">
               <tr>
                 <th className="py-2.5 px-3">Tên Không Gian Làm Việc</th>
@@ -675,7 +722,9 @@ export function WorkspaceManagementDialog({
                 <th className="py-2.5 px-3 w-24">Thành viên</th>
                 <th className="py-2.5 px-3 w-24">Ngoại tuyến</th>
                 <th className="py-2.5 px-3 w-24 text-center">Trạng thái</th>
-                <th className="py-2.5 px-3 w-64 text-center">Thao tác</th>
+                <th className="w-[560px] min-w-[560px] px-3 py-2.5 text-center">
+                  Thao tác
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
@@ -698,7 +747,9 @@ export function WorkspaceManagementDialog({
                   >
                     {t("workspaces.noWorkspacesFound", {
                       defaultValue:
-                        "Không tìm thấy workspace nào phù hợp với bộ lọc",
+                        workspaces.length === 0 && !searchQuery
+                          ? "Organization này chưa có workspace."
+                          : "Không tìm thấy workspace nào phù hợp với bộ lọc",
                     })}
                   </td>
                 </tr>
@@ -715,14 +766,16 @@ export function WorkspaceManagementDialog({
                         isActive && "bg-primary/5",
                       )}
                     >
-                      <td className="py-2.5 px-3">
-                        <div className="flex items-center gap-2.5">
+                      <td className="px-3 py-2">
+                        <div className="flex min-w-0 items-center gap-2.5">
                           <span className="grid size-7 shrink-0 place-items-center rounded bg-primary/10 text-primary font-semibold">
                             <LuBuilding2 className="size-3.5" />
                           </span>
-                          <div>
-                            <div className="font-semibold text-foreground flex items-center gap-1.5">
-                              <span>{ws.name}</span>
+                          <div className="min-w-0">
+                            <div className="flex min-w-0 items-center gap-1.5 font-semibold text-foreground">
+                              <span className="truncate" title={ws.name}>
+                                {ws.name}
+                              </span>
                               {isActive && (
                                 <Badge
                                   variant="outline"
@@ -740,17 +793,17 @@ export function WorkspaceManagementDialog({
                           </div>
                         </div>
                       </td>
-                      <td className="py-2.5 px-3 font-mono text-muted-foreground">
+                      <td className="px-3 py-2 font-mono text-muted-foreground">
                         {ws.policy?.maxProfiles
                           ? `${ws.policy.maxProfiles} slots`
                           : "Không giới hạn"}
                       </td>
-                      <td className="py-2.5 px-3 font-mono text-muted-foreground">
+                      <td className="px-3 py-2 font-mono text-muted-foreground">
                         {ws.policy?.maxMembers
                           ? `${ws.policy.maxMembers} seats`
                           : "Không giới hạn"}
                       </td>
-                      <td className="py-2.5 px-3">
+                      <td className="px-3 py-2">
                         {ws.policy?.offlineEntitled ? (
                           <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600 font-medium">
                             <LuCheck className="size-3" />
@@ -763,7 +816,7 @@ export function WorkspaceManagementDialog({
                           </span>
                         )}
                       </td>
-                      <td className="py-2.5 px-3 text-center">
+                      <td className="px-3 py-2 text-center">
                         {isActive ? (
                           <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-500">
                             <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -781,8 +834,8 @@ export function WorkspaceManagementDialog({
                           </LoadingButton>
                         )}
                       </td>
-                      <td className="py-2.5 px-3 text-center">
-                        <div className="flex flex-wrap items-center justify-center gap-1">
+                      <td className="w-[560px] min-w-[560px] px-3 py-2 text-center">
+                        <div className="flex flex-nowrap items-center justify-center gap-1 whitespace-nowrap">
                           {isPageMode && (
                             <Button
                               variant="outline"
@@ -1319,10 +1372,34 @@ export function WorkspaceManagementDialog({
             <div className="flex items-center justify-between gap-2 px-2 pb-2">
               <h2 className="text-xs font-semibold">Organizations</h2>
               <Badge variant="outline" className="text-[10px]">
-                {organizations.length}
+                {isLoadingOrgs ? "…" : organizations.length}
               </Badge>
             </div>
             <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+              {organizationLoadError ? (
+                <div className="space-y-2 px-2 py-3 text-xs text-destructive">
+                  <p>Không tải được danh sách organization.</p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void loadOrgs()}
+                    disabled={isLoadingOrgs}
+                    className="h-7 text-xs"
+                  >
+                    Thử lại
+                  </Button>
+                </div>
+              ) : null}
+              {isLoadingOrgs && organizations.length === 0 ? (
+                <div
+                  className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground"
+                  role="status"
+                >
+                  <LuRefreshCw className="size-3 animate-spin" />
+                  Đang tải organizations...
+                </div>
+              ) : null}
               {organizations.map((organization) => (
                 <Button
                   key={organization.id}
@@ -1335,6 +1412,7 @@ export function WorkspaceManagementDialog({
                   onClick={() => {
                     workspaceRequestRef.current += 1;
                     setWorkspaces([]);
+                    setIsLoading(true);
                     setWorkspaceLoadError(null);
                     setSelectedOrgId(organization.id);
                     setPage(0);
@@ -1344,11 +1422,13 @@ export function WorkspaceManagementDialog({
                   <span className="truncate">{organization.name}</span>
                 </Button>
               ))}
-              {organizations.length === 0 && !isLoading && (
-                <p className="px-2 py-3 text-xs text-muted-foreground">
-                  Chưa có organization.
-                </p>
-              )}
+              {organizations.length === 0 &&
+                !isLoadingOrgs &&
+                !organizationLoadError && (
+                  <p className="px-2 py-3 text-xs text-muted-foreground">
+                    Chưa có organization.
+                  </p>
+                )}
             </div>
             <Button
               type="button"
