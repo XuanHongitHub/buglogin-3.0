@@ -204,6 +204,7 @@ fn extension_group(id: &str, extension: &Extension) -> ExtensionGroup {
         id: ExtensionGroupId::new(id).unwrap(),
         name: "Extension Group".into(),
         extension_ids: vec![extension.id.clone()],
+        extension_sources: Default::default(),
         sync_mode: Some(SyncMode::Managed),
         created_at: "2026-07-21T00:00:00Z".into(),
         updated_at: "2026-07-21T00:00:00Z".into(),

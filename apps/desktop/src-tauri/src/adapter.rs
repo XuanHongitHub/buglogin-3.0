@@ -361,7 +361,7 @@ fn append_wayfern_default_start_page(args: &mut Vec<String>, profile_path: &Path
     if has_saved_wayfern_session(profile_path) {
         push_or_replace_arg(args, "--restore-last-session".to_owned());
     } else if !args.iter().any(|argument| !argument.starts_with('-')) {
-        args.push("about:blank".to_owned());
+        args.push("https://buglogin.com/".to_owned());
     }
 }
 
@@ -1326,6 +1326,7 @@ impl AdapterState {
         )?;
         let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
         validate_extension_group_fields(&input.name, &input.extension_ids, correlation_id)?;
+        buglogin_api::services::extension_groups::validate_sources(&input.extension_ids, &input.extension_sources)?;
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|_| {
@@ -1340,6 +1341,7 @@ impl AdapterState {
             id: input.extension_group_id,
             name: input.name.trim().to_owned(),
             extension_ids: input.extension_ids,
+            extension_sources: input.extension_sources,
             sync_mode: input.sync_mode,
             created_at: now.clone(),
             updated_at: now,
@@ -1383,6 +1385,12 @@ impl AdapterState {
                 )
             })?;
         current.value.name = input.name.trim().to_owned();
+        if let Some(sources) = input.extension_sources {
+            buglogin_api::services::extension_groups::validate_sources(&input.extension_ids, &sources)?;
+            current.value.extension_sources = sources;
+        }
+        current.value.extension_sources.retain(|id, _| input.extension_ids.contains(id));
+        buglogin_api::services::extension_groups::validate_sources(&input.extension_ids, &current.value.extension_sources)?;
         current.value.extension_ids = input.extension_ids;
         current.value.sync_mode = input.sync_mode;
         current.value.updated_at = now;
@@ -2992,7 +3000,7 @@ mod tests {
     }
 
     #[test]
-    fn wayfern_fresh_start_disables_first_run_and_uses_blank_page() {
+    fn wayfern_fresh_start_disables_first_run_and_uses_buglogin_homepage() {
         let profile_path = std::env::temp_dir().join(format!(
             "buglogin-start-page-fresh-{}-{}",
             std::process::id(),
@@ -3008,7 +3016,8 @@ mod tests {
 
         assert!(args.iter().any(|arg| arg == "--no-first-run"));
         assert!(args.iter().any(|arg| arg == "--no-default-browser-check"));
-        assert!(args.iter().any(|arg| arg == "about:blank"));
+        assert!(args.iter().any(|arg| arg == "https://buglogin.com/"));
+        assert!(!args.iter().any(|arg| arg == "about:blank"));
         assert!(!args.iter().any(|arg| arg == "--restore-last-session"));
         fs::remove_dir_all(profile_path).unwrap();
     }

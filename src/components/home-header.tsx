@@ -3,8 +3,10 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { LuDownload, LuRefreshCw } from "react-icons/lu";
 import { getCurrentOS } from "@/lib/browser-utils";
 import { cn } from "@/lib/utils";
+import type { AppUpdateInfo, AppUpdateProgress } from "@/types";
 
 const HOLD_MS = 150;
 const DRAG_THRESHOLD_PX = 3;
@@ -22,12 +24,26 @@ const isInteractiveTarget = (target: EventTarget | null): boolean => {
 
 interface Props {
   pageTitle?: string;
-  workspaces?: Array<{ id: string; name: string }>;
-  selectedWorkspaceId?: string;
-  onWorkspaceSelect?: (workspaceId: string) => void;
+  showPageContext?: boolean;
+  // App update props (DES-04 §3.1)
+  updateInfo?: AppUpdateInfo | null;
+  updateReady?: boolean;
+  isUpdating?: boolean;
+  isCheckingForUpdates?: boolean;
+  updateProgress?: AppUpdateProgress | null;
+  onOpenUpdateDialog?: () => void;
 }
 
-export const HomeHeader = ({ pageTitle }: Props) => {
+export const HomeHeader = ({
+  pageTitle,
+  showPageContext = true,
+  updateInfo,
+  updateReady,
+  isUpdating,
+  isCheckingForUpdates,
+  updateProgress,
+  onOpenUpdateDialog,
+}: Props) => {
   const { t } = useTranslation();
   const [platform, setPlatform] = useState<string>("macos");
 
@@ -133,20 +149,65 @@ export const HomeHeader = ({ pageTitle }: Props) => {
         isWindows ? "pr-[144px]" : "pr-4",
       )}
     >
-      {/* Breadcrumb Navigation */}
-      <div className="flex items-center gap-1.5 text-xs">
-        <span className="text-muted-foreground/70 font-medium select-none">
-          BugLogin
-        </span>
-        <span className="text-muted-foreground/40 select-none">/</span>
-        <span className="font-semibold text-foreground tracking-tight select-none">
-          {pageTitle || t("rail.profiles", { defaultValue: "Profiles" })}
-        </span>
+      {/* Breadcrumb */}
+      <div className="flex items-center gap-2 text-xs">
+        {showPageContext && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground/70 font-medium select-none">
+              BugLogin
+            </span>
+            <span className="text-muted-foreground/40 select-none">/</span>
+            <span className="font-semibold text-foreground tracking-tight select-none">
+              {pageTitle || t("rail.profiles", { defaultValue: "Profiles" })}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Central drag area */}
       <div className="flex-1 h-full cursor-default" />
+
+      {/* Right side: Update Anchor Pill (DES-04 §3.1) */}
+      <div className="flex items-center gap-2 shrink-0">
+        {updateReady && updateInfo && (
+          <button
+            type="button"
+            onClick={onOpenUpdateDialog}
+            className="flex h-6.5 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all shadow-2xs cursor-pointer select-none"
+            title={t("appUpdate.updateReadyTooltip", {
+              defaultValue: `Bản cập nhật v${updateInfo.new_version} đã sẵn sàng cài đặt`,
+            })}
+          >
+            <span className="size-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-semibold">v{updateInfo.new_version}</span>
+          </button>
+        )}
+
+        {isUpdating && updateInfo && (
+          <button
+            type="button"
+            onClick={onOpenUpdateDialog}
+            className="flex h-6.5 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-mono bg-primary/10 text-primary border border-primary/25 hover:bg-primary/20 transition-all shadow-2xs cursor-pointer select-none"
+            title="Đang tải bản cập nhật ngầm"
+          >
+            <LuDownload className="size-3 animate-bounce" />
+            <span>{updateProgress?.percentage ?? 0}%</span>
+          </button>
+        )}
+
+        {isCheckingForUpdates && (
+          <span
+            className="flex items-center gap-1 text-[11px] text-muted-foreground/60 pr-1 select-none"
+            title={t("about.checkingUpdates", {
+              defaultValue: "Đang kiểm tra cập nhật...",
+            })}
+          >
+            <LuRefreshCw className="size-3 animate-spin" />
+          </span>
+        )}
+      </div>
     </div>
   );
 };
+
 export default HomeHeader;

@@ -318,7 +318,7 @@ export function ScopedAccountCreationPage({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-background">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-6 py-3.5">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-3">
         <div className="flex items-center gap-3">
           <Button
             type="button"
@@ -330,18 +330,24 @@ export function ScopedAccountCreationPage({
             <LuArrowLeft className="size-4" />
           </Button>
           <div>
-            <h1 className="text-base font-semibold">Tạo tài khoản</h1>
+            <h1 className="text-sm font-semibold">Tạo tài khoản</h1>
             <p className="text-xs text-muted-foreground">
               {organizationName ? `${organizationName} / ` : ""}Workspace:{" "}
               {workspaceName}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-1 rounded-md border border-border p-1">
+        <div
+          role="tablist"
+          aria-label="Chế độ tạo tài khoản"
+          className="flex items-center rounded-md border border-border bg-muted/30 p-0.5"
+        >
           <Button
             type="button"
             size="sm"
             variant={mode === "single" ? "secondary" : "ghost"}
+            role="tab"
+            aria-selected={mode === "single"}
             onClick={() => {
               setMode("single");
               setBulkRows("");
@@ -349,33 +355,35 @@ export function ScopedAccountCreationPage({
               setConfirmPassword("");
             }}
           >
-            <LuUserPlus className="mr-1.5 size-3.5" /> Một tài khoản
+            <LuUserPlus className="mr-1.5 size-3.5" /> Tạo một
           </Button>
           <Button
             type="button"
             size="sm"
             variant={mode === "bulk" ? "secondary" : "ghost"}
+            role="tab"
+            aria-selected={mode === "bulk"}
             onClick={() => {
               setMode("bulk");
               setInitialPassword("");
               setConfirmPassword("");
             }}
           >
-            <LuUsers className="mr-1.5 size-3.5" /> Hàng loạt
+            <LuUsers className="mr-1.5 size-3.5" /> Tạo hàng loạt
           </Button>
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-3xl space-y-5 p-6">
-        <section className="rounded-lg border border-border bg-card p-4">
-          <p className="text-sm font-medium">
-            Tạo tài khoản trực tiếp trong workspace này
+      <div className="mx-auto w-full max-w-2xl space-y-5 px-5 py-5">
+        <div className="space-y-1">
+          <h2 className="text-sm font-semibold">
+            Tài khoản được cấp quyền đăng nhập ngay
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            Đây là tài khoản mới, không phải lời mời. Chuyển mật khẩu ban đầu
+            cho người dùng qua kênh an toàn.
           </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Đây không phải lời mời. Người dùng có thể đăng nhập ngay bằng mật
-            khẩu ban đầu đã được cấp.
-          </p>
-        </section>
+        </div>
 
         {authorityError ? (
           <section
@@ -396,91 +404,117 @@ export function ScopedAccountCreationPage({
 
         <form
           onSubmit={(event) => void handleSubmit(event)}
-          className="space-y-4"
+          className="space-y-5"
         >
-          <div className="space-y-1.5">
-            <Label htmlFor="account-role">Vai trò trong workspace</Label>
-            <Select
-              value={role}
-              onValueChange={(value) => setRole(value as MemberRole)}
-              disabled={blocked}
-            >
-              <SelectTrigger id="account-role">
-                <SelectValue placeholder="Chọn vai trò" />
-              </SelectTrigger>
-              <SelectContent>
-                {assignableRoles.map((candidate) => (
-                  <SelectItem key={candidate} value={candidate}>
-                    {t(`roles.${candidate}`, { defaultValue: candidate })}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {mode === "single" && (
+            <section className="space-y-3">
+              <div className="border-b border-border/60 pb-2">
+                <h3 className="text-xs font-semibold">Thông tin tài khoản</h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="account-username">Tên tài khoản</Label>
+                  <Input
+                    id="account-username"
+                    autoComplete="off"
+                    minLength={3}
+                    maxLength={64}
+                    required
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="account-email">Email</Label>
+                  <Input
+                    id="account-email"
+                    type="email"
+                    autoComplete="off"
+                    maxLength={254}
+                    required
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                  />
+                </div>
+              </div>
+            </section>
+          )}
 
-          {mode === "single" ? (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="account-username">Tên tài khoản</Label>
-                <Input
-                  id="account-username"
-                  autoComplete="off"
-                  minLength={3}
-                  maxLength={64}
-                  required
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="account-email">Email</Label>
-                <Input
-                  id="account-email"
-                  type="email"
-                  autoComplete="off"
-                  maxLength={254}
-                  required
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="account-initial-password">
-                  Mật khẩu ban đầu
-                </Label>
-                <Input
-                  id="account-initial-password"
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={MIN_INITIAL_PASSWORD_LENGTH}
-                  maxLength={MAX_INITIAL_PASSWORD_LENGTH}
-                  required
-                  value={initialPassword}
-                  onChange={(event) => setInitialPassword(event.target.value)}
-                />
+          <section className="space-y-3 border-t border-border/60 pt-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
+                <h3 className="text-xs font-semibold">Quyền trong workspace</h3>
                 <p className="text-xs text-muted-foreground">
-                  Dài 12–256 ký tự. Hãy chuyển mật khẩu cho người dùng qua kênh
-                  an toàn.
+                  Chỉ hiển thị vai trò bạn có quyền cấp.
                 </p>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="account-confirm-password">
-                  Xác nhận mật khẩu
-                </Label>
-                <Input
-                  id="account-confirm-password"
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={MIN_INITIAL_PASSWORD_LENGTH}
-                  maxLength={MAX_INITIAL_PASSWORD_LENGTH}
-                  required
-                  value={confirmPassword}
-                  onChange={(event) => setConfirmPassword(event.target.value)}
-                />
-              </div>
+              <Select
+                value={assignableRoles.includes(role) ? role : undefined}
+                onValueChange={(value) => setRole(value as MemberRole)}
+                disabled={blocked}
+              >
+                <SelectTrigger id="account-role" className="w-48">
+                  <SelectValue
+                    placeholder={
+                      isLoadingAuthority ? "Đang tải vai trò…" : "Chọn vai trò"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {assignableRoles.map((candidate) => (
+                    <SelectItem key={candidate} value={candidate}>
+                      {t(`roles.${candidate}`, { defaultValue: candidate })}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
+          </section>
+
+          {mode === "single" ? (
+            <section className="space-y-3 border-t border-border/60 pt-4">
+              <div className="border-b border-border/60 pb-2">
+                <h3 className="text-xs font-semibold">Thông tin đăng nhập</h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="account-initial-password">
+                    Mật khẩu ban đầu
+                  </Label>
+                  <Input
+                    id="account-initial-password"
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={MIN_INITIAL_PASSWORD_LENGTH}
+                    maxLength={MAX_INITIAL_PASSWORD_LENGTH}
+                    required
+                    value={initialPassword}
+                    onChange={(event) => setInitialPassword(event.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Dài 12–256 ký tự. Hãy chuyển mật khẩu cho người dùng qua
+                    kênh an toàn.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="account-confirm-password">
+                    Xác nhận mật khẩu
+                  </Label>
+                  <Input
+                    id="account-confirm-password"
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={MIN_INITIAL_PASSWORD_LENGTH}
+                    maxLength={MAX_INITIAL_PASSWORD_LENGTH}
+                    required
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                  />
+                </div>
+              </div>
+            </section>
           ) : (
-            <div className="space-y-1.5">
+            <section className="space-y-2 border-t border-border/60 pt-4">
               <Label htmlFor="bulk-accounts">Danh sách tài khoản</Label>
               <p className="text-xs text-muted-foreground">
                 Mỗi dòng theo định dạng{" "}
@@ -501,7 +535,7 @@ export function ScopedAccountCreationPage({
                 {bulkAnalysis.invalidLines.length} dòng sai ·{" "}
                 {bulkAnalysis.duplicateLines.length} dòng trùng
               </p>
-            </div>
+            </section>
           )}
 
           {result && (
@@ -512,7 +546,7 @@ export function ScopedAccountCreationPage({
               {result}
             </p>
           )}
-          <div className="flex justify-end gap-2 border-t border-border/60 pt-4">
+          <div className="flex justify-end gap-2 border-t border-border/60 pt-3">
             <Button type="button" variant="outline" onClick={onBack}>
               Quay lại
             </Button>

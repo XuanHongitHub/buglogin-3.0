@@ -27,6 +27,7 @@ import {
   LuCopy,
   LuEllipsis,
   LuFolder,
+  LuFolderPlus,
   LuGlobe,
   LuInfo,
   LuLock,
@@ -34,10 +35,12 @@ import {
   LuPlus,
   LuPuzzle,
   LuRefreshCw,
+  LuShieldCheck,
   LuSparkles,
   LuSquare,
   LuTrash2,
   LuTriangleAlert,
+  LuUserPlus,
   LuUserSearch,
   LuUsers,
 } from "react-icons/lu";
@@ -314,7 +317,19 @@ interface TableMeta {
   onOpenTrafficDialog?: (profileId: string) => void;
 
   // Sync
-  syncStatuses: Record<string, { status: string; error?: string }>;
+  syncStatuses: Record<
+    string,
+    {
+      status: string;
+      error?: string;
+      generation?: number;
+      can_open?: boolean;
+      can_open_error?: string;
+      checkedAt?: number;
+      source?: "api";
+    }
+  >;
+  refreshProfileSyncStatus?: (profileId: string, force?: boolean) => void;
   crossOsUnlocked?: boolean;
   syncUnlocked?: boolean;
 
@@ -366,19 +381,25 @@ function getProfileSyncStatusDot(
 ): SyncStatusDot | null {
   const encrypted =
     profile.sync_mode === "managed" || profile.sync_mode === "Encrypted";
+  const managed =
+    profile.sync_mode === "managed" ||
+    profile.sync_mode === "Encrypted" ||
+    profile.sync_mode === "Regular";
 
   if (!profile.last_sync && !liveStatus) {
     if (profile.sync_mode === "Disabled" || profile.sync_mode === "disabled") {
       return null;
     }
-    return {
-      color: "bg-muted-foreground/40",
-      tooltip: t("profileTable.syncTooltipNotSynced", {
-        defaultValue: "Lưu trữ trên máy này (Chưa đồng bộ Cloud)",
-      }),
-      animate: false,
-      encrypted,
-    };
+    if (!managed) {
+      return {
+        color: "bg-muted-foreground/40",
+        tooltip: t("profileTable.syncTooltipNotSynced", {
+          defaultValue: "Profile này chỉ lưu trên máy, chưa tải lên Cloud.",
+        }),
+        animate: false,
+        encrypted,
+      };
+    }
   }
 
   const status =
@@ -1697,6 +1718,13 @@ interface ProfilesDataTableProps {
   filterControls?: React.ReactNode;
   groups?: Array<{ id: string; name: string; profile_count?: number }>;
   totalProfilesCount?: number;
+  onOpenGroupManagement?: () => void;
+  onOpenProxyManagement?: () => void;
+  onOpenMemberManagement?: () => void;
+  workspaceName?: string;
+  workspaceRole?: string;
+  organizationName?: string;
+  maxProfiles?: number;
   onGroupSelect?: (groupId: string) => void;
 }
 
@@ -1747,6 +1775,13 @@ export function ProfilesDataTable({
   groups = [],
   totalProfilesCount,
   onGroupSelect,
+  onOpenGroupManagement,
+  onOpenProxyManagement,
+  onOpenMemberManagement,
+  workspaceName,
+  workspaceRole,
+  organizationName,
+  maxProfiles,
 }: ProfilesDataTableProps) {
   const { t } = useTranslation();
   const profileDrag = useProfileGroupDrag();
@@ -1901,7 +1936,18 @@ export function ProfilesDataTable({
     name?: string;
   } | null>(null);
   const [syncStatuses, setSyncStatuses] = React.useState<
-    Record<string, { status: string; error?: string }>
+    Record<
+      string,
+      {
+        status: string;
+        error?: string;
+        generation?: number;
+        can_open?: boolean;
+        can_open_error?: string;
+        checkedAt?: number;
+        source?: "api";
+      }
+    >
   >({});
 
   // Country proxy creation state (for inline proxy creation in dropdown)
@@ -2067,7 +2113,114 @@ export function ProfilesDataTable({
     stoppingProfiles,
   );
 
+  const refreshProfileSyncStatus = React.useCallback(
+    async (profileId: string, force = false) => {
+      const profile = profiles.find((item) => item.id === profileId);
+      if (!profile) return;
+      const managed =
+        profile.sync_mode === "managed" ||
+        profile.sync_mode === "Encrypted" ||
+        profile.sync_mode === "Regular";
+      if (!managed) return;
+      const current = syncStatuses[profileId];
+      if (
+        current?.status === "syncing" ||
+        (!force &&
+          current?.source === "api" &&
+          current.checkedAt &&
+          Date.now() - current.checkedAt < 30_000)
+      ) {
+        return;
+      }
+      if (runningProfiles.has(profileId)) {
+        setSyncStatuses((previous) => ({
+          ...previous,
+          [profileId]: {
+            status: "waiting",
+            checkedAt: Date.now(),
+          },
+        }));
+        return;
+      }
+      try {
+        const remote = await invoke<{
+          status: string;
+          generation?: number | null;
+          can_open: boolean;
+          can_open_error?: string | null;
+        }>("profile_sync_status_get", { profileId });
+        setSyncStatuses((previous) => ({
+          ...previous,
+          [profileId]: {
+            status: remote.status,
+            error: remote.can_open_error
+              ? formatError(remote.can_open_error)
+              : undefined,
+            generation: remote.generation ?? undefined,
+            can_open: remote.can_open,
+            can_open_error: remote.can_open_error ?? undefined,
+            checkedAt: Date.now(),
+            source: "api",
+          },
+        }));
+      } catch (error) {
+        console.error("Failed to refresh profile sync status:", error);
+        setSyncStatuses((previous) => ({
+          ...previous,
+          [profileId]: {
+            status: "error",
+            error: formatError(error),
+            checkedAt: Date.now(),
+            source: "api",
+          },
+        }));
+      }
+    },
+    [profiles, runningProfiles, syncStatuses],
+  );
+
+  React.useEffect(() => {
+    if (!browserState.isClient) return;
+    for (const profile of profiles) {
+      if (
+        profile.sync_mode === "managed" ||
+        profile.sync_mode === "Encrypted" ||
+        profile.sync_mode === "Regular"
+      ) {
+        void refreshProfileSyncStatus(profile.id);
+      }
+    }
+  }, [browserState.isClient, profiles, refreshProfileSyncStatus]);
+
   // Listen for sync status events
+  React.useEffect(() => {
+    if (!browserState.isClient) return;
+    const unlisten = listen("profile-fingerprint-warning", () => {
+      showErrorToast(t("profileTable.nativeFingerprintWarning"));
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [browserState.isClient, t]);
+
+  React.useEffect(() => {
+    if (!browserState.isClient) return;
+    const unlisten = listen<{ profileId: string; warnings: string[] }>(
+      "profile-extension-warning",
+      ({ payload }) => {
+        showErrorToast(
+          t("extensions.launchUpdateWarning", {
+            count: payload.warnings.length,
+          }),
+          { description: payload.warnings.join("\n") },
+        );
+      },
+    );
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [browserState.isClient, t]);
+
   React.useEffect(() => {
     if (!browserState.isClient) return;
     let unlisten: (() => void) | undefined;
@@ -2083,6 +2236,9 @@ export function ProfilesDataTable({
             ...prev,
             [profile_id]: { status, error },
           }));
+          if (status !== "syncing") {
+            void refreshProfileSyncStatus(profile_id, true);
+          }
         });
       } catch (error) {
         console.error("Failed to listen for sync status events:", error);
@@ -2091,7 +2247,7 @@ export function ProfilesDataTable({
     return () => {
       if (unlisten) unlisten();
     };
-  }, [browserState.isClient]);
+  }, [browserState.isClient, refreshProfileSyncStatus]);
 
   // Fetch traffic snapshots for running profiles (lightweight, real-time data)
   // Convert Set to sorted array to avoid Set reference comparison issues in dependencies
@@ -2551,6 +2707,7 @@ export function ProfilesDataTable({
 
       // Sync
       syncStatuses,
+      refreshProfileSyncStatus,
       crossOsUnlocked,
       syncUnlocked,
 
@@ -2622,6 +2779,7 @@ export function ProfilesDataTable({
       onCopyCookiesToProfile,
       onOpenCookieManagement,
       syncStatuses,
+      refreshProfileSyncStatus,
       crossOsUnlocked,
       syncUnlocked,
       countries,
@@ -2708,8 +2866,14 @@ export function ProfilesDataTable({
           const isLockedByAnother = meta.isProfileLockedByAnother(profile.id);
           const isLockUnknown = meta.isProfileLockUnknown(profile.id);
           const isSyncing = meta.syncStatuses[profile.id]?.status === "syncing";
+          const syncEntry = meta.syncStatuses[profile.id];
+          const requiresSyncKey =
+            profile.sync_mode === "managed" ||
+            profile.sync_mode === "Encrypted" ||
+            profile.sync_mode === "Regular";
+          const canOpenHere = !requiresSyncKey || syncEntry?.can_open !== false;
           const canLaunch = isRunningRemotely
-            ? true
+            ? false
             : meta.browserState.canLaunchProfile(profile) &&
               !isPendingRemotePull &&
               !isLockedByAnother &&
@@ -2738,6 +2902,14 @@ export function ProfilesDataTable({
                 : isLockUnknown
                   ? meta.t("sync.team.leaseUnknown")
                   : meta.browserState.getLaunchTooltipContent(profile);
+          const openTooltipContent =
+            syncEntry?.can_open === false
+              ? formatError(
+                  syncEntry.can_open_error ?? "sync_key_recovery_required",
+                )
+              : syncEntry?.status === "error"
+                ? (syncEntry.error ?? tooltipContent)
+                : tooltipContent;
 
           const handleProfileStop = async (profile: BrowserProfile) => {
             meta.setStoppingProfiles((prev: Set<string>) =>
@@ -2824,59 +2996,72 @@ export function ProfilesDataTable({
                   </TooltipContent>
                 </Tooltip>
               )}
-              <LaunchControlTooltip
-                profileId={profile.id}
-                launching={isLaunching}
-                content={isRunning ? stopTooltip : tooltipContent}
-              >
-                <span className="inline-flex">
-                  <RippleButton
-                    variant="soft"
-                    size="sm"
-                    data-running={isRunning ? "true" : undefined}
-                    disabled={!canLaunch || isLaunching || isStopping}
-                    aria-label={
-                      isRunning
-                        ? meta.t("profiles.actions.stop")
-                        : isLockedByAnother || isLockUnknown
+              {(isRunning || canOpenHere) && (
+                <LaunchControlTooltip
+                  profileId={profile.id}
+                  launching={isLaunching}
+                  content={isRunning ? stopTooltip : openTooltipContent}
+                >
+                  <span className="inline-flex">
+                    <RippleButton
+                      variant="soft"
+                      size="sm"
+                      data-running={isRunning ? "true" : undefined}
+                      disabled={!canLaunch || isLaunching || isStopping}
+                      aria-label={
+                        isRunningRemotely
                           ? tooltipContent
-                          : meta.t("profiles.actions.launch")
-                    }
-                    className={cn(
-                      "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",
-                      !canLaunch && "cursor-not-allowed opacity-50",
-                      canLaunch && "cursor-pointer",
-                      !isRunning &&
-                        "hover:bg-primary hover:text-primary-foreground",
-                      isRunning &&
-                        !isFollower &&
-                        "bg-destructive/12 text-destructive hover:bg-destructive/20",
-                    )}
-                    onClick={() =>
-                      isRunning
-                        ? void handleStop()
-                        : void handleProfileLaunch(profile)
-                    }
-                  >
-                    <span className="grid place-items-center">
-                      {isLaunching || isStopping ? (
-                        <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
-                      ) : isRunning ? (
-                        <LuSquare className="size-3 fill-current" />
-                      ) : isLockedByAnother || isLockUnknown ? (
-                        <LuLock
-                          className={cn(
-                            "size-3.5",
-                            isLockUnknown && "text-warning",
-                          )}
-                        />
-                      ) : (
-                        <LuPlay className="size-3 translate-x-px fill-current" />
+                          : isRunning
+                            ? meta.t("profiles.actions.stop")
+                            : isLockedByAnother || isLockUnknown
+                              ? tooltipContent
+                              : meta.t("profiles.actions.launch")
+                      }
+                      className={cn(
+                        "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",
+                        !canLaunch && "cursor-not-allowed opacity-50",
+                        canLaunch && "cursor-pointer",
+                        !isRunning &&
+                          "hover:bg-primary hover:text-primary-foreground",
+                        isRunning &&
+                          !isFollower &&
+                          "bg-destructive/12 text-destructive hover:bg-destructive/20",
                       )}
-                    </span>
-                  </RippleButton>
-                </span>
-              </LaunchControlTooltip>
+                      onClick={() =>
+                        isRunning
+                          ? void handleStop()
+                          : void handleProfileLaunch(profile)
+                      }
+                    >
+                      <span className="grid place-items-center">
+                        {isLaunching || isStopping ? (
+                          <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
+                        ) : isRunningRemotely ||
+                          isLockedByAnother ||
+                          isLockUnknown ? (
+                          <LuLock
+                            className={cn(
+                              "size-3.5",
+                              isLockUnknown && "text-warning",
+                            )}
+                          />
+                        ) : isRunning ? (
+                          <LuSquare className="size-3 fill-current" />
+                        ) : isLockedByAnother || isLockUnknown ? (
+                          <LuLock
+                            className={cn(
+                              "size-3.5",
+                              isLockUnknown && "text-warning",
+                            )}
+                          />
+                        ) : (
+                          <LuPlay className="size-3 translate-x-px fill-current" />
+                        )}
+                      </span>
+                    </RippleButton>
+                  </span>
+                </LaunchControlTooltip>
+              )}
             </div>
           );
         },
@@ -3939,6 +4124,50 @@ export function ProfilesDataTable({
               </Button>
             );
           })}
+
+          {onOpenGroupManagement && (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              title={t("groups.createTitle", { defaultValue: "Tạo nhóm mới" })}
+              onClick={onOpenGroupManagement}
+            >
+              <LuFolderPlus className="size-3.5" />
+            </Button>
+          )}
+
+          {(workspaceName ||
+            organizationName ||
+            (typeof maxProfiles === "number" && maxProfiles > 0)) && (
+            <div className="hidden lg:flex items-center gap-2 pl-2 text-[11px] text-muted-foreground/80 font-mono select-none">
+              <span className="text-muted-foreground/30">•</span>
+              {organizationName && (
+                <span className="font-sans font-medium text-foreground/80">
+                  {organizationName}
+                </span>
+              )}
+              {workspaceRole && (
+                <span className="rounded bg-primary/10 px-1 py-0.2 text-[9px] font-semibold uppercase text-primary tracking-wider">
+                  {workspaceRole}
+                </span>
+              )}
+              {typeof maxProfiles === "number" && maxProfiles > 0 && (
+                <>
+                  <span className="text-muted-foreground/30">•</span>
+                  <span>
+                    {totalProfilesCount ?? profiles.length}/{maxProfiles} (
+                    {Math.round(
+                      ((totalProfilesCount ?? profiles.length) / maxProfiles) *
+                        100,
+                    )}
+                    %)
+                  </span>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
@@ -3962,14 +4191,108 @@ export function ProfilesDataTable({
             </Button>
           )}
           {onCreateProfile && (
-            <Button
-              size="sm"
-              onClick={onCreateProfile}
-              className="h-7 shrink-0 gap-1.5 rounded-md px-3 text-xs font-medium shadow-xs"
-            >
-              <LuPlus className="size-3.5" />
-              <span>{t("header.newProfile")}</span>
-            </Button>
+            <DropdownMenu>
+              <div className="flex items-center rounded-md bg-primary text-primary-foreground shadow-xs">
+                <Button
+                  size="sm"
+                  onClick={onCreateProfile}
+                  className="h-7 gap-1.5 rounded-l-md rounded-r-none border-r border-primary-foreground/20 bg-transparent px-2.5 text-xs font-medium text-primary-foreground shadow-none hover:bg-white/10"
+                  title={t("createProfile.title", {
+                    defaultValue: "Tạo hồ sơ mới (Ctrl+N)",
+                  })}
+                >
+                  <LuPlus className="size-3.5" />
+                  <span>{t("header.newProfile", { defaultValue: "Mới" })}</span>
+                </Button>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="icon"
+                    className="h-7 w-6 rounded-l-none rounded-r-md bg-transparent px-0 text-primary-foreground shadow-none hover:bg-white/10"
+                    title={t("actions.addOptions", {
+                      defaultValue: "Thêm mục khác...",
+                    })}
+                    aria-label={t("actions.addOptions", {
+                      defaultValue: "Thao tác tạo nhanh",
+                    })}
+                  >
+                    <LuChevronDown className="size-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </div>
+
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel className="text-xs font-semibold text-muted-foreground">
+                  {t("actions.addOptions", {
+                    defaultValue: "Thao tác tạo nhanh",
+                  })}
+                </DropdownMenuLabel>
+                <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {t("actions.resources", { defaultValue: "Tài nguyên" })}
+                </DropdownMenuLabel>
+                <DropdownMenuItem
+                  onClick={onCreateProfile}
+                  className="gap-2 cursor-pointer text-xs"
+                >
+                  <LuGlobe className="size-3.5 text-primary" />
+                  <span className="flex-1">
+                    {t("createProfile.title", {
+                      defaultValue: "Tạo hồ sơ mới",
+                    })}
+                  </span>
+                  <span className="text-[10px] font-mono text-muted-foreground">
+                    Ctrl+N
+                  </span>
+                </DropdownMenuItem>
+                {onOpenGroupManagement && (
+                  <DropdownMenuItem
+                    onClick={onOpenGroupManagement}
+                    className="gap-2 cursor-pointer text-xs"
+                  >
+                    <LuFolderPlus className="size-3.5 text-primary" />
+                    <span className="flex-1">
+                      {t("groups.createTitle", {
+                        defaultValue: "Tạo nhóm mới",
+                      })}
+                    </span>
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      Ctrl+G
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {onOpenProxyManagement && (
+                  <DropdownMenuItem
+                    onClick={onOpenProxyManagement}
+                    className="gap-2 cursor-pointer text-xs"
+                  >
+                    <LuShieldCheck className="size-3.5 text-primary" />
+                    <span>
+                      {t("proxies.newProxy", { defaultValue: "Thêm Proxy" })}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {onOpenMemberManagement && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {t("actions.members", {
+                        defaultValue: "Nhân sự & Thành viên",
+                      })}
+                    </DropdownMenuLabel>
+                    <DropdownMenuItem
+                      onClick={onOpenMemberManagement}
+                      className="gap-2 cursor-pointer text-xs"
+                    >
+                      <LuUserPlus className="size-3.5 text-primary" />
+                      <span>
+                        {t("members.inviteMember", {
+                          defaultValue: "Mời thành viên",
+                        })}
+                      </span>
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
       </div>

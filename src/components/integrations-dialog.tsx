@@ -10,12 +10,17 @@ import {
   LuCode,
   LuCopy,
   LuCpu,
+  LuEye,
+  LuEyeOff,
   LuKey,
   LuLayers,
   LuPlug,
   LuRefreshCw,
   LuServer,
   LuShieldCheck,
+  LuSparkles,
+  LuTrash2,
+  LuTriangleAlert,
   LuZap,
 } from "react-icons/lu";
 import { Badge } from "@/components/ui/badge";
@@ -35,6 +40,54 @@ interface IntegrationsDialogProps {
 }
 
 const desktopApi = createTauriDesktopApi();
+
+const MCP_STORAGE_KEY = "buglogin.mcp.fixed_token.v1";
+
+interface StoredFixedMcpToken {
+  token: string;
+  tokenId?: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+function getStoredMcpToken(): StoredFixedMcpToken | null {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(MCP_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredFixedMcpToken;
+    if (
+      parsed &&
+      typeof parsed.token === "string" &&
+      parsed.token.startsWith("blapi_") &&
+      parsed.expiresAt > Math.floor(Date.now() / 1000)
+    ) {
+      return parsed;
+    }
+    window.localStorage.removeItem(MCP_STORAGE_KEY);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredMcpToken(data: StoredFixedMcpToken) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(MCP_STORAGE_KEY, JSON.stringify(data));
+  } catch {
+    // ignore
+  }
+}
+
+function removeStoredMcpToken() {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.removeItem(MCP_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 type TabType = "api" | "mcp" | "endpoints";
 type CodeLang = "curl" | "node" | "python";
@@ -57,7 +110,11 @@ export function IntegrationsDialog({
   const [mcpClient, setMcpClient] = useState<McpClient>("cursor");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [apiTokens, setApiTokens] = useState<ApiToken[]>([]);
-  const [newMcpToken, setNewMcpToken] = useState<string | null>(null);
+  const [fixedMcpToken, setFixedMcpToken] = useState<string | null>(() => {
+    const stored = getStoredMcpToken();
+    return stored?.token ?? null;
+  });
+  const [showMcpKey, setShowMcpKey] = useState(false);
   const [isManagingMcpToken, setIsManagingMcpToken] = useState(false);
 
   // Realtime Ping test state
@@ -103,12 +160,43 @@ export function IntegrationsDialog({
   const mcpUrl = status?.mcpEndpoint || `${endpoint}/v1/mcp`;
   const isApiConnected = status?.apiReachable ?? true;
   const mcpEnabled = status?.mcpEnabled === true;
-  const activeMcpTokens = apiTokens.filter(
-    (token) =>
-      token.name === "BugLogin MCP" &&
-      token.revokedAt == null &&
-      token.expiresAt > Math.floor(Date.now() / 1000),
+  const activeMcpTokens = useMemo(
+    () =>
+      apiTokens.filter(
+        (token) =>
+          token.name === "BugLogin MCP" &&
+          token.revokedAt == null &&
+          token.expiresAt > Math.floor(Date.now() / 1000),
+      ),
+    [apiTokens],
   );
+
+  const primaryMcpRecord = useMemo(() => {
+    if (!activeMcpTokens.length) return null;
+    const stored = getStoredMcpToken();
+    if (stored?.tokenId) {
+      const match = activeMcpTokens.find((t) => t.id === stored.tokenId);
+      if (match) return match;
+    }
+    return activeMcpTokens[0] ?? null;
+  }, [activeMcpTokens]);
+
+  useEffect(() => {
+    const stored = getStoredMcpToken();
+    if (!stored) {
+      setFixedMcpToken(null);
+      return;
+    }
+    if (apiTokens.length > 0 && stored.tokenId) {
+      const serverToken = apiTokens.find((t) => t.id === stored.tokenId);
+      if (serverToken && serverToken.revokedAt != null) {
+        removeStoredMcpToken();
+        setFixedMcpToken(null);
+        return;
+      }
+    }
+    setFixedMcpToken(stored.token);
+  }, [apiTokens]);
 
   const handleCopy = async (
     text: string,
@@ -125,10 +213,21 @@ export function IntegrationsDialog({
     }
   };
 
-  const handleCreateMcpToken = async () => {
+  const handleCreateOrRegenerateMcpToken = async () => {
     setIsManagingMcpToken(true);
     try {
-      const expiresAt = Math.floor(Date.now() / 1000) + 90 * 24 * 60 * 60;
+      // Clean up any existing duplicate / old MCP tokens on backend so only 1 fixed key exists
+      for (const oldToken of activeMcpTokens) {
+        try {
+          await desktopApi.revokeApiToken(oldToken.id);
+        } catch {
+          // ignore
+        }
+      }
+
+      // 1 year (365 days) fixed key
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = nowSec + 365 * 24 * 60 * 60;
       const created = await desktopApi.createApiToken({
         name: "BugLogin MCP",
         scopes: [
@@ -144,12 +243,23 @@ export function IntegrationsDialog({
         ],
         expiresAt,
       });
-      setNewMcpToken(created.token);
+
+      saveStoredMcpToken({
+        token: created.token,
+        tokenId: created.tokenRecord.id,
+        createdAt: nowSec,
+        expiresAt,
+      });
+
+      setFixedMcpToken(created.token);
       setApiTokens((current) => [
         created.tokenRecord,
-        ...current.filter((token) => token.id !== created.tokenRecord.id),
+        ...current.filter((t) => t.name !== "BugLogin MCP"),
       ]);
-      showSuccessToast("Đã tạo API key MCP. Key chỉ hiển thị một lần.");
+
+      showSuccessToast(
+        "Đã kích hoạt Key MCP cố định! Key đã được lưu an toàn trên máy.",
+      );
     } catch (cause) {
       showErrorToast(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -157,15 +267,30 @@ export function IntegrationsDialog({
     }
   };
 
-  const handleRevokeMcpToken = async (tokenId: string) => {
+  const handleRevokeFixedMcpToken = async () => {
     setIsManagingMcpToken(true);
     try {
-      await desktopApi.revokeApiToken(tokenId);
+      const stored = getStoredMcpToken();
+      for (const oldToken of activeMcpTokens) {
+        try {
+          await desktopApi.revokeApiToken(oldToken.id);
+        } catch {
+          // continue
+        }
+      }
+      if (stored?.tokenId) {
+        try {
+          await desktopApi.revokeApiToken(stored.tokenId);
+        } catch {
+          // continue
+        }
+      }
+      removeStoredMcpToken();
+      setFixedMcpToken(null);
       setApiTokens((current) =>
-        current.filter((token) => token.id !== tokenId),
+        current.filter((token) => token.name !== "BugLogin MCP"),
       );
-      setNewMcpToken(null);
-      showSuccessToast("Đã thu hồi API key.");
+      showSuccessToast("Đã thu hồi Key MCP cố định.");
     } catch (cause) {
       showErrorToast(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -287,7 +412,7 @@ with sync_playwright() as p:
     { name: string; file: string; config: string }
   > = useMemo(() => {
     const headers = {
-      Authorization: `Bearer ${newMcpToken ?? "YOUR_BUGLOGIN_API_KEY"}`,
+      Authorization: `Bearer ${fixedMcpToken ?? "YOUR_BUGLOGIN_API_KEY"}`,
     };
     return {
       cursor: {
@@ -340,7 +465,7 @@ with sync_playwright() as p:
         ),
       },
     };
-  }, [mcpUrl, newMcpToken]);
+  }, [mcpUrl, fixedMcpToken]);
 
   const apiEndpointsList = [
     {
@@ -843,21 +968,29 @@ with sync_playwright() as p:
                     variant="outline"
                     className={cn(
                       "gap-1.5 text-xs px-2.5 py-0.5 font-medium",
-                      mcpEnabled
-                        ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
-                        : "border-border bg-muted text-muted-foreground",
+                      fixedMcpToken
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                        : mcpEnabled
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                          : "border-border bg-muted text-muted-foreground",
                     )}
                   >
                     <span
                       className={cn(
                         "size-1.5 rounded-full",
-                        mcpEnabled ? "bg-amber-400" : "bg-muted-foreground",
+                        fixedMcpToken
+                          ? "bg-emerald-400"
+                          : mcpEnabled
+                            ? "bg-amber-400"
+                            : "bg-muted-foreground",
                       )}
                     />
                     <span>
-                      {mcpEnabled
-                        ? "Cần API key để kết nối"
-                        : "MCP chưa được bật"}
+                      {fixedMcpToken
+                        ? "MCP sẵn sàng kết nối"
+                        : mcpEnabled
+                          ? "Cần tạo API key cố định"
+                          : "MCP chưa được bật"}
                     </span>
                   </Badge>
                 </div>
@@ -867,71 +1000,219 @@ with sync_playwright() as p:
                   key thì cấu hình client bên dưới chưa thể kết nối.
                 </p>
 
-                <div className="space-y-3 rounded-lg border border-border/60 bg-background/50 p-4">
+                {/* Khối API Key Cố Định Cho MCP */}
+                <div className="space-y-3.5 rounded-lg border border-border/70 bg-background/60 p-4 shadow-2xs">
                   <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">API key cho MCP</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Key thuộc account đang đăng nhập, hết hạn sau 90 ngày và
-                        chỉ cấp quyền profile cùng sync.
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <LuKey className="size-4 text-primary" />
+                        <p className="text-sm font-semibold text-foreground">
+                          API key cố định cho MCP
+                        </p>
+                        {fixedMcpToken ? (
+                          <Badge
+                            variant="outline"
+                            className="text-[11px] px-2 py-0 h-5 border-emerald-500/30 bg-emerald-500/10 text-emerald-400 font-medium"
+                          >
+                            <span className="size-1.5 rounded-full bg-emerald-400 mr-1.5" />
+                            Đang hoạt động
+                          </Badge>
+                        ) : (
+                          <Badge
+                            variant="outline"
+                            className="text-[11px] px-2 py-0 h-5 border-amber-500/30 bg-amber-500/10 text-amber-400 font-medium"
+                          >
+                            <span className="size-1.5 rounded-full bg-amber-400 mr-1.5" />
+                            Chưa có key
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Key cố định dùng kết nối các trợ lý AI (Cursor, Claude,
+                        Windsurf, Antigravity). Được lưu an toàn trên máy này.
                       </p>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={isManagingMcpToken || !isApiConnected}
-                      onClick={() => void handleCreateMcpToken()}
-                    >
-                      <LuKey className="mr-1.5 size-3.5" />
-                      {isManagingMcpToken ? "Đang tạo…" : "Tạo key MCP"}
-                    </Button>
-                  </div>
 
-                  {newMcpToken && (
-                    <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
-                      <code className="min-w-0 flex-1 break-all font-mono text-xs">
-                        {newMcpToken}
-                      </code>
+                    {!fixedMcpToken && activeMcpTokens.length === 0 && (
                       <Button
                         size="sm"
-                        variant="outline"
-                        onClick={() =>
-                          void handleCopy(
-                            newMcpToken,
-                            "mcp_token",
-                            "Đã sao chép API key MCP",
-                          )
-                        }
+                        disabled={isManagingMcpToken || !isApiConnected}
+                        onClick={() => void handleCreateOrRegenerateMcpToken()}
+                        className="h-8 gap-1.5 cursor-pointer font-medium"
                       >
-                        {copiedKey === "mcp_token" ? "Đã chép" : "Sao chép key"}
+                        <LuKey className="size-3.5" />
+                        {isManagingMcpToken
+                          ? "Đang tạo…"
+                          : "Tạo key MCP cố định"}
                       </Button>
-                    </div>
-                  )}
+                    )}
+                  </div>
 
-                  {activeMcpTokens.length > 0 && (
-                    <ul className="space-y-2 text-xs">
-                      {activeMcpTokens.map((token) => (
-                        <li
-                          key={token.id}
-                          className="flex items-center justify-between gap-3 rounded-md bg-muted/40 px-3 py-2"
-                        >
-                          <span className="min-w-0 truncate">
-                            {token.name} · hết hạn{" "}
-                            {new Date(
-                              token.expiresAt * 1000,
-                            ).toLocaleDateString()}
+                  {/* Case 1: Đã có key cố định và chuỗi token được lưu */}
+                  {fixedMcpToken ? (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Masked / Plaintext Key Box */}
+                        <div className="relative min-w-0 flex-1 flex items-center rounded-md border border-border/80 bg-muted/50 px-3 py-1.5 font-mono text-xs">
+                          <span className="min-w-0 flex-1 select-all break-all tracking-wide text-foreground font-semibold">
+                            {showMcpKey
+                              ? fixedMcpToken
+                              : `blapi_${"•".repeat(32)}`}
                           </span>
                           <Button
-                            size="sm"
+                            type="button"
                             variant="ghost"
-                            disabled={isManagingMcpToken}
-                            onClick={() => void handleRevokeMcpToken(token.id)}
+                            size="sm"
+                            className="h-7 w-7 p-0 ml-1.5 text-muted-foreground hover:text-foreground cursor-pointer shrink-0"
+                            onClick={() => setShowMcpKey(!showMcpKey)}
+                            title={showMcpKey ? "Ẩn API key" : "Hiện API key"}
                           >
-                            Thu hồi
+                            {showMcpKey ? (
+                              <LuEyeOff className="size-3.5" />
+                            ) : (
+                              <LuEye className="size-3.5" />
+                            )}
+                            <span className="sr-only">
+                              {showMcpKey ? "Ẩn" : "Hiện"}
+                            </span>
                           </Button>
-                        </li>
-                      ))}
-                    </ul>
+                        </div>
+
+                        {/* Copy Button */}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-9 gap-1.5 text-xs cursor-pointer font-medium"
+                          onClick={() =>
+                            void handleCopy(
+                              fixedMcpToken,
+                              "mcp_fixed_token",
+                              "Đã sao chép API key MCP vào bộ nhớ tạm",
+                            )
+                          }
+                        >
+                          {copiedKey === "mcp_fixed_token" ? (
+                            <LuCheck className="size-3.5 text-emerald-500" />
+                          ) : (
+                            <LuCopy className="size-3.5" />
+                          )}
+                          <span>
+                            {copiedKey === "mcp_fixed_token"
+                              ? "Đã chép"
+                              : "Sao chép key"}
+                          </span>
+                        </Button>
+
+                        {/* Regenerate Key */}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={isManagingMcpToken}
+                          className="h-9 gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                          onClick={() =>
+                            void handleCreateOrRegenerateMcpToken()
+                          }
+                          title="Tạo lại key mới (thu hồi key cũ)"
+                        >
+                          <LuRefreshCw
+                            className={cn(
+                              "size-3.5",
+                              isManagingMcpToken && "animate-spin",
+                            )}
+                          />
+                          <span>Tạo lại key</span>
+                        </Button>
+
+                        {/* Revoke Key */}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={isManagingMcpToken}
+                          className="h-9 gap-1.5 text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 cursor-pointer"
+                          onClick={() => void handleRevokeFixedMcpToken()}
+                          title="Thu hồi key MCP"
+                        >
+                          <LuTrash2 className="size-3.5" />
+                          <span>Thu hồi</span>
+                        </Button>
+                      </div>
+
+                      {/* Token Details Note */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground px-0.5">
+                        <span>
+                          {primaryMcpRecord?.expiresAt
+                            ? `Hết hạn: ${new Date(primaryMcpRecord.expiresAt * 1000).toLocaleDateString()}`
+                            : "Thời hạn: 1 năm"}{" "}
+                          · Quyền: profile, sync
+                        </span>
+                        <span className="text-emerald-500/90 flex items-center gap-1 font-medium">
+                          <LuCheck className="size-3" /> Tự động điền vào cấu
+                          hình bên dưới
+                        </span>
+                      </div>
+                    </div>
+                  ) : activeMcpTokens.length > 0 ? (
+                    /* Case 2: Đang có key cũ trên tài khoản nhưng chưa lưu secret trên máy này */
+                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3.5 space-y-3">
+                      <div className="flex items-start gap-2.5 text-xs text-amber-300">
+                        <LuTriangleAlert className="size-4 shrink-0 mt-0.5" />
+                        <div className="space-y-1">
+                          <p className="font-semibold text-amber-200">
+                            Phát hiện {activeMcpTokens.length} key MCP cũ trên
+                            tài khoản (Chưa lưu mã bí mật trên máy này)
+                          </p>
+                          <p className="text-amber-300/80 leading-relaxed text-[11px]">
+                            Chuỗi bí mật chưa được lưu cố định trên thiết bị này
+                            nên không thể Hiện hay Sao chép trực tiếp. Hãy bấm
+                            nút bên dưới để dọn dẹp các key cũ và kích hoạt 1
+                            Key cố định duy nhất.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          size="sm"
+                          disabled={isManagingMcpToken}
+                          className="h-8 gap-1.5 text-xs cursor-pointer font-medium"
+                          onClick={() =>
+                            void handleCreateOrRegenerateMcpToken()
+                          }
+                        >
+                          <LuSparkles className="size-3.5" />
+                          {isManagingMcpToken
+                            ? "Đang xử lý…"
+                            : "Kích hoạt Key cố định duy nhất"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={isManagingMcpToken}
+                          className="h-8 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                          onClick={() => void handleRevokeFixedMcpToken()}
+                        >
+                          Thu hồi các key cũ
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Case 3: Chưa có key nào */
+                    <div className="rounded-md border border-dashed border-border/80 bg-muted/20 p-4 text-center space-y-2.5">
+                      <p className="text-xs text-muted-foreground">
+                        Chưa có Key MCP nào được tạo. Tạo một key cố định duy
+                        nhất để bắt đầu tự động hóa với các trợ lý AI.
+                      </p>
+                      <Button
+                        size="sm"
+                        disabled={isManagingMcpToken || !isApiConnected}
+                        onClick={() => void handleCreateOrRegenerateMcpToken()}
+                        className="h-8 gap-1.5 cursor-pointer font-medium"
+                      >
+                        <LuKey className="size-3.5" />
+                        {isManagingMcpToken
+                          ? "Đang tạo…"
+                          : "Tạo key MCP cố định"}
+                      </Button>
+                    </div>
                   )}
                 </div>
 
@@ -1020,13 +1301,14 @@ with sync_playwright() as p:
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={!newMcpToken}
                         className="h-7 px-2.5 text-[11px] gap-1.5 bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800 hover:text-white cursor-pointer"
                         onClick={() =>
                           void handleCopy(
                             mcpConfigs[mcpClient].config,
                             `mcp_conf_${mcpClient}`,
-                            `Đã sao chép cấu hình ${mcpConfigs[mcpClient].name}`,
+                            fixedMcpToken
+                              ? `Đã sao chép cấu hình ${mcpConfigs[mcpClient].name}`
+                              : `Đã sao chép cấu hình mẫu (chưa có key)`,
                           )
                         }
                       >
@@ -1047,6 +1329,24 @@ with sync_playwright() as p:
                       <code>{mcpConfigs[mcpClient].config}</code>
                     </pre>
                   </div>
+
+                  {fixedMcpToken ? (
+                    <p className="text-[11px] text-emerald-400 font-medium flex items-center gap-1.5 pt-0.5">
+                      <LuCheck className="size-3.5" />
+                      <span>
+                        Đã tự động điền Key MCP cố định của bạn vào file cấu
+                        hình. Chỉ cần sao chép và dán vào ứng dụng AI.
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-amber-400/90 font-medium flex items-center gap-1.5 pt-0.5">
+                      <LuTriangleAlert className="size-3.5" />
+                      <span>
+                        Chưa có Key MCP cố định. Vui lòng bấm &quot;Tạo key MCP
+                        cố định&quot; ở trên để tự động điền key thật.
+                      </span>
+                    </p>
+                  )}
                 </div>
 
                 <div className="rounded-lg bg-muted/40 p-3.5 border border-border/40 space-y-1.5 text-xs">

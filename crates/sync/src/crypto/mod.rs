@@ -14,6 +14,7 @@ use hpke::{
     kem::X25519HkdfSha256,
 };
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
@@ -372,6 +373,106 @@ impl ResourceKeyEnvelope {
     }
 }
 
+/// Service-wrapped resource key envelope. The wrapping key is supplied only
+/// by the API key-management adapter and must never be persisted with profile
+/// data. Scope fields are authenticated as AES-GCM associated data.
+#[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedResourceKeyEnvelope {
+    pub schema_version: u8,
+    pub workspace_id: WorkspaceId,
+    pub resource_id: ResourceId,
+    pub key_version: String,
+    pub encrypted_key: AuthenticatedChunk,
+}
+
+impl fmt::Debug for ManagedResourceKeyEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagedResourceKeyEnvelope")
+            .field("schema_version", &self.schema_version)
+            .field("workspace_id", &self.workspace_id)
+            .field("resource_id", &self.resource_id)
+            .field("key_version", &self.key_version)
+            .field("encrypted_key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ManagedResourceKeyEnvelope {
+    pub fn wrap(
+        workspace_id: WorkspaceId,
+        resource_id: ResourceId,
+        wrapping_key: &ClientKey,
+        resource_key: &ClientKey,
+    ) -> Result<Self, Problem> {
+        let key_version = format!("{:x}", sha2::Sha256::digest(resource_key.as_bytes()));
+        let encrypted_key = AuthenticatedChunk::encrypt(
+            wrapping_key,
+            resource_key.as_bytes(),
+            &managed_resource_key_aad(&workspace_id, &resource_id, &key_version),
+        )?;
+        Ok(Self {
+            schema_version: 1,
+            workspace_id,
+            resource_id,
+            key_version,
+            encrypted_key,
+        })
+    }
+
+    pub fn unwrap(
+        &self,
+        expected_workspace_id: &WorkspaceId,
+        expected_resource_id: &ResourceId,
+        expected_key_version: &str,
+        wrapping_key: &ClientKey,
+    ) -> Result<ClientKey, Problem> {
+        if self.schema_version != 1
+            || &self.workspace_id != expected_workspace_id
+            || &self.resource_id != expected_resource_id
+            || self.key_version != expected_key_version
+        {
+            return Err(crypto_problem("managed_resource_key_scope_mismatch"));
+        }
+        let mut bytes = self.encrypted_key.decrypt(
+            wrapping_key,
+            &managed_resource_key_aad(
+                expected_workspace_id,
+                expected_resource_id,
+                expected_key_version,
+            ),
+        )?;
+        if bytes.len() != KEY_BYTES {
+            bytes.fill(0);
+            return Err(crypto_problem("invalid_managed_resource_key_envelope"));
+        }
+        let mut raw = [0_u8; KEY_BYTES];
+        raw.copy_from_slice(&bytes);
+        bytes.fill(0);
+        let key = ClientKey::from_bytes(raw);
+        raw.fill(0);
+        if format!("{:x}", sha2::Sha256::digest(key.as_bytes())) != expected_key_version {
+            return Err(crypto_problem("managed_resource_key_scope_mismatch"));
+        }
+        Ok(key)
+    }
+}
+
+fn managed_resource_key_aad(
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+    key_version: &str,
+) -> Vec<u8> {
+    format!(
+        "buglogin/managed-resource-key/v1/{}/{}/{}",
+        workspace_id.as_str(),
+        resource_id.as_str(),
+        key_version
+    )
+    .into_bytes()
+}
+
 /// Encrypted proxy credentials scoped to the profile resource that references
 /// them. The server may store this envelope as an opaque manifest object, but
 /// cannot move it across workspaces, profile resources, proxies, or revisions.
@@ -581,7 +682,10 @@ fn crypto_problem(code: &'static str) -> Problem {
 
 #[cfg(test)]
 mod error_contract_tests {
-    use super::crypto_problem;
+    use super::{
+        ClientKey, ManagedResourceKeyEnvelope, crypto_problem,
+    };
+    use buglogin_domain::ids::{ResourceId, WorkspaceId};
 
     #[test]
     fn crypto_problem_uses_status_for_failure_class() {
@@ -599,5 +703,34 @@ mod error_contract_tests {
 
         let unavailable = crypto_problem("key_generation_failed");
         assert_eq!((unavailable.status, unavailable.retryable), (503, true));
+    }
+
+    #[test]
+    fn managed_profile_key_envelope_is_scope_bound_and_round_trips() {
+        let workspace = WorkspaceId::from_str("ws_managed_key_test").unwrap();
+        let resource = ResourceId::from_str("res_managed_key_test").unwrap();
+        let wrapping = ClientKey::from_bytes([0x15; 32]);
+        let resource_key = ClientKey::from_bytes([0x29; 32]);
+        let envelope = ManagedResourceKeyEnvelope::wrap(
+            workspace.clone(),
+            resource.clone(),
+            &wrapping,
+            &resource_key,
+        )
+        .unwrap();
+        assert_eq!(
+            envelope
+                .unwrap(&workspace, &resource, &envelope.key_version, &wrapping)
+                .unwrap(),
+            resource_key
+        );
+        assert!(envelope
+            .unwrap(
+                &WorkspaceId::from_str("ws_another_managed_key_test").unwrap(),
+                &resource,
+                &envelope.key_version,
+                &wrapping
+            )
+            .is_err());
     }
 }

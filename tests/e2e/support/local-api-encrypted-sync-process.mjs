@@ -29,6 +29,34 @@ const bootstrapBinary = join(
 const dataRoot = await mkdtemp(join(tmpdir(), "buglogin-encrypted-sync-e2e-"));
 const password = "Synthetic-Sync-E2E-Password-2026!";
 const runId = randomBytes(6).toString("hex");
+const s3Environment = (() => {
+  if (process.env.BUGLOGIN_SYNC_E2E_S3 !== "1") return {};
+  const required = [
+    "BUGLOGIN_S3_ENDPOINT",
+    "BUGLOGIN_S3_BUCKET",
+    "BUGLOGIN_S3_ACCESS_KEY",
+    "BUGLOGIN_S3_SECRET_KEY",
+  ];
+  for (const name of required) {
+    if (!process.env[name]?.trim()) throw new Error(`${name} is required for S3 sync E2E`);
+  }
+  if (new URL(process.env.BUGLOGIN_S3_ENDPOINT).protocol !== "https:") {
+    throw new Error("S3 sync E2E requires an HTTPS endpoint");
+  }
+  return {
+    BUGLOGIN_S3_ENDPOINT: process.env.BUGLOGIN_S3_ENDPOINT,
+    BUGLOGIN_S3_BUCKET: process.env.BUGLOGIN_S3_BUCKET,
+    BUGLOGIN_S3_REGION: process.env.BUGLOGIN_S3_REGION ?? "us-east-1",
+    BUGLOGIN_S3_PREFIX: process.env.BUGLOGIN_S3_PREFIX ?? "buglogin3/local-dev",
+    BUGLOGIN_S3_ACCESS_KEY: process.env.BUGLOGIN_S3_ACCESS_KEY,
+    BUGLOGIN_S3_SECRET_KEY: process.env.BUGLOGIN_S3_SECRET_KEY,
+    BUGLOGIN_S3_PATH_STYLE: process.env.BUGLOGIN_S3_PATH_STYLE ?? "false",
+    BUGLOGIN_TENANT_ID: `buglogin3-qa-${runId}`,
+    ...(process.env.BUGLOGIN_S3_SESSION_TOKEN
+      ? { BUGLOGIN_S3_SESSION_TOKEN: process.env.BUGLOGIN_S3_SESSION_TOKEN }
+      : {}),
+  };
+})();
 let api;
 let apiOutput = "";
 let baseUrl;
@@ -43,6 +71,7 @@ function isolatedEnv(extra = {}) {
     BUGLOGIN_ENV: "local",
     BUGLOGIN_DATA_ROOT: dataRoot,
     CARGO_TARGET_DIR: targetDir,
+    ...s3Environment,
     ...extra,
   };
 }
@@ -650,7 +679,7 @@ try {
   assert.deepEqual(persistedProxyCredential, downloadedProxyCredential);
 
   console.log(
-    "PASS local API encrypted sync process E2E: cross-device profile/proxy/credential sync, AES-GCM payload and proxy-credential decrypt, wrong-key/tag rejection, manifest commit/read, checksum, API restart persistence",
+    `PASS ${Object.keys(s3Environment).length ? "S3" : "local"} API encrypted sync process E2E: cross-device profile/proxy/credential sync, AES-GCM payload and proxy-credential decrypt, wrong-key/tag rejection, manifest commit/read, checksum, API restart persistence`,
   );
 } finally {
   await stopApi(api);

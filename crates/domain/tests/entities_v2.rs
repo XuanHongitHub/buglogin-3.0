@@ -39,6 +39,7 @@ fn vpn_and_extension_entities_match_domain_v2_wire_format() {
         id: ExtensionGroupId::new("ext_group_1").unwrap(),
         name: "Firefox".into(),
         extension_ids: vec![extension.id.clone()],
+        extension_sources: Default::default(),
         sync_mode: Some(SyncMode::Managed),
         created_at: "2026-07-21T00:00:00Z".into(),
         updated_at: "2026-07-21T00:00:00Z".into(),

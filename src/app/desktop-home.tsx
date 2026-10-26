@@ -7,8 +7,7 @@ import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AboutDialog } from "@/components/about-dialog";
-import { AccountManagementPanel } from "@/components/account-management-panel";
-import { AccountPage } from "@/components/account-page";
+import AppUpdateDialog from "@/components/app-update-dialog";
 import { AuditLogView } from "@/components/audit-log-view";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
 import { CloseConfirmDialog } from "@/components/close-confirm-dialog";
@@ -25,13 +24,16 @@ import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialo
 import { ExtensionGroupAssignmentDialog } from "@/components/extension-group-assignment-dialog";
 import { ExtensionManagementDialog } from "@/components/extension-management-dialog";
 import { GroupAssignmentDialog } from "@/components/group-assignment-dialog";
-import { GroupManagementDialog } from "@/components/group-management-dialog";
 import HomeHeader from "@/components/home-header";
+import InlineUpdateBanner from "@/components/inline-update-banner";
 import { IntegrationsDialog } from "@/components/integrations-dialog";
-import { MemberManagementDialog } from "@/components/member-management-dialog";
-import { OrgManagementCenter } from "@/components/org-management-view";
+import { AccountDirectory } from "@/components/management/accounts";
+import { WorkspaceMembers } from "@/components/management/members";
+import { OrganizationManagement } from "@/components/management/org-workspaces";
+import { PersonalAccount } from "@/components/management/personal-account";
+import { PlatformManagement } from "@/components/management/platform";
+import { ManagementResources } from "@/components/management/resources";
 import { PendingInvitesDialog } from "@/components/pending-invites-dialog";
-import { PlatformAdminView } from "@/components/platform-admin-view";
 import { ProfilesDataTable } from "@/components/profile-data-table";
 import {
   type PasswordDialogMode,
@@ -48,9 +50,8 @@ import { TableFilterControls } from "@/components/table-controls";
 import { TeamManagerView } from "@/components/team-manager-view";
 import { WayfernConfigDialog } from "@/components/wayfern-config-dialog";
 import { WayfernTermsDialog } from "@/components/wayfern-terms-dialog";
-import { WindowResizeWarningDialog } from "@/components/window-resize-warning-dialog";
-import { WorkspaceManagementDialog } from "@/components/workspace-management-dialog";
 import { type WorkspaceItem } from "@/components/workspace-switcher";
+import type { useAppUpdateNotifications } from "@/hooks/use-app-update-notifications";
 import { useBrowserDownload } from "@/hooks/use-browser-download";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { useGroupEvents } from "@/hooks/use-group-events";
@@ -104,10 +105,12 @@ export default function Home({
   onShareProfiles,
   onCheckForUpdates,
   isCheckingForUpdates,
+  appUpdates,
 }: {
   onShareProfiles?: ShareProfilesHandler;
   onCheckForUpdates?: () => void;
   isCheckingForUpdates?: boolean;
+  appUpdates?: ReturnType<typeof useAppUpdateNotifications>;
 } = {}) {
   return process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "web" ? (
     <WebRouteHost initialPath="/" />
@@ -116,6 +119,7 @@ export default function Home({
       onShareProfiles={onShareProfiles}
       onCheckForUpdates={onCheckForUpdates}
       isCheckingForUpdates={isCheckingForUpdates}
+      appUpdates={appUpdates}
     />
   );
 }
@@ -124,10 +128,12 @@ function DesktopHome({
   onShareProfiles,
   onCheckForUpdates,
   isCheckingForUpdates,
+  appUpdates,
 }: {
   onShareProfiles?: ShareProfilesHandler;
   onCheckForUpdates?: () => void;
   isCheckingForUpdates?: boolean;
+  appUpdates?: ReturnType<typeof useAppUpdateNotifications>;
 } = {}) {
   const { t } = useTranslation();
   // Use the profile events hook for centralized profile management
@@ -156,8 +162,6 @@ function DesktopHome({
   const refreshWorkspaceList = useCallback(() => {
     setWorkspaceListRevision((revision) => revision + 1);
   }, []);
-  const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
-  const [memberManagementOpen, setMemberManagementOpen] = useState(false);
   const [pendingInvitesOpen, setPendingInvitesOpen] = useState(false);
   const [pendingInviteLink, setPendingInviteLink] = useState("");
 
@@ -178,6 +182,12 @@ function DesktopHome({
     selectedWorkspaceId,
     profilesWorkspaceId,
     workspaceSwitching,
+  );
+  const activeWorkspace = useMemo(
+    () =>
+      workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ??
+      null,
+    [workspaces, selectedWorkspaceId],
   );
   const profiles = visibleProfilesForWorkspace(
     loadedProfiles,
@@ -451,7 +461,6 @@ function DesktopHome({
   const _syncUnlocked = crossOsUnlocked;
 
   const [currentPage, setCurrentPage] = useState<AppPage>("profiles");
-  const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   // Tracks which tab inside the shared proxy-management page should be active.
   const [proxyManagementInitialTab, setProxyManagementInitialTab] =
     useState<"proxies">("proxies");
@@ -464,8 +473,6 @@ function DesktopHome({
   const [proxyManagementDialogOpen, setProxyManagementDialogOpen] =
     useState(false);
   const [wayfernConfigDialogOpen, setWayfernConfigDialogOpen] = useState(false);
-  const [groupManagementDialogOpen, setGroupManagementDialogOpen] =
-    useState(false);
   const [extensionManagementDialogOpen, setExtensionManagementDialogOpen] =
     useState(false);
   const [groupAssignmentDialogOpen, setGroupAssignmentDialogOpen] =
@@ -509,10 +516,6 @@ function DesktopHome({
     useState<PasswordDialogMode>("set");
   const pendingLaunchAfterUnlockRef = useRef<BrowserProfile | null>(null);
   const runtimeInstallTasksRef = useRef(new Map<string, Promise<void>>());
-  const [windowResizeWarningOpen, setWindowResizeWarningOpen] = useState(false);
-  const windowResizeWarningResolver = useRef<
-    ((proceed: boolean) => void) | null
-  >(null);
   const [showBulkDeleteConfirmation, setShowBulkDeleteConfirmation] =
     useState(false);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
@@ -544,9 +547,7 @@ function DesktopHome({
       setSettingsDialogOpen(false);
       setProxyManagementDialogOpen(false);
       setExtensionManagementDialogOpen(false);
-      setGroupManagementDialogOpen(false);
       setIntegrationsDialogOpen(false);
-      setAccountDialogOpen(false);
 
       setCurrentPage(page);
       switch (page) {
@@ -563,13 +564,11 @@ function DesktopHome({
           setExtensionManagementDialogOpen(true);
           break;
         case "groups":
-          setGroupManagementDialogOpen(true);
           break;
         case "integrations":
           setIntegrationsDialogOpen(true);
           break;
         case "account":
-          setAccountDialogOpen(true);
           break;
         case "shortcuts":
         case "accountManagement":
@@ -982,26 +981,6 @@ function DesktopHome({
         }
       }
 
-      // Show one-time warning about window resizing for fingerprinted browsers
-      if (profile.browser === "wayfern") {
-        try {
-          const dismissed = await invoke<boolean>(
-            "get_window_resize_warning_dismissed",
-          );
-          if (!dismissed) {
-            const proceed = await new Promise<boolean>((resolve) => {
-              windowResizeWarningResolver.current = resolve;
-              setWindowResizeWarningOpen(true);
-            });
-            if (!proceed) {
-              return;
-            }
-          }
-        } catch (error) {
-          console.error("Failed to check window resize warning:", error);
-        }
-      }
-
       try {
         if (profile.browser === "wayfern") {
           if (!profile.version) {
@@ -1339,10 +1318,6 @@ function DesktopHome({
     setSelectedProfilesForProxy([]);
   }, []);
 
-  const handleGroupManagementComplete = useCallback(async () => {
-    // No need to manually reload - useProfileEvents will handle the update
-  }, []);
-
   useEffect(() => {
     let disposed = false;
     let unlistenStatus: (() => void) | undefined;
@@ -1650,8 +1625,8 @@ function DesktopHome({
         }}
         onOpenAuditLogs={() => handleRailNavigate("auditLogs")}
         onOpenTeamManager={() => handleRailNavigate("teamManager")}
-        onOpenOrgCenter={() => handleRailNavigate("orgCenter")}
         onOpenPlatformAdmin={() => handleRailNavigate("platformAdmin")}
+        onOpenOrgCenter={() => handleRailNavigate("orgCenter")}
         workspaces={workspaces}
         selectedWorkspaceId={selectedWorkspaceId}
         onWorkspaceSelect={handleWorkspaceSelect}
@@ -1663,7 +1638,30 @@ function DesktopHome({
         )}
       />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <HomeHeader pageTitle={subPageTitle} />
+        <HomeHeader
+          pageTitle={subPageTitle}
+          showPageContext={
+            currentPage !== "workspaces" && currentPage !== "orgCenter"
+          }
+          updateInfo={appUpdates?.updateInfo}
+          updateReady={appUpdates?.updateReady}
+          isUpdating={appUpdates?.isUpdating}
+          isCheckingForUpdates={
+            appUpdates?.isCheckingForUpdates ?? isCheckingForUpdates
+          }
+          updateProgress={appUpdates?.updateProgress}
+          onOpenUpdateDialog={() => appUpdates?.setIsUpdateDialogOpen(true)}
+        />
+        {appUpdates?.updateReady &&
+          !appUpdates.bannerDismissed &&
+          appUpdates.updateInfo && (
+            <InlineUpdateBanner
+              updateInfo={appUpdates.updateInfo}
+              onRestart={appUpdates.handleRestart}
+              onOpenDetails={() => appUpdates.setIsUpdateDialogOpen(true)}
+              onDismiss={appUpdates.dismissBanner}
+            />
+          )}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {currentPage === "profiles" && (
             <motion.div
@@ -1765,6 +1763,16 @@ function DesktopHome({
                   setCreateProfileDialogOpen(true);
                 }}
                 workspaceSelected={Boolean(selectedWorkspaceId)}
+                onOpenGroupManagement={() => setCurrentPage("groups")}
+                onOpenProxyManagement={() => {
+                  setProxyManagementInitialTab("proxies");
+                  setProxyManagementDialogOpen(true);
+                }}
+                onOpenMemberManagement={() => setCurrentPage("members")}
+                workspaceName={activeWorkspace?.name}
+                workspaceRole={activeWorkspace?.role}
+                organizationName={activeWorkspace?.organizationName}
+                maxProfiles={activeWorkspace?.maxProfiles}
               />
             </motion.div>
           )}
@@ -1820,18 +1828,6 @@ function DesktopHome({
             />
           )}
 
-          {groupManagementDialogOpen && (
-            <GroupManagementDialog
-              isOpen={groupManagementDialogOpen}
-              onClose={() => {
-                setGroupManagementDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              onGroupManagementComplete={handleGroupManagementComplete}
-              subPage={currentPage === "groups"}
-            />
-          )}
-
           {extensionManagementDialogOpen && (
             <ExtensionManagementDialog
               isOpen={extensionManagementDialogOpen}
@@ -1844,21 +1840,41 @@ function DesktopHome({
             />
           )}
 
-          {accountDialogOpen && (
-            <AccountPage
-              isOpen={accountDialogOpen}
-              onClose={() => {
-                setAccountDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              subPage={currentPage === "account"}
-              onOpenSignIn={() => {
-                if (process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET !== "desktop") {
-                  setAccountDialogOpen(false);
-                  setCurrentPage("profiles");
-                }
-              }}
-            />
+          {currentPage === "account" && <PersonalAccount />}
+
+          {currentPage === "members" && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
+              className="flex min-h-0 flex-1 flex-col overflow-hidden p-3"
+            >
+              {activeWorkspace?.organizationId ? (
+                <WorkspaceMembers
+                  organizationId={activeWorkspace.organizationId}
+                  workspaceId={activeWorkspace.id}
+                  onDataChanged={refreshWorkspaceList}
+                />
+              ) : (
+                <p className="p-4 text-sm text-muted-foreground">
+                  Chưa chọn workspace hợp lệ.
+                </p>
+              )}
+            </motion.div>
+          )}
+
+          {currentPage === "groups" && activeWorkspace && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
+              className="flex min-h-0 flex-1 flex-col overflow-hidden"
+            >
+              <ManagementResources
+                workspaceId={activeWorkspace.id}
+                kind="groups"
+              />
+            </motion.div>
           )}
 
           {currentPage === "orgCenter" && (
@@ -1868,10 +1884,7 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <OrgManagementCenter
-                mode="page"
-                onNavigateHome={() => setCurrentPage("profiles")}
-              />
+              <OrganizationManagement onDataChanged={refreshWorkspaceList} />
             </motion.div>
           )}
 
@@ -1919,9 +1932,8 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <PlatformAdminView
-                onNavigateHome={() => setCurrentPage("profiles")}
-                onOpenAuditLogs={() => handleRailNavigate("auditLogs")}
+              <PlatformManagement
+                onOpenAudit={() => handleRailNavigate("auditLogs")}
               />
             </motion.div>
           )}
@@ -1933,8 +1945,14 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <AccountManagementPanel
-                onCreateScoped={() => setCurrentPage("orgCenter")}
+              <AccountDirectory
+                organizationId={
+                  selectedWorkspaceId
+                    ? undefined
+                    : activeWorkspace?.organizationId
+                }
+                workspaceId={selectedWorkspaceId}
+                onDataChanged={refreshWorkspaceList}
               />
             </motion.div>
           )}
@@ -1946,16 +1964,9 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <WorkspaceManagementDialog
-                mode="page"
-                isOpen={true}
-                onClose={() => setCurrentPage("profiles")}
-                activeWorkspaceId={selectedWorkspaceId}
-                onWorkspaceSwitched={(id) => {
-                  handleWorkspaceSelect(id);
-                }}
-                onWorkspaceDataChanged={refreshWorkspaceList}
-                onNavigateHome={() => setCurrentPage("profiles")}
+              <OrganizationManagement
+                onDataChanged={refreshWorkspaceList}
+                platformView="workspaces"
               />
             </motion.div>
           )}
@@ -2091,6 +2102,21 @@ function DesktopHome({
         onAssignmentComplete={handleGroupAssignmentComplete}
       />
 
+      {appUpdates && (
+        <AppUpdateDialog
+          isOpen={appUpdates.isUpdateDialogOpen}
+          onClose={() => appUpdates.setIsUpdateDialogOpen(false)}
+          updateInfo={appUpdates.updateInfo}
+          isUpdating={appUpdates.isUpdating}
+          updateProgress={appUpdates.updateProgress}
+          updateReady={appUpdates.updateReady}
+          onUpdate={() => void appUpdates.handleAppUpdate()}
+          onRestart={appUpdates.handleRestart}
+          autoUpdatesEnabled={appUpdates.autoUpdatesEnabled}
+          onToggleAutoUpdates={appUpdates.setAutoUpdatesEnabled}
+        />
+      )}
+
       <ExtensionGroupAssignmentDialog
         isOpen={extensionGroupAssignmentDialogOpen}
         workspaceId={selectedWorkspaceId}
@@ -2203,15 +2229,6 @@ function DesktopHome({
         onAccepted={checkTerms}
       />
 
-      <WindowResizeWarningDialog
-        isOpen={windowResizeWarningOpen}
-        onResult={(proceed) => {
-          setWindowResizeWarningOpen(false);
-          windowResizeWarningResolver.current?.(proceed);
-          windowResizeWarningResolver.current = null;
-        }}
-      />
-
       <SyncFollowerDialog
         isOpen={syncLeaderProfile !== null}
         onClose={() => {
@@ -2220,21 +2237,6 @@ function DesktopHome({
         leaderProfile={syncLeaderProfile}
         allProfiles={profiles}
         runningProfiles={runningProfiles}
-      />
-
-      <WorkspaceManagementDialog
-        mode="dialog"
-        isOpen={workspaceManagementOpen}
-        onClose={() => setWorkspaceManagementOpen(false)}
-        activeWorkspaceId={selectedWorkspaceId}
-        onWorkspaceSwitched={handleWorkspaceSelect}
-        onWorkspaceDataChanged={refreshWorkspaceList}
-      />
-
-      <MemberManagementDialog
-        isOpen={memberManagementOpen}
-        onClose={() => setMemberManagementOpen(false)}
-        workspaceId={selectedWorkspaceId}
       />
 
       <PendingInvitesDialog

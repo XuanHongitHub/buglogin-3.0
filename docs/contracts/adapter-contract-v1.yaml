@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: 374c4ba895777ebcb07433b2c37c853f9135d7c131b8f0aa6f869920bc99a609
-projectionCount: 147
+sourceSha256: 7615becac231fd63eb91cefdb9a0cc5585937476bad4d8366463b3483f65a52a
+projectionCount: 159
 projections:
   - commandId: runtime.catalog.get
     kind: query
@@ -1420,6 +1420,134 @@ projections:
       tauri: account_get
       rest: account.get
       mcp: account_get
+  - commandId: account.identity.own.get
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    inputSchema: Empty
+    outputSchema: AccountIdentity
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_identity_own_get
+      rest: account.identity.own.get
+  - commandId: account.identity.get
+    kind: query
+    capability: CAP-ADM-001
+    action: read
+    inputSchema: AccountIdentityGetInput
+    outputSchema: AccountIdentity
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_identity_get
+      rest: account.identity.get
+  - commandId: account.identity.update
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    inputSchema: AccountIdentityUpdateCommandInput
+    outputSchema: AccountIdentity
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_identity_update
+      rest: account.identity.update
+  - commandId: account.password.change
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    inputSchema: AccountPasswordChangeInput
+    outputSchema: AccountPasswordChangeReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_password_change
+      rest: account.password.change
+  - commandId: account.sessions.list
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    inputSchema: AccountSessionsListInput
+    outputSchema: WebSessionPage
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_sessions_list
+      rest: account.sessions.list
+  - commandId: account.sessions.revoke
+    kind: command
+    capability: CAP-ID-001
+    action: manage
+    inputSchema: AccountSessionRevokeInput
+    outputSchema: AccountSessionRevokeReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: account_sessions_revoke
+      rest: account.sessions.revoke
+  - commandId: management.account.drafts.generate
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    inputSchema: AccountDraftsInput
+    outputSchema: AccountDraftPage
+    auth: required
+    audit: required
+    idempotency: none
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: management_account_drafts_generate
+      rest: management.account.drafts.generate
+  - commandId: management.batch.execute
+    kind: command
+    capability: CAP-MEM-001
+    action: manage
+    inputSchema: ManagementBatchInput
+    outputSchema: ManagementBatchReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: management_batch_execute
+      rest: management.batch.execute
   - commandId: account.create
     kind: command
     capability: CAP-ADM-001
@@ -1582,6 +1710,38 @@ projections:
       tauri: organization_update
       rest: organization.update
       mcp: organization_update
+  - commandId: organization.delete
+    kind: command
+    capability: CAP-ORG-001
+    action: delete
+    inputSchema: OrganizationDeleteCommandInput
+    outputSchema: OrganizationDeleteReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: organization_delete
+      rest: organization.delete
+  - commandId: organization.owner.transfer
+    kind: command
+    capability: CAP-ORG-001
+    action: manage
+    inputSchema: OrganizationOwnerTransferCommandInput
+    outputSchema: Organization
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: organization_owner_transfer
+      rest: organization.owner.transfer
   - commandId: organization.members.list
     kind: query
     capability: CAP-ORG-001
@@ -1760,6 +1920,22 @@ projections:
       tauri: workspace_update
       rest: workspace.update
       mcp: workspace_update
+  - commandId: workspace.delete
+    kind: command
+    capability: CAP-WS-001
+    action: delete
+    inputSchema: WorkspaceDeleteCommandInput
+    outputSchema: WorkspaceDeleteReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: workspace_delete
+      rest: workspace.delete
   - commandId: group.list
     kind: query
     capability: CAP-PROF-003
@@ -2290,6 +2466,22 @@ projections:
       tauri: member_suspend
       rest: member.suspend
       mcp: member_suspend
+  - commandId: member.remove
+    kind: command
+    capability: CAP-MEM-001
+    action: delete
+    inputSchema: MemberRemoveInput
+    outputSchema: MemberRemoveReceipt
+    auth: required
+    audit: required
+    idempotency: required
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: member_remove
+      rest: member.remove
   - commandId: member.role.update
     kind: command
     capability: CAP-MEM-001
@@ -5194,6 +5386,142 @@ rest:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: account.identity.own.get
+      commandId: account.identity.own.get
+      kind: query
+      capability: CAP-ID-001
+      action: read
+      inputSchema: Empty
+      outputSchema: AccountIdentity
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: account.identity.get
+      commandId: account.identity.get
+      kind: query
+      capability: CAP-ADM-001
+      action: read
+      inputSchema: AccountIdentityGetInput
+      outputSchema: AccountIdentity
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: account.identity.update
+      commandId: account.identity.update
+      kind: command
+      capability: CAP-ID-001
+      action: update
+      inputSchema: AccountIdentityUpdateCommandInput
+      outputSchema: AccountIdentity
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: account.password.change
+      commandId: account.password.change
+      kind: command
+      capability: CAP-ID-001
+      action: update
+      inputSchema: AccountPasswordChangeInput
+      outputSchema: AccountPasswordChangeReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: account.sessions.list
+      commandId: account.sessions.list
+      kind: query
+      capability: CAP-ID-001
+      action: read
+      inputSchema: AccountSessionsListInput
+      outputSchema: WebSessionPage
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: account.sessions.revoke
+      commandId: account.sessions.revoke
+      kind: command
+      capability: CAP-ID-001
+      action: manage
+      inputSchema: AccountSessionRevokeInput
+      outputSchema: AccountSessionRevokeReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: management.account.drafts.generate
+      commandId: management.account.drafts.generate
+      kind: command
+      capability: CAP-MEM-001
+      action: create
+      inputSchema: AccountDraftsInput
+      outputSchema: AccountDraftPage
+      auth: required
+      audit: required
+      idempotency: none
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: management.batch.execute
+      commandId: management.batch.execute
+      kind: command
+      capability: CAP-MEM-001
+      action: manage
+      inputSchema: ManagementBatchInput
+      outputSchema: ManagementBatchReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
     - operationId: account.create
       commandId: account.create
       kind: command
@@ -5336,6 +5664,42 @@ rest:
       capability: CAP-ORG-001
       action: update
       inputSchema: OrganizationUpdateInput
+      outputSchema: Organization
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: organization.delete
+      commandId: organization.delete
+      kind: command
+      capability: CAP-ORG-001
+      action: delete
+      inputSchema: OrganizationDeleteCommandInput
+      outputSchema: OrganizationDeleteReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: organization.owner.transfer
+      commandId: organization.owner.transfer
+      kind: command
+      capability: CAP-ORG-001
+      action: manage
+      inputSchema: OrganizationOwnerTransferCommandInput
       outputSchema: Organization
       auth: required
       audit: required
@@ -5494,6 +5858,24 @@ rest:
       action: update
       inputSchema: WorkspaceUpdateInput
       outputSchema: Workspace
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: workspace.delete
+      commandId: workspace.delete
+      kind: command
+      capability: CAP-WS-001
+      action: delete
+      inputSchema: WorkspaceDeleteCommandInput
+      outputSchema: WorkspaceDeleteReceipt
       auth: required
       audit: required
       idempotency: required
@@ -6014,6 +6396,24 @@ rest:
       action: manage
       inputSchema: MemberIdInput
       outputSchema: Member
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+      requires:
+        - Idempotency-Key
+    - operationId: member.remove
+      commandId: member.remove
+      kind: command
+      capability: CAP-MEM-001
+      action: delete
+      inputSchema: MemberRemoveInput
+      outputSchema: MemberRemoveReceipt
       auth: required
       audit: required
       idempotency: required
@@ -7043,6 +7443,138 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: account_identity_own_get
+      commandId: account.identity.own.get
+      kind: query
+      capability: CAP-ID-001
+      action: read
+      inputSchema: Empty
+      outputSchema: AccountIdentity
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: account_identity_get
+      commandId: account.identity.get
+      kind: query
+      capability: CAP-ADM-001
+      action: read
+      inputSchema: AccountIdentityGetInput
+      outputSchema: AccountIdentity
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: account_identity_update
+      commandId: account.identity.update
+      kind: command
+      capability: CAP-ID-001
+      action: update
+      inputSchema: AccountIdentityUpdateCommandInput
+      outputSchema: AccountIdentity
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: account_password_change
+      commandId: account.password.change
+      kind: command
+      capability: CAP-ID-001
+      action: update
+      inputSchema: AccountPasswordChangeInput
+      outputSchema: AccountPasswordChangeReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: account_sessions_list
+      commandId: account.sessions.list
+      kind: query
+      capability: CAP-ID-001
+      action: read
+      inputSchema: AccountSessionsListInput
+      outputSchema: WebSessionPage
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: account_sessions_revoke
+      commandId: account.sessions.revoke
+      kind: command
+      capability: CAP-ID-001
+      action: manage
+      inputSchema: AccountSessionRevokeInput
+      outputSchema: AccountSessionRevokeReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: management_account_drafts_generate
+      commandId: management.account.drafts.generate
+      kind: command
+      capability: CAP-MEM-001
+      action: create
+      inputSchema: AccountDraftsInput
+      outputSchema: AccountDraftPage
+      auth: required
+      audit: required
+      idempotency: none
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: management_batch_execute
+      commandId: management.batch.execute
+      kind: command
+      capability: CAP-MEM-001
+      action: manage
+      inputSchema: ManagementBatchInput
+      outputSchema: ManagementBatchReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
     - invoke: account_create
       commandId: account.create
       kind: command
@@ -7181,6 +7713,40 @@ tauri:
       capability: CAP-ORG-001
       action: update
       inputSchema: OrganizationUpdateInput
+      outputSchema: Organization
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: organization_delete
+      commandId: organization.delete
+      kind: command
+      capability: CAP-ORG-001
+      action: delete
+      inputSchema: OrganizationDeleteCommandInput
+      outputSchema: OrganizationDeleteReceipt
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: organization_owner_transfer
+      commandId: organization.owner.transfer
+      kind: command
+      capability: CAP-ORG-001
+      action: manage
+      inputSchema: OrganizationOwnerTransferCommandInput
       outputSchema: Organization
       auth: required
       audit: required
@@ -7334,6 +7900,23 @@ tauri:
       action: update
       inputSchema: WorkspaceUpdateInput
       outputSchema: Workspace
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: workspace_delete
+      commandId: workspace.delete
+      kind: command
+      capability: CAP-WS-001
+      action: delete
+      inputSchema: WorkspaceDeleteCommandInput
+      outputSchema: WorkspaceDeleteReceipt
       auth: required
       audit: required
       idempotency: required
@@ -7817,6 +8400,23 @@ tauri:
       action: manage
       inputSchema: MemberIdInput
       outputSchema: Member
+      auth: required
+      audit: required
+      idempotency: required
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+      retry: use-idempotency-key
+    - invoke: member_remove
+      commandId: member.remove
+      kind: command
+      capability: CAP-MEM-001
+      action: delete
+      inputSchema: MemberRemoveInput
+      outputSchema: MemberRemoveReceipt
       auth: required
       audit: required
       idempotency: required
