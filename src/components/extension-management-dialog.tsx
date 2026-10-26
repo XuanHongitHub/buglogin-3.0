@@ -982,7 +982,14 @@ export function ExtensionManagementDialog({
         cell: ({ row }) => (
           <ProfileUsageButton
             label={t("appFeedback.assignedProfiles", {
-              name: row.original.name,
+              count:
+                referencedProfiles?.filter((profile) =>
+                  extensionGroups.some(
+                    (group) =>
+                      group.id === profile.extension_group_id &&
+                      group.extension_ids.includes(row.original.id),
+                  ),
+                ).length ?? 0,
             })}
             failed={referencesFailed}
             profiles={
@@ -1246,7 +1253,10 @@ export function ExtensionManagementDialog({
         cell: ({ row }) => (
           <ProfileUsageButton
             label={t("appFeedback.assignedProfiles", {
-              name: row.original.name,
+              count:
+                referencedProfiles?.filter(
+                  (profile) => profile.extension_group_id === row.original.id,
+                ).length ?? 0,
             })}
             failed={referencesFailed}
             profiles={
