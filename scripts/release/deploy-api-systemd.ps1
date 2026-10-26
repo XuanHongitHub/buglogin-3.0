@@ -141,7 +141,7 @@ try {
     Invoke-Checked $scp @("-q", $remoteHelper, "${HostAlias}:$remoteStage/deploy-api-systemd-remote.sh")
     $remoteDeploy = "sudo -n /bin/bash $remoteStage/deploy-api-systemd-remote.sh activate $remoteStage $commit $apiHash $adminHash $openApiHash"
     $deploymentOutput = Get-CommandOutput $ssh @("-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", $HostAlias, $remoteDeploy)
-    if ($deploymentOutput -notmatch '(?m)^deployment_id=([0-9]{8}T[0-9]{6}Z-[0-9a-f]{40}-[0-9a-f]{16})$') {
+    if ($deploymentOutput -notmatch '(?m)^deployment_id=([0-9]{8}T[0-9]{6}Z-[0-9a-f]{40}-[0-9a-f]{16})\r?$') {
         throw "Remote activation did not return a valid deployment ID. Remote output: $deploymentOutput"
     }
     $deploymentId = $Matches[1]
