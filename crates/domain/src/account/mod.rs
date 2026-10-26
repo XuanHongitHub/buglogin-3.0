@@ -17,6 +17,8 @@ pub enum IdentityVerification {
 pub struct AccountIdentity {
     pub account_id: AccountId,
     pub username: String,
+    #[serde(default)]
+    pub display_name: String,
     pub canonical_username: String,
     pub email: String,
     pub canonical_email: String,
@@ -41,6 +43,7 @@ impl AccountIdentity {
         Ok(Self {
             account_id,
             username: username.trim().into(),
+            display_name: String::new(),
             canonical_username,
             email: email.trim().into(),
             canonical_email,
@@ -57,7 +60,25 @@ impl AccountIdentity {
         email: impl Into<String>,
         created_at: impl Into<String>,
     ) -> Result<Self, Problem> {
-        let mut identity = Self::new(account_id, username, email, created_at)?;
+        let username = username.into();
+        let email = email.into();
+        let mut identity = if email.trim().is_empty() {
+            let created_at = created_at.into();
+            Self {
+                account_id,
+                canonical_username: canonical_username(&username)?,
+                username: username.trim().into(),
+                display_name: String::new(),
+                email: String::new(),
+                canonical_email: String::new(),
+                verification: IdentityVerification::AdminProvisioned,
+                revision: 1,
+                created_at: created_at.clone(),
+                updated_at: created_at,
+            }
+        } else {
+            Self::new(account_id, username, email, created_at)?
+        };
         identity.verification = IdentityVerification::AdminProvisioned;
         Ok(identity)
     }

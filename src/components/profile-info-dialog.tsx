@@ -51,7 +51,6 @@ import { ProfileHandoffStatus } from "@/components/profile-handoff-status";
 import { ProfileLaunchActivity } from "@/components/profile-launch-activity";
 import { ProfileMetadataCard } from "@/components/profile-metadata-card";
 import { ExportProfileSection } from "@/components/profile-transfer";
-import { RestorePoints } from "@/components/restore-points";
 import { SharedFingerprintConfigForm } from "@/components/shared-fingerprint-config-form";
 import { ProfileTotpSection } from "@/components/totp-code";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -1478,6 +1477,7 @@ function ProfileInfoLayout({
                 isRunning={isRunning}
                 isDisabled={isDisabled}
                 onCopyCookies={cookiesCopyAction?.onClick}
+                onManageCookies={cookiesManageAction?.onClick}
                 t={t}
               />
             ))}
@@ -1895,9 +1895,6 @@ function SyncSectionInline({
             </p>
           )}
         </div>
-      )}
-      {syncMode !== "Disabled" && (
-        <RestorePoints profileId={profile.id} isDisabled={isDisabled} />
       )}
       {error && <p className="text-xs text-destructive-text">{error}</p>}
     </div>
@@ -2483,12 +2480,14 @@ function CookiesSectionInline({
   isRunning,
   isDisabled,
   onCopyCookies,
+  onManageCookies,
   t,
 }: {
   profile: BrowserProfile;
   isRunning: boolean;
   isDisabled: boolean;
   onCopyCookies?: () => void;
+  onManageCookies?: () => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   type CookieStats = {
@@ -2529,43 +2528,6 @@ function CookiesSectionInline({
   }, [profile.id, isRunning, t]);
 
   const [isExporting, setIsExporting] = React.useState(false);
-
-  // Export all of this profile's cookies in one of the same formats import
-  // accepts (JSON or Netscape). The backend formats every cookie; we just pick
-  // a destination file.
-  const handleDirectImportCookies = async () => {
-    try {
-      const selected = await openDialog({
-        multiple: false,
-        filters: [{ name: "Cookies", extensions: ["json", "txt"] }],
-      });
-      if (!selected || typeof selected !== "string") return;
-      const content = await readTextFile(selected);
-      const res = await invoke<{ cookies_imported: number }>(
-        "import_profile_cookies",
-        {
-          profileId: profile.id,
-          content,
-        },
-      );
-      showSuccessToast(
-        t("cookies.import.success", {
-          defaultValue: `Đã nhập thành công ${res.cookies_imported} cookies`,
-          count: res.cookies_imported,
-        }),
-      );
-      try {
-        const data = await invoke<CookieStats>("get_profile_cookie_stats", {
-          profileId: profile.id,
-        });
-        setStats(data);
-      } catch {
-        // ignore
-      }
-    } catch (e) {
-      showErrorToast(translateBackendError(t as never, e));
-    }
-  };
 
   const handleExport = React.useCallback(
     async (format: "json" | "netscape") => {
@@ -2642,18 +2604,18 @@ function CookiesSectionInline({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button
-            variant="soft"
-            size="sm"
-            className="h-7 gap-1.5"
-            disabled={isDisabled || isRunning}
-            onClick={() => {
-              void handleDirectImportCookies();
-            }}
-          >
-            <LuUpload className="size-3.5" />
-            {t("common.buttons.import")}
-          </Button>
+          {onManageCookies && (
+            <Button
+              variant="soft"
+              size="sm"
+              className="h-7 gap-1.5"
+              disabled={isDisabled || isRunning}
+              onClick={onManageCookies}
+            >
+              <LuUpload className="size-3.5" />
+              {t("common.buttons.import")}
+            </Button>
+          )}
           {onCopyCookies && (
             <Button
               variant="soft"

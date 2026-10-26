@@ -376,8 +376,8 @@ pub async fn get_groups_with_profile_counts(
     let profiles = list_all_profiles(&state).await?;
     let groups = group_result
         .data
-        .get("items")
-        .and_then(Value::as_array)
+        .as_array()
+        .or_else(|| group_result.data.get("items").and_then(Value::as_array))
         .ok_or_else(|| invalid_response("group-list"))?;
     Ok(groups.iter().map(|record| {
         let group = record.get("group").unwrap_or(record);
@@ -1685,7 +1685,7 @@ pub async fn launch_browser_profile(
             &correlation_id,
         )
         .await?;
-        run_operation(
+        run_operation_result(
             &state,
             "profile_launch",
             json!({ "profileId": profile_id, "headless": false }),
@@ -1693,13 +1693,22 @@ pub async fn launch_browser_profile(
         .await
     }
     .await;
-    if let Err(error) = launch {
+    let receipt = match launch {
+        Ok(receipt) => receipt,
+        Err(error) => {
         crate::diagnostics::report_problem_failure(
             state.inner().clone(),
             "profile.launch",
             error.clone(),
         );
         return Err(error);
+        }
+    };
+    if let Some(warnings) = receipt.get("extensionWarnings").and_then(Value::as_array).filter(|warnings| !warnings.is_empty()) {
+        let _ = app.emit("profile-extension-warning", json!({ "profileId": profile_id, "warnings": warnings }));
+    }
+    if let Some(warning) = receipt.get("fingerprintWarning").filter(|warning| !warning.is_null()) {
+        let _ = app.emit("profile-fingerprint-warning", json!({"profileId":profile_id,"warning":warning}));
     }
     app.emit(
         "profile-running-changed",
@@ -1793,6 +1802,10 @@ pub async fn list_running_browser_profiles(
 }
 
 async fn run_operation(state: &DesktopState, command: &str, payload: Value) -> Result<(), Problem> {
+    run_operation_result(state, command, payload).await.map(|_| ())
+}
+
+async fn run_operation_result(state: &DesktopState, command: &str, payload: Value) -> Result<Value, Problem> {
     let correlation_id = request_id(command);
     let accepted = state
         .invoke(
@@ -1820,7 +1833,7 @@ async fn run_operation(state: &DesktopState, command: &str, payload: Value) -> R
             )
             .await?;
         match operation.data.get("status").and_then(Value::as_str) {
-            Some("completed") => return Ok(()),
+            Some("completed") => return Ok(operation.data.get("result").cloned().unwrap_or(Value::Null)),
             Some("failed" | "cancelled") => {
                 if let Some(error) = operation.data.get("error") {
                     if let Ok(problem) = serde_json::from_value::<Problem>(error.clone()) {

@@ -3,30 +3,10 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  LuBuilding2,
-  LuChevronDown,
-  LuDownload,
-  LuFolderPlus,
-  LuGlobe,
-  LuPlus,
-  LuRefreshCw,
-  LuUserPlus,
-} from "react-icons/lu";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuShortcut,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { LuDownload, LuRefreshCw } from "react-icons/lu";
 import { getCurrentOS } from "@/lib/browser-utils";
 import { cn } from "@/lib/utils";
 import type { AppUpdateInfo, AppUpdateProgress } from "@/types";
-import { type WorkspaceItem, WorkspaceSwitcher } from "./workspace-switcher";
 
 const HOLD_MS = 150;
 const DRAG_THRESHOLD_PX = 3;
@@ -44,16 +24,7 @@ const isInteractiveTarget = (target: EventTarget | null): boolean => {
 
 interface Props {
   pageTitle?: string;
-  workspaces?: WorkspaceItem[];
-  selectedWorkspaceId?: string;
-  onWorkspaceSelect?: (workspaceId: string) => void;
-  onManageWorkspaces?: () => void;
-  onOpenOrgCenter?: () => void;
-  activeWorkspace?: WorkspaceItem | null;
-  onCreateProfile?: () => void;
-  onCreateGroup?: () => void;
-  onAddProxy?: () => void;
-  onInviteMember?: () => void;
+  showPageContext?: boolean;
   // App update props (DES-04 §3.1)
   updateInfo?: AppUpdateInfo | null;
   updateReady?: boolean;
@@ -65,16 +36,7 @@ interface Props {
 
 export const HomeHeader = ({
   pageTitle,
-  workspaces = [],
-  selectedWorkspaceId,
-  onWorkspaceSelect,
-  onManageWorkspaces,
-  onOpenOrgCenter,
-  activeWorkspace,
-  onCreateProfile,
-  onCreateGroup,
-  onAddProxy,
-  onInviteMember,
+  showPageContext = true,
   updateInfo,
   updateReady,
   isUpdating,
@@ -187,134 +149,17 @@ export const HomeHeader = ({
         isWindows ? "pr-[144px]" : "pr-4",
       )}
     >
-      {/* Left side: Breadcrumb Navigation + Unified Context Anchor & Action Hub (DES-02) */}
+      {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-xs">
-        <div className="flex items-center gap-1.5">
-          <span className="text-muted-foreground/70 font-medium select-none">
-            BugLogin
-          </span>
-          <span className="text-muted-foreground/40 select-none">/</span>
-          <span className="font-semibold text-foreground tracking-tight select-none">
-            {pageTitle || t("rail.profiles", { defaultValue: "Profiles" })}
-          </span>
-        </div>
-
-        {/* Unified Context Anchor (DES-02 §2.1) */}
-        {activeWorkspace && (
-          <div className="flex items-center gap-2 ml-2 pl-2 border-l border-border/60">
-            <WorkspaceSwitcher
-              variant="header"
-              workspaces={workspaces}
-              selectedWorkspaceId={selectedWorkspaceId || ""}
-              onWorkspaceSelect={onWorkspaceSelect || (() => {})}
-              onManageWorkspaces={onManageWorkspaces}
-              onOpenOrgCenter={onOpenOrgCenter}
-            />
-
-            {/* Unified Creation Action Hub (DES-02 §2.1) */}
-            {onCreateProfile && (
-              <div className="flex items-center">
-                <Button
-                  size="sm"
-                  variant="default"
-                  onClick={onCreateProfile}
-                  className="h-7 px-2.5 rounded-r-none text-xs font-semibold gap-1 bg-primary text-primary-foreground hover:bg-primary/90 shadow-2xs cursor-pointer"
-                  title="Tạo Profile mới (Ctrl+N)"
-                >
-                  <LuPlus className="size-3.5" />
-                  <span>{t("actions.new", { defaultValue: "Mới" })}</span>
-                </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      size="sm"
-                      variant="default"
-                      className="h-7 px-1.5 rounded-l-none border-l border-primary-foreground/20 bg-primary text-primary-foreground hover:bg-primary/90 shadow-2xs cursor-pointer"
-                      aria-label="Tùy chọn tạo mới"
-                    >
-                      <LuChevronDown className="size-3" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-56">
-                    <DropdownMenuLabel className="text-xs font-semibold text-muted-foreground">
-                      {t("actions.addOptions", {
-                        defaultValue: "Thao tác tạo nhanh",
-                      })}
-                    </DropdownMenuLabel>
-                    <DropdownMenuItem
-                      onClick={onCreateProfile}
-                      className="gap-2 cursor-pointer text-xs"
-                    >
-                      <LuPlus className="size-4 text-primary" />
-                      <div className="flex-1">
-                        <div className="font-medium">
-                          {t("actions.newProfile", {
-                            defaultValue: "Tạo Profile mới",
-                          })}
-                        </div>
-                      </div>
-                      <DropdownMenuShortcut>Ctrl+N</DropdownMenuShortcut>
-                    </DropdownMenuItem>
-
-                    {onCreateGroup && (
-                      <DropdownMenuItem
-                        onClick={onCreateGroup}
-                        className="gap-2 cursor-pointer text-xs"
-                      >
-                        <LuFolderPlus className="size-4 text-emerald-500" />
-                        <div className="flex-1">
-                          <div className="font-medium">
-                            {t("actions.newGroup", {
-                              defaultValue: "Tạo Nhóm mới",
-                            })}
-                          </div>
-                        </div>
-                        <DropdownMenuShortcut>Ctrl+G</DropdownMenuShortcut>
-                      </DropdownMenuItem>
-                    )}
-
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-[11px] font-semibold text-muted-foreground/80">
-                      {t("actions.resources", {
-                        defaultValue: "Tài nguyên & Thành viên",
-                      })}
-                    </DropdownMenuLabel>
-
-                    {onAddProxy && (
-                      <DropdownMenuItem
-                        onClick={onAddProxy}
-                        className="gap-2 cursor-pointer text-xs"
-                      >
-                        <LuGlobe className="size-4 text-blue-500" />
-                        <div className="flex-1">
-                          <div className="font-medium">
-                            {t("actions.addProxy", {
-                              defaultValue: "Thêm Proxy / VPN",
-                            })}
-                          </div>
-                        </div>
-                      </DropdownMenuItem>
-                    )}
-
-                    {onInviteMember && (
-                      <DropdownMenuItem
-                        onClick={onInviteMember}
-                        className="gap-2 cursor-pointer text-xs"
-                      >
-                        <LuUserPlus className="size-4 text-purple-500" />
-                        <div className="flex-1">
-                          <div className="font-medium">
-                            {t("actions.inviteMember", {
-                              defaultValue: "Mời thành viên",
-                            })}
-                          </div>
-                        </div>
-                      </DropdownMenuItem>
-                    )}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            )}
+        {showPageContext && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground/70 font-medium select-none">
+              BugLogin
+            </span>
+            <span className="text-muted-foreground/40 select-none">/</span>
+            <span className="font-semibold text-foreground tracking-tight select-none">
+              {pageTitle || t("rail.profiles", { defaultValue: "Profiles" })}
+            </span>
           </div>
         )}
       </div>

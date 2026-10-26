@@ -10,13 +10,16 @@ import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 
 interface RestorePoint {
   id: string;
-  createdAt: string;
-  kind: "auto" | "manual";
-  files: number;
-  bytes: number;
+  profile_id: string;
+  label: string | null;
+  size_bytes: number;
+  created_at: number;
 }
 
-function formatBytes(bytes: number, language: string): string {
+function formatBytes(bytes: number | undefined, language: string): string {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) {
+    return "—";
+  }
   const units = ["B", "KB", "MB", "GB"];
   let value = bytes;
   let unit = 0;
@@ -70,10 +73,10 @@ export function RestorePoints({
     }
   };
 
-  const when = (iso: string) => {
-    const date = new Date(iso);
+  const when = (timestamp: number) => {
+    const date = new Date(timestamp * 1000);
     return Number.isNaN(date.getTime())
-      ? iso
+      ? "—"
       : date.toLocaleString(i18n.language, {
           dateStyle: "medium",
           timeStyle: "short",
@@ -123,10 +126,10 @@ export function RestorePoints({
               data-point={point.id}
             >
               <span className="min-w-0 truncate">
-                {when(point.createdAt)}{" "}
+                {when(point.created_at)}{" "}
                 <span className="text-xs text-muted-foreground">
-                  {t(`restorePoints.kind.${point.kind}`)} ·{" "}
-                  {formatBytes(point.bytes, i18n.language)}
+                  {point.label?.trim() || t("restorePoints.snapshot")} ·{" "}
+                  {formatBytes(point.size_bytes, i18n.language)}
                 </span>
               </span>
               <span className="flex shrink-0 gap-1">
@@ -177,7 +180,7 @@ export function RestorePoints({
         }}
         title={t("restorePoints.restoreTitle")}
         description={t("restorePoints.restoreDescription", {
-          when: restoring ? when(restoring.createdAt) : "",
+          when: restoring ? when(restoring.created_at) : "",
         })}
         confirmButtonText={t("restorePoints.restore")}
         isLoading={busy}
