@@ -2260,6 +2260,7 @@ mod tests {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();

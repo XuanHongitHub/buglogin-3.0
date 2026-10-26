@@ -71,6 +71,7 @@ fn acl_denies_before_lookup_and_explicit_deny_overrides_role() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: true,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -109,6 +110,7 @@ fn workspace_ids_are_unique_across_organizations_and_quota_is_enforced() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: true,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -133,6 +135,7 @@ fn workspace_ids_are_unique_across_organizations_and_quota_is_enforced() {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: true,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();

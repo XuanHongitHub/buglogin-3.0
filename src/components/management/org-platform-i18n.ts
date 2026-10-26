@@ -40,6 +40,13 @@ const en = {
     "New profiles in this workspace will inherit this group. Git sources update when the profile opens.",
   extensionGroupsUnavailable:
     "Extension groups could not be loaded; the default was not changed.",
+  organizationDefaultExtensionGroups: "Organization defaults for new profiles",
+  organizationDefaultExtensionGroupsHint:
+    "Choose a default group for each workspace. A workspace-level choice takes priority.",
+  unavailableDefaultExtensionGroup:
+    "Saved group is unavailable — choose another group or clear it",
+  organizationExtensionGroupsUnavailable:
+    "Some workspace groups could not be loaded. Their saved choices are preserved while you edit other workspaces.",
   currentUsage: "Usage / limit",
   profiles: "Profiles",
   members: "Members",
@@ -212,6 +219,14 @@ const vi: typeof en = {
     "Profile mới trong workspace này tự nhận nhóm; nguồn Git được cập nhật khi mở profile.",
   extensionGroupsUnavailable:
     "Không tải được nhóm tiện ích; chưa thay đổi mặc định.",
+  organizationDefaultExtensionGroups:
+    "Nhóm mặc định cho profile mới trong tổ chức",
+  organizationDefaultExtensionGroupsHint:
+    "Chọn nhóm cho từng workspace. Cấu hình riêng của workspace được ưu tiên.",
+  unavailableDefaultExtensionGroup:
+    "Nhóm đã lưu không còn khả dụng — hãy chọn nhóm khác hoặc xóa",
+  organizationExtensionGroupsUnavailable:
+    "Không tải được nhóm tiện ích của một số workspace. Lựa chọn đã lưu vẫn được giữ khi bạn sửa workspace khác.",
   currentUsage: "Đang dùng / hạn mức",
   profiles: "Profiles",
   members: "Thành viên",

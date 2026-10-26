@@ -970,6 +970,7 @@ async fn control_http_flow_enforces_acl_replay_audit_and_redaction() {
             OrganizationPolicy {
                 max_workspaces: 2,
                 offline_entitled: true,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();

@@ -1285,6 +1285,7 @@ impl ApiState {
             OrganizationPolicy {
                 max_workspaces: 10,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )?;
         let workspace = Workspace {
@@ -4912,6 +4913,7 @@ impl ApiState {
                     OrganizationPolicy {
                         max_workspaces: input.max_workspaces,
                         offline_entitled: false,
+                        default_extension_groups_by_workspace: Default::default(),
                     },
                 )?;
                 workspaces.create_workspace(

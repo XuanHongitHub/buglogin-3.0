@@ -315,6 +315,7 @@ fn seed_workspace(
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: false,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -1586,6 +1587,7 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
     let organization_policy = OrganizationPolicy {
         max_workspaces: 4,
         offline_entitled: false,
+        default_extension_groups_by_workspace: Default::default(),
     };
     let created_organization = dispatcher
         .dispatch(production_request(

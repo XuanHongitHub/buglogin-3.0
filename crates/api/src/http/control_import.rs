@@ -1509,6 +1509,7 @@ fn merge_workspaces(
                         .try_into()
                         .map_err(|_| invalid("organization workspace count"))?,
                     offline_entitled: offline.into_iter().next().unwrap_or(false),
+                    default_extension_groups_by_workspace: Default::default(),
                 },
             ),
         );

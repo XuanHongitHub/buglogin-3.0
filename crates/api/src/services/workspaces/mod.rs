@@ -120,6 +120,10 @@ impl WorkspaceService {
         )?;
         record.workspaces.remove(workspace_id);
         record.workspace_revisions.remove(workspace_id);
+        record
+            .policy
+            .default_extension_groups_by_workspace
+            .remove(workspace_id);
         record.revision = next_revision(record.revision)?;
         Ok(workspace)
     }
@@ -400,6 +404,22 @@ impl WorkspaceService {
             ));
         }
         authorize_organization(principal, grants, &record.organization, Action::Update)?;
+        for workspace_id in update.policy.default_extension_groups_by_workspace.keys() {
+            let workspace = record.workspaces.get(workspace_id).ok_or_else(|| {
+                problem(
+                    "workspace_not_found",
+                    "Default extension group references a workspace outside this organization",
+                    404,
+                )
+            })?;
+            if workspace.organization_id != *organization_id {
+                return Err(problem(
+                    "tenant_mismatch",
+                    "Default extension group references a workspace outside this organization",
+                    403,
+                ));
+            }
+        }
         check_revision(record.revision, update.expected_revision)?;
         record.revision = next_revision(record.revision)?;
         record.organization.name = update.organization.name.trim().to_owned();
@@ -474,6 +494,17 @@ impl WorkspaceService {
             .values()
             .find_map(|record| record.workspaces.get(workspace_id))
             .cloned()
+            .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))
+    }
+
+    pub(crate) fn organization_policy_for_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<OrganizationPolicy, Problem> {
+        self.organizations
+            .values()
+            .find(|record| record.workspaces.contains_key(workspace_id))
+            .map(|record| record.policy.clone())
             .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))
     }
 
@@ -658,6 +689,7 @@ impl WorkspaceService {
         let revision = next_revision(revision)?;
         workspace.name = update.workspace.name.trim().to_owned();
         workspace.policy = update.workspace.policy;
+        workspace.default_extension_group_id = update.workspace.default_extension_group_id;
         record
             .workspace_revisions
             .insert(workspace_id.clone(), revision);
@@ -897,7 +929,7 @@ fn problem(code: &str, title: &str, status: u16) -> Problem {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use buglogin_domain::{
         ids::{AccountId, GrantId, MemberId, OrganizationId, TeamId, WorkspaceId},
@@ -922,6 +954,7 @@ mod tests {
         OrganizationPolicy {
             max_workspaces: 4,
             offline_entitled: true,
+            default_extension_groups_by_workspace: Default::default(),
         }
     }
 
@@ -973,6 +1006,7 @@ mod tests {
             policy: OrganizationPolicy {
                 max_workspaces: 8,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
             expected_revision: 1,
         };
@@ -1015,6 +1049,62 @@ mod tests {
                 .code,
             "tenant_mismatch"
         );
+    }
+
+    #[test]
+    fn organization_extension_default_must_reference_its_own_workspace() {
+        let organization = organization("org_extension_policy", "account_extension_policy");
+        let workspace_id = WorkspaceId::new("ws_extension_policy").unwrap();
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        service
+            .create_workspace(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                workspace("ws_extension_policy", &organization.id),
+            )
+            .unwrap();
+
+        let error = service
+            .update_organization(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                OrganizationUpdate {
+                    organization: organization.clone(),
+                    policy: OrganizationPolicy {
+                        default_extension_groups_by_workspace: BTreeMap::from([(
+                            WorkspaceId::new("ws_other_organization").unwrap(),
+                            buglogin_domain::ids::ExtensionGroupId::new("extgrp_default").unwrap(),
+                        )]),
+                        ..organization_policy()
+                    },
+                    expected_revision: 1,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "workspace_not_found");
+
+        let valid = service
+            .update_organization(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                OrganizationUpdate {
+                    organization: organization.clone(),
+                    policy: OrganizationPolicy {
+                        default_extension_groups_by_workspace: BTreeMap::from([(
+                            workspace_id,
+                            buglogin_domain::ids::ExtensionGroupId::new("extgrp_default").unwrap(),
+                        )]),
+                        ..organization_policy()
+                    },
+                    expected_revision: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(valid.policy.default_extension_groups_by_workspace.len(), 1);
     }
 
     #[test]
@@ -1076,6 +1166,43 @@ mod tests {
                 .unwrap_err()
                 .code,
             "tenant_mismatch"
+        );
+    }
+
+    #[test]
+    fn workspace_update_persists_default_extension_group() {
+        let organization = organization("org_workspace_extension", "acct_workspace_extension");
+        let workspace_id = WorkspaceId::new("ws_workspace_extension").unwrap();
+        let mut service =
+            WorkspaceService::new(organization.clone(), organization_policy()).unwrap();
+        let workspace = workspace("ws_workspace_extension", &organization.id);
+        service
+            .create_workspace(&platform_admin(), &[], &organization.id, workspace.clone())
+            .unwrap();
+        let group_id =
+            buglogin_domain::ids::ExtensionGroupId::new("extgrp_workspace_default").unwrap();
+        let mut updated = workspace;
+        updated.default_extension_group_id = Some(group_id.clone());
+
+        let record = service
+            .update_workspace(
+                &platform_admin(),
+                &[],
+                &organization.id,
+                &workspace_id,
+                WorkspaceUpdate {
+                    workspace: updated,
+                    expected_revision: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(record.workspace.default_extension_group_id, Some(group_id));
+        assert_eq!(
+            service
+                .get_workspace(&platform_admin(), &[], &organization.id, &workspace_id)
+                .unwrap()
+                .default_extension_group_id,
+            Some(buglogin_domain::ids::ExtensionGroupId::new("extgrp_workspace_default").unwrap())
         );
     }
 

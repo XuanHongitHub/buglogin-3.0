@@ -758,6 +758,7 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: false,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -1360,6 +1361,7 @@ async fn hosted_profile_archive_restore_replays_and_survives_restart() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: false,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();

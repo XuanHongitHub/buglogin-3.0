@@ -1157,23 +1157,67 @@ function OrganizationEditor({
   const [name, setName] = useState(organization?.name ?? "");
   const [limit, setLimit] = useState("10");
   const [record, setRecord] = useState<OrganizationRecord | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [extensionGroupsByWorkspace, setExtensionGroupsByWorkspace] = useState<
+    Record<string, ExtensionGroupRecord[]>
+  >({});
+  const [
+    defaultExtensionGroupsByWorkspace,
+    setDefaultExtensionGroupsByWorkspace,
+  ] = useState<Record<string, string>>({});
+  const [extensionGroupsUnavailable, setExtensionGroupsUnavailable] =
+    useState(false);
+  const [
+    extensionGroupsUnavailableByWorkspace,
+    setExtensionGroupsUnavailableByWorkspace,
+  ] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(Boolean(organization));
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
     if (!organization) return;
-    void api
-      .getOrganizationRecord({ organizationId: organization.id })
-      .then((value) => {
+    void Promise.all([
+      api.getOrganizationRecord({ organizationId: organization.id }),
+      api.listWorkspaces(organization.id),
+    ])
+      .then(async ([value, workspacePage]) => {
         if (active) {
           setRecord(value);
           setName(value.organization.name);
           setLimit(String(value.policy.maxWorkspaces));
+          setWorkspaces(workspacePage.items);
+          setDefaultExtensionGroupsByWorkspace(
+            value.policy.defaultExtensionGroupsByWorkspace ?? {},
+          );
+        }
+        const results = await Promise.allSettled(
+          workspacePage.items.map(
+            async (workspace) =>
+              [
+                workspace.id,
+                await api.listExtensionGroups(workspace.id),
+              ] as const,
+          ),
+        );
+        if (active) {
+          const groups: Record<string, ExtensionGroupRecord[]> = {};
+          const unavailable: Record<string, boolean> = {};
+          results.forEach((result, index) => {
+            const workspaceId = workspacePage.items[index].id;
+            if (result.status === "fulfilled")
+              groups[result.value[0]] = result.value[1];
+            else unavailable[workspaceId] = true;
+          });
+          setExtensionGroupsByWorkspace(groups);
+          setExtensionGroupsUnavailableByWorkspace(unavailable);
+          setExtensionGroupsUnavailable(Object.keys(unavailable).length > 0);
         }
       })
       .catch((err) => {
-        if (active) setError(errorMessage(err));
+        if (active) {
+          setError(errorMessage(err));
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -1202,6 +1246,7 @@ function OrganizationEditor({
             organization: { ...record.organization, name: name.trim() },
             policy: {
               ...record.policy,
+              defaultExtensionGroupsByWorkspace,
               ...(platform ? { maxWorkspaces: Number(limit) } : {}),
             },
             expectedRevision: record.revision,
@@ -1248,6 +1293,11 @@ function OrganizationEditor({
           className="space-y-4"
         >
           {error ? <ErrorNotice message={error} /> : null}
+          {extensionGroupsUnavailable ? (
+            <ErrorNotice
+              message={t("organizationExtensionGroupsUnavailable")}
+            />
+          ) : null}
           <div className="space-y-1.5">
             <Label htmlFor="management-organization-name">{t("name")} *</Label>
             <Input
@@ -1260,6 +1310,75 @@ function OrganizationEditor({
               autoFocus
             />
           </div>
+          {organization && workspaces.length > 0 ? (
+            <section className="space-y-3 border-t border-border pt-4">
+              <div className="space-y-1">
+                <h3 className="text-sm font-medium">
+                  {t("organizationDefaultExtensionGroups")}
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  {t("organizationDefaultExtensionGroupsHint")}
+                </p>
+              </div>
+              <div className="max-h-56 space-y-3 overflow-y-auto pr-1">
+                {workspaces.map((workspace) => {
+                  const groups = extensionGroupsByWorkspace[workspace.id] ?? [];
+                  const selectedGroupId =
+                    defaultExtensionGroupsByWorkspace[workspace.id];
+                  const selectedGroupAvailable = groups.some(
+                    ({ group }) => group.id === selectedGroupId,
+                  );
+                  return (
+                    <div
+                      key={workspace.id}
+                      className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] items-center gap-3"
+                    >
+                      <Label
+                        htmlFor={`management-org-default-extension-group-${workspace.id}`}
+                        className="truncate"
+                        title={workspace.name}
+                      >
+                        {workspace.name}
+                      </Label>
+                      <Select
+                        value={selectedGroupId ?? "__none__"}
+                        onValueChange={(value) =>
+                          setDefaultExtensionGroupsByWorkspace((previous) => {
+                            const next = { ...previous };
+                            if (value === "__none__") delete next[workspace.id];
+                            else next[workspace.id] = value;
+                            return next;
+                          })
+                        }
+                        disabled={busy || loading}
+                      >
+                        <SelectTrigger
+                          id={`management-org-default-extension-group-${workspace.id}`}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__none__">
+                            {t("noDefaultExtensionGroup")}
+                          </SelectItem>
+                          {selectedGroupId && !selectedGroupAvailable ? (
+                            <SelectItem value={selectedGroupId}>
+                              {t("unavailableDefaultExtensionGroup")}
+                            </SelectItem>
+                          ) : null}
+                          {groups.map(({ group }) => (
+                            <SelectItem key={group.id} value={group.id}>
+                              {group.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
           {platform ? (
             <div className="space-y-1.5">
               <Label htmlFor="management-organization-limit">

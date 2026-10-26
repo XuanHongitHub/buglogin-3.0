@@ -3995,6 +3995,36 @@ async fn update_organization(
     let grants = grants(&state)?;
     let organization_id =
         OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    authorize_organization_management(
+        &state,
+        &principal,
+        &grants,
+        &organization_id,
+        Action::Update,
+    )?;
+    for (workspace_id, group_id) in &input.policy.default_extension_groups_by_workspace {
+        let workspace = state
+            .workspaces
+            .read()
+            .map_err(|_| service_unavailable("workspace"))?
+            .workspace_for_policy(workspace_id)
+            .map_err(response_problem)?;
+        if workspace.organization_id != organization_id {
+            return Err(response_problem(buglogin_domain::errors::Problem::new(
+                "tenant_mismatch",
+                "Default extension group references a workspace outside this organization",
+                403,
+                "organization.update",
+            ))
+            .into());
+        }
+        state
+            .extension_groups
+            .read()
+            .map_err(|_| service_unavailable("extension_group"))?
+            .get_in_workspace(workspace_id, group_id)
+            .map_err(response_problem)?;
+    }
     let value = serde_json::to_value(&input).map_err(internal)?;
     mutate(
         &state,
@@ -10203,6 +10233,7 @@ mod tests {
             buglogin_domain::organization::OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -10320,6 +10351,7 @@ mod tests {
             buglogin_domain::organization::OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
