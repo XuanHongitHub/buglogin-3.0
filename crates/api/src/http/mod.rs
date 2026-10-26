@@ -8953,15 +8953,21 @@ async fn get_profile_key_share_envelope(
         )));
     }
     let current_grants = grants(&state)?;
-    let allowed = HostedProfileService::authorized(
-        &state,
+    let read_capability = Capability::new("profile.read")
+        .map_err(|_| response(problem("invalid_capability", "Invalid capability", 500)))?;
+    let read_scope = ResourceScope {
+        workspace_id: Some(binding.workspace_id.clone()),
+        resource_id: Some(binding.resource_id.clone()),
+        profile_id: Some(profile_id.clone()),
+        ..ResourceScope::default()
+    };
+    let owner_read_allowed = is_allowed(
         &principal,
-        &current_grants,
-        &profile_id,
+        &read_capability,
         Action::Read,
-        "profile.read",
-    )
-    .map_err(response)?;
+        &read_scope,
+        &current_grants,
+    );
     let key_recipients = HostedProfileService::effective_profile_key_recipients(
         &state,
         &profile_id,
@@ -8971,7 +8977,10 @@ async fn get_profile_key_share_envelope(
     .map_err(response)?;
     let active_member = active_members
         .into_iter()
-        .find(|member| key_recipients.contains(&member.id))
+        .find(|member| {
+            key_recipients.contains(&member.id)
+                || (member.role == MemberRole::Owner && owner_read_allowed)
+        })
         .ok_or_else(|| {
             response(problem(
                 "profile_forbidden",
@@ -8979,13 +8988,6 @@ async fn get_profile_key_share_envelope(
                 403,
             ))
         })?;
-    if !allowed {
-        return Err(response(problem(
-            "profile_forbidden",
-            "A current profile read share is required to retrieve this envelope",
-            403,
-        )));
-    }
     let manifest = state
         .current_sync_manifest(&binding.workspace_id, &binding.resource_id)
         .map_err(response)?
@@ -13761,6 +13763,10 @@ mod persistence_tests {
             .account_persistence
             .provision_default(recipient_id.clone(), "2026-10-14T00:00:00Z".into())
             .unwrap();
+        state
+            .account_persistence
+            .provision_default(owner_id.clone(), "2026-10-14T00:00:00Z".into())
+            .unwrap();
         let owner = Principal {
             account_id: Some(owner_id.clone()),
             workspace_ids: [workspace_id.clone()].into_iter().collect(),
@@ -14043,6 +14049,71 @@ mod persistence_tests {
         )
         .unwrap();
         assert_eq!(actual, expected);
+
+        // Workspace owners have default read access and receive an initial
+        // device-bound key envelope during profile provisioning. They are not
+        // represented as explicit share recipients, but must still be able to
+        // retrieve that envelope on their bound device.
+        let owner_device_id = "device_group_envelope_owner";
+        let owner_access_token = state
+            .auth
+            .write()
+            .unwrap()
+            .issue_device_session(
+                owner_id.clone(),
+                now + 3_600,
+                now + 7_200,
+                owner_device_id.into(),
+                None,
+            )
+            .map(|mut tokens| std::mem::take(&mut tokens.access_token))
+            .unwrap();
+        let owner_envelope = ProfileKeyShareEnvelope {
+            schema_version: 2,
+            workspace_id: expected.workspace_id.clone(),
+            resource_id: expected.resource_id.clone(),
+            recipient_device_id: owner_device_id.into(),
+            key_version: expected.key_version.clone(),
+            encapped_key: vec![3; 32],
+            ciphertext: vec![4; 80],
+        };
+        state
+            .replace_profile_key_share_envelopes(
+                &profile_id,
+                &owner_envelope.workspace_id,
+                &owner_envelope.resource_id,
+                &owner_member_id,
+                vec![ConfirmedProfileKeyShareEnvelope {
+                    envelope: owner_envelope.clone(),
+                    confirmed_fingerprint: "c".repeat(64),
+                }],
+            )
+            .unwrap();
+        let owner_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/profiles/{}/key-envelope", profile_id.as_str()))
+                    .header("authorization", format!("Bearer {owner_access_token}"))
+                    .header("x-correlation-id", "group-envelope-owner-test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let owner_response_status = owner_response.status();
+        let owner_response_body = axum::body::to_bytes(owner_response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner_response_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&owner_response_body)
+        );
+        let actual_owner_envelope: ProfileKeyShareEnvelope =
+            serde_json::from_slice(&owner_response_body).unwrap();
+        assert_eq!(actual_owner_envelope, owner_envelope);
 
         let other_device_response = router(state.clone())
             .oneshot(

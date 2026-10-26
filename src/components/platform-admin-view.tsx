@@ -1,20 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  LuArrowLeft,
+  LuBuilding2,
+  LuCircleAlert,
   LuHardDrive,
+  LuPencil,
   LuPlus,
   LuRefreshCw,
   LuSearch,
   LuServer,
-  LuShieldAlert,
   LuUsers,
 } from "react-icons/lu";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -32,26 +33,72 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
-import type { Workspace } from "../../apps/desktop/src/contracts";
+import type {
+  AccountAdminRecord,
+  AccountStatus,
+  Organization,
+  OrganizationPolicy,
+  Resource,
+  ResourceKind,
+  Workspace,
+} from "../../frontend/src/generated/command-registry";
 
 const desktopApi = createTauriDesktopApi();
 
-export interface TenantRecord {
-  id: string;
-  organizationId: string;
-  organizationName: string;
-  policy: Workspace["policy"];
-  name: string;
-  profilesMax: number;
-  membersMax: number;
-}
+type WorkspaceEntry = {
+  organization: Organization;
+  workspace: Workspace;
+};
+
+type ResourceEntry = {
+  organization: Organization;
+  workspace: Workspace;
+  resource: Resource;
+};
+
+type AdminSection = "organizations" | "workspaces" | "accounts" | "resources";
 
 interface PlatformAdminViewProps {
   onNavigateHome: () => void;
   onOpenAuditLogs?: () => void;
+}
+
+const statusLabels: Record<AccountStatus, string> = {
+  active: "Hoạt động",
+  suspended: "Đình chỉ",
+  disabled: "Vô hiệu hóa",
+};
+
+function ErrorState({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between gap-3 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+      role="alert"
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <LuCircleAlert className="size-4 shrink-0" />
+        <span className="truncate">{message}</span>
+      </span>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 shrink-0"
+        onClick={onRetry}
+      >
+        Thử lại
+      </Button>
+    </div>
+  );
 }
 
 export function PlatformAdminView({
@@ -59,664 +106,1151 @@ export function PlatformAdminView({
   onOpenAuditLogs,
 }: PlatformAdminViewProps) {
   const { t } = useTranslation();
-  const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [section, setSection] = useState<AdminSection>("organizations");
+  const [search, setSearch] = useState("");
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
+  const [accounts, setAccounts] = useState<AccountAdminRecord[]>([]);
+  const [resources, setResources] = useState<ResourceEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [accountsLoading, setAccountsLoading] = useState(true);
+  const [resourcesLoading, setResourcesLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [sortKey, setSortKey] = useState<keyof TenantRecord>("name");
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-
-  // Quota adjust state
-  const [adjustTenant, setAdjustTenant] = useState<TenantRecord | null>(null);
-  const [newMaxProfiles, setNewMaxProfiles] = useState(0);
-  const [isSavingQuota, setIsSavingQuota] = useState(false);
-
-  // Multi-select for bulk tenant actions
-  const [selectedTenantIds, setSelectedTenantIds] = useState<Set<string>>(
-    new Set(),
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [resourceError, setResourceError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [pendingAccount, setPendingAccount] = useState<{
+    record: AccountAdminRecord;
+    status: AccountStatus;
+  } | null>(null);
+  const [isUpdatingAccount, setIsUpdatingAccount] = useState(false);
+  const [createAccountOpen, setCreateAccountOpen] = useState(false);
+  const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false);
+  const [organizationName, setOrganizationName] = useState("");
+  const [organizationLimit, setOrganizationLimit] = useState(10);
+  const [isCreatingOrganization, setIsCreatingOrganization] = useState(false);
+  const [editingOrganization, setEditingOrganization] =
+    useState<Organization | null>(null);
+  const [editingOrganizationName, setEditingOrganizationName] = useState("");
+  const [editingOrganizationLimit, setEditingOrganizationLimit] = useState(10);
+  const [editingOrganizationRevision, setEditingOrganizationRevision] =
+    useState(0);
+  const [editingOrganizationPolicy, setEditingOrganizationPolicy] =
+    useState<OrganizationPolicy>({ maxWorkspaces: 10, offlineEntitled: false });
+  const [isSavingOrganization, setIsSavingOrganization] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [isCreatingAccount, setIsCreatingAccount] = useState(false);
+  const [createResourceOpen, setCreateResourceOpen] = useState(false);
+  const [resourceWorkspaceId, setResourceWorkspaceId] = useState("");
+  const [resourceName, setResourceName] = useState("");
+  const [resourceKind, setResourceKind] = useState<ResourceKind>("proxy");
+  const [isCreatingResource, setIsCreatingResource] = useState(false);
+  const [quotaWorkspace, setQuotaWorkspace] = useState<WorkspaceEntry | null>(
+    null,
   );
-  const [isBulkExecuting, setIsBulkExecuting] = useState(false);
+  const [maxProfiles, setMaxProfiles] = useState(0);
+  const [maxMembers, setMaxMembers] = useState(0);
+  const [isSavingQuota, setIsSavingQuota] = useState(false);
+  const directoryRequest = useRef(0);
+  const accountRequest = useRef(0);
+  const resourceRequest = useRef(0);
 
-  // Load Real Data from Desktop / Backend
-  const loadPlatformData = useCallback(async () => {
+  const loadDirectory = useCallback(async (refresh = false) => {
+    const request = ++directoryRequest.current;
     setIsLoading(true);
+    if (refresh) setIsRefreshing(true);
     try {
-      const organizations = await desktopApi.listOrganizations();
+      const organizationPage = await desktopApi.listOrganizations();
       const workspacePages = await Promise.all(
-        organizations.items.map((organization) =>
+        organizationPage.items.map((organization) =>
           desktopApi.listWorkspaces(organization.id),
         ),
       );
-      const organizationNames = new Map(
-        organizations.items.map((organization) => [
-          organization.id,
-          organization.name,
-        ]),
-      );
-      const mapped = workspacePages.flatMap((page) =>
-        (page.items ?? []).map(
-          (workspace): TenantRecord => ({
-            id: workspace.id,
-            organizationId: workspace.organizationId,
-            organizationName:
-              organizationNames.get(workspace.organizationId) ?? "—",
-            policy: workspace.policy,
-            name: workspace.name,
-            profilesMax: workspace.policy.maxProfiles,
-            membersMax: workspace.policy.maxMembers,
-          }),
+      if (request !== directoryRequest.current) return;
+      setOrganizations(organizationPage.items);
+      setWorkspaces(
+        workspacePages.flatMap((page, index) =>
+          page.items.map((workspace) => ({
+            organization: organizationPage.items[index],
+            workspace,
+          })),
         ),
       );
-      setTenants(mapped);
       setLoadError(null);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
-      showErrorToast(`Lỗi đồng bộ dữ liệu quản trị: ${String(err)}`);
+    } catch (error) {
+      if (request === directoryRequest.current)
+        setLoadError(error instanceof Error ? error.message : String(error));
     } finally {
-      setIsLoading(false);
+      if (request === directoryRequest.current) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, []);
 
-  useEffect(() => {
-    void loadPlatformData();
-  }, [loadPlatformData]);
-
-  // Sorting & Filtering
-  const filteredTenants = useMemo(() => {
-    let result = tenants.filter((tenant) => {
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        if (
-          !tenant.name.toLowerCase().includes(q) &&
-          !tenant.organizationName.toLowerCase().includes(q)
-        ) {
-          return false;
-        }
-      }
-      return true;
-    });
-
-    result = [...result].sort((a, b) => {
-      const aVal = a[sortKey];
-      const bVal = b[sortKey];
-      if (typeof aVal === "number" && typeof bVal === "number") {
-        return sortDirection === "asc" ? aVal - bVal : bVal - aVal;
-      }
-      return sortDirection === "asc"
-        ? String(aVal).localeCompare(String(bVal))
-        : String(bVal).localeCompare(String(aVal));
-    });
-
-    return result;
-  }, [tenants, searchQuery, sortKey, sortDirection]);
-
-  // Pagination
-  const totalPages = Math.max(1, Math.ceil(filteredTenants.length / pageSize));
-  const paginatedTenants = useMemo(() => {
-    const start = (currentPage - 1) * pageSize;
-    return filteredTenants.slice(start, start + pageSize);
-  }, [filteredTenants, currentPage, pageSize]);
-
-  const handleSort = (key: keyof TenantRecord) => {
-    if (sortKey === key) {
-      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
-    } else {
-      setSortKey(key);
-      setSortDirection("asc");
-    }
-    setCurrentPage(1);
-  };
-
-  const handleToggleSelectTenant = (id: string) => {
-    setSelectedTenantIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const handleSelectAllTenants = () => {
-    if (
-      selectedTenantIds.size === paginatedTenants.length &&
-      paginatedTenants.length > 0
-    ) {
-      setSelectedTenantIds(new Set());
-    } else {
-      setSelectedTenantIds(new Set(paginatedTenants.map((t) => t.id)));
-    }
-  };
-
-  const handleBulkAddQuota = async () => {
-    if (selectedTenantIds.size === 0) return;
-    setIsBulkExecuting(true);
-    let updated = 0;
+  const loadAccounts = useCallback(async () => {
+    const request = ++accountRequest.current;
+    setAccountsLoading(true);
     try {
-      const selected = tenants.filter((tenant) =>
-        selectedTenantIds.has(tenant.id),
-      );
-      const failedIds: string[] = [];
-      for (const tenant of selected) {
-        try {
-          await desktopApi.updateWorkspace({
-            organizationId: tenant.organizationId,
-            workspaceId: tenant.id,
-            update: {
-              policy: {
-                ...tenant.policy,
-                maxProfiles: tenant.profilesMax + 500,
-              },
-            },
-          });
-          updated += 1;
-        } catch (err) {
-          failedIds.push(tenant.id);
-          console.warn(
-            `Failed to update quota for workspace ${tenant.id}:`,
-            err,
-          );
-        }
-      }
-      if (updated) await loadPlatformData();
-      if (failedIds.length === 0)
-        showSuccessToast(`Đã cập nhật quota cho ${updated} workspace.`);
-      else
-        showErrorToast(
-          `Đã cập nhật ${updated}/${selected.length} workspace; ${failedIds.length} thao tác thất bại. Các workspace lỗi vẫn được chọn để thử lại.`,
-        );
-      setSelectedTenantIds(new Set(failedIds));
+      const page = await desktopApi.listAccounts();
+      if (request !== accountRequest.current) return;
+      setAccounts(page.items);
+      setAccountError(null);
+    } catch (error) {
+      if (request === accountRequest.current)
+        setAccountError(error instanceof Error ? error.message : String(error));
     } finally {
-      setIsBulkExecuting(false);
+      if (request === accountRequest.current) setAccountsLoading(false);
+    }
+  }, []);
+
+  const loadResources = useCallback(async () => {
+    const request = ++resourceRequest.current;
+    setResourcesLoading(true);
+    try {
+      const pages = await Promise.all(
+        workspaces.map(async ({ organization, workspace }) => {
+          const items: Resource[] = [];
+          let cursor: string | null | undefined;
+          for (let pageCount = 0; pageCount < 1000; pageCount += 1) {
+            const page = await desktopApi.listResources({
+              workspaceId: workspace.id,
+              cursor,
+              limit: 100,
+            });
+            items.push(...page.items);
+            cursor = page.nextCursor;
+            if (!cursor) break;
+          }
+          return items.map((resource) => ({
+            organization,
+            workspace,
+            resource,
+          }));
+        }),
+      );
+      if (request !== resourceRequest.current) return;
+      setResources(pages.flat());
+      setResourceError(null);
+    } catch (error) {
+      if (request === resourceRequest.current)
+        setResourceError(
+          error instanceof Error ? error.message : String(error),
+        );
+    } finally {
+      if (request === resourceRequest.current) setResourcesLoading(false);
+    }
+  }, [workspaces]);
+
+  useEffect(() => {
+    void Promise.all([loadDirectory(), loadAccounts()]);
+    return () => {
+      directoryRequest.current += 1;
+      accountRequest.current += 1;
+      resourceRequest.current += 1;
+    };
+  }, [loadAccounts, loadDirectory]);
+
+  useEffect(() => {
+    if (section === "resources" && workspaces.length > 0) void loadResources();
+  }, [loadResources, section, workspaces.length]);
+
+  const filteredOrganizations = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return organizations.filter((organization) =>
+      !query ? true : organization.name.toLocaleLowerCase().includes(query),
+    );
+  }, [organizations, search]);
+
+  const filteredWorkspaces = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return workspaces.filter(
+      ({ organization, workspace }) =>
+        !query ||
+        workspace.name.toLocaleLowerCase().includes(query) ||
+        organization.name.toLocaleLowerCase().includes(query),
+    );
+  }, [search, workspaces]);
+
+  const filteredAccounts = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return accounts.filter(
+      ({ account, identity }) =>
+        !query ||
+        [identity?.username, identity?.email, account.status]
+          .filter(Boolean)
+          .some((value) => value?.toLocaleLowerCase().includes(query)),
+    );
+  }, [accounts, search]);
+
+  const filteredResources = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return resources.filter(
+      ({ organization, workspace, resource }) =>
+        !query ||
+        [
+          resource.displayName,
+          resource.kind,
+          resource.state,
+          workspace.name,
+          organization.name,
+        ].some((value) => value.toLocaleLowerCase().includes(query)),
+    );
+  }, [resources, search]);
+
+  const refreshCurrent = async () => {
+    if (section === "accounts") return loadAccounts();
+    if (section === "resources") return loadResources();
+    return loadDirectory(true);
+  };
+
+  const updateAccountStatus = async () => {
+    if (!pendingAccount) return;
+    setIsUpdatingAccount(true);
+    try {
+      const { account } = pendingAccount.record;
+      const updated = await desktopApi.updateAccountStatus({
+        accountId: account.id,
+        status: pendingAccount.status,
+        expectedRevision: account.revision,
+      });
+      setAccounts((current) =>
+        current.map((record) =>
+          record.account.id === updated.id
+            ? { ...record, account: updated }
+            : record,
+        ),
+      );
+      showSuccessToast("Đã cập nhật trạng thái tài khoản.");
+      setPendingAccount(null);
+    } catch (error) {
+      showErrorToast(error instanceof Error ? error.message : String(error));
+      await loadAccounts();
+    } finally {
+      setIsUpdatingAccount(false);
     }
   };
 
-  const handleOpenAdjustQuota = (tenant: TenantRecord) => {
-    setAdjustTenant(tenant);
-    setNewMaxProfiles(tenant.profilesMax);
+  const createAccount = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const username = newUsername.trim();
+    const email = newEmail.trim();
+    if (!username || !email || isCreatingAccount) return;
+    setIsCreatingAccount(true);
+    try {
+      const accountId = `acct_${crypto.randomUUID().replaceAll("-", "")}`;
+      await desktopApi.createPendingAccount(
+        { accountId, username, email },
+        `platform-account-${crypto.randomUUID()}`,
+      );
+      showSuccessToast("Đã tạo tài khoản nền tảng.");
+      setNewUsername("");
+      setNewEmail("");
+      setCreateAccountOpen(false);
+      await loadAccounts();
+    } catch (error) {
+      showErrorToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsCreatingAccount(false);
+    }
   };
 
-  const handleSaveQuota = async () => {
-    if (
-      !adjustTenant ||
-      !Number.isInteger(newMaxProfiles) ||
-      newMaxProfiles < 0
-    )
-      return;
+  const createOrganization = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = organizationName.trim();
+    if (!name || isCreatingOrganization) return;
+    setIsCreatingOrganization(true);
+    try {
+      const account = await desktopApi.getAccount();
+      await desktopApi.createOrganization({
+        organization: {
+          id: `org_${crypto.randomUUID().replaceAll("-", "")}`,
+          accountId: account.accountId,
+          name,
+          createdAt: new Date().toISOString(),
+        },
+        policy: { maxWorkspaces: organizationLimit, offlineEntitled: false },
+      });
+      showSuccessToast("Đã tạo organization.");
+      setOrganizationName("");
+      setCreateOrganizationOpen(false);
+      await loadDirectory(true);
+    } catch (error) {
+      showErrorToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsCreatingOrganization(false);
+    }
+  };
+
+  const openOrganizationEditor = async (organization: Organization) => {
+    try {
+      const record = await desktopApi.getOrganizationRecord({
+        organizationId: organization.id,
+      });
+      setEditingOrganization(record.organization);
+      setEditingOrganizationName(record.organization.name);
+      setEditingOrganizationLimit(record.policy.maxWorkspaces);
+      setEditingOrganizationRevision(record.revision);
+      setEditingOrganizationPolicy(record.policy);
+    } catch (error) {
+      showErrorToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const saveOrganization = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingOrganization || isSavingOrganization) return;
+    setIsSavingOrganization(true);
+    try {
+      await desktopApi.updateOrganization({
+        organizationId: editingOrganization.id,
+        update: {
+          organization: {
+            ...editingOrganization,
+            name: editingOrganizationName.trim(),
+          },
+          policy: {
+            ...editingOrganizationPolicy,
+            maxWorkspaces: editingOrganizationLimit,
+          },
+          expectedRevision: editingOrganizationRevision,
+        },
+      });
+      showSuccessToast("Đã cập nhật organization.");
+      setEditingOrganization(null);
+      await loadDirectory(true);
+    } catch (error) {
+      showErrorToast(error instanceof Error ? error.message : String(error));
+      await loadDirectory(true);
+    } finally {
+      setIsSavingOrganization(false);
+    }
+  };
+
+  const createResource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const workspace = workspaces.find(
+      (entry) => entry.workspace.id === resourceWorkspaceId,
+    );
+    const displayName = resourceName.trim();
+    if (!workspace || !displayName || isCreatingResource) return;
+    setIsCreatingResource(true);
+    try {
+      await desktopApi.registerResource({
+        resource: {
+          id: `res_${crypto.randomUUID().replaceAll("-", "")}`,
+          workspaceId: workspace.workspace.id,
+          kind: resourceKind,
+          state: "active",
+          displayName,
+        },
+      });
+      showSuccessToast("Đã đăng ký tài nguyên trong workspace.");
+      setResourceName("");
+      setCreateResourceOpen(false);
+      await loadResources();
+    } catch (error) {
+      showErrorToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsCreatingResource(false);
+    }
+  };
+
+  const saveQuota = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!quotaWorkspace || isSavingQuota) return;
     setIsSavingQuota(true);
     try {
       await desktopApi.updateWorkspace({
-        organizationId: adjustTenant.organizationId,
-        workspaceId: adjustTenant.id,
+        organizationId: quotaWorkspace.organization.id,
+        workspaceId: quotaWorkspace.workspace.id,
         update: {
-          policy: { ...adjustTenant.policy, maxProfiles: newMaxProfiles },
+          name: quotaWorkspace.workspace.name,
+          policy: {
+            ...quotaWorkspace.workspace.policy,
+            maxProfiles,
+            maxMembers,
+          },
         },
       });
-      showSuccessToast(
-        `Đã điều chỉnh hạn mức profiles của ${adjustTenant.name} lên ${newMaxProfiles}`,
-      );
-      setAdjustTenant(null);
-      await loadPlatformData();
-    } catch (err) {
-      showErrorToast(err instanceof Error ? err.message : JSON.stringify(err));
+      showSuccessToast("Đã cập nhật hạn mức workspace.");
+      setQuotaWorkspace(null);
+      await loadDirectory(true);
+    } catch (error) {
+      showErrorToast(error instanceof Error ? error.message : String(error));
     } finally {
       setIsSavingQuota(false);
     }
   };
 
-  // These are configured policy limits, not live usage or billing entitlements.
-  const totalProfilesMax = tenants.reduce((acc, t) => acc + t.profilesMax, 0);
-  const totalMembersMax = tenants.reduce((acc, t) => acc + t.membersMax, 0);
+  const countWorkspaces = (organizationId: string) =>
+    workspaces.filter((entry) => entry.organization.id === organizationId)
+      .length;
+
+  const TableState = ({
+    count,
+    colSpan = 5,
+  }: {
+    count: number;
+    colSpan?: number;
+  }) => (
+    <tbody>
+      {((section === "organizations" || section === "workspaces") &&
+        isLoading) ||
+      (section === "accounts" && accountsLoading) ||
+      (section === "resources" && resourcesLoading) ? (
+        <tr>
+          <td
+            colSpan={colSpan}
+            className="h-24 text-center text-muted-foreground"
+          >
+            Đang tải dữ liệu…
+          </td>
+        </tr>
+      ) : count === 0 ? (
+        <tr>
+          <td
+            colSpan={colSpan}
+            className="h-24 text-center text-muted-foreground"
+          >
+            {search ? "Không có kết quả phù hợp." : "Chưa có dữ liệu."}
+          </td>
+        </tr>
+      ) : null}
+    </tbody>
+  );
 
   return (
-    <div className="flex h-full flex-col min-h-0 bg-background overflow-hidden">
-      {/* 1. Header Toolbar */}
-      <div className="border-b border-border/60 bg-card/60 px-6 py-4 shrink-0 backdrop-blur-xs">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={onNavigateHome}
-              className="grid size-9 place-items-center rounded-lg border border-border/70 bg-background text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
-              title="Quay lại danh sách profiles"
-            >
-              <LuArrowLeft className="size-4" />
-            </button>
-            <div className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs">
-              <LuServer className="size-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-semibold text-foreground">
-                  {t("platformAdmin.title", {
-                    defaultValue: "Bàn Điều Hành Quản Trị Nền Tảng",
-                  })}
-                </h1>
-                <Badge
-                  variant="outline"
-                  className="text-[10px] font-mono border-primary/30 text-primary"
-                >
-                  ENTERPRISE CONTROL
-                </Badge>
-              </div>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {t("platformAdmin.subtitle", {
-                  defaultValue:
-                    "Giám sát hệ sinh thái Multi-Tenant, phân bổ Quota máy chủ, trạng thái phần cứng và cấp phép bản quyền BugLogin.",
-                })}
-              </p>
-            </div>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-3">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={onNavigateHome}
+            aria-label="Quay lại Profiles"
+            className="size-8"
+          >
+            <LuServer className="size-4" />
+          </Button>
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold">
+              {t("platformAdmin.title", { defaultValue: "Platform Admin" })}
+            </h1>
+            <p className="truncate text-xs text-muted-foreground">
+              Quản lý danh bạ nền tảng, tài khoản và tài nguyên theo phạm vi
+              được API cấp.
+            </p>
           </div>
-
-          <div className="flex items-center gap-2">
+          <Badge variant="outline" className="hidden shrink-0 sm:inline-flex">
+            Theo quyền được cấp
+          </Badge>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {onOpenAuditLogs && (
             <Button
               variant="outline"
               size="sm"
-              onClick={() => void loadPlatformData()}
-              disabled={isLoading}
-              className="h-8 text-xs gap-1.5 cursor-pointer font-medium"
+              className="h-8"
+              onClick={onOpenAuditLogs}
             >
-              <LuRefreshCw
-                className={cn("size-3.5", isLoading && "animate-spin")}
-              />
-              <span>Làm mới</span>
+              Audit
             </Button>
-            {onOpenAuditLogs && (
+          )}
+          {section === "accounts" && (
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setCreateAccountOpen(true)}
+            >
+              <LuPlus className="size-3.5" />
+              Tạo account
+            </Button>
+          )}
+          {section === "organizations" && (
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setCreateOrganizationOpen(true)}
+            >
+              <LuPlus className="size-3.5" /> Tạo organization
+            </Button>
+          )}
+          {section === "resources" && (
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => {
+                setResourceWorkspaceId(workspaces[0]?.workspace.id ?? "");
+                setCreateResourceOpen(true);
+              }}
+              disabled={workspaces.length === 0}
+            >
+              <LuPlus className="size-3.5" />
+              Đăng ký resource
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5"
+            onClick={() => void refreshCurrent()}
+            disabled={isRefreshing || isLoading}
+          >
+            <LuRefreshCw
+              className={cn(
+                "size-3.5",
+                (isRefreshing || isLoading) && "animate-spin",
+              )}
+            />
+            Làm mới
+          </Button>
+        </div>
+      </header>
+
+      <Tabs
+        value={section}
+        onValueChange={(value) => {
+          setSection(value as AdminSection);
+          setSearch("");
+        }}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-2">
+          <TabsList className="h-8 justify-start gap-1 bg-transparent p-0">
+            <TabsTrigger value="organizations" className="h-8 px-2.5 text-xs">
+              <LuBuilding2 className="mr-1.5 size-3.5" />
+              Organizations
+            </TabsTrigger>
+            <TabsTrigger value="workspaces" className="h-8 px-2.5 text-xs">
+              <LuHardDrive className="mr-1.5 size-3.5" />
+              Workspaces
+            </TabsTrigger>
+            <TabsTrigger value="accounts" className="h-8 px-2.5 text-xs">
+              <LuUsers className="mr-1.5 size-3.5" />
+              Accounts{" "}
+              <span className="ml-1 tabular-nums">{accounts.length}</span>
+            </TabsTrigger>
+            <TabsTrigger value="resources" className="h-8 px-2.5 text-xs">
+              <LuServer className="mr-1.5 size-3.5" />
+              Resources
+            </TabsTrigger>
+          </TabsList>
+          <div className="relative w-64 max-w-[40vw]">
+            <LuSearch className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Tìm trong danh sách…"
+              className="h-8 pl-8 text-xs"
+            />
+          </div>
+        </div>
+
+        {loadError && section !== "accounts" && section !== "resources" && (
+          <ErrorState
+            message={loadError}
+            onRetry={() => void loadDirectory(true)}
+          />
+        )}
+        {accountError && section === "accounts" && (
+          <ErrorState
+            message={accountError}
+            onRetry={() => void loadAccounts()}
+          />
+        )}
+        {resourceError && section === "resources" && (
+          <ErrorState
+            message={resourceError}
+            onRetry={() => void loadResources()}
+          />
+        )}
+
+        <TabsContent
+          value="organizations"
+          className="m-0 min-h-0 flex-1 overflow-auto focus-visible:ring-0"
+        >
+          <table className="w-full min-w-[560px] text-left text-xs">
+            <thead className="sticky top-0 z-10 border-b border-border bg-muted/70 text-[11px] text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2">Organization</th>
+                <th className="px-3 py-2">Workspaces</th>
+                <th className="px-3 py-2">Created</th>
+                <th className="px-3 py-2 text-right">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {filteredOrganizations.map((organization) => (
+                <tr key={organization.id} className="h-10 hover:bg-muted/30">
+                  <td className="px-3 font-medium">{organization.name}</td>
+                  <td className="px-3 tabular-nums">
+                    {countWorkspaces(organization.id)}
+                  </td>
+                  <td className="px-3 text-muted-foreground">
+                    {new Date(organization.createdAt).toLocaleDateString()}
+                  </td>
+                  <td className="px-3 text-right">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1.5"
+                      onClick={() => void openOrganizationEditor(organization)}
+                    >
+                      <LuPencil className="size-3.5" /> Chỉnh sửa
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            {isLoading && (
+              <TableState count={filteredOrganizations.length} colSpan={4} />
+            )}
+            {!isLoading && filteredOrganizations.length === 0 && (
+              <TableState count={0} colSpan={4} />
+            )}
+          </table>
+        </TabsContent>
+
+        <TabsContent
+          value="workspaces"
+          className="m-0 min-h-0 flex-1 overflow-auto focus-visible:ring-0"
+        >
+          <table className="w-full min-w-[760px] text-left text-xs">
+            <thead className="sticky top-0 z-10 border-b border-border bg-muted/70 text-[11px] text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2">Workspace</th>
+                <th className="px-3 py-2">Organization</th>
+                <th className="px-3 py-2 text-right">Profile limit</th>
+                <th className="px-3 py-2 text-right">Member limit</th>
+                <th className="px-3 py-2">Offline</th>
+                <th className="px-3 py-2 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {filteredWorkspaces.map((entry) => {
+                const { organization, workspace } = entry;
+                return (
+                  <tr key={workspace.id} className="h-10 hover:bg-muted/30">
+                    <td className="px-3 font-medium">{workspace.name}</td>
+                    <td className="px-3 text-muted-foreground">
+                      {organization.name}
+                    </td>
+                    <td className="px-3 text-right font-mono tabular-nums">
+                      {workspace.policy.maxProfiles.toLocaleString()}
+                    </td>
+                    <td className="px-3 text-right font-mono tabular-nums">
+                      {workspace.policy.maxMembers.toLocaleString()}
+                    </td>
+                    <td className="px-3">
+                      {workspace.policy.offlineEntitled ? "Được phép" : "Không"}
+                    </td>
+                    <td className="px-3 text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7"
+                        onClick={() => {
+                          setQuotaWorkspace(entry);
+                          setMaxProfiles(workspace.policy.maxProfiles);
+                          setMaxMembers(workspace.policy.maxMembers);
+                        }}
+                      >
+                        Hạn mức
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            {isLoading && (
+              <TableState count={filteredWorkspaces.length} colSpan={6} />
+            )}
+            {!isLoading && filteredWorkspaces.length === 0 && (
+              <TableState count={0} colSpan={6} />
+            )}
+          </table>
+        </TabsContent>
+
+        <TabsContent
+          value="accounts"
+          className="m-0 min-h-0 flex-1 overflow-auto focus-visible:ring-0"
+        >
+          <table className="w-full min-w-[760px] text-left text-xs">
+            <thead className="sticky top-0 z-10 border-b border-border bg-muted/70 text-[11px] text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2">Username</th>
+                <th className="px-3 py-2">Email</th>
+                <th className="px-3 py-2">Verification</th>
+                <th className="px-3 py-2">Status</th>
+                <th className="px-3 py-2 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {filteredAccounts.map((record) => (
+                <tr key={record.account.id} className="h-10 hover:bg-muted/30">
+                  <td className="px-3 font-medium">
+                    {record.identity?.username ?? "Không khả dụng"}
+                  </td>
+                  <td className="px-3">
+                    {record.identity?.email ?? "Không khả dụng"}
+                  </td>
+                  <td className="px-3 text-muted-foreground">
+                    {record.identity?.verification ?? "Không khả dụng"}
+                  </td>
+                  <td className="px-3">
+                    <Badge
+                      variant={
+                        record.account.status === "active"
+                          ? "secondary"
+                          : "outline"
+                      }
+                    >
+                      {statusLabels[record.account.status]}
+                    </Badge>
+                  </td>
+                  <td className="px-3 text-right">
+                    <Select
+                      value={record.account.status}
+                      onValueChange={(value) => {
+                        const status = value as AccountStatus;
+                        if (status !== record.account.status)
+                          setPendingAccount({ record, status });
+                      }}
+                    >
+                      <SelectTrigger
+                        aria-label={`Trạng thái tài khoản ${record.identity?.username ?? ""}`}
+                        className="ml-auto h-7 w-36 text-xs"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="active">Hoạt động</SelectItem>
+                        <SelectItem value="suspended">Đình chỉ</SelectItem>
+                        <SelectItem value="disabled">Vô hiệu hóa</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            {filteredAccounts.length === 0 && !accountError && (
+              <TableState count={0} />
+            )}
+          </table>
+        </TabsContent>
+
+        <TabsContent
+          value="resources"
+          className="m-0 min-h-0 flex-1 overflow-auto focus-visible:ring-0"
+        >
+          <table className="w-full min-w-[760px] text-left text-xs">
+            <thead className="sticky top-0 z-10 border-b border-border bg-muted/70 text-[11px] text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2">Resource</th>
+                <th className="px-3 py-2">Type</th>
+                <th className="px-3 py-2">State</th>
+                <th className="px-3 py-2">Workspace</th>
+                <th className="px-3 py-2">Organization</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {filteredResources.map(
+                ({ organization, workspace, resource }) => (
+                  <tr
+                    key={`${workspace.id}:${resource.id}`}
+                    className="h-10 hover:bg-muted/30"
+                  >
+                    <td className="px-3 font-medium">{resource.displayName}</td>
+                    <td className="px-3 capitalize">{resource.kind}</td>
+                    <td className="px-3">
+                      <Badge
+                        variant={
+                          resource.state === "active" ? "secondary" : "outline"
+                        }
+                      >
+                        {resource.state}
+                      </Badge>
+                    </td>
+                    <td className="px-3">{workspace.name}</td>
+                    <td className="px-3 text-muted-foreground">
+                      {organization.name}
+                    </td>
+                  </tr>
+                ),
+              )}
+            </tbody>
+            {workspaces.length > 0 &&
+              resources.length === 0 &&
+              !resourceError && <TableState count={0} />}
+            {workspaces.length === 0 && !isLoading && <TableState count={0} />}
+          </table>
+        </TabsContent>
+      </Tabs>
+
+      <Dialog
+        open={createOrganizationOpen}
+        onOpenChange={setCreateOrganizationOpen}
+      >
+        <DialogContent className="max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">Tạo organization</DialogTitle>
+            <DialogDescription className="text-xs">
+              Organization mới được tạo trong phạm vi tài khoản hiện tại; quyền
+              được API xác thực.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => void createOrganization(event)}
+            className="space-y-3"
+          >
+            <div className="space-y-1">
+              <Label htmlFor="platform-organization-name">
+                Tên organization
+              </Label>
+              <Input
+                id="platform-organization-name"
+                value={organizationName}
+                onChange={(event) => setOrganizationName(event.target.value)}
+                required
+                maxLength={120}
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="platform-organization-limit">
+                Giới hạn workspace
+              </Label>
+              <Input
+                id="platform-organization-limit"
+                type="number"
+                min={1}
+                max={10000}
+                value={organizationLimit}
+                onChange={(event) =>
+                  setOrganizationLimit(Number(event.target.value))
+                }
+                required
+              />
+            </div>
+            <DialogFooter>
               <Button
                 variant="outline"
-                size="sm"
-                onClick={onOpenAuditLogs}
-                className="h-8 text-xs gap-1.5 cursor-pointer font-medium"
+                type="button"
+                onClick={() => setCreateOrganizationOpen(false)}
+                disabled={isCreatingOrganization}
               >
-                <LuShieldAlert className="size-3.5 text-primary" />
-                <span>Nhật ký Audit</span>
+                Hủy
               </Button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 2. Workspace policy overview (configured limits, not live usage) */}
-      <div className="border-b border-border/50 bg-muted/20 px-6 py-3 shrink-0">
-        {loadError && (
-          <div
-            role="status"
-            className="mb-3 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
-          >
-            <span>
-              Không làm mới được dữ liệu. Đang giữ danh sách gần nhất.{" "}
-              {loadError}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void loadPlatformData()}
-              disabled={isLoading}
-            >
-              Thử lại
-            </Button>
-          </div>
-        )}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div className="rounded-md border border-border/70 bg-card px-3 py-2.5">
-            <div className="text-xs text-muted-foreground">
-              Workspace hiển thị
-            </div>
-            <div className="mt-1 font-mono text-sm font-semibold tabular-nums">
-              {tenants.length.toLocaleString()}
-            </div>
-          </div>
-          <div className="rounded-md border border-border/70 bg-card px-3 py-2.5">
-            <div className="text-xs text-muted-foreground">
-              Tổng hạn mức profile đã cấu hình
-            </div>
-            <div className="mt-1 flex items-center gap-2 font-mono text-sm font-semibold tabular-nums">
-              <LuHardDrive className="size-4 text-muted-foreground" />
-              {totalProfilesMax.toLocaleString()}
-            </div>
-          </div>
-          <div className="rounded-md border border-border/70 bg-card px-3 py-2.5">
-            <div className="text-xs text-muted-foreground">
-              Tổng hạn mức thành viên đã cấu hình
-            </div>
-            <div className="mt-1 flex items-center gap-2 font-mono text-sm font-semibold tabular-nums">
-              <LuUsers className="size-4 text-muted-foreground" />
-              {totalMembersMax.toLocaleString()}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. Main Enterprise Data Table Area */}
-      <div className="flex-1 flex flex-col min-h-0 p-6 overflow-hidden">
-        <div className="flex-1 flex flex-col min-h-0 rounded-xl border border-border/70 bg-card shadow-xs overflow-hidden">
-          {/* Table Toolbar Controls */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 bg-muted/15 p-3">
-            <div className="flex flex-1 items-center gap-2 max-w-md">
-              <div className="relative w-full">
-                <LuSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-                <Input
-                  type="search"
-                  placeholder="Tìm theo workspace hoặc tổ chức…"
-                  value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    setCurrentPage(1);
-                  }}
-                  className="h-8 pl-8 text-xs bg-background"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Select
-                value={String(pageSize)}
-                onValueChange={(val) => {
-                  setPageSize(Number(val));
-                  setCurrentPage(1);
-                }}
+              <Button
+                type="submit"
+                disabled={!organizationName.trim() || isCreatingOrganization}
               >
-                <SelectTrigger className="h-8 w-24 text-xs bg-background">
-                  <SelectValue />
+                {isCreatingOrganization ? "Đang tạo…" : "Tạo organization"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!editingOrganization}
+        onOpenChange={(open) => !open && setEditingOrganization(null)}
+      >
+        <DialogContent className="max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              Chỉnh sửa organization
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Lưu theo revision hiện tại; nếu dữ liệu đã đổi, tải lại rồi thử
+              lại.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => void saveOrganization(event)}
+            className="space-y-3"
+          >
+            <div className="space-y-1">
+              <Label htmlFor="edit-platform-organization-name">
+                Tên organization
+              </Label>
+              <Input
+                id="edit-platform-organization-name"
+                value={editingOrganizationName}
+                onChange={(event) =>
+                  setEditingOrganizationName(event.target.value)
+                }
+                required
+                maxLength={120}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="edit-platform-organization-limit">
+                Giới hạn workspace
+              </Label>
+              <Input
+                id="edit-platform-organization-limit"
+                type="number"
+                min={1}
+                max={10000}
+                value={editingOrganizationLimit}
+                onChange={(event) =>
+                  setEditingOrganizationLimit(Number(event.target.value))
+                }
+                required
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setEditingOrganization(null)}
+                disabled={isSavingOrganization}
+              >
+                Hủy
+              </Button>
+              <Button
+                type="submit"
+                disabled={
+                  !editingOrganizationName.trim() || isSavingOrganization
+                }
+              >
+                {isSavingOrganization ? "Đang lưu…" : "Lưu thay đổi"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={createAccountOpen} onOpenChange={setCreateAccountOpen}>
+        <DialogContent className="max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              Tạo tài khoản nền tảng
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Tạo identity đang chờ xác minh; thao tác này không tạo workspace
+              membership. Cấp quyền tại workspace đích riêng.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => void createAccount(event)}
+            className="space-y-3"
+          >
+            <div className="space-y-1">
+              <Label htmlFor="platform-account-username">Username</Label>
+              <Input
+                id="platform-account-username"
+                required
+                minLength={3}
+                maxLength={64}
+                value={newUsername}
+                onChange={(event) => setNewUsername(event.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="platform-account-email">Email</Label>
+              <Input
+                id="platform-account-email"
+                type="email"
+                required
+                maxLength={254}
+                value={newEmail}
+                onChange={(event) => setNewEmail(event.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setCreateAccountOpen(false)}
+                disabled={isCreatingAccount}
+              >
+                Hủy
+              </Button>
+              <Button type="submit" disabled={isCreatingAccount}>
+                {isCreatingAccount ? "Đang tạo…" : "Tạo account"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={createResourceOpen} onOpenChange={setCreateResourceOpen}>
+        <DialogContent className="max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">Đăng ký tài nguyên</DialogTitle>
+            <DialogDescription className="text-xs">
+              Tài nguyên sẽ thuộc workspace được chọn.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => void createResource(event)}
+            className="space-y-3"
+          >
+            <div className="space-y-1">
+              <Label htmlFor="resource-workspace">Workspace</Label>
+              <Select
+                value={resourceWorkspaceId}
+                onValueChange={setResourceWorkspaceId}
+              >
+                <SelectTrigger id="resource-workspace">
+                  <SelectValue placeholder="Chọn workspace" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="10" className="text-xs">
-                    10 dòng
-                  </SelectItem>
-                  <SelectItem value="25" className="text-xs">
-                    25 dòng
-                  </SelectItem>
-                  <SelectItem value="50" className="text-xs">
-                    50 dòng
-                  </SelectItem>
+                  {workspaces.map(({ workspace, organization }) => (
+                    <SelectItem key={workspace.id} value={workspace.id}>
+                      {organization.name} / {workspace.name}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
-          </div>
-
-          {/* Table Container */}
-          <div className="flex-1 overflow-auto">
-            <table className="w-full border-collapse text-left text-xs">
-              <thead className="sticky top-0 z-10 bg-muted/60 backdrop-blur-xs border-b border-border/60 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-                <tr>
-                  <th className="py-2.5 px-3 w-8">
-                    <Checkbox
-                      checked={
-                        paginatedTenants.length > 0 &&
-                        selectedTenantIds.size === paginatedTenants.length
-                      }
-                      onCheckedChange={handleSelectAllTenants}
-                      disabled={paginatedTenants.length === 0}
-                      aria-label="Select all tenants"
-                    />
-                  </th>
-                  <th
-                    className="py-2.5 px-4 cursor-pointer select-none hover:text-foreground transition-colors"
-                    onClick={() => handleSort("name")}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span>Tổ Chức / Không Gian</span>
-                      {sortKey === "name" && (
-                        <span>{sortDirection === "asc" ? "▲" : "▼"}</span>
-                      )}
-                    </div>
-                  </th>
-                  <th
-                    className="py-2.5 px-4 cursor-pointer select-none hover:text-foreground transition-colors"
-                    onClick={() => handleSort("profilesMax")}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span>Hạn mức profile</span>
-                      {sortKey === "profilesMax" && (
-                        <span>{sortDirection === "asc" ? "▲" : "▼"}</span>
-                      )}
-                    </div>
-                  </th>
-                  <th
-                    className="py-2.5 px-4 cursor-pointer select-none hover:text-foreground transition-colors"
-                    onClick={() => handleSort("membersMax")}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span>Hạn mức thành viên</span>
-                      {sortKey === "membersMax" && (
-                        <span>{sortDirection === "asc" ? "▲" : "▼"}</span>
-                      )}
-                    </div>
-                  </th>
-                  <th className="py-2.5 px-4 text-right">Thao Tác Quản Trị</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/40">
-                {paginatedTenants.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={5}
-                      className="py-12 text-center text-muted-foreground"
-                    >
-                      {isLoading
-                        ? "Đang tải workspace…"
-                        : "Không tìm thấy workspace nào phù hợp."}
-                    </td>
-                  </tr>
-                ) : (
-                  paginatedTenants.map((tenant) => (
-                    <tr
-                      key={tenant.id}
-                      className={cn("transition-colors hover:bg-muted/30")}
-                    >
-                      <td className="py-3 px-3 w-8">
-                        <Checkbox
-                          checked={selectedTenantIds.has(tenant.id)}
-                          onCheckedChange={() =>
-                            handleToggleSelectTenant(tenant.id)
-                          }
-                          aria-label={`Select ${tenant.name}`}
-                        />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="font-semibold text-foreground text-xs">
-                          {tenant.name}
-                        </div>
-                        <div className="text-[11px] text-muted-foreground flex items-center gap-2 mt-0.5">
-                          <span>{tenant.organizationName}</span>
-                        </div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="font-mono text-xs tabular-nums">
-                          {tenant.profilesMax.toLocaleString()}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="font-mono text-xs font-semibold text-foreground">
-                          {tenant.membersMax.toLocaleString()}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleOpenAdjustQuota(tenant)}
-                            className="h-7 px-2.5 text-[11px] font-medium cursor-pointer"
-                          >
-                            Sửa Quota
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Floating Bulk Action Bar for Tenants */}
-          {selectedTenantIds.size > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-2.5 border-t border-border/60 bg-card p-3 shadow-md animate-in fade-in slide-in-from-bottom-2 text-xs">
-              <div className="flex items-center gap-2">
-                <Badge variant="default" className="text-xs px-2.5 py-0.5">
-                  {t("platformAdmin.bulkActions.selected", {
-                    count: selectedTenantIds.size,
-                    defaultValue: `Đã chọn ${selectedTenantIds.size} tổ chức`,
-                  })}
-                </Badge>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSelectedTenantIds(new Set())}
-                  className="h-7 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
-                >
-                  {t("platformAdmin.bulkActions.clear", {
-                    defaultValue: "Bỏ chọn",
-                  })}
-                </Button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={handleBulkAddQuota}
-                  disabled={isBulkExecuting}
-                  className="h-7 text-xs gap-1 cursor-pointer"
-                >
-                  <LuPlus className="size-3 text-primary" />
-                  <span>
-                    {t("platformAdmin.bulkActions.addQuota", {
-                      defaultValue: "Tăng hạn mức (+500)",
-                    })}
-                  </span>
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Table Footer Pagination */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 bg-muted/15 px-4 py-2.5 text-xs text-muted-foreground">
-            <div>
-              Hiển thị{" "}
-              <strong className="text-foreground">
-                {filteredTenants.length === 0
-                  ? 0
-                  : (currentPage - 1) * pageSize + 1}
-                -{Math.min(currentPage * pageSize, filteredTenants.length)}
-              </strong>{" "}
-              trong tổng số{" "}
-              <strong className="text-foreground">
-                {filteredTenants.length}
-              </strong>{" "}
-              tổ chức
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage(1)}
-                disabled={currentPage <= 1}
-                className="h-7 px-2 text-xs cursor-pointer"
-              >
-                « Đầu
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                disabled={currentPage <= 1}
-                className="h-7 px-2 text-xs cursor-pointer"
-              >
-                ‹ Trước
-              </Button>
-              <span className="px-2 font-mono text-xs font-semibold text-foreground">
-                Trang {currentPage} / {totalPages}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  setCurrentPage((p) => Math.min(totalPages, p + 1))
-                }
-                disabled={currentPage >= totalPages}
-                className="h-7 px-2 text-xs cursor-pointer"
-              >
-                Sau ›
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage(totalPages)}
-                disabled={currentPage >= totalPages}
-                className="h-7 px-2 text-xs cursor-pointer"
-              >
-                Cuối »
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ACTION DIALOG: Adjust Quota */}
-      <Dialog
-        open={!!adjustTenant}
-        onOpenChange={(open) => !open && setAdjustTenant(null)}
-      >
-        <DialogContent className="max-w-sm p-5">
-          <DialogHeader className="border-b border-border/50 pb-2.5">
-            <DialogTitle className="text-sm font-semibold">
-              Điều Chỉnh Hạn Mức Profiles
-            </DialogTitle>
-            <DialogDescription className="text-xs text-muted-foreground">
-              {adjustTenant?.name}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 py-2 text-xs">
             <div className="space-y-1">
-              <Label className="text-xs font-medium">
-                Hạn mức Profiles mới:
-              </Label>
+              <Label htmlFor="resource-name">Tên tài nguyên</Label>
               <Input
-                type="number"
-                step={100}
-                min={0}
-                value={newMaxProfiles}
-                onChange={(e) => setNewMaxProfiles(Number(e.target.value))}
-                className="h-9 text-xs"
+                id="resource-name"
+                required
+                maxLength={160}
+                value={resourceName}
+                onChange={(event) => setResourceName(event.target.value)}
               />
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              Hạn mức profile hiện tại:{" "}
-              <strong className="text-foreground">
-                {adjustTenant?.profilesMax.toLocaleString()}
-              </strong>{" "}
-              profiles. API hiện tại không cung cấp số lượng đang dùng.
-            </p>
-          </div>
+            <div className="space-y-1">
+              <Label htmlFor="resource-kind">Loại tài nguyên</Label>
+              <Select
+                value={resourceKind}
+                onValueChange={(value) =>
+                  setResourceKind(value as ResourceKind)
+                }
+              >
+                <SelectTrigger id="resource-kind">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="profile">Profile</SelectItem>
+                  <SelectItem value="proxy">Proxy</SelectItem>
+                  <SelectItem value="vpn">VPN</SelectItem>
+                  <SelectItem value="cookieset">Cookie set</SelectItem>
+                  <SelectItem value="extension">Extension</SelectItem>
+                  <SelectItem value="runtime">Runtime</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setCreateResourceOpen(false)}
+                disabled={isCreatingResource}
+              >
+                Hủy
+              </Button>
+              <Button
+                type="submit"
+                disabled={!resourceWorkspaceId || isCreatingResource}
+              >
+                {isCreatingResource ? "Đang lưu…" : "Đăng ký"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
-          <DialogFooter className="border-t border-border/50 pt-2.5">
+      <Dialog
+        open={!!quotaWorkspace}
+        onOpenChange={(open) => !open && setQuotaWorkspace(null)}
+      >
+        <DialogContent className="max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">Hạn mức workspace</DialogTitle>
+            <DialogDescription className="text-xs">
+              {quotaWorkspace?.organization.name} /{" "}
+              {quotaWorkspace?.workspace.name}
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => void saveQuota(event)}
+            className="space-y-3"
+          >
+            <div className="space-y-1">
+              <Label htmlFor="workspace-max-profiles">Giới hạn profile</Label>
+              <Input
+                id="workspace-max-profiles"
+                type="number"
+                min={0}
+                step={1}
+                required
+                value={maxProfiles}
+                onChange={(event) => setMaxProfiles(Number(event.target.value))}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="workspace-max-members">Giới hạn thành viên</Label>
+              <Input
+                id="workspace-max-members"
+                type="number"
+                min={0}
+                step={1}
+                required
+                value={maxMembers}
+                onChange={(event) => setMaxMembers(Number(event.target.value))}
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setQuotaWorkspace(null)}
+                disabled={isSavingQuota}
+              >
+                Hủy
+              </Button>
+              <Button
+                type="submit"
+                disabled={isSavingQuota || maxProfiles < 0 || maxMembers < 0}
+              >
+                {isSavingQuota ? "Đang lưu…" : "Lưu hạn mức"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!pendingAccount}
+        onOpenChange={(open) => !open && setPendingAccount(null)}
+      >
+        <DialogContent className="max-w-sm p-4">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              Xác nhận thay đổi tài khoản
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Đổi trạng thái tài khoản này thành{" "}
+              <strong className="text-foreground">
+                {pendingAccount ? statusLabels[pendingAccount.status] : ""}
+              </strong>
+              ? Thao tác có hiệu lực trên tài khoản toàn cục.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
             <Button
-              type="button"
               variant="outline"
               size="sm"
-              onClick={() => setAdjustTenant(null)}
-              className="h-8 text-xs cursor-pointer"
+              onClick={() => setPendingAccount(null)}
+              disabled={isUpdatingAccount}
             >
               Hủy
             </Button>
             <Button
-              type="button"
-              variant="default"
               size="sm"
-              onClick={handleSaveQuota}
-              disabled={
-                isSavingQuota ||
-                !Number.isInteger(newMaxProfiles) ||
-                newMaxProfiles < 0
-              }
-              className="h-8 text-xs cursor-pointer font-medium"
+              onClick={() => void updateAccountStatus()}
+              disabled={isUpdatingAccount}
             >
-              {isSavingQuota ? "Đang lưu…" : "Lưu thay đổi"}
+              {isUpdatingAccount ? "Đang lưu…" : "Xác nhận"}
             </Button>
           </DialogFooter>
         </DialogContent>

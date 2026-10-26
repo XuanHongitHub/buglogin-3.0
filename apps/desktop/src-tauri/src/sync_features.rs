@@ -358,6 +358,27 @@ pub async fn request_profile_sync(
 }
 
 #[tauri::command]
+pub async fn profile_sync_status_get(
+    state: State<'_, DesktopState>,
+    profile_id: String,
+) -> Result<Value, String> {
+    let request_id = crate::clock::unix_time_nanos("profile-sync-status")
+        .map_err(|problem| problem.code)?
+        .to_string();
+    let correlation_id = format!("profile-sync-status-{request_id}");
+    state
+        .invoke(
+            "profile_sync_status_get",
+            &correlation_id,
+            None,
+            json!({ "profileId": profile_id }),
+        )
+        .await
+        .map(|result| result.data)
+        .map_err(|problem| problem.code)
+}
+
+#[tauri::command]
 pub async fn cancel_profile_sync(_profile_id: String) -> Result<(), String> {
     Ok(())
 }

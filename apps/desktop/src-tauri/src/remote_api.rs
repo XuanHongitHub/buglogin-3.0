@@ -2068,7 +2068,7 @@ impl RemoteApiClient {
                 )
                 .await?
             },
-            "group_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; json!({"items":self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/groups"),correlation).await?,"nextCursor":Value::Null}) },
+            "group_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; json!(self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/groups"),correlation).await?) },
             "group_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/groups/{id}"),correlation).await? },
             "group_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/groups"),Some(payload),correlation,idem,None,&[]).await? },
             "group_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/groups/{id}"),Some(payload),correlation,idem,None,&[]).await? },

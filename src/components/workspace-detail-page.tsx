@@ -1,14 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   LuArrowLeft,
   LuCheck,
   LuCopy,
+  LuEllipsis,
   LuFolder,
   LuLayoutGrid,
+  LuPlay,
   LuPlus,
   LuRefreshCw,
+  LuSquare,
   LuUsers,
 } from "react-icons/lu";
 import { MemberManagementDialog } from "@/components/member-management-dialog";
@@ -16,6 +20,13 @@ import type { OrgWorkspaceRoute } from "@/components/org-workspace-route";
 import { ResourceInventoryPanel } from "@/components/resource-inventory-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -74,18 +85,30 @@ export function WorkspaceDetailPage({
   initialProfileId?: string;
   onRouteChange?: (route: OrgWorkspaceRoute) => void;
 }) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<WorkspaceTab>(initialTab);
   const [groups, setGroups] = useState<GroupRecord[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [groupsLoaded, setGroupsLoaded] = useState(false);
   const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [groupMutationError, setGroupMutationError] = useState<string | null>(
+    null,
+  );
   const [newGroupName, setNewGroupName] = useState("");
+  const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<GroupRecord | null>(null);
   const [editingName, setEditingName] = useState("");
   const [confirmDeleteGroupId, setConfirmDeleteGroupId] = useState<
     string | null
   >(null);
   const [groupMutationBusy, setGroupMutationBusy] = useState(false);
+  const [groupProfileOperation, setGroupProfileOperation] = useState<{
+    groupId: string;
+    action: "launch" | "stop";
+    total: number;
+    accepted: number;
+    failed: number;
+  } | null>(null);
   const [invitePageOpen, setInvitePageOpen] = useState(initialInvitePage);
   const [accessGroup, setAccessGroup] = useState<GroupRecord | null>(null);
   const [groupShares, setGroupShares] = useState<GroupShareGrant[]>([]);
@@ -105,7 +128,19 @@ export function WorkspaceDetailPage({
     setGroupsLoaded(false);
     setGroupsError(null);
     try {
-      setGroups(await desktopApi.listGroups(workspaceId));
+      const response: unknown = await desktopApi.listGroups(workspaceId);
+      if (Array.isArray(response)) {
+        setGroups(response as GroupRecord[]);
+      } else if (
+        response &&
+        typeof response === "object" &&
+        "items" in response &&
+        Array.isArray(response.items)
+      ) {
+        setGroups(response.items as GroupRecord[]);
+      } else {
+        throw new Error("Máy chủ trả về danh sách group không hợp lệ.");
+      }
     } catch (error) {
       setGroupsError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -123,7 +158,7 @@ export function WorkspaceDetailPage({
     const name = newGroupName.trim();
     if (!name || groupMutationBusy) return;
     setGroupMutationBusy(true);
-    setGroupsError(null);
+    setGroupMutationError(null);
     try {
       const created = await desktopApi.createGroup({
         workspaceId,
@@ -136,9 +171,12 @@ export function WorkspaceDetailPage({
         ),
       );
       setNewGroupName("");
+      setCreateGroupOpen(false);
       showSuccessToast("Đã tạo group.");
     } catch (error) {
-      setGroupsError(error instanceof Error ? error.message : String(error));
+      setGroupMutationError(
+        error instanceof Error ? error.message : String(error),
+      );
     } finally {
       setGroupMutationBusy(false);
     }
@@ -148,7 +186,7 @@ export function WorkspaceDetailPage({
     event.preventDefault();
     if (!editingGroup || !editingName.trim() || groupMutationBusy) return;
     setGroupMutationBusy(true);
-    setGroupsError(null);
+    setGroupMutationError(null);
     try {
       const updated = await desktopApi.updateGroup({
         workspaceId,
@@ -164,7 +202,9 @@ export function WorkspaceDetailPage({
       setEditingGroup(null);
       showSuccessToast("Đã cập nhật tên group.");
     } catch (error) {
-      setGroupsError(error instanceof Error ? error.message : String(error));
+      setGroupMutationError(
+        error instanceof Error ? error.message : String(error),
+      );
     } finally {
       setGroupMutationBusy(false);
     }
@@ -173,7 +213,7 @@ export function WorkspaceDetailPage({
   const deleteGroup = async (group: GroupRecord) => {
     if (groupMutationBusy) return;
     setGroupMutationBusy(true);
-    setGroupsError(null);
+    setGroupMutationError(null);
     try {
       await desktopApi.deleteGroup({
         workspaceId,
@@ -186,9 +226,108 @@ export function WorkspaceDetailPage({
       setConfirmDeleteGroupId(null);
       showSuccessToast("Đã xóa group.");
     } catch (error) {
-      setGroupsError(error instanceof Error ? error.message : String(error));
+      setGroupMutationError(
+        error instanceof Error ? error.message : String(error),
+      );
     } finally {
       setGroupMutationBusy(false);
+    }
+  };
+
+  const runGroupProfiles = async (
+    group: GroupRecord,
+    action: "launch" | "stop",
+  ) => {
+    if (groupProfileOperation || groupMutationBusy) return;
+    setGroupMutationError(null);
+    setGroupProfileOperation({
+      groupId: group.group.id,
+      action,
+      total: 0,
+      accepted: 0,
+      failed: 0,
+    });
+    try {
+      const profileItems = [] as Awaited<
+        ReturnType<typeof desktopApi.listProfiles>
+      >["items"];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const page = await desktopApi.listProfiles(false, {
+          limit: 100,
+          workspaceId,
+          ...(cursor ? { cursor } : {}),
+        });
+        profileItems.push(...page.items);
+        const nextCursor = page.nextCursor ?? undefined;
+        if (
+          nextCursor &&
+          (nextCursor.length > 512 || seenCursors.has(nextCursor))
+        ) {
+          throw new Error("Profile list cursor did not advance");
+        }
+        if (nextCursor) seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      } while (cursor);
+      const targets = profileItems.filter((profile) =>
+        profile.groupIds.includes(group.group.id),
+      );
+      if (targets.length === 0) {
+        setGroupMutationError(
+          t("groups.noProfilesInGroup", {
+            defaultValue: "Nhóm này chưa có hồ sơ để thao tác.",
+          }),
+        );
+        return;
+      }
+      const operation = {
+        groupId: group.group.id,
+        action,
+        total: targets.length,
+        accepted: 0,
+        failed: 0,
+      };
+      setGroupProfileOperation(operation);
+      let accepted = 0;
+      let failed = 0;
+      const failureReasons: string[] = [];
+      for (const profile of targets) {
+        try {
+          if (action === "launch") await desktopApi.launchProfile(profile.id);
+          else await desktopApi.stopProfile(profile.id);
+          accepted += 1;
+        } catch (error) {
+          failed += 1;
+          failureReasons.push(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        setGroupProfileOperation({ ...operation, accepted, failed });
+      }
+      if (failed > 0) {
+        setGroupMutationError(
+          `${t("groups.profileActionPartial", {
+            accepted,
+            failed,
+            defaultValue: `Đã gửi ${accepted}/${targets.length} lệnh; ${failed} lệnh lỗi hoặc bị từ chối.`,
+          })} ${[...new Set(failureReasons)].slice(0, 3).join(" · ")}`,
+        );
+      } else {
+        showSuccessToast(
+          t("groups.profileActionAccepted", {
+            count: accepted,
+            action: action === "launch" ? "mở" : "dừng",
+            defaultValue: `Đã gửi yêu cầu ${action === "launch" ? "mở" : "dừng"} ${accepted} hồ sơ.`,
+          }),
+        );
+      }
+    } catch (error) {
+      setGroupMutationError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setGroupProfileOperation(null);
     }
   };
 
@@ -339,7 +478,10 @@ export function WorkspaceDetailPage({
             </h1>
           </div>
         </div>
-        <nav aria-label="Workspace sections" className="flex flex-wrap gap-1">
+        <nav
+          aria-label="Workspace sections"
+          className="flex shrink-0 gap-1 overflow-x-auto"
+        >
           {tabs.map(({ id, label, icon: Icon }) => (
             <Button
               key={id}
@@ -373,8 +515,16 @@ export function WorkspaceDetailPage({
           <MemberManagementDialog
             mode="page"
             isOpen
-            onClose={() => setTab("overview")}
+            onClose={() => {
+              setTab("overview");
+              onRouteChange?.({
+                organizationId,
+                workspaceId,
+                section: "overview",
+              });
+            }}
             onInvitePage={() => setInvitePageOpen(true)}
+            organizationId={organizationId}
             workspaceId={workspaceId}
             workspaceName={workspaceName}
             organizationName={organizationName}
@@ -399,75 +549,144 @@ export function WorkspaceDetailPage({
         />
       ) : tab === "groups" ? (
         <section
-          className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6"
+          className="min-h-0 flex-1 overflow-y-auto p-3"
           aria-labelledby="workspace-groups-title"
         >
-          <div className="mx-auto max-w-5xl space-y-4">
-            <header className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2
-                  id="workspace-groups-title"
-                  className="text-base font-semibold"
+          <div className="space-y-3">
+            <header className="flex min-h-9 items-center justify-between gap-2">
+              <h2 id="workspace-groups-title" className="text-sm font-semibold">
+                {t("groups.pageTitle", { defaultValue: "Nhóm" })}{" "}
+                <span className="font-normal text-muted-foreground">
+                  / {workspaceName}
+                </span>
+              </h2>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => void loadGroups()}
+                  disabled={groupsLoading}
+                  aria-label={t("common.buttons.refresh", {
+                    defaultValue: "Làm mới",
+                  })}
+                  title={t("common.buttons.refresh", {
+                    defaultValue: "Làm mới",
+                  })}
+                  className="size-8"
                 >
-                  Groups trong {workspaceName}
-                </h2>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Profile có thể thuộc nhiều group hoặc để trống group. Việc gán
-                  profile được quản lý ở trang Profiles.
-                </p>
+                  <LuRefreshCw
+                    className={groupsLoading ? "animate-spin" : ""}
+                  />
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => setCreateGroupOpen((open) => !open)}
+                  aria-expanded={createGroupOpen}
+                  className="h-8"
+                >
+                  <LuPlus className="size-3.5" />
+                  {t("common.buttons.create", { defaultValue: "Tạo mới" })}
+                </Button>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void loadGroups()}
-                disabled={groupsLoading}
-              >
-                <LuRefreshCw
-                  className={`mr-1.5 size-3.5 ${groupsLoading ? "animate-spin" : ""}`}
-                />{" "}
-                Làm mới
-              </Button>
             </header>
 
-            <form
-              onSubmit={(event) => void createGroup(event)}
-              className="flex flex-wrap items-end gap-2 rounded-md border border-border p-3"
-            >
-              <div className="min-w-52 flex-1 space-y-1.5">
-                <Label htmlFor="new-workspace-group">Tạo group</Label>
-                <Input
-                  id="new-workspace-group"
-                  value={newGroupName}
-                  onChange={(event) => setNewGroupName(event.target.value)}
-                  maxLength={80}
-                  required
-                  placeholder="Tên group"
-                />
-              </div>
-              <Button
-                type="submit"
-                disabled={!newGroupName.trim() || groupMutationBusy}
+            {createGroupOpen && (
+              <form
+                onSubmit={(event) => void createGroup(event)}
+                className="flex items-end gap-2 rounded-md border border-border bg-card p-2"
               >
-                <LuPlus className="mr-1.5 size-4" />
-                Tạo group
-              </Button>
-            </form>
+                <div className="min-w-52 flex-1 space-y-1">
+                  <Label htmlFor="new-workspace-group">
+                    {t("groups.name", { defaultValue: "Tên nhóm" })}
+                  </Label>
+                  <Input
+                    id="new-workspace-group"
+                    value={newGroupName}
+                    onChange={(event) => setNewGroupName(event.target.value)}
+                    maxLength={80}
+                    required
+                    placeholder={t("groups.name", { defaultValue: "Tên nhóm" })}
+                    autoFocus
+                    className="h-8"
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  type="submit"
+                  disabled={!newGroupName.trim() || groupMutationBusy}
+                >
+                  {groupMutationBusy
+                    ? t("common.buttons.creating", {
+                        defaultValue: "Đang tạo…",
+                      })
+                    : t("common.buttons.create", { defaultValue: "Tạo nhóm" })}
+                </Button>
+                <Button
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setCreateGroupOpen(false);
+                    setNewGroupName("");
+                  }}
+                >
+                  {t("common.buttons.cancel", { defaultValue: "Hủy" })}
+                </Button>
+              </form>
+            )}
 
             {groupsError && (
+              <div
+                role="alert"
+                className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive"
+              >
+                <span>
+                  {t("groups.loadFailed", {
+                    defaultValue: "Không tải được danh sách nhóm.",
+                  })}{" "}
+                  {groupsError}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void loadGroups()}
+                  disabled={groupsLoading}
+                >
+                  {t("common.buttons.retry", { defaultValue: "Thử lại" })}
+                </Button>
+              </div>
+            )}
+            {groupMutationError && (
               <p
                 role="alert"
-                className="rounded-md border border-destructive/40 p-3 text-sm text-destructive"
+                className="rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive"
               >
-                Không thể hoàn tất thao tác group: {groupsError}
+                {t("groups.actionFailed", {
+                  defaultValue: "Không thể hoàn tất thao tác nhóm.",
+                })}{" "}
+                {groupMutationError}
+              </p>
+            )}
+            {groupProfileOperation && (
+              <p role="status" className="text-xs text-muted-foreground">
+                {groupProfileOperation.total === 0
+                  ? t("groups.profileActionLoading", {
+                      defaultValue: "Đang tải profile trong nhóm…",
+                    })
+                  : t("groups.profileActionProgress", {
+                      accepted: groupProfileOperation.accepted,
+                      total: groupProfileOperation.total,
+                      defaultValue: `Đã gửi ${groupProfileOperation.accepted}/${groupProfileOperation.total} lệnh profile.`,
+                    })}
               </p>
             )}
             <div className="overflow-hidden rounded-md border border-border">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-muted/40 text-xs text-muted-foreground">
+              <table className="w-full text-left text-xs">
+                <thead className="sticky top-0 z-10 bg-muted/60 text-xs text-muted-foreground">
                   <tr>
-                    <th className="px-3 py-2.5">Tên group</th>
-                    <th className="px-3 py-2.5">Cập nhật</th>
-                    <th className="px-3 py-2.5 text-right">Thao tác</th>
+                    <th className="px-3 py-2">Tên nhóm</th>
+                    <th className="px-3 py-2">Cập nhật</th>
+                    <th className="w-16 px-3 py-2 text-right">Thao tác</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -491,8 +710,11 @@ export function WorkspaceDetailPage({
                     </tr>
                   ) : (
                     groups.map((record) => (
-                      <tr key={record.group.id}>
-                        <td className="px-3 py-2.5">
+                      <tr
+                        key={record.group.id}
+                        className="h-10 hover:bg-muted/30"
+                      >
+                        <td className="px-3 py-1.5">
                           {editingGroup?.group.id === record.group.id ? (
                             <form
                               onSubmit={(event) => void saveGroupName(event)}
@@ -531,11 +753,11 @@ export function WorkspaceDetailPage({
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-2.5 text-xs text-muted-foreground">
+                        <td className="px-3 py-1.5 text-xs text-muted-foreground">
                           {new Date(record.group.updatedAt).toLocaleString()}
                         </td>
-                        <td className="px-3 py-2.5">
-                          <div className="flex justify-end gap-2">
+                        <td className="px-3 py-1.5">
+                          <div className="flex justify-end gap-1">
                             {confirmDeleteGroupId === record.group.id ? (
                               <>
                                 <span className="self-center text-xs text-muted-foreground">
@@ -558,44 +780,87 @@ export function WorkspaceDetailPage({
                                 </Button>
                               </>
                             ) : (
-                              <>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => {
-                                    openedInitialGroup.current =
-                                      record.group.id;
-                                    void loadGroupAccess(record);
-                                    onRouteChange?.({
-                                      organizationId,
-                                      workspaceId,
-                                      section: "groups",
-                                      groupId: record.group.id,
-                                    });
-                                  }}
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    className="size-7"
+                                    aria-label={t("groups.actionsFor", {
+                                      name: record.group.name,
+                                      defaultValue: `Thao tác với nhóm ${record.group.name}`,
+                                    })}
+                                  >
+                                    <LuEllipsis className="size-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent
+                                  align="end"
+                                  className="w-48"
                                 >
-                                  Quyền truy cập
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => {
-                                    setEditingGroup(record);
-                                    setEditingName(record.group.name);
-                                  }}
-                                >
-                                  Đổi tên
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={() =>
-                                    setConfirmDeleteGroupId(record.group.id)
-                                  }
-                                >
-                                  Xóa
-                                </Button>
-                              </>
+                                  <DropdownMenuItem
+                                    onSelect={() => {
+                                      openedInitialGroup.current =
+                                        record.group.id;
+                                      void loadGroupAccess(record);
+                                      onRouteChange?.({
+                                        organizationId,
+                                        workspaceId,
+                                        section: "groups",
+                                        groupId: record.group.id,
+                                      });
+                                    }}
+                                  >
+                                    {t("groups.access", {
+                                      defaultValue: "Quyền truy cập",
+                                    })}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    disabled={Boolean(groupProfileOperation)}
+                                    onSelect={() =>
+                                      void runGroupProfiles(record, "launch")
+                                    }
+                                  >
+                                    <LuPlay />
+                                    {t("groups.runProfiles", {
+                                      defaultValue: "Mở hồ sơ trong nhóm",
+                                    })}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    disabled={Boolean(groupProfileOperation)}
+                                    onSelect={() =>
+                                      void runGroupProfiles(record, "stop")
+                                    }
+                                  >
+                                    <LuSquare />
+                                    {t("groups.stopProfiles", {
+                                      defaultValue: "Dừng hồ sơ trong nhóm",
+                                    })}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onSelect={() => {
+                                      setEditingGroup(record);
+                                      setEditingName(record.group.name);
+                                    }}
+                                  >
+                                    {t("common.buttons.rename", {
+                                      defaultValue: "Đổi tên",
+                                    })}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onSelect={() =>
+                                      setConfirmDeleteGroupId(record.group.id)
+                                    }
+                                  >
+                                    {t("common.buttons.delete", {
+                                      defaultValue: "Xóa nhóm",
+                                    })}
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
                             )}
                           </div>
                         </td>
@@ -754,7 +1019,7 @@ export function WorkspaceDetailPage({
         </section>
       ) : (
         <section className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
-          <div className="mx-auto grid max-w-5xl gap-3 md:grid-cols-2">
+          <div className="grid w-full gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <button
               type="button"
               onClick={() => setTab("members")}

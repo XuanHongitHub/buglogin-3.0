@@ -9,14 +9,15 @@ import {
   LuCheck,
   LuChevronLeft,
   LuChevronRight,
-  LuHardDrive,
+  LuEllipsis,
+  LuFolder,
+  LuMail,
   LuPencil,
   LuPlus,
   LuRefreshCw,
   LuSearch,
-  LuSend,
-  LuShieldCheck,
   LuTriangleAlert,
+  LuUserPlus,
   LuUsers,
   LuWifiOff,
 } from "react-icons/lu";
@@ -35,8 +36,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ManagementDrawerContent } from "@/components/ui/management-drawer";
 import {
   Select,
   SelectContent,
@@ -56,28 +65,24 @@ import type {
 import { RippleButton } from "./ui/ripple";
 
 interface WorkspaceManagementDialogProps {
-  mode?: "page" | "dialog";
   isOpen?: boolean;
   onClose?: () => void;
   activeWorkspaceId: string;
   onWorkspaceSwitched: (workspaceId: string) => void;
   onWorkspaceDataChanged?: () => void;
-  onNavigateHome?: () => void;
 }
 
 const desktopApi = createTauriDesktopApi();
 
 export function WorkspaceManagementDialog({
-  mode = "dialog",
   isOpen = true,
   onClose = () => {},
   activeWorkspaceId,
   onWorkspaceSwitched,
   onWorkspaceDataChanged,
-  onNavigateHome,
 }: WorkspaceManagementDialogProps) {
   const { t } = useTranslation();
-  const isPageMode = mode === "page";
+  const isPageMode = true;
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [isLoadingOrgs, setIsLoadingOrgs] = useState(true);
   const [organizationLoadError, setOrganizationLoadError] = useState<
@@ -417,125 +422,8 @@ export function WorkspaceManagementDialog({
     setPage(0);
   };
 
-  const renderActiveWorkspaceInfo = () => {
-    const activeWsDetail =
-      workspaces.find((w) => w.id === activeWorkspaceId) || workspaces[0];
-    if (!activeWsDetail) return null;
-    return (
-      <div className="rounded-lg border border-border/70 bg-muted/15 p-3 space-y-2 text-xs">
-        <div className="flex items-center justify-between font-semibold text-foreground text-xs">
-          <div className="flex items-center gap-2">
-            <LuBuilding2 className="size-4 text-primary" />
-            <span>THÔNG TIN CHI TIẾT WORKSPACE: "{activeWsDetail.name}"</span>
-          </div>
-          <Badge
-            variant="outline"
-            className="font-mono text-[10px] text-emerald-600 bg-emerald-500/10 border-emerald-500/30"
-          >
-            Active Context
-          </Badge>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-muted-foreground pt-1 border-t border-border/40">
-          <div>
-            • <strong>Trạng thái:</strong>{" "}
-            <span className="text-foreground/80 font-medium">
-              Không gian làm việc chính (Đang hoạt động)
-            </span>
-          </div>
-          <div>
-            • <strong>Giới hạn lưu trữ:</strong>{" "}
-            <span className="text-foreground/80 font-medium">
-              {activeWsDetail.policy?.maxStorageBytes
-                ? `${Math.round(activeWsDetail.policy.maxStorageBytes / (1024 * 1024))} MB`
-                : "Không giới hạn dung lượng"}
-            </span>
-          </div>
-          <div>
-            • <strong>Chính sách Profile:</strong>{" "}
-            <span className="text-foreground/80 font-medium">
-              {activeWsDetail.policy?.maxProfiles != null
-                ? `${activeWsDetail.policy.maxProfiles} Profiles`
-                : "Không giới hạn"}
-            </span>
-            {" • "}
-            <strong>Thành viên:</strong>{" "}
-            <span className="text-foreground/80 font-medium">
-              {activeWsDetail.policy?.maxMembers != null
-                ? `${activeWsDetail.policy.maxMembers} Thành viên`
-                : "Không giới hạn"}
-            </span>
-          </div>
-          <div>
-            • <strong>Hỗ trợ ngoại tuyến (Offline):</strong>{" "}
-            {activeWsDetail.policy?.offlineEntitled
-              ? "Được phép mở khi mất mạng"
-              : "Chỉ Online"}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
   const renderTableContent = (isPageMode: boolean) => (
     <div className="space-y-4">
-      {/* 4 Metric KPI Cards in Page Mode */}
-      {isPageMode && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
-            <div className="flex items-center justify-between text-muted-foreground">
-              <span className="text-xs font-medium">Tổng Workspace</span>
-              <LuBuilding2 className="size-4 text-primary" />
-            </div>
-            <div className="mt-2 text-2xl font-bold text-foreground">
-              {workspaces.length}
-            </div>
-            <div className="text-[11px] text-muted-foreground mt-0.5">
-              Không gian làm việc
-            </div>
-          </div>
-          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
-            <div className="flex items-center justify-between text-muted-foreground">
-              <span className="text-xs font-medium">Đang Hoạt Động</span>
-              <LuCheck className="size-4 text-emerald-500" />
-            </div>
-            <div className="mt-2 text-2xl font-bold text-emerald-600 truncate">
-              {workspaces.find((w) => w.id === activeWorkspaceId)?.name || "—"}
-            </div>
-            <div className="text-[11px] text-muted-foreground mt-0.5">
-              Phiên làm việc hiện tại
-            </div>
-          </div>
-          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
-            <div className="flex items-center justify-between text-muted-foreground">
-              <span className="text-xs font-medium">Tổng Hạn Mức Profile</span>
-              <LuHardDrive className="size-4 text-primary" />
-            </div>
-            <div className="mt-2 text-2xl font-bold text-foreground">
-              {workspaces.reduce(
-                (sum, w) => sum + (w.policy?.maxProfiles || 0),
-                0,
-              ) || "—"}
-            </div>
-            <div className="text-[11px] text-muted-foreground mt-0.5">
-              Hạn mức các Workspace
-            </div>
-          </div>
-          <div className="rounded-xl border border-border/60 bg-card p-3.5 shadow-xs">
-            <div className="flex items-center justify-between text-muted-foreground">
-              <span className="text-xs font-medium">Hỗ Trợ Ngoại Tuyến</span>
-              <LuShieldCheck className="size-4 text-emerald-500" />
-            </div>
-            <div className="mt-2 text-2xl font-bold text-foreground">
-              {workspaces.filter((w) => w.policy?.offlineEntitled).length}/
-              {workspaces.length}
-            </div>
-            <div className="text-[11px] text-muted-foreground mt-0.5">
-              Workspace bật Offline
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Main Table Container */}
       <div
         className={cn(
@@ -714,17 +602,15 @@ export function WorkspaceManagementDialog({
             isPageMode ? "" : "max-h-[300px] overflow-y-auto",
           )}
         >
-          <table className="w-full min-w-[1140px] text-left text-xs">
+          <table className="w-full min-w-[920px] table-fixed text-left text-xs">
             <thead className="bg-muted/50 border-b border-border sticky top-0 font-medium text-muted-foreground text-[11px]">
               <tr>
-                <th className="py-2.5 px-3">Tên Không Gian Làm Việc</th>
-                <th className="py-2.5 px-3 w-28">Hạn mức Profile</th>
-                <th className="py-2.5 px-3 w-24">Thành viên</th>
-                <th className="py-2.5 px-3 w-24">Ngoại tuyến</th>
-                <th className="py-2.5 px-3 w-24 text-center">Trạng thái</th>
-                <th className="w-[560px] min-w-[560px] px-3 py-2.5 text-center">
-                  Thao tác
-                </th>
+                <th className="w-[30%] py-2.5 px-3">Tên Không Gian Làm Việc</th>
+                <th className="w-[12%] py-2.5 px-3">Hạn mức Profile</th>
+                <th className="w-[10%] py-2.5 px-3">Thành viên</th>
+                <th className="w-[12%] py-2.5 px-3">Ngoại tuyến</th>
+                <th className="w-[12%] py-2.5 px-3 text-center">Trạng thái</th>
+                <th className="w-[24%] px-3 py-2.5 text-right">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
@@ -834,81 +720,81 @@ export function WorkspaceManagementDialog({
                           </LoadingButton>
                         )}
                       </td>
-                      <td className="w-[560px] min-w-[560px] px-3 py-2 text-center">
-                        <div className="flex flex-nowrap items-center justify-center gap-1 whitespace-nowrap">
-                          {isPageMode && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                setDetailInitialTab("overview");
-                                setDetailWorkspace(ws);
-                              }}
-                              className="h-7 px-2 text-xs"
-                              title="Mở chi tiết workspace"
-                            >
-                              Mở workspace
-                            </Button>
-                          )}
-                          {isPageMode && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                setDetailInitialTab("groups");
-                                setDetailWorkspace(ws);
-                              }}
-                              className="h-7 px-2 text-xs"
-                              title="Mở nhóm trong workspace này"
-                            >
-                              Mở groups
-                            </Button>
-                          )}
-                          {isPageMode && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setAccountWorkspace(ws)}
-                              className="h-7 px-2 text-xs"
-                            >
-                              Tạo account
-                            </Button>
-                          )}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setEditingWs(ws)}
-                            className="h-7 w-7 p-0 cursor-pointer"
-                            title="Chỉnh sửa cài đặt workspace"
-                          >
-                            <LuPencil className="size-3 text-muted-foreground hover:text-foreground" />
-                          </Button>
+                      <td className="px-3 py-2 text-right">
+                        <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
                           <Button
                             variant="outline"
                             size="sm"
                             onClick={() => {
-                              if (isPageMode) {
-                                setDetailInitialTab("members");
-                                setDetailWorkspace(ws);
-                              } else {
-                                setMembersWs(ws);
-                              }
+                              setDetailInitialTab("overview");
+                              setDetailWorkspace(ws);
                             }}
-                            className="h-7 gap-1 px-2 text-xs cursor-pointer"
-                            title="Quản lý thành viên & phân quyền"
+                            className="h-7 px-2.5 text-xs"
+                            title="Mở chi tiết workspace"
                           >
-                            <LuUsers className="size-3" />
-                            <span>Thành viên</span>
+                            Mở workspace
                           </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setInviteWs(ws)}
-                            className="h-7 w-7 p-0 cursor-pointer"
-                            title="Tạo mã mời thành viên"
-                          >
-                            <LuSend className="size-3 text-muted-foreground hover:text-foreground" />
-                          </Button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="icon"
+                                aria-label={`Thao tác với ${ws.name}`}
+                                title={`Thao tác với ${ws.name}`}
+                                className="size-7"
+                              >
+                                <LuEllipsis className="size-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="w-52 text-xs"
+                            >
+                              <DropdownMenuItem
+                                onSelect={() => {
+                                  setDetailInitialTab("groups");
+                                  setDetailWorkspace(ws);
+                                }}
+                                className="gap-2 py-1.5 text-xs"
+                              >
+                                <LuFolder className="size-4" />
+                                Nhóm và hồ sơ
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => {
+                                  setDetailInitialTab("members");
+                                  setDetailWorkspace(ws);
+                                }}
+                                className="gap-2 py-1.5 text-xs"
+                              >
+                                <LuUsers className="size-4" />
+                                Thành viên
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => setAccountWorkspace(ws)}
+                                className="gap-2 py-1.5 text-xs"
+                              >
+                                <LuUserPlus className="size-4" />
+                                Cấp tài khoản
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => setInviteWs(ws)}
+                                className="gap-2 py-1.5 text-xs"
+                              >
+                                <LuMail className="size-4" />
+                                Mời thành viên
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                onSelect={() => setEditingWs(ws)}
+                                className="gap-2 py-1.5 text-xs"
+                              >
+                                <LuPencil className="size-4" />
+                                Chỉnh sửa workspace
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
                       </td>
                     </tr>
@@ -953,8 +839,6 @@ export function WorkspaceManagementDialog({
           </div>
         </div>
       </div>
-
-      {renderActiveWorkspaceInfo()}
     </div>
   );
 
@@ -962,7 +846,7 @@ export function WorkspaceManagementDialog({
     <>
       {/* SUB-MODAL: Create Workspace */}
       <Dialog open={createWsOpen} onOpenChange={setCreateWsOpen}>
-        <DialogContent className="max-w-md p-6">
+        <ManagementDrawerContent>
           <DialogHeader className="border-b border-border/50 pb-3">
             <DialogTitle className="text-base font-semibold">
               {t("workspaces.createModalTitle", {
@@ -1051,12 +935,12 @@ export function WorkspaceManagementDialog({
               </LoadingButton>
             </DialogFooter>
           </form>
-        </DialogContent>
+        </ManagementDrawerContent>
       </Dialog>
 
       {/* SUB-MODAL: Create Organization */}
       <Dialog open={createOrgOpen} onOpenChange={setCreateOrgOpen}>
-        <DialogContent className="max-w-md p-6">
+        <ManagementDrawerContent>
           <DialogHeader className="border-b border-border/50 pb-3">
             <DialogTitle className="text-base font-semibold">
               {t("workspaces.createOrgTitle", {
@@ -1107,7 +991,7 @@ export function WorkspaceManagementDialog({
               </LoadingButton>
             </DialogFooter>
           </form>
-        </DialogContent>
+        </ManagementDrawerContent>
       </Dialog>
 
       {/* SUB-MODAL: Edit Workspace (Section 14.2) */}
@@ -1115,7 +999,7 @@ export function WorkspaceManagementDialog({
         open={!!editingWs}
         onOpenChange={(open) => !open && setEditingWs(null)}
       >
-        <DialogContent className="max-w-md p-6">
+        <ManagementDrawerContent>
           <DialogHeader className="border-b border-border/50 pb-3">
             <DialogTitle className="text-base font-semibold">
               {t("workspaces.editTitle", {
@@ -1250,7 +1134,7 @@ export function WorkspaceManagementDialog({
               </DialogFooter>
             </form>
           )}
-        </DialogContent>
+        </ManagementDrawerContent>
       </Dialog>
 
       {/* SUB-MODAL: Create Invite Modal (Section 14.1) */}
@@ -1275,7 +1159,7 @@ export function WorkspaceManagementDialog({
     </>
   );
 
-  if (mode === "page" && detailWorkspace) {
+  if (detailWorkspace) {
     return (
       <WorkspaceDetailPage
         organizationId={detailWorkspace.organizationId}
@@ -1291,7 +1175,7 @@ export function WorkspaceManagementDialog({
     );
   }
 
-  if (mode === "page" && membersWs) {
+  if (membersWs) {
     return (
       <MemberManagementDialog
         mode="page"
@@ -1306,66 +1190,33 @@ export function WorkspaceManagementDialog({
     );
   }
 
-  if (mode === "page" && accountWorkspace) {
+  if (accountWorkspace) {
     return (
-      <ScopedAccountCreationPage
-        workspaceId={accountWorkspace.id}
-        workspaceName={accountWorkspace.name}
-        organizationName={
-          organizations.find(
-            (org) => org.id === accountWorkspace.organizationId,
-          )?.name
-        }
-        onBack={() => setAccountWorkspace(null)}
-        onCreated={() => void loadWorkspaces()}
-      />
+      <Dialog open onOpenChange={(open) => !open && setAccountWorkspace(null)}>
+        <ManagementDrawerContent
+          width="lg"
+          hideClose
+          className="!overflow-hidden !p-0"
+        >
+          <ScopedAccountCreationPage
+            workspaceId={accountWorkspace.id}
+            workspaceName={accountWorkspace.name}
+            organizationName={
+              organizations.find(
+                (org) => org.id === accountWorkspace.organizationId,
+              )?.name
+            }
+            onBack={() => setAccountWorkspace(null)}
+            onCreated={() => void loadWorkspaces()}
+          />
+        </ManagementDrawerContent>
+      </Dialog>
     );
   }
 
-  if (mode === "page") {
+  if (isPageMode) {
     return (
       <div className="flex flex-1 flex-col overflow-hidden bg-background">
-        {/* Full-Page Header */}
-        <div className="flex items-center justify-between border-b border-border/60 px-6 py-3.5 bg-card/30">
-          <div className="flex items-center gap-3">
-            <div className="grid size-9 place-items-center rounded-lg bg-primary/10 text-primary shadow-xs">
-              <LuBuilding2 className="size-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-semibold text-foreground">
-                  {t("workspaces.managementTitle", {
-                    defaultValue:
-                      "Quản Lý Không Gian Làm Việc (Workspace Center)",
-                  })}
-                </h1>
-                <Badge
-                  variant="outline"
-                  className="text-[10px] font-mono border-primary/30 text-primary"
-                >
-                  {workspaces.length} Không gian
-                </Badge>
-              </div>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {t("workspaces.managementSubtitle", {
-                  defaultValue:
-                    "Phân chia môi trường vận hành riêng biệt giữa các dự án, khách hàng và phòng ban",
-                })}
-              </p>
-            </div>
-          </div>
-          {onNavigateHome && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onNavigateHome}
-              className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-            >
-              <span>← Trở về Profiles</span>
-            </Button>
-          )}
-        </div>
-
         {/* Scrollable Page Body */}
         <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden sm:grid-cols-[minmax(190px,240px)_minmax(0,1fr)]">
           <aside className="flex max-h-48 min-h-0 flex-col border-b border-border/60 bg-muted/10 p-3 sm:max-h-none sm:border-b-0 sm:border-r">

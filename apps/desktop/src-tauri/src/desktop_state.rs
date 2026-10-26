@@ -2605,6 +2605,37 @@ impl ProductionDesktopState {
                 self.invoke_proxy_mutation(invoke_name, correlation_id, idempotency_key, payload)
                     .await
             }
+            "profile_sync_status_get" => {
+                let input: ProfileSyncStatusInput = parse_payload(payload, correlation_id)?;
+                let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
+                let binding = self
+                    .client
+                    .profile_binding(&profile_id, correlation_id)
+                    .await?;
+                let auth = self.auth(correlation_id)?;
+                let manifest = self
+                    .client
+                    .current_manifest(
+                        CoordinationScope {
+                            workspace_id: &binding.workspace_id,
+                            auth: &auth,
+                        },
+                        &binding.resource_id,
+                    )
+                    .await?;
+                let generation = manifest.as_ref().map(|manifest| manifest.generation);
+                let synced = manifest.as_ref().is_some_and(|manifest| {
+                    manifest.generation > 1 || manifest.payload_encryption.is_some()
+                });
+                Ok(result(
+                    "profile.sync.status.get",
+                    correlation_id,
+                    json!({
+                        "status": if synced { "synced" } else { "waiting" },
+                        "generation": generation
+                    }),
+                ))
+            }
             "profile_sync_recovery_code_get" => {
                 let input: ProfileRecoveryCodeInput = parse_payload(payload, correlation_id)?;
                 let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
@@ -7241,6 +7272,12 @@ struct LegacyProfileDataInventoryRecord {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProfileRecoveryCodeInput {
+    profile_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileSyncStatusInput {
     profile_id: String,
 }
 

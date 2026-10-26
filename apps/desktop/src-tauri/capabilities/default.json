@@ -10,6 +10,8 @@
     "deep-link:allow-register",
     "deep-link:allow-unregister",
     "deep-link:allow-is-registered",
+    "dialog:allow-open",
+    "dialog:allow-save",
     "deep-link:allow-get-current"
   ]
 }

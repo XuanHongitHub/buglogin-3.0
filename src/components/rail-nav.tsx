@@ -489,12 +489,11 @@ export function RailNav({
         )}
       </div>
 
-      {/* Workspace Switcher Row */}
       {onWorkspaceSelect && (
         <div
           className={cn(
             "shrink-0 border-b border-border/40 py-2",
-            isCollapsed ? "px-2 flex justify-center" : "px-2.5",
+            isCollapsed ? "flex justify-center px-2" : "px-2.5",
           )}
         >
           <WorkspaceSwitcher

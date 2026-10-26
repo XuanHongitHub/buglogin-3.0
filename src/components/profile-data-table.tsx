@@ -317,7 +317,11 @@ interface TableMeta {
   onOpenTrafficDialog?: (profileId: string) => void;
 
   // Sync
-  syncStatuses: Record<string, { status: string; error?: string }>;
+  syncStatuses: Record<
+    string,
+    { status: string; error?: string; generation?: number; checkedAt?: number }
+  >;
+  refreshProfileSyncStatus?: (profileId: string) => void;
   crossOsUnlocked?: boolean;
   syncUnlocked?: boolean;
 
@@ -369,19 +373,23 @@ function getProfileSyncStatusDot(
 ): SyncStatusDot | null {
   const encrypted =
     profile.sync_mode === "managed" || profile.sync_mode === "Encrypted";
+  const managed =
+    profile.sync_mode === "managed" || profile.sync_mode === "Encrypted";
 
   if (!profile.last_sync && !liveStatus) {
     if (profile.sync_mode === "Disabled" || profile.sync_mode === "disabled") {
       return null;
     }
-    return {
-      color: "bg-muted-foreground/40",
-      tooltip: t("profileTable.syncTooltipNotSynced", {
-        defaultValue: "Lưu trữ trên máy này (Chưa đồng bộ Cloud)",
-      }),
-      animate: false,
-      encrypted,
-    };
+    if (!managed) {
+      return {
+        color: "bg-muted-foreground/40",
+        tooltip: t("profileTable.syncTooltipNotSynced", {
+          defaultValue: "Profile này chỉ lưu trên máy, chưa tải lên Cloud.",
+        }),
+        animate: false,
+        encrypted,
+      };
+    }
   }
 
   const status =
@@ -1918,7 +1926,15 @@ export function ProfilesDataTable({
     name?: string;
   } | null>(null);
   const [syncStatuses, setSyncStatuses] = React.useState<
-    Record<string, { status: string; error?: string }>
+    Record<
+      string,
+      {
+        status: string;
+        error?: string;
+        generation?: number;
+        checkedAt?: number;
+      }
+    >
   >({});
 
   // Country proxy creation state (for inline proxy creation in dropdown)
@@ -2084,6 +2100,52 @@ export function ProfilesDataTable({
     stoppingProfiles,
   );
 
+  const refreshProfileSyncStatus = React.useCallback(
+    async (profileId: string) => {
+      const profile = profiles.find((item) => item.id === profileId);
+      if (!profile) return;
+      const managed =
+        profile.sync_mode === "managed" ||
+        profile.sync_mode === "Encrypted" ||
+        profile.sync_mode === "Regular";
+      if (!managed) return;
+      const current = syncStatuses[profileId];
+      if (
+        current?.status === "syncing" ||
+        (current?.checkedAt && Date.now() - current.checkedAt < 30_000)
+      ) {
+        return;
+      }
+      if (runningProfiles.has(profileId)) {
+        setSyncStatuses((previous) => ({
+          ...previous,
+          [profileId]: {
+            status: "waiting",
+            checkedAt: Date.now(),
+          },
+        }));
+        return;
+      }
+      try {
+        const remote = await invoke<{
+          status: string;
+          generation?: number | null;
+        }>("profile_sync_status_get", { profileId });
+        setSyncStatuses((previous) => ({
+          ...previous,
+          [profileId]: {
+            status: remote.status,
+            generation: remote.generation ?? undefined,
+            checkedAt: Date.now(),
+          },
+        }));
+      } catch (error) {
+        console.error("Failed to refresh profile sync status:", error);
+      }
+    },
+    [profiles, runningProfiles, syncStatuses],
+  );
+
   // Listen for sync status events
   React.useEffect(() => {
     if (!browserState.isClient) return;
@@ -2098,7 +2160,7 @@ export function ProfilesDataTable({
           const { profile_id, status, error } = event.payload;
           setSyncStatuses((prev) => ({
             ...prev,
-            [profile_id]: { status, error },
+            [profile_id]: { status, error, checkedAt: Date.now() },
           }));
         });
       } catch (error) {
@@ -2568,6 +2630,7 @@ export function ProfilesDataTable({
 
       // Sync
       syncStatuses,
+      refreshProfileSyncStatus,
       crossOsUnlocked,
       syncUnlocked,
 
@@ -2639,6 +2702,7 @@ export function ProfilesDataTable({
       onCopyCookiesToProfile,
       onOpenCookieManagement,
       syncStatuses,
+      refreshProfileSyncStatus,
       crossOsUnlocked,
       syncUnlocked,
       countries,
@@ -2726,7 +2790,7 @@ export function ProfilesDataTable({
           const isLockUnknown = meta.isProfileLockUnknown(profile.id);
           const isSyncing = meta.syncStatuses[profile.id]?.status === "syncing";
           const canLaunch = isRunningRemotely
-            ? true
+            ? false
             : meta.browserState.canLaunchProfile(profile) &&
               !isPendingRemotePull &&
               !isLockedByAnother &&
@@ -2853,11 +2917,13 @@ export function ProfilesDataTable({
                     data-running={isRunning ? "true" : undefined}
                     disabled={!canLaunch || isLaunching || isStopping}
                     aria-label={
-                      isRunning
-                        ? meta.t("profiles.actions.stop")
-                        : isLockedByAnother || isLockUnknown
-                          ? tooltipContent
-                          : meta.t("profiles.actions.launch")
+                      isRunningRemotely
+                        ? tooltipContent
+                        : isRunning
+                          ? meta.t("profiles.actions.stop")
+                          : isLockedByAnother || isLockUnknown
+                            ? tooltipContent
+                            : meta.t("profiles.actions.launch")
                     }
                     className={cn(
                       "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",
@@ -2878,6 +2944,15 @@ export function ProfilesDataTable({
                     <span className="grid place-items-center">
                       {isLaunching || isStopping ? (
                         <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
+                      ) : isRunningRemotely ||
+                        isLockedByAnother ||
+                        isLockUnknown ? (
+                        <LuLock
+                          className={cn(
+                            "size-3.5",
+                            isLockUnknown && "text-warning",
+                          )}
+                        />
                       ) : isRunning ? (
                         <LuSquare className="size-3 fill-current" />
                       ) : isLockedByAnother || isLockUnknown ? (
@@ -4028,7 +4103,10 @@ export function ProfilesDataTable({
                 <Button
                   size="sm"
                   onClick={onCreateProfile}
-                  className="h-7 gap-1.5 rounded-l-md rounded-r-none px-2.5 text-xs font-medium bg-transparent hover:bg-white/10 text-primary-foreground shadow-none border-r border-primary-foreground/20"
+                  className="h-7 gap-1.5 rounded-l-md rounded-r-none border-r border-primary-foreground/20 bg-transparent px-2.5 text-xs font-medium text-primary-foreground shadow-none hover:bg-white/10"
+                  title={t("createProfile.title", {
+                    defaultValue: "Tạo hồ sơ mới (Ctrl+N)",
+                  })}
                 >
                   <LuPlus className="size-3.5" />
                   <span>{t("header.newProfile", { defaultValue: "Mới" })}</span>
@@ -4036,9 +4114,12 @@ export function ProfilesDataTable({
                 <DropdownMenuTrigger asChild>
                   <Button
                     size="icon"
-                    className="h-7 w-6 rounded-l-none rounded-r-md bg-transparent hover:bg-white/10 text-primary-foreground shadow-none px-0"
+                    className="h-7 w-6 rounded-l-none rounded-r-md bg-transparent px-0 text-primary-foreground shadow-none hover:bg-white/10"
                     title={t("actions.addOptions", {
                       defaultValue: "Thêm mục khác...",
+                    })}
+                    aria-label={t("actions.addOptions", {
+                      defaultValue: "Thao tác tạo nhanh",
                     })}
                   >
                     <LuChevronDown className="size-3" />
@@ -4047,24 +4128,27 @@ export function ProfilesDataTable({
               </div>
 
               <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuLabel className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                  📦 {t("actions.resources", { defaultValue: "Tài nguyên" })}
+                <DropdownMenuLabel className="text-xs font-semibold text-muted-foreground">
+                  {t("actions.addOptions", {
+                    defaultValue: "Thao tác tạo nhanh",
+                  })}
+                </DropdownMenuLabel>
+                <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {t("actions.resources", { defaultValue: "Tài nguyên" })}
                 </DropdownMenuLabel>
                 <DropdownMenuItem
                   onClick={onCreateProfile}
                   className="gap-2 cursor-pointer text-xs"
                 >
                   <LuGlobe className="size-3.5 text-primary" />
-                  <div className="flex flex-1 items-center justify-between">
-                    <span>
-                      {t("createProfile.title", {
-                        defaultValue: "Tạo hồ sơ mới",
-                      })}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground font-mono">
-                      Ctrl+N
-                    </span>
-                  </div>
+                  <span className="flex-1">
+                    {t("createProfile.title", {
+                      defaultValue: "Tạo hồ sơ mới",
+                    })}
+                  </span>
+                  <span className="text-[10px] font-mono text-muted-foreground">
+                    Ctrl+N
+                  </span>
                 </DropdownMenuItem>
                 {onOpenGroupManagement && (
                   <DropdownMenuItem
@@ -4072,16 +4156,14 @@ export function ProfilesDataTable({
                     className="gap-2 cursor-pointer text-xs"
                   >
                     <LuFolderPlus className="size-3.5 text-primary" />
-                    <div className="flex flex-1 items-center justify-between">
-                      <span>
-                        {t("groups.createTitle", {
-                          defaultValue: "Tạo nhóm mới",
-                        })}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground font-mono">
-                        Ctrl+G
-                      </span>
-                    </div>
+                    <span className="flex-1">
+                      {t("groups.createTitle", {
+                        defaultValue: "Tạo nhóm mới",
+                      })}
+                    </span>
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      Ctrl+G
+                    </span>
                   </DropdownMenuItem>
                 )}
                 {onOpenProxyManagement && (
@@ -4095,12 +4177,10 @@ export function ProfilesDataTable({
                     </span>
                   </DropdownMenuItem>
                 )}
-
                 {onOpenMemberManagement && (
                   <>
                     <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                      👥{" "}
+                    <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                       {t("actions.members", {
                         defaultValue: "Nhân sự & Thành viên",
                       })}
