@@ -437,7 +437,7 @@ paths:
   /v1/profiles/{profileId}/key-envelope:
     get:
       operationId: profile.share.keyenvelope.get
-      description: Returns only the authenticated device's envelope while a current direct profile read share is active.
+      description: Returns only the authenticated device's envelope while a current direct profile read share is active, or while workspace-owner profile read access is active.
       parameters: [{ $ref: '#/components/parameters/ProfileId' }]
       responses:
         "200": { description: Device-bound encrypted resource key envelope, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileKeyShareEnvelope' } } } }

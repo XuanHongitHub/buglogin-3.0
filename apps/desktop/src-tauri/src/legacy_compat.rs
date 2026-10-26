@@ -376,8 +376,8 @@ pub async fn get_groups_with_profile_counts(
     let profiles = list_all_profiles(&state).await?;
     let groups = group_result
         .data
-        .get("items")
-        .and_then(Value::as_array)
+        .as_array()
+        .or_else(|| group_result.data.get("items").and_then(Value::as_array))
         .ok_or_else(|| invalid_response("group-list"))?;
     Ok(groups.iter().map(|record| {
         let group = record.get("group").unwrap_or(record);

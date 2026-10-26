@@ -504,8 +504,8 @@
       "oldest": "Cũ nhất trước"
     },
     "remote": {
-      "runningTooltip": "Đang chạy trên máy từ xa. Dừng lại để đưa hồ sơ về đây.",
-      "runningTooltipOwner": "Đang chạy trên máy từ xa bởi {{owner}}. Dừng lại để đưa hồ sơ về đây.",
+      "runningTooltip": "Hồ sơ đang chạy trên thiết bị khác. Hãy dừng tại đó và chờ đồng bộ xong trước khi mở ở đây.",
+      "runningTooltipOwner": "Hồ sơ đang chạy trên thiết bị khác bởi {{owner}}. Hãy dừng tại đó và chờ đồng bộ xong trước khi mở ở đây.",
       "pendingSyncTooltip": "Đang tải về những gì phiên từ xa đã thay đổi. Sẽ dùng lại được khi hoàn tất."
     }
   },
@@ -966,8 +966,8 @@
       "profileLocked": "Đang được sử dụng bởi {{owner}}",
       "profileLockedShort": "Đang sử dụng",
       "cannotLaunchLocked": "Không thể khởi chạy — profile đang được sử dụng bởi {{owner}}",
-      "leaseExpiry": " · lease hết hạn lúc {{time}}",
-      "leaseUnknown": "Chưa xác minh được trình duyệt đang chạy. Profile tạm bị chặn mở để tránh dùng trùng cho đến khi runtime hoặc lease được xác nhận.",
+      "leaseExpiry": " · quyền sử dụng hết hạn lúc {{time}}",
+      "leaseUnknown": "Chưa xác nhận được trình duyệt đã đóng nên profile đang tạm khóa để tránh mở trùng. Hãy đóng cửa sổ trình duyệt đang dùng profile rồi thử lại.",
       "createdBy": "Được tạo bởi {{email}}",
       "roleLauncher": "Người khởi chạy"
     },
@@ -2341,9 +2341,9 @@
     "syncTooltipWaiting": "Đang chờ đồng bộ",
     "syncTooltipErrorWith": "Lỗi đồng bộ: {{error}}",
     "syncTooltipError": "Lỗi đồng bộ",
-    "syncTooltipNotSynced": "Chưa đồng bộ",
+    "syncTooltipNotSynced": "Profile chỉ được lưu trên máy này, chưa có bản sao trên Cloud.",
     "noTags": "Không có thẻ",
-    "syncTooltipCloseToSync": "Đóng profile để đồng bộ",
+    "syncTooltipCloseToSync": "Profile chưa có bản sao mới trên Cloud. Đóng profile để đồng bộ.",
     "syncTooltipDisabledWithLast": "Đã tắt đồng bộ, lần đồng bộ cuối {{time}}",
     "addTagsPlaceholder": "Thêm thẻ",
     "tagsHeader": "Thẻ",
@@ -4393,10 +4393,11 @@
   },
   "restorePoints": {
     "title": "Điểm khôi phục",
-    "hint": "Các bản sao dữ liệu của hồ sơ này trên máy chủ đồng bộ: mỗi ngày một bản sau khi có thay đổi, và những bản bạn tạo. Giữ 3 bản mới nhất của mỗi loại.",
+    "hint": "Các bản sao lưu dữ liệu cục bộ của hồ sơ này. Hãy tạo bản sao trước khi thay đổi quan trọng.",
     "create": "Tạo",
     "created": "Đã tạo điểm khôi phục.",
     "empty": "Chưa có điểm khôi phục nào.",
+    "snapshot": "Bản sao lưu",
     "restore": "Khôi phục",
     "restored": "Đã khôi phục từ điểm khôi phục.",
     "deleted": "Đã xóa điểm khôi phục.",

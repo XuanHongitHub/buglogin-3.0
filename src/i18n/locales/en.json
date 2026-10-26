@@ -504,8 +504,8 @@
       "oldest": "Oldest first"
     },
     "remote": {
-      "runningTooltip": "Running on a remote machine. Stop it to bring the profile back here.",
-      "runningTooltipOwner": "Running on a remote machine by {{owner}}. Stop it to bring the profile back here.",
+      "runningTooltip": "Running on another device. Stop it there and wait for sync before opening it here.",
+      "runningTooltipOwner": "Running on another device by {{owner}}. Stop it there and wait for sync before opening it here.",
       "pendingSyncTooltip": "Downloading what the remote session changed. Available again when it finishes."
     }
   },
@@ -966,8 +966,8 @@
       "profileLocked": "In use by {{owner}}",
       "profileLockedShort": "In use",
       "cannotLaunchLocked": "Cannot launch — profile is in use by {{owner}}",
-      "leaseExpiry": " · lease expires {{time}}",
-      "leaseUnknown": "Browser activity is not confirmed. This profile is temporarily blocked from opening until its runtime or lease state can be verified.",
+      "leaseExpiry": " · access ends at {{time}}",
+      "leaseUnknown": "BugLogin could not confirm that the browser has closed, so this profile is temporarily locked to prevent duplicate use. Close the browser window using this profile, then try again.",
       "createdBy": "Created by {{email}}",
       "roleLauncher": "Launcher"
     },
@@ -2341,9 +2341,9 @@
     "syncTooltipWaiting": "Waiting to sync",
     "syncTooltipErrorWith": "Sync error: {{error}}",
     "syncTooltipError": "Sync error",
-    "syncTooltipNotSynced": "Not synced",
+    "syncTooltipNotSynced": "This profile is stored on this device and has no copy in the cloud.",
     "noTags": "No tags",
-    "syncTooltipCloseToSync": "Close the profile to sync",
+    "syncTooltipCloseToSync": "There is no current cloud copy of this profile. Close the profile to sync it.",
     "syncTooltipDisabledWithLast": "Sync disabled, last sync {{time}}",
     "addTagsPlaceholder": "Add tags",
     "tagsHeader": "Tags",
@@ -4393,10 +4393,11 @@
   },
   "restorePoints": {
     "title": "Restore points",
-    "hint": "Copies of this profile's data on the sync server: one a day after a change, and the ones you make. The newest 3 of each are kept.",
+    "hint": "Local backups of this profile's data. Create a backup before making an important change.",
     "create": "Create",
     "created": "Restore point created.",
     "empty": "No restore points yet.",
+    "snapshot": "Backup",
     "restore": "Restore",
     "restored": "Restore point restored.",
     "deleted": "Restore point deleted.",

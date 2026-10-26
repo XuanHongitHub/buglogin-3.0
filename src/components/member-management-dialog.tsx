@@ -6,13 +6,14 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  LuArrowLeft,
   LuBan,
   LuCheck,
+  LuChevronDown,
   LuClock,
   LuCopy,
   LuExternalLink,
@@ -44,8 +45,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ManagementDrawerContent } from "@/components/ui/management-drawer";
 import {
   Select,
   SelectContent,
@@ -65,6 +74,7 @@ import type {
   Member,
   MemberRole,
   MemberStatus,
+  WorkspacePolicy,
 } from "../../frontend/src/generated/command-registry";
 import { RippleButton } from "./ui/ripple";
 
@@ -73,6 +83,7 @@ interface MemberManagementDialogProps {
   isOpen: boolean;
   onClose: () => void;
   workspaceId: string;
+  organizationId?: string;
   workspaceName?: string;
   organizationName?: string;
   onInvitePage?: () => void;
@@ -93,6 +104,7 @@ export function MemberManagementDialog({
   isOpen,
   onClose,
   workspaceId: propWorkspaceId,
+  organizationId,
   workspaceName = "Workspace Hiện Tại",
   organizationName,
   onInvitePage,
@@ -104,6 +116,11 @@ export function MemberManagementDialog({
   const [searchQuery, setSearchQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [isMaximized, setIsMaximized] = useState(false);
+  const memberRequestRef = useRef(0);
+  const [memberLoadError, setMemberLoadError] = useState<string | null>(null);
+  const [workspacePolicy, setWorkspacePolicy] =
+    useState<WorkspacePolicy | null>(null);
+  const [workspacePolicyError, setWorkspacePolicyError] = useState(false);
   const [accountCreationMode, setAccountCreationMode] = useState<
     "single" | "bulk" | null
   >(null);
@@ -223,12 +240,33 @@ export function MemberManagementDialog({
 
   const loadMembers = useCallback(async () => {
     if (!workspaceId) return false;
+    const requestId = ++memberRequestRef.current;
     setIsLoading(true);
+    setMemberLoadError(null);
     try {
       const [page, account] = await Promise.all([
         desktopApi.listMembers(workspaceId),
         desktopApi.getAccount(),
       ]);
+      if (requestId !== memberRequestRef.current) return false;
+      if (!organizationId) {
+        setWorkspacePolicy(null);
+        setWorkspacePolicyError(true);
+      } else {
+        try {
+          const workspace = await desktopApi.getWorkspace({
+            organizationId,
+            workspaceId,
+          });
+          if (requestId !== memberRequestRef.current) return false;
+          setWorkspacePolicy(workspace.policy);
+          setWorkspacePolicyError(false);
+        } catch {
+          if (requestId !== memberRequestRef.current) return false;
+          setWorkspacePolicy(null);
+          setWorkspacePolicyError(true);
+        }
+      }
       setMembers(page.items);
       if (account?.accountId) {
         const membership = page.items.find(
@@ -246,7 +284,9 @@ export function MemberManagementDialog({
       }
       return true;
     } catch (err) {
+      if (requestId !== memberRequestRef.current) return false;
       console.error("Failed to load members:", err);
+      setMemberLoadError(err instanceof Error ? err.message : String(err));
       showErrorToast(
         t("members.loadFailed", {
           defaultValue: "Không thể tải danh sách thành viên",
@@ -254,14 +294,17 @@ export function MemberManagementDialog({
       );
       return false;
     } finally {
-      setIsLoading(false);
+      if (requestId === memberRequestRef.current) setIsLoading(false);
     }
-  }, [workspaceId, t]);
+  }, [workspaceId, organizationId, t]);
 
   useEffect(() => {
     if (isOpen) {
       void loadMembers();
     }
+    return () => {
+      memberRequestRef.current += 1;
+    };
   }, [isOpen, loadMembers]);
 
   const handleRoleChange = async (memberId: string, newRole: MemberRole) => {
@@ -728,7 +771,7 @@ export function MemberManagementDialog({
 
   const MemberFrame = ({ children }: { children: ReactNode }) =>
     mode === "page" ? (
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-background">
+      <div className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-background px-3 md:px-4">
         {children}
       </div>
     ) : (
@@ -748,6 +791,17 @@ export function MemberManagementDialog({
   const workspaceLabel = organizationName
     ? `${organizationName} / ${workspaceName}`
     : workspaceName;
+  const workspaceSummary = workspacePolicy
+    ? t("members.workspaceSummaryWithLimit", {
+        workspaceName: workspaceLabel,
+        used: members.length,
+        max: workspacePolicy.maxMembers,
+        defaultValue: `${workspaceLabel} · ${members.length} / ${workspacePolicy.maxMembers} ghế`,
+      })
+    : t("members.workspaceSummary", {
+        workspaceName: workspaceLabel,
+        defaultValue: `${workspaceLabel}${workspacePolicyError ? " · Không tải được hạn mức" : ""}`,
+      });
 
   if (accountCreationMode) {
     return (
@@ -765,89 +819,56 @@ export function MemberManagementDialog({
   return (
     <>
       <MemberFrame>
-        <DialogHeader className="border-b border-border/50 pb-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {mode === "page" && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={onClose}
-                  aria-label="Quay lại workspace"
-                >
-                  <LuArrowLeft className="size-4" />
-                </Button>
-              )}
-              <div className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs shrink-0">
-                <LuUsers className="size-5" />
-              </div>
-              <div>
-                {mode === "page" ? (
-                  <h1 className="text-base font-semibold">
-                    {t("members.title", {
-                      defaultValue: "Quản Lý Thành Viên & Phân Quyền",
-                    })}
-                  </h1>
-                ) : (
+        {mode === "dialog" && (
+          <DialogHeader className="border-b border-border/50 pb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs shrink-0">
+                  <LuUsers className="size-5" />
+                </div>
+                <div>
                   <DialogTitle className="text-base font-semibold">
                     {t("members.title", {
                       defaultValue: "Quản Lý Thành Viên & Phân Quyền",
                     })}
                   </DialogTitle>
-                )}
-                {mode === "page" ? (
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {t("members.subtitle", {
-                      workspaceName: workspaceLabel,
-                      used: members.length,
-                      max: 20,
-                      defaultValue: `Không gian: ${workspaceLabel} · Đã dùng: ${members.length} / 20 ghế thành viên`,
-                    })}
-                  </p>
-                ) : (
                   <DialogDescription className="text-xs text-muted-foreground mt-0.5">
-                    {t("members.subtitle", {
-                      workspaceName: workspaceLabel,
-                      used: members.length,
-                      max: 20,
-                      defaultValue: `Không gian: ${workspaceLabel} · Đã dùng: ${members.length} / 20 ghế thành viên`,
-                    })}
+                    {workspaceSummary}
                   </DialogDescription>
-                )}
+                </div>
               </div>
-            </div>
 
-            {/* Maximize / Minimize Fullscreen Toggle */}
-            {mode === "dialog" && (
-              <div className="flex items-center gap-2 pr-6">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setIsMaximized(!isMaximized)}
-                  className="h-8 px-2.5 text-xs gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer"
-                  title={
-                    isMaximized
-                      ? "Thu nhỏ về kích thước chuẩn"
-                      : "Mở rộng toàn màn hình"
-                  }
-                >
-                  {isMaximized ? (
-                    <>
-                      <LuMinimize2 className="size-3.5 text-primary" />
-                      <span className="hidden sm:inline">Thu nhỏ</span>
-                    </>
-                  ) : (
-                    <>
-                      <LuMaximize2 className="size-3.5 text-primary" />
-                      <span className="hidden sm:inline">Toàn màn hình</span>
-                    </>
-                  )}
-                </Button>
-              </div>
-            )}
-          </div>
-        </DialogHeader>
+              {/* Maximize / Minimize Fullscreen Toggle */}
+              {mode === "dialog" && (
+                <div className="flex items-center gap-2 pr-6">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setIsMaximized(!isMaximized)}
+                    className="h-8 px-2.5 text-xs gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer"
+                    title={
+                      isMaximized
+                        ? "Thu nhỏ về kích thước chuẩn"
+                        : "Mở rộng toàn màn hình"
+                    }
+                  >
+                    {isMaximized ? (
+                      <>
+                        <LuMinimize2 className="size-3.5 text-primary" />
+                        <span className="hidden sm:inline">Thu nhỏ</span>
+                      </>
+                    ) : (
+                      <>
+                        <LuMaximize2 className="size-3.5 text-primary" />
+                        <span className="hidden sm:inline">Toàn màn hình</span>
+                      </>
+                    )}
+                  </Button>
+                </div>
+              )}
+            </div>
+          </DialogHeader>
+        )}
 
         <div className="space-y-3.5 py-1 text-xs">
           {/* Role & Access Status Banner */}
@@ -883,10 +904,31 @@ export function MemberManagementDialog({
             </div>
           </div>
 
+          {memberLoadError ? (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+            >
+              <span>
+                Không tải được danh sách thành viên. {memberLoadError}
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void loadMembers()}
+                disabled={isLoading}
+                className="h-7"
+              >
+                Thử lại
+              </Button>
+            </div>
+          ) : null}
+
           {/* Toolbar: Search, Filter, Direct Provision, Bulk Provision, Invite */}
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2">
-              <div className="relative w-48 sm:w-60">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <div className="relative w-48 max-w-full sm:w-60">
                 <LuSearch className="absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
                 <Input
                   placeholder={t("members.searchPlaceholder", {
@@ -924,75 +966,64 @@ export function MemberManagementDialog({
               </Select>
             </div>
 
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setBulkCreateAccounts(false);
-                  setBulkEmailsText("");
-                  setBulkInputError(null);
-                  setBulkRole(assignableRoles[0] || "operator");
-                  setBulkResults(null);
-                  setBulkModalOpen(true);
-                }}
-                disabled={currentUserRank <= 1}
-                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-              >
-                <LuUsers className="size-3.5 text-primary" />
-                <span>
-                  {t("members.bulkProvisionButton", {
-                    defaultValue: "Mời hàng loạt",
-                  })}
-                </span>
-              </Button>
-
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setAccountCreationMode("bulk")}
-                disabled={currentUserRank <= 1}
-                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-              >
-                <LuUsers className="size-3.5" />
-                <span>Tạo account hàng loạt</span>
-              </Button>
-
-              <Button
-                size="sm"
-                onClick={() => {
-                  if (mode === "page" && onInvitePage) {
-                    onInvitePage();
-                    return;
-                  }
-                  setCreateInviteAccount(false);
-                  setGeneratedInvite(null);
-                  setInviteEmail("");
-                  setInviteUsername("");
-                  setInviteRole(assignableRoles[0] || "operator");
-                  setInviteModalOpen(true);
-                }}
-                disabled={currentUserRank <= 1}
-                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-              >
-                <LuUserPlus className="size-3.5" />
-                <span>
-                  {t("members.inviteButton", {
-                    defaultValue: "Mời Thành Viên",
-                  })}
-                </span>
-              </Button>
-
-              <Button
-                size="sm"
-                onClick={() => setAccountCreationMode("single")}
-                disabled={currentUserRank <= 1}
-                className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
-              >
-                <LuUserPlus className="size-3.5" />
-                <span>Tạo tài khoản</span>
-              </Button>
-            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  disabled={currentUserRank <= 1}
+                  className="h-8 shrink-0 gap-1.5 whitespace-nowrap text-xs font-medium"
+                >
+                  <LuUserPlus className="size-3.5" />
+                  <span>Thêm</span>
+                  <LuChevronDown className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56 text-xs">
+                <DropdownMenuItem
+                  onSelect={() => {
+                    if (mode === "page" && onInvitePage) {
+                      onInvitePage();
+                      return;
+                    }
+                    setCreateInviteAccount(false);
+                    setGeneratedInvite(null);
+                    setInviteEmail("");
+                    setInviteUsername("");
+                    setInviteRole(assignableRoles[0] || "operator");
+                    setInviteModalOpen(true);
+                  }}
+                >
+                  <LuUserPlus className="size-4" />
+                  Mời thành viên
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() => {
+                    setBulkCreateAccounts(false);
+                    setBulkEmailsText("");
+                    setBulkInputError(null);
+                    setBulkRole(assignableRoles[0] || "operator");
+                    setBulkResults(null);
+                    setBulkModalOpen(true);
+                  }}
+                >
+                  <LuUsers className="size-4" />
+                  Mời nhiều thành viên
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() => setAccountCreationMode("single")}
+                >
+                  <LuUser className="size-4" />
+                  Cấp tài khoản trực tiếp
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() => setAccountCreationMode("bulk")}
+                >
+                  <LuUsers className="size-4" />
+                  Cấp nhiều tài khoản
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
 
           {/* Members Table */}
@@ -1081,7 +1112,7 @@ export function MemberManagementDialog({
                                 handleToggleSelectMember(member.id)
                               }
                               disabled={!canManage}
-                              aria-label={`Select ${member.accountId}`}
+                              aria-label={`Chọn ${displayIdentity}`}
                             />
                           </td>
                           <td className="py-2.5 px-3">
@@ -1103,9 +1134,6 @@ export function MemberManagementDialog({
                                 </div>
                                 <div className="text-[11px] text-muted-foreground">
                                   {displayEmail}
-                                </div>
-                                <div className="text-[10px] text-muted-foreground/50 font-mono">
-                                  {member.id}
                                 </div>
                               </div>
                             </div>
@@ -1406,7 +1434,7 @@ export function MemberManagementDialog({
 
       {/* SUB-MODAL: Invite Member */}
       <Dialog open={inviteModalOpen} onOpenChange={setInviteModalOpen}>
-        <DialogContent className="max-w-md p-6">
+        <ManagementDrawerContent>
           <DialogHeader className="border-b border-border/50 pb-3">
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
               <LuUserPlus className="size-4 text-primary" />
@@ -1616,12 +1644,12 @@ export function MemberManagementDialog({
               </DialogFooter>
             </div>
           )}
-        </DialogContent>
+        </ManagementDrawerContent>
       </Dialog>
 
       {/* SUB-MODAL: Bulk Member Invitations */}
       <Dialog open={bulkModalOpen} onOpenChange={setBulkModalOpen}>
-        <DialogContent className="max-w-xl p-6">
+        <ManagementDrawerContent width="lg">
           <DialogHeader className="border-b border-border/50 pb-3">
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
               <LuUsers className="size-4 text-primary" />
@@ -1940,7 +1968,7 @@ export function MemberManagementDialog({
               </DialogFooter>
             </div>
           )}
-        </DialogContent>
+        </ManagementDrawerContent>
       </Dialog>
 
       {/* SUB-MODAL 4: Offboarding & Revocation Modal (Section 13.5) */}

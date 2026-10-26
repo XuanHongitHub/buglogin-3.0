@@ -80,6 +80,7 @@ pub fn run() {
     };
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
     let updater_configured = option_env!("BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY")
         .is_some_and(|public_key| !public_key.trim().is_empty());
@@ -429,6 +430,7 @@ pub fn run() {
             sync_features::get_sync_settings,
             sync_features::save_sync_settings,
             sync_features::request_profile_sync,
+            sync_features::profile_sync_status_get,
             sync_features::cancel_profile_sync,
             sync_features::get_unsynced_entity_counts,
             sync_features::enable_sync_for_all_entities,

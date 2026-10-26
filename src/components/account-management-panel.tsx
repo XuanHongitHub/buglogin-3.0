@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { showSuccessToast } from "@/lib/toast-utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
 import {
   type AccountAdminRecord,
@@ -94,6 +95,13 @@ export function AccountManagementPanel({
   const [results, setResults] = useState<CreateResult[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pendingStatus, setPendingStatus] = useState<{
+    record: AccountAdminRecord;
+    status: AccountStatus;
+  } | null>(null);
+  const [updatingAccountId, setUpdatingAccountId] = useState<string | null>(
+    null,
+  );
   const accountsRequestRef = useRef(0);
   const didLoadAccountsRef = useRef(false);
 
@@ -300,6 +308,8 @@ export function AccountManagementPanel({
     record: AccountAdminRecord,
     status: AccountStatus,
   ) => {
+    setUpdatingAccountId(record.account.id);
+    setActionError(null);
     try {
       const account = await desktopApi.updateAccountStatus({
         accountId: record.account.id,
@@ -311,8 +321,17 @@ export function AccountManagementPanel({
           item.account.id === account.id ? { ...item, account } : item,
         ),
       );
+      setPendingStatus(null);
+      showSuccessToast(
+        t("accountAdmin.statusUpdated", {
+          status,
+          defaultValue: `Đã đổi trạng thái tài khoản thành ${status}.`,
+        }),
+      );
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setUpdatingAccountId(null);
     }
   };
 
@@ -661,9 +680,12 @@ export function AccountManagementPanel({
                     <td className="px-3 py-3">
                       <Select
                         value={account.status}
-                        disabled={!canChange}
+                        disabled={!canChange || updatingAccountId !== null}
                         onValueChange={(value) =>
-                          void updateStatus(record, value as AccountStatus)
+                          setPendingStatus({
+                            record,
+                            status: value as AccountStatus,
+                          })
                         }
                       >
                         <SelectTrigger className="h-8 w-40">
@@ -699,6 +721,43 @@ export function AccountManagementPanel({
           </table>
         )}
       </div>
+      {pendingStatus ? (
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card px-3 py-2 text-xs">
+          <span>
+            Đổi trạng thái tài khoản{" "}
+            <strong className="font-medium">
+              {pendingStatus.record.identity?.email ??
+                pendingStatus.record.identity?.username ??
+                "đã chọn"}
+            </strong>{" "}
+            thành{" "}
+            <strong className="font-medium">{pendingStatus.status}</strong>?
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={updatingAccountId !== null}
+              onClick={() => setPendingStatus(null)}
+            >
+              Hủy
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={updatingAccountId !== null}
+              onClick={() =>
+                void updateStatus(pendingStatus.record, pendingStatus.status)
+              }
+            >
+              {updatingAccountId === pendingStatus.record.account.id
+                ? "Đang lưu…"
+                : "Xác nhận"}
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {loadError && records.length > 0 ? (
         <p role="status" className="mt-2 text-xs text-destructive">
           Làm mới thất bại; đang hiển thị dữ liệu cũ. {loadError}

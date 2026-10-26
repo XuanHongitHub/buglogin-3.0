@@ -6,16 +6,13 @@ import {
   LuArrowRight,
   LuBan,
   LuBuilding2,
-  LuCreditCard,
   LuCrown,
   LuHardDrive,
-  LuLaptop,
   LuPencil,
   LuSearch,
   LuShield,
   LuShieldCheck,
   LuSlidersHorizontal,
-  LuTriangleAlert,
   LuUserCheck,
   LuUsers,
 } from "react-icons/lu";
@@ -42,8 +39,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ManagementDrawerContent } from "@/components/ui/management-drawer";
 import {
   Select,
   SelectContent,
@@ -89,35 +94,34 @@ export interface OrgWorkspaceItem {
   id: string;
   organizationId: string;
   name: string;
-  profileCount: number | null;
   maxProfiles: number;
   memberCount: number;
   maxMembers: number;
   maxStorageBytes: number;
   offlineEntitled: boolean;
-  cloudSync: boolean;
 }
 
 interface OrgManagementCenterProps {
   mode?: "page" | "dialog";
   isOpen?: boolean;
   onClose?: () => void;
-  onNavigateHome?: () => void;
 }
 
 export function OrgManagementCenter({
   mode = "dialog",
   isOpen = true,
   onClose,
-  onNavigateHome,
 }: OrgManagementCenterProps) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<
-    "members" | "access" | "workspaces" | "resources" | "security" | "billing"
-  >("members");
+    "members" | "access" | "workspaces" | "resources"
+  >("workspaces");
 
   const [employees, setEmployees] = useState<OrgEmployee[]>([]);
   const [workspaces, setWorkspaces] = useState<OrgWorkspaceItem[]>([]);
+  const [organizations, setOrganizations] = useState<
+    Awaited<ReturnType<typeof desktopApi.listOrganizations>>["items"]
+  >([]);
   const [currentUser, setCurrentUser] = useState<{
     id: string;
     email: string;
@@ -153,12 +157,8 @@ export function OrgManagementCenter({
   const routeRef = useRef(route);
   const [routeIssue, setRouteIssue] = useState<string | null>(null);
   const [editWsModal, setEditWsModal] = useState<OrgWorkspaceItem | null>(null);
-  const [deleteWsModal, setDeleteWsModal] = useState<OrgWorkspaceItem | null>(
-    null,
-  );
 
   // Form states for Submodals
-  const [orgBillingEmail] = useState("Chưa có dữ liệu billing");
   const [orgName, setOrgName] = useState("Đang tải tổ chức…");
   const [orgId, setOrgId] = useState<string | null>(null);
   const [orgAccountId, setOrgAccountId] = useState("");
@@ -202,11 +202,6 @@ export function OrgManagementCenter({
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
-
-  const [deleteConfirmationName, setDeleteConfirmationName] = useState("");
-  const [deleteHandleProfilesAction, setDeleteHandleProfilesAction] = useState<
-    "archive" | "purge"
-  >("archive");
 
   // Workspaces multi-select & bulk actions
   const [selectedWsIds, setSelectedWsIds] = useState<Set<string>>(new Set());
@@ -415,6 +410,7 @@ export function OrgManagementCenter({
         desktopApi.getAccount(),
         desktopApi.listOrganizations(),
       ]);
+      setOrganizations(organizations.items);
       const userId = account.accountId;
       const userEmail = getActiveUserEmail() || "";
       const requestedOrg = organizations.items.find(
@@ -435,9 +431,9 @@ export function OrgManagementCenter({
         setOrgAccountId("");
         setOrgCreatedAt("");
       }
-      const workspacePages = await Promise.all(
-        organizations.items.map((org) => desktopApi.listWorkspaces(org.id)),
-      );
+      const workspacePages = primaryOrg
+        ? [await desktopApi.listWorkspaces(primaryOrg.id)]
+        : [];
       const allWorkspaces = workspacePages.flatMap((page) => page.items);
       const memberPages = await Promise.all(
         allWorkspaces.map(async (workspace) => ({
@@ -450,13 +446,11 @@ export function OrgManagementCenter({
           id: workspace.id,
           organizationId: workspace.organizationId,
           name: workspace.name,
-          profileCount: null,
           maxProfiles: workspace.policy.maxProfiles,
           memberCount: memberPages[index].page.items.length,
           maxMembers: workspace.policy.maxMembers,
           maxStorageBytes: workspace.policy.maxStorageBytes,
           offlineEntitled: workspace.policy.offlineEntitled,
-          cloudSync: false,
         }),
       );
       if (requestedRoute.workspaceId) {
@@ -520,11 +514,13 @@ export function OrgManagementCenter({
         .filter(
           (member) => member.accountId === userId && member.status === "active",
         );
+      const visibleWorkspaceIds = new Set(allWorkspaces.map(({ id }) => id));
       const workspaceRoles = Object.fromEntries(
-        account.managedWorkspaceIds.map((managedWorkspaceId) => [
-          managedWorkspaceId,
-          "owner",
-        ]),
+        account.managedWorkspaceIds
+          .filter((managedWorkspaceId) =>
+            visibleWorkspaceIds.has(managedWorkspaceId),
+          )
+          .map((managedWorkspaceId) => [managedWorkspaceId, "owner"]),
       ) as Record<string, HierarchicalRole>;
       Object.assign(
         workspaceRoles,
@@ -532,6 +528,7 @@ export function OrgManagementCenter({
           ownMemberships
             .filter(
               (member) =>
+                visibleWorkspaceIds.has(member.workspaceId) &&
                 !account.managedWorkspaceIds.includes(member.workspaceId),
             )
             .map((member) => [member.workspaceId, member.role]),
@@ -636,34 +633,6 @@ export function OrgManagementCenter({
     });
   }, [employees, workspaceFilter, searchEmployeeQuery]);
 
-  const totalProfilesUsed = workspaces.every(
-    (workspace) => workspace.profileCount !== null,
-  )
-    ? workspaces.reduce(
-        (acc, workspace) => acc + (workspace.profileCount ?? 0),
-        0,
-      )
-    : null;
-  const totalProfilesMax = workspaces.reduce(
-    (sum, workspace) => sum + workspace.maxProfiles,
-    0,
-  );
-  const profilesPercent =
-    totalProfilesUsed === null || totalProfilesMax === 0
-      ? 0
-      : Math.round((totalProfilesUsed / totalProfilesMax) * 100);
-
-  const totalMembersUsed = employees.length;
-  const totalMembersMax = workspaces.reduce(
-    (sum, workspace) => sum + workspace.maxMembers,
-    0,
-  );
-  const membersPercent =
-    totalMembersMax === 0
-      ? 0
-      : Math.round((totalMembersUsed / totalMembersMax) * 100);
-
-  const totalWorkspacesUsed = workspaces.length;
   const canManageOrganizationAccounts = canOpenOrganizationMembers({
     platformAdmin: currentUser.platformAdmin,
     organizationOwner: !!orgAccountId && currentUser.id === orgAccountId,
@@ -719,11 +688,6 @@ export function OrgManagementCenter({
     }
   };
 
-  const handleDeleteWorkspace = () =>
-    showErrorToast(
-      "Xóa workspace chưa có API; không có dữ liệu nào bị thay đổi.",
-    );
-
   const handleSaveOrganization = async () => {
     if (!orgId) return showErrorToast("Không có tổ chức để cập nhật.");
     try {
@@ -753,27 +717,45 @@ export function OrgManagementCenter({
   };
 
   const content = (
-    <div className="space-y-4 text-xs font-sans">
+    <div className="space-y-3 text-xs font-sans">
       {/* 1. Header Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 pb-3">
         <div className="flex items-center gap-3">
-          <div className="grid size-11 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs">
-            <LuCrown className="size-6 text-primary" />
+          <div className="grid size-9 place-items-center rounded-md bg-muted text-foreground">
+            <LuBuilding2 className="size-4" />
           </div>
-          <div>
+          <div className="flex min-w-0 items-center gap-2">
             {routeIssue ? (
-              <p role="status" className="mb-1 text-xs text-amber-600">
+              <p role="status" className="truncate text-xs text-amber-600">
                 {routeIssue}
               </p>
             ) : null}
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold text-foreground">
-                TRUNG TÂM QUẢN TRỊ DOANH NGHIỆP (ORGANIZATION SETTINGS)
-              </h2>
-            </div>
             <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
-              <span>Tổ Chức:</span>
-              <strong className="text-foreground">{orgName}</strong>
+              <span>Tổ chức:</span>
+              {organizations.length > 0 ? (
+                <Select
+                  value={orgId ?? undefined}
+                  onValueChange={(organizationId) =>
+                    navigateRoute({ organizationId })
+                  }
+                >
+                  <SelectTrigger
+                    aria-label="Chọn tổ chức"
+                    className="h-7 w-64 max-w-[45vw] border-0 bg-transparent px-1 text-xs font-semibold text-foreground shadow-none"
+                  >
+                    <SelectValue placeholder="Chọn tổ chức" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {organizations.map((organization) => (
+                      <SelectItem key={organization.id} value={organization.id}>
+                        {organization.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <strong className="text-foreground">{orgName}</strong>
+              )}
             </div>
           </div>
         </div>
@@ -789,98 +771,10 @@ export function OrgManagementCenter({
             <LuSlidersHorizontal className="size-3.5" />
             <span>Cài Đặt Tổ Chức</span>
           </Button>
-
-          {mode === "page" && onNavigateHome && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={onNavigateHome}
-              className="h-8 text-xs gap-1 cursor-pointer"
-            >
-              <LuArrowRight className="size-3.5" />
-              <span>Quay Lại Profiles</span>
-            </Button>
-          )}
         </div>
       </div>
 
-      {/* 2. Quota Progress Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {/* Metric 1: Profiles */}
-        <div className="rounded-lg border border-border/70 bg-card p-3 space-y-1.5 shadow-2xs">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="text-muted-foreground font-medium flex items-center gap-1.5">
-              <LuLaptop className="size-3.5 text-primary" />
-              <span>Profiles Cấp / Sử Dụng:</span>
-            </span>
-            <span className="font-bold text-foreground font-mono">
-              {totalProfilesUsed === null
-                ? "Chưa có số liệu sử dụng"
-                : `${totalProfilesUsed.toLocaleString()} / ${totalProfilesMax.toLocaleString()} (${profilesPercent}%)`}
-            </span>
-          </div>
-          <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-            <div
-              className={cn(
-                "h-full rounded-full transition-all duration-300",
-                profilesPercent >= 90 ? "bg-amber-500" : "bg-primary",
-              )}
-              style={{ width: `${profilesPercent}%` }}
-            />
-          </div>
-          <div className="text-[10px] text-muted-foreground flex justify-between">
-            <span>
-              {totalProfilesUsed === null
-                ? "API chưa trả tổng số profile"
-                : `Còn ${totalProfilesMax - totalProfilesUsed} profiles`}
-            </span>
-            <span>Hạn mức tổ chức</span>
-          </div>
-        </div>
-
-        {/* Metric 2: Members */}
-        <div className="rounded-lg border border-border/70 bg-card p-3 space-y-1.5 shadow-2xs">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="text-muted-foreground font-medium flex items-center gap-1.5">
-              <LuUsers className="size-3.5 text-primary" />
-              <span>Ghế Thành Viên (Seats):</span>
-            </span>
-            <span className="font-bold text-foreground font-mono">
-              {totalMembersUsed} / {totalMembersMax} ({membersPercent}%)
-            </span>
-          </div>
-          <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-            <div
-              className="h-full bg-primary rounded-full transition-all duration-300"
-              style={{ width: `${membersPercent}%` }}
-            />
-          </div>
-          <div className="text-[10px] text-muted-foreground flex justify-between">
-            <span>Còn {totalMembersMax - totalMembersUsed} ghế trống</span>
-            <span>Bảo vệ quyền truy cập</span>
-          </div>
-        </div>
-
-        {/* Metric 3: Workspaces */}
-        <div className="rounded-lg border border-border/70 bg-card p-3 space-y-1.5 shadow-2xs">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="text-muted-foreground font-medium flex items-center gap-1.5">
-              <LuBuilding2 className="size-3.5 text-primary" />
-              <span>Không Gian Làm Việc:</span>
-            </span>
-            <span className="font-bold text-foreground font-mono">
-              {totalWorkspacesUsed} workspace
-            </span>
-          </div>
-          <div className="text-[10px] text-muted-foreground flex justify-between">
-            <span>Hạn mức chưa có trong API</span>
-            <span>Tổ chức hiện tại</span>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. Navigation Tabs */}
+      {/* Organization scope tabs */}
       <div className="flex items-center gap-1 border-b border-border/60 pb-1">
         <button
           type="button"
@@ -938,34 +832,6 @@ export function OrgManagementCenter({
         >
           <LuHardDrive className="size-3.5" />
           <span>Tài nguyên</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab("security")}
-          className={cn(
-            "px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150 cursor-pointer flex items-center gap-1.5",
-            activeTab === "security"
-              ? "bg-accent text-accent-foreground shadow-2xs"
-              : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
-          )}
-        >
-          <LuShieldCheck className="size-3.5" />
-          <span>Chính Sách Bảo Mật Bắt Buộc</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab("billing")}
-          className={cn(
-            "px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150 cursor-pointer flex items-center gap-1.5",
-            activeTab === "billing"
-              ? "bg-accent text-accent-foreground shadow-2xs"
-              : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
-          )}
-        >
-          <LuCreditCard className="size-3.5" />
-          <span>Hóa Đơn & Gói Bản Quyền</span>
         </button>
       </div>
 
@@ -1268,13 +1134,6 @@ export function OrgManagementCenter({
                             </Badge>
                           ) : (
                             <div className="flex items-center justify-end gap-1.5">
-                              <span
-                                className="text-[10px] text-muted-foreground"
-                                title="API khôi phục mật khẩu chưa hỗ trợ; dùng luồng khôi phục tài khoản."
-                              >
-                                Đặt lại mật khẩu chưa hỗ trợ; liên hệ Platform
-                                Admin
-                              </span>
                               <Button
                                 type="button"
                                 variant={
@@ -1418,110 +1277,100 @@ export function OrgManagementCenter({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/40">
-                {workspaces.map((ws) => {
-                  const prfPercent =
-                    ws.profileCount === null || ws.maxProfiles === 0
-                      ? 0
-                      : Math.round((ws.profileCount / ws.maxProfiles) * 100);
-                  return (
-                    <tr
-                      key={ws.id}
-                      className="hover:bg-accent/40 transition-colors"
-                    >
-                      <td className="py-2.5 px-3 w-8">
-                        <Checkbox
-                          checked={selectedWsIds.has(ws.id)}
-                          onCheckedChange={() => handleToggleSelectWs(ws.id)}
-                          aria-label={`Select workspace ${ws.name}`}
-                        />
-                      </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap">
-                        <div className="font-semibold text-foreground">
-                          {ws.name}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap min-w-[150px]">
-                        <div className="flex justify-between font-mono text-[11px] mb-1">
-                          <span>
-                            {ws.profileCount === null
-                              ? `— / ${ws.maxProfiles}`
-                              : `${ws.profileCount} / ${ws.maxProfiles}`}
-                          </span>
-                          <span className="font-bold text-muted-foreground">
-                            {prfPercent}%
-                          </span>
-                        </div>
-                        <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                          <div
-                            className="h-full bg-primary rounded-full"
-                            style={{ width: `${prfPercent}%` }}
-                          />
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap font-mono text-[11px] text-muted-foreground">
-                        {ws.memberCount} / {ws.maxMembers} seats
-                      </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap">
-                        <div className="flex items-center gap-1.5">
-                          {ws.offlineEntitled && (
-                            <Badge
-                              variant="outline"
-                              className="text-[10px] text-muted-foreground gap-1"
-                            >
-                              <span>Offline OK</span>
-                            </Badge>
-                          )}
-                          {ws.cloudSync && (
-                            <Badge
-                              variant="outline"
-                              className="text-[10px] border-emerald-500/30 text-emerald-600 gap-1"
-                            >
-                              <span>Cloud Sync</span>
-                            </Badge>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <Button
-                            type="button"
+                {workspaces.map((ws) => (
+                  <tr
+                    key={ws.id}
+                    className="hover:bg-accent/40 transition-colors"
+                  >
+                    <td className="py-2.5 px-3 w-8">
+                      <Checkbox
+                        checked={selectedWsIds.has(ws.id)}
+                        onCheckedChange={() => handleToggleSelectWs(ws.id)}
+                        aria-label={`Select workspace ${ws.name}`}
+                      />
+                    </td>
+                    <td className="py-2.5 px-3 whitespace-nowrap">
+                      <div className="font-semibold text-foreground">
+                        {ws.name}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3 whitespace-nowrap font-mono text-[11px] text-muted-foreground">
+                      {ws.maxProfiles} max
+                    </td>
+                    <td className="py-2.5 px-3 whitespace-nowrap font-mono text-[11px] text-muted-foreground">
+                      {ws.memberCount} / {ws.maxMembers} seats
+                    </td>
+                    <td className="py-2.5 px-3 whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        {ws.offlineEntitled && (
+                          <Badge
                             variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              setWorkspaceDetailInviteOpen(false);
-                              setWorkspaceDetailPage(ws);
-                              navigateRoute({
-                                organizationId: ws.organizationId,
-                                workspaceId: ws.id,
-                                section: "overview",
-                              });
-                            }}
-                            className="h-7 px-2 text-[10px] gap-1 cursor-pointer font-medium"
+                            className="text-[10px] text-muted-foreground gap-1"
                           >
-                            <LuArrowRight className="size-3" />
-                            <span>Mở workspace</span>
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setEditWsModal(ws)}
-                            className="h-7 px-2 text-[10px] gap-1 cursor-pointer font-medium"
-                          >
-                            <LuPencil className="size-3" />
-                            <span>Sửa</span>
-                          </Button>
-                          <span
-                            className="text-[10px] text-muted-foreground"
-                            title="API xóa workspace chưa được hỗ trợ; liên hệ Platform Admin."
-                          >
-                            Xóa chưa hỗ trợ
-                          </span>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                            <span>Offline OK</span>
+                          </Badge>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                      <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setWorkspaceDetailInviteOpen(false);
+                            setWorkspaceDetailPage(ws);
+                            navigateRoute({
+                              organizationId: ws.organizationId,
+                              workspaceId: ws.id,
+                              section: "overview",
+                            });
+                          }}
+                          className="h-7 px-2.5 text-xs gap-1 cursor-pointer font-medium"
+                        >
+                          <LuArrowRight className="size-3" />
+                          <span>Mở workspace</span>
+                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              aria-label={`Thao tác với ${ws.name}`}
+                              className="size-7"
+                            >
+                              <LuSlidersHorizontal className="size-3.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48">
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                setWorkspaceDetailInviteOpen(false);
+                                setWorkspaceDetailPage(ws);
+                                navigateRoute({
+                                  organizationId: ws.organizationId,
+                                  workspaceId: ws.id,
+                                  section: "members",
+                                });
+                              }}
+                            >
+                              Thành viên và quyền
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onSelect={() => setEditWsModal(ws)}
+                            >
+                              <LuPencil />
+                              Sửa workspace
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -1588,91 +1437,6 @@ export function OrgManagementCenter({
       ) : null}
 
       {activeTab === "resources" && <ResourceInventoryPanel />}
-
-      {/* 6. Tab 3: Security Policies (Chính Sách Bảo Mật Bắt Buộc Toàn Công Ty) */}
-      {activeTab === "security" && (
-        <div className="rounded-lg border border-border p-4 text-sm text-muted-foreground">
-          Chính sách bảo mật tổ chức chưa có API lưu trữ. Chưa áp dụng thay đổi
-          nào.
-        </div>
-      )}
-      {/* 7. Tab 4: Billing & Tier Info */}
-      {activeTab === "billing" && (
-        <div className="rounded-lg border border-border p-4 text-sm text-muted-foreground">
-          Thông tin billing và license chưa được cung cấp bởi API của tổ chức.
-        </div>
-      )}
-      {false && activeTab === "billing" && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="rounded-lg border border-border/70 bg-card p-4 space-y-3">
-            <div className="font-semibold text-foreground text-xs flex items-center gap-2">
-              <LuCreditCard className="size-4 text-primary" />
-              <span>Gói Bản Quyền Doanh Nghiệp (PRO ENTERPRISE)</span>
-            </div>
-            <div className="space-y-2 text-xs">
-              <div className="flex justify-between py-1 border-b border-border/40">
-                <span className="text-muted-foreground">
-                  Khách hàng đăng ký:
-                </span>
-                <span className="font-semibold text-foreground">{orgName}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-border/40">
-                <span className="text-muted-foreground">
-                  Email nhận hóa đơn:
-                </span>
-                <span className="font-mono text-foreground">
-                  {orgBillingEmail}
-                </span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-border/40">
-                <span className="text-muted-foreground">Ngày hết hạn gói:</span>
-                <span className="font-semibold text-foreground">
-                  2027-12-31 (Còn 428 ngày)
-                </span>
-              </div>
-              <div className="flex justify-between py-1">
-                <span className="text-muted-foreground">
-                  Trạng thái thanh toán:
-                </span>
-                <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/30 text-[10px]">
-                  ● Đã thanh toán đầy đủ
-                </Badge>
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-border/70 bg-card p-4 space-y-3">
-            <div className="font-semibold text-foreground text-xs flex items-center gap-2">
-              <LuHardDrive className="size-4 text-primary" />
-              <span>Hạ Tầng Đám Mây & MCP Gateway Đi Kèm</span>
-            </div>
-            <div className="space-y-2 text-xs">
-              <div className="flex justify-between py-1 border-b border-border/40">
-                <span className="text-muted-foreground">
-                  Đồng bộ đám mây mã hóa (Cloud Sync):
-                </span>
-                <span className="font-medium text-emerald-500">
-                  Đã kích hoạt (Mã hóa đầu cuối)
-                </span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-border/40">
-                <span className="text-muted-foreground">
-                  Cổng kết nối MCP Server:
-                </span>
-                <span className="font-medium text-emerald-500">
-                  Sẵn sàng (Port 1420/REST)
-                </span>
-              </div>
-              <div className="flex justify-between py-1">
-                <span className="text-muted-foreground">Nhân Chromium:</span>
-                <span className="font-mono font-bold text-foreground">
-                  v132.0.6834.110 (Mới nhất)
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* SUB-MODAL: Bulk Adjust Workspace Quotas */}
       <Dialog
@@ -1760,7 +1524,7 @@ export function OrgManagementCenter({
 
       {/* SUB-MODAL: Edit Organization */}
       <Dialog open={editOrgModalOpen} onOpenChange={setEditOrgModalOpen}>
-        <DialogContent className="max-w-md p-6">
+        <ManagementDrawerContent>
           <DialogHeader className="border-b border-border/50 pb-3">
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
               <LuBuilding2 className="size-4 text-primary" />
@@ -1801,13 +1565,13 @@ export function OrgManagementCenter({
               Lưu Cài Đặt
             </Button>
           </DialogFooter>
-        </DialogContent>
+        </ManagementDrawerContent>
       </Dialog>
 
       {/* SUB-MODAL: Edit Workspace Settings (Mục 14.2) */}
       {editWsModal && (
         <Dialog open={true} onOpenChange={() => setEditWsModal(null)}>
-          <DialogContent className="max-w-md p-6">
+          <ManagementDrawerContent>
             <DialogHeader className="border-b border-border/50 pb-3">
               <DialogTitle className="text-base font-semibold flex items-center gap-2">
                 <LuBuilding2 className="size-4 text-primary" />
@@ -1906,108 +1670,7 @@ export function OrgManagementCenter({
                 Lưu Cập Nhật
               </Button>
             </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
-
-      {/* SUB-MODAL: Delete Workspace Modal (Mục 14.3) */}
-      {deleteWsModal && (
-        <Dialog open={true} onOpenChange={() => setDeleteWsModal(null)}>
-          <DialogContent className="max-w-md p-6">
-            <DialogHeader className="border-b border-border/50 pb-3">
-              <DialogTitle className="text-base font-semibold flex items-center gap-2 text-destructive">
-                <LuTriangleAlert className="size-4" />
-                <span>CẢNH BÁO: XÓA / GIẢI TÁN KHÔNG GIAN LÀM VIỆC</span>
-              </DialogTitle>
-              <DialogDescription className="text-xs text-muted-foreground">
-                Bạn đang chuẩn bị giải tán Workspace:{" "}
-                <strong>{deleteWsModal.name}</strong>
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="space-y-3 py-2 text-xs">
-              <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1.5 text-muted-foreground text-[11px]">
-                <div className="font-bold text-foreground">
-                  TÀI NGUYÊN BỊ ẢNH HƯỞNG:
-                </div>
-                <div>
-                  • {deleteWsModal.profileCount} Profiles trình duyệt đang lưu
-                  trữ
-                </div>
-                <div>
-                  • {deleteWsModal.memberCount} Thành viên sẽ bị thu hồi quyền
-                  truy cập
-                </div>
-                <div>
-                  • Mọi Proxy gán riêng cho Workspace sẽ trả về kho tự do
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-[11px] font-medium">
-                  Phương án xử lý {deleteWsModal.profileCount} Profiles:
-                </Label>
-                <div className="space-y-1">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="handleProfiles"
-                      checked={deleteHandleProfilesAction === "archive"}
-                      onChange={() => setDeleteHandleProfilesAction("archive")}
-                      className="size-3.5"
-                    />
-                    <span>Chuyển vào Kho Lưu Trữ (Archive) để giữ dữ liệu</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="handleProfiles"
-                      checked={deleteHandleProfilesAction === "purge"}
-                      onChange={() => setDeleteHandleProfilesAction("purge")}
-                      className="size-3.5"
-                    />
-                    <span className="text-destructive font-medium">
-                      Xóa sạch vĩnh viễn không thể khôi phục
-                    </span>
-                  </label>
-                </div>
-              </div>
-
-              <div className="space-y-1 pt-1">
-                <Label className="text-[11px] font-medium text-destructive">
-                  Để xác nhận, vui lòng gõ chính xác: &quot;{deleteWsModal.name}
-                  &quot;
-                </Label>
-                <Input
-                  value={deleteConfirmationName}
-                  onChange={(e) => setDeleteConfirmationName(e.target.value)}
-                  placeholder={deleteWsModal.name}
-                  className="h-8 text-xs font-mono"
-                />
-              </div>
-            </div>
-
-            <DialogFooter className="border-t border-border/50 pt-3">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setDeleteWsModal(null)}
-                className="h-8 text-xs cursor-pointer"
-              >
-                Hủy Bỏ
-              </Button>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                onClick={handleDeleteWorkspace}
-                className="h-8 text-xs font-medium cursor-pointer"
-              >
-                Tôi Hiểu Rủi Ro, Xóa Workspace Này
-              </Button>
-            </DialogFooter>
-          </DialogContent>
+          </ManagementDrawerContent>
         </Dialog>
       )}
     </div>
@@ -2087,16 +1750,28 @@ export function OrgManagementCenter({
 
   if (accountCreationPageOpen && accountWorkspaceId) {
     return (
-      <ScopedAccountCreationPage
-        workspaceId={accountWorkspaceId}
-        workspaceName={
-          workspaces.find((workspace) => workspace.id === accountWorkspaceId)
-            ?.name ?? "Workspace"
-        }
-        organizationName={orgName}
-        onBack={() => setAccountCreationPageOpen(false)}
-        onCreated={() => void loadRealData()}
-      />
+      <Dialog
+        open
+        onOpenChange={(open) => !open && setAccountCreationPageOpen(false)}
+      >
+        <ManagementDrawerContent
+          width="lg"
+          hideClose
+          className="!overflow-hidden !p-0"
+        >
+          <ScopedAccountCreationPage
+            workspaceId={accountWorkspaceId}
+            workspaceName={
+              workspaces.find(
+                (workspace) => workspace.id === accountWorkspaceId,
+              )?.name ?? "Workspace"
+            }
+            organizationName={orgName}
+            onBack={() => setAccountCreationPageOpen(false)}
+            onCreated={() => void loadRealData()}
+          />
+        </ManagementDrawerContent>
+      </Dialog>
     );
   }
 

@@ -2512,6 +2512,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_browser_file_marks_decrypted_generation_dirty() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-new-file-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_new_file").unwrap();
+        let resource = ResourceId::new("res_new_file").unwrap();
+        let profile = ProfileId::new("prf_new_file").unwrap();
+        let manifest = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let receipt = projection
+            .publish_decrypted(&profile, &manifest, Vec::new())
+            .unwrap();
+        assert!(
+            projection
+                .dirty_local_generation(&profile, &manifest)
+                .unwrap()
+                .is_none()
+        );
+        fs::create_dir_all(receipt.path.join("Default")).unwrap();
+        fs::write(receipt.path.join("Default/Cookies"), b"new browser data").unwrap();
+        assert_eq!(
+            projection
+                .dirty_local_generation(&profile, &manifest)
+                .unwrap(),
+            Some(receipt.path)
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn legacy_empty_genesis_manifest_is_hydratable() {
         let workspace = WorkspaceId::new("ws_legacy_empty_genesis").unwrap();
         let resource = ResourceId::new("res_legacy_empty_genesis").unwrap();
