@@ -1729,7 +1729,11 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
         ))
         .unwrap();
     let chunked_commit = app.clone().oneshot(chunked_commit_request).await.unwrap();
-    assert_eq!(chunked_commit.status(), StatusCode::OK);
+    assert_eq!(chunked_commit.status(), StatusCode::CONFLICT);
+    let chunked_commit: Value =
+        serde_json::from_slice(&to_bytes(chunked_commit.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(chunked_commit["code"], "profile_key_enrollment_required");
 
     let get = Request::builder()
         .method("GET")
@@ -1743,7 +1747,8 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: SyncManifest =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(body, chunked_manifest);
+    assert_eq!(body.generation, manifest.generation);
+    assert_eq!(body.objects, manifest.objects);
     let _ = fs::remove_dir_all(root);
 }
 
