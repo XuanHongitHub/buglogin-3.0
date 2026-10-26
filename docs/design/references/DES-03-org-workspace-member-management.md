@@ -1,5 +1,7 @@
 # DES-03 Reference Package: Workspace Resource & Member Management
 
+> Superseded for management screen composition and actions (2026-10-26): use [the canonical management UI/UX specification](../../superpowers/specs/2026-10-26-management-ui-ux-design.md). Earlier diagrams below are historical references. Do not implement their repeated header switcher/navigation, offline/storage quota controls, implied organization membership/suspension, or incomplete generic action forms. Runtime/resource operations outside the new management scope retain their own contracts and references.
+
 Status: approved design specification & interaction contract  
 Screen: Workspace Management Surfaces (Members, Groups, Proxies, and Audit Trail)  
 Authority: [`docs/design/ui-authority.md`](../ui-authority.md), [`DESIGN.md`](../../DESIGN.md), [`DES-02-unified-switcher-action-hub.md`](DES-02-unified-switcher-action-hub.md)  

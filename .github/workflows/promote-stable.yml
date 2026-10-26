@@ -43,6 +43,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Validate successful candidate run and source commit
         id: candidate
         shell: bash
@@ -68,6 +69,9 @@ jobs:
           mkdir -p incoming/windows incoming/macos
           gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-windows-x64-signed" --dir incoming/windows
           gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-macos-arm64-signed" --dir incoming/macos
+          COSIGN_IDENTITY='^https://github\.com/keyduc91/Malvanut-Login/\.github/workflows/(release|signing)\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
+          cosign verify-blob incoming/windows/SHA256SUMS.txt --bundle incoming/windows/provenance.sigstore.json --certificate-identity-regexp "$COSIGN_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          cosign verify-blob incoming/macos/SHA256SUMS.txt --bundle incoming/macos/provenance.sigstore.json --certificate-identity-regexp "$COSIGN_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com
           node -e 'const fs=require("node:fs");for(const [dir,platform] of [["incoming/windows","windows-x64"],["incoming/macos","macos-arm64"]]){const p=JSON.parse(fs.readFileSync(`${dir}/provenance.json`,`utf8`));if(p.source.repository!==process.env.GH_REPO||p.source.sha!==process.env.SOURCE_SHA||p.source.ref!==process.env.SOURCE_SHA||p.platform!==platform)throw Error(`${platform}: candidate provenance mismatch`)}'
           (cd incoming/windows && sha256sum --check SHA256SUMS.txt)
           (cd incoming/macos && sha256sum --check SHA256SUMS.txt)
@@ -86,8 +90,8 @@ jobs:
           node scripts/release/verify-tauri-updater-feed.mjs assembled/latest.json "$VERSION" "$GH_REPO" "$S3_PUBLIC_BASE_URL/artifacts/"
           node scripts/release/verify-downloads-manifest.mjs assembled/downloads.json "$VERSION" "$ARTIFACT_ROOT"
           mkdir -p assembled/evidence/windows assembled/evidence/macos
-          cp incoming/windows/dist.spdx.json incoming/windows/provenance.json incoming/windows/SHA256SUMS.txt assembled/evidence/windows/
-          cp incoming/macos/dist.spdx.json incoming/macos/provenance.json incoming/macos/SHA256SUMS.txt assembled/evidence/macos/
+          cp incoming/windows/dist.spdx.json incoming/windows/provenance.json incoming/windows/provenance.sigstore.json incoming/windows/SHA256SUMS.txt assembled/evidence/windows/
+          cp incoming/macos/dist.spdx.json incoming/macos/provenance.json incoming/macos/provenance.sigstore.json incoming/macos/SHA256SUMS.txt assembled/evidence/macos/
           (cd assembled && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
       - name: Upload immutable artifacts and verify public downloads
         shell: bash

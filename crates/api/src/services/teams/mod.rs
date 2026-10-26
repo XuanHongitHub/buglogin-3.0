@@ -45,6 +45,19 @@ pub struct TeamService {
 }
 
 impl TeamService {
+    pub(crate) fn remove_member_references(&mut self, workspace: &WorkspaceId, member: &MemberId) {
+        for record in self.teams.values_mut() {
+            if &record.team.workspace_id == workspace && record.team.member_ids.contains(member) {
+                record.team.member_ids.retain(|id| id != member);
+                record.revision = record.revision.saturating_add(1);
+            }
+        }
+    }
+
+    pub(crate) fn has_workspace_records(&self, workspace_id: &WorkspaceId) -> bool {
+        self.teams.values().any(|record| &record.team.workspace_id == workspace_id)
+    }
+
     pub fn create(
         &mut self,
         principal: &Principal,

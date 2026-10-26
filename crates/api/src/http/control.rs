@@ -33,7 +33,10 @@ use buglogin_network::proxy::{ProxyDelete, ProxyRecord, ProxyUpdate, RepositoryE
 use buglogin_storage::control::ControlPut;
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationScope},
-    crypto::{AuthenticatedChunk, ProxyCredentialEnvelope, ResourceKeyEnvelope},
+    crypto::{
+        AuthenticatedChunk, ManagedResourceKeyEnvelope, ProxyCredentialEnvelope,
+        ResourceKeyEnvelope,
+    },
     manifest::{MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject, SyncManifest},
 };
 use serde::{Deserialize, Serialize};
@@ -51,6 +54,11 @@ use super::{
 use crate::services::members::MemberService;
 use crate::services::profile_hosted::HostedProfileService;
 use crate::services::proxy_credentials::{credential_version, next_proxy_revision};
+
+mod management_tenancy;
+
+mod management;
+mod management_member_remove;
 
 pub(super) async fn mutate_hosted_profile_archive_state(
     state: ApiState,
@@ -341,6 +349,8 @@ struct OrganizationAccountCreateInput {
     organization_id: OrganizationId,
     account_id: AccountId,
     username: String,
+    #[serde(default)]
+    display_name: String,
     email: String,
     initial_password: String,
 }
@@ -1089,6 +1099,10 @@ struct ProxyCreateResultView {
 }
 
 pub(super) fn routes() -> Router<ApiState> {
+    routes_core().merge(management::routes())
+}
+
+fn routes_core() -> Router<ApiState> {
     Router::new()
         .route("/v1/account", get(account))
         .route("/v1/accounts", get(list_accounts).post(create_account))
@@ -1103,7 +1117,11 @@ pub(super) fn routes() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}",
-            get(get_organization).patch(update_organization),
+            get(get_organization).patch(update_organization).delete(management_tenancy::delete_organization),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/owner",
+            post(management_tenancy::transfer_owner),
         )
         .route(
             "/v1/organizations/{organization_id}/record",
@@ -1131,7 +1149,7 @@ pub(super) fn routes() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}",
-            get(get_workspace).patch(update_workspace),
+            get(get_workspace).patch(update_workspace).delete(management_tenancy::delete_workspace),
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}/record",
@@ -1233,7 +1251,7 @@ pub(super) fn routes() -> Router<ApiState> {
         )
         .route(
             "/v1/workspaces/{workspace_id}/members/{member_id}",
-            get(get_member),
+            get(get_member).delete(management_member_remove::remove_member),
         )
         .route(
             "/v1/workspaces/{workspace_id}/members/{member_id}/activate",
@@ -1677,6 +1695,8 @@ struct AccountCreateInput {
 struct ScopedAccountCreateInput {
     account_id: AccountId,
     username: String,
+    #[serde(default)]
+    display_name: String,
     email: String,
     role: MemberRole,
     initial_password: String,
@@ -1829,6 +1849,7 @@ async fn create_scoped_account(
         "account": {
             "accountId": input.account_id,
             "username": input.username,
+            "displayName": input.display_name,
             "email": input.email,
         },
         "member": member,
@@ -1874,7 +1895,7 @@ async fn create_scoped_account(
             }
         },
         || {
-            let (pending, mut account_puts) =
+            let (mut pending, mut account_puts) =
                 crate::services::account_provisioning::AccountProvisioningService::new(
                     state.control_persistence.clone(),
                 )
@@ -1885,6 +1906,7 @@ async fn create_scoped_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
+            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -2911,6 +2933,24 @@ fn encrypted_profile_device_envelope_resources(
         else {
             continue;
         };
+        if let Some(key_version) = manifest
+            .payload_encryption
+            .as_ref()
+            .and_then(|encryption| encryption.key_version.as_deref())
+            && state
+                .has_managed_profile_key_envelope(
+                    &profile.value.id,
+                    &binding.workspace_id,
+                    &binding.resource_id,
+                    key_version,
+                )
+                .map_err(response_problem)?
+        {
+            // Service-managed envelope access is authorized against the current
+            // profile ACL. Device enrollment/revocation no longer requires
+            // client-side envelope fanout or fingerprint confirmation.
+            continue;
+        }
         let recipients = HostedProfileService::effective_profile_key_recipients(
             state,
             &profile.value.id,
@@ -3614,7 +3654,7 @@ async fn create_organization_account(
             }
         },
         || {
-            let (pending, mut account_puts) =
+            let (mut pending, mut account_puts) =
                 crate::services::account_provisioning::AccountProvisioningService::new(
                     state.control_persistence.clone(),
                 )
@@ -3625,6 +3665,7 @@ async fn create_organization_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
+            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -5387,9 +5428,7 @@ async fn acquire_resource_lease(
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
-    let rotation_pending = state
-        .resource_key_rotation_pending(&workspace_id, &resource_id)
-        .map_err(response_problem)?;
+    let rotation_pending = key_rotation_blocks_resource(&state, &workspace_id, &resource_id)?;
     let (capability, action) = resource_lease_authority(rotation_pending);
     authorize_lease(
         &state,
@@ -5520,9 +5559,7 @@ async fn renew_resource_lease(
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
-    let rotation_pending = state
-        .resource_key_rotation_pending(&workspace_id, &resource_id)
-        .map_err(response_problem)?;
+    let rotation_pending = key_rotation_blocks_resource(&state, &workspace_id, &resource_id)?;
     let (capability, action) = resource_lease_authority(rotation_pending);
     authorize_lease(
         &state,
@@ -5551,6 +5588,42 @@ async fn renew_resource_lease(
         .await
         .map_err(response_problem)?;
     Ok(Json(lease))
+}
+
+fn key_rotation_blocks_resource(
+    state: &ApiState,
+    workspace_id: &WorkspaceId,
+    resource_id: &ResourceId,
+) -> Result<bool, Response> {
+    if !state
+        .resource_key_rotation_pending(workspace_id, resource_id)
+        .map_err(response_problem)?
+    {
+        return Ok(false);
+    }
+    let Some(binding) = state
+        .profile_resource_for_resource(workspace_id, resource_id)
+        .map_err(response_problem)?
+    else {
+        return Ok(true);
+    };
+    let managed_key_available = state
+        .current_sync_manifest(workspace_id, resource_id)
+        .map_err(response_problem)?
+        .and_then(|manifest| manifest.payload_encryption)
+        .and_then(|encryption| encryption.key_version)
+        .map(|key_version| {
+            state.has_managed_profile_key_envelope(
+                &binding.profile_id,
+                workspace_id,
+                resource_id,
+                &key_version,
+            )
+        })
+        .transpose()
+        .map_err(response_problem)?
+        .unwrap_or(false);
+    Ok(!managed_key_available)
 }
 
 fn resource_lease_authority(rotation_pending: bool) -> (&'static str, Action) {
@@ -6213,6 +6286,25 @@ fn validate_payload_object_wire_format(
     correlation_id: &str,
 ) -> Result<(), Response> {
     if object.key == envelope_ref.key {
+        if let Ok(envelope) = serde_json::from_slice::<ManagedResourceKeyEnvelope>(bytes) {
+            if envelope.schema_version != 1
+                || &envelope.workspace_id != workspace_id
+                || envelope.resource_id != manifest.resource_id
+                || manifest
+                    .payload_encryption
+                    .as_ref()
+                    .and_then(|encryption| encryption.key_version.as_deref())
+                    != Some(envelope.key_version.as_str())
+            {
+                return Err(problem_response(
+                    "managed_profile_key_scope_mismatch",
+                    "Managed key envelope does not match the manifest scope or key version",
+                    409,
+                    correlation_id.to_owned(),
+                ));
+            }
+            return Ok(());
+        }
         let envelope: ResourceKeyEnvelope = serde_json::from_slice(bytes).map_err(|_| {
             problem_response(
                 "resource_key_envelope_invalid",
@@ -6421,6 +6513,22 @@ fn validate_pending_key_rotation(
         .and_then(|value| value.key_version.as_ref());
     let candidate_encryption = candidate.payload_encryption.as_ref();
     let candidate_version = candidate_encryption.and_then(|value| value.key_version.as_ref());
+    if current_version == candidate_version {
+        if let Some(binding) = state
+            .profile_resource_for_resource(workspace_id, resource_id)
+            .map_err(response_problem)?
+            && state
+                .has_managed_profile_key_envelope(
+                    &binding.profile_id,
+                    workspace_id,
+                    resource_id,
+                    current_version.map(String::as_str).unwrap_or_default(),
+                )
+                .map_err(response_problem)?
+        {
+            return Ok(());
+        }
+    }
     let is_new_version = candidate_version
         .is_some_and(|version| current_version.is_none_or(|previous| previous != version));
     let uses_v2 = candidate_encryption.is_some_and(|value| {

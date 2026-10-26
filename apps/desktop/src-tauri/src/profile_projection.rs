@@ -128,11 +128,26 @@ impl ProfileProjection {
         if !path.exists() {
             return Ok(None);
         }
-        if verify_decrypted_generation(profile_id, manifest, &path).is_ok() {
-            Ok(None)
-        } else {
-            Ok(Some(path))
+        if verify_decrypted_generation(profile_id, manifest, &path).is_err() {
+            return Ok(Some(path));
         }
+        let marker_bytes = fs::read(path.join(MARKER)).map_err(|_| unavailable())?;
+        let marker: EncryptedProjectionMarker =
+            serde_json::from_slice(&marker_bytes).map_err(|_| unavailable())?;
+        let mut files = Vec::new();
+        collect_file_paths(&path, &path, &mut files)?;
+        let expected: std::collections::HashSet<&str> = marker
+            .local_objects
+            .iter()
+            .map(|object| object.path.as_str())
+            .collect();
+        if files
+            .iter()
+            .any(|(relative, _, _)| !expected.contains(relative.as_str()))
+        {
+            return Ok(Some(path));
+        }
+        Ok(None)
     }
 
     pub fn existing_local_generation(
@@ -382,6 +397,114 @@ impl ProfileProjection {
         }
     }
 
+    /// Reuses the last decrypted base generation only when a pending local
+    /// commit proves that the remote manifest is still exactly its base.
+    /// The caller must separately hold the production lease before launch.
+    pub fn verified_local_recovery_receipt(
+        &self,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+    ) -> Result<Option<ProjectionReceipt>, Problem> {
+        let commit_path = confined_path(
+            &self.root,
+            &PathBuf::from(profile_id.as_str()).join(SYNC_COMMIT_MARKER),
+        )?;
+        let marker_path = confined_path(
+            &self.root,
+            &PathBuf::from(profile_id.as_str()).join(ACTIVE_SESSION_MARKER),
+        )?;
+        let generation_path = if commit_path.exists() {
+            let bytes = fs::read(&commit_path).map_err(|_| unavailable())?;
+            let marker: SyncCommitMarker = serde_json::from_slice(&bytes).map_err(|_| {
+                problem(
+                    "profile_sync_commit_marker_invalid",
+                    "The local sync commit record is invalid; local profile data has been preserved",
+                )
+            })?;
+            if marker.profile_id != *profile_id
+                || marker.target_generation <= marker.base_generation
+                || !valid_manifest_checksum(&marker.base_root_checksum)
+                || !valid_manifest_checksum(&marker.target_root_checksum)
+                || manifest.generation != marker.base_generation
+                || manifest.root_checksum != marker.base_root_checksum
+            {
+                return Ok(None);
+            }
+            decrypted_generation_path_parts(
+                &self.root,
+                profile_id,
+                marker.base_generation,
+                &marker.base_root_checksum,
+            )?
+        } else {
+            let bytes = match fs::read(&marker_path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None);
+                }
+                Err(_) => return Err(unavailable()),
+            };
+            let marker: ActiveSessionMarker = serde_json::from_slice(&bytes).map_err(|_| {
+                problem(
+                    "profile_session_marker_invalid",
+                    "The local profile session marker is invalid; preserve the profile data and contact support",
+                )
+            })?;
+            if marker.state != "active"
+                || marker.profile_id != *profile_id
+                || marker.generation != manifest.generation
+                || marker.root_checksum != manifest.root_checksum
+            {
+                return Ok(None);
+            }
+            decrypted_generation_path(&self.root, profile_id, manifest)?
+        };
+        if !generation_path.exists() {
+            return Ok(None);
+        }
+        let generation_metadata =
+            fs::symlink_metadata(&generation_path).map_err(|_| unavailable())?;
+        if !generation_metadata.is_dir() || generation_metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+        let projection_marker_path = generation_path.join(MARKER);
+        let projection_marker_metadata =
+            fs::symlink_metadata(&projection_marker_path).map_err(|_| unavailable())?;
+        if !projection_marker_metadata.is_file()
+            || projection_marker_metadata.file_type().is_symlink()
+        {
+            return Ok(None);
+        }
+        let marker_bytes = fs::read(projection_marker_path).map_err(|_| unavailable())?;
+        let projection_marker: EncryptedProjectionMarker =
+            serde_json::from_slice(&marker_bytes).map_err(|_| unavailable())?;
+        if projection_marker.state != "complete"
+            || projection_marker.profile_id != *profile_id
+            || projection_marker.generation != manifest.generation
+            || projection_marker.remote_root_checksum != manifest.root_checksum
+        {
+            return Ok(None);
+        }
+        let mut files = Vec::new();
+        collect_file_paths(&generation_path, &generation_path, &mut files)?;
+        Ok(Some(ProjectionReceipt {
+            profile_id: profile_id.clone(),
+            generation: manifest.generation,
+            root_checksum: manifest.root_checksum.clone(),
+            path: generation_path,
+        }))
+    }
+
+    pub fn clear_active_session_marker(&self, profile_id: &ProfileId) -> Result<(), Problem> {
+        let relative = PathBuf::from(profile_id.as_str()).join(ACTIVE_SESSION_MARKER);
+        let marker_path = confined_path(&self.root, &relative)?;
+        match fs::remove_file(marker_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(unavailable()),
+        }
+    }
+
     pub fn begin_active_session(
         &self,
         profile_id: &ProfileId,
@@ -399,6 +522,20 @@ impl ProfileProjection {
         let relative = PathBuf::from(profile_id.as_str()).join(ACTIVE_SESSION_MARKER);
         let marker_path = confined_path(&self.root, &relative)?;
         if marker_path.exists() {
+            let bytes = fs::read(&marker_path).map_err(|_| unavailable())?;
+            let existing: ActiveSessionMarker = serde_json::from_slice(&bytes).map_err(|_| {
+                problem(
+                    "profile_session_marker_invalid",
+                    "The local profile session marker is invalid; preserve the profile data and contact support",
+                )
+            })?;
+            if existing.state == "active"
+                && existing.profile_id == *profile_id
+                && existing.generation == generation
+                && existing.root_checksum == root_checksum
+            {
+                return Ok(());
+            }
             return Err(problem(
                 "profile_session_already_active",
                 "A local profile session is already marked active",
@@ -644,21 +781,26 @@ impl ProfileProjection {
                 "Resource key envelope does not match the manifest",
             ));
         }
-        let recovery_key = recovery_key.ok_or_else(|| {
-            problem(
-                "sync_key_recovery_required",
-                "Enter this profile's recovery code on this device to open it",
-            )
+        let unwrapped_key = if client_key.is_none() {
+            let recovery_key = recovery_key.ok_or_else(|| {
+                problem(
+                    "sync_key_recovery_required",
+                    "This profile needs an authorized managed key delivery",
+                )
+            })?;
+            Some(envelope.unwrap(&manifest.workspace_id, &manifest.resource_id, recovery_key)?)
+        } else {
+            None
+        };
+        let key = client_key.or(unwrapped_key.as_ref()).ok_or_else(|| {
+            problem("profile_key_unavailable", "Profile key is unavailable")
         })?;
-        let unwrapped_key =
-            envelope.unwrap(&manifest.workspace_id, &manifest.resource_id, recovery_key)?;
-        if client_key.is_some_and(|key| key != &unwrapped_key) {
+        if unwrapped_key.as_ref().is_some_and(|unwrapped| client_key != Some(unwrapped)) {
             return Err(problem(
                 "workspace_key_vault_mismatch",
                 "Stored profile key does not match the active manifest",
             ));
         }
-        let key = client_key.unwrap_or(&unwrapped_key);
         if let PayloadEncryptionAlgorithm::Aes256GcmChunkV2 = encryption.algorithm {
             let expected_key_version = checksum(key.as_bytes());
             if encryption.key_version.as_deref() != Some(expected_key_version.as_str()) {
@@ -2497,6 +2639,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_browser_file_marks_decrypted_generation_dirty_with_existing_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-new-file-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_new_file").unwrap();
+        let resource = ResourceId::new("res_new_file").unwrap();
+        let profile = ProfileId::new("prf_new_file").unwrap();
+        let manifest = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let receipt = projection
+            .publish_decrypted(&profile, &manifest, Vec::new())
+            .unwrap();
+        assert!(
+            projection
+                .dirty_local_generation(&profile, &manifest)
+                .unwrap()
+                .is_none()
+        );
+        fs::create_dir_all(receipt.path.join("Default")).unwrap();
+        fs::write(receipt.path.join("Default/Cookies"), b"new browser data").unwrap();
+        assert_eq!(
+            projection
+                .dirty_local_generation(&profile, &manifest)
+                .unwrap(),
+            Some(receipt.path)
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn legacy_empty_genesis_manifest_is_hydratable() {
         let workspace = WorkspaceId::new("ws_legacy_empty_genesis").unwrap();
         let resource = ResourceId::new("res_legacy_empty_genesis").unwrap();
@@ -2643,6 +2818,39 @@ mod tests {
     }
 
     #[test]
+    fn new_browser_file_marks_decrypted_generation_dirty() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-new-file-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_new_file").unwrap();
+        let resource = ResourceId::new("res_new_file").unwrap();
+        let profile = ProfileId::new("prf_new_file").unwrap();
+        let manifest = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let receipt = projection
+            .publish_decrypted(&profile, &manifest, Vec::new())
+            .unwrap();
+        assert!(
+            projection
+                .dirty_local_generation(&profile, &manifest)
+                .unwrap()
+                .is_none()
+        );
+        fs::create_dir_all(receipt.path.join("Default")).unwrap();
+        fs::write(receipt.path.join("Default/Cookies"), b"new browser data").unwrap();
+        assert_eq!(
+            projection
+                .dirty_local_generation(&profile, &manifest)
+                .unwrap(),
+            Some(receipt.path)
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn active_session_recovery_returns_modified_generation_without_deleting_it() {
         let root = std::env::temp_dir().join(format!(
             "buglogin-projection-active-recovery-{}-{}",
@@ -2677,6 +2885,74 @@ mod tests {
             b"local dirty data"
         );
         assert!(recovered.join(MARKER).exists());
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_local_recovery_receipt_preserves_pending_sync_data_for_launch() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-verified-recovery-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_verified_recovery").unwrap();
+        let resource = ResourceId::new("res_verified_recovery").unwrap();
+        let profile = ProfileId::new("prf_verified_recovery").unwrap();
+        let base = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let target = recovery_manifest(&workspace, &resource, 2, Some(1), b"target");
+        let receipt = projection
+            .publish_decrypted(
+                &profile,
+                &base,
+                vec![("Default/Cookies".to_owned(), b"base".to_vec())],
+            )
+            .unwrap();
+        projection
+            .prepare_sync_commit(&profile, &base, &target)
+            .unwrap();
+        projection
+            .begin_active_session(&profile, base.generation, &base.root_checksum)
+            .unwrap();
+        fs::write(receipt.path.join("Default/Cookies"), b"local dirty data").unwrap();
+
+        let recovery = projection
+            .verified_local_recovery_receipt(&profile, &base)
+            .unwrap()
+            .expect("matching remote base permits local recovery launch");
+
+        assert_eq!(
+            recovery,
+            ProjectionReceipt {
+                profile_id: profile.clone(),
+                generation: base.generation,
+                root_checksum: base.root_checksum.clone(),
+                path: receipt.path.clone(),
+            }
+        );
+        assert_eq!(
+            fs::read(recovery.path.join("Default/Cookies")).unwrap(),
+            b"local dirty data"
+        );
+        assert!(
+            root.join(profile.as_str())
+                .join(SYNC_COMMIT_MARKER)
+                .exists()
+        );
+        assert!(
+            root.join(profile.as_str())
+                .join(ACTIVE_SESSION_MARKER)
+                .exists()
+        );
+
+        let newer_remote = recovery_manifest(&workspace, &resource, 3, Some(2), b"newer");
+        assert!(
+            projection
+                .verified_local_recovery_receipt(&profile, &newer_remote)
+                .unwrap()
+                .is_none()
+        );
         drop(projection);
         fs::remove_dir_all(root).unwrap();
     }

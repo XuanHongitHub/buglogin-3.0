@@ -20,6 +20,7 @@ buglogin-network = { path = "../../../crates/network" }
 buglogin-storage = { path = "../../../crates/storage" }
 buglogin-sync = { path = "../../../crates/sync" }
 async-trait = "0.1"
+httpdate = "1.0.3"
 fs2 = "0.4.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -33,9 +34,11 @@ base64 = "0.22"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 url = "2.5"
+zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 tokio = { version = "1.53", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-deep-link = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-opener = "=2.5.4"
 tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["native-tls", "zip"] }
 image = "0.25"
