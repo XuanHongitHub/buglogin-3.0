@@ -12,6 +12,7 @@ import {
   LuFolderKanban,
   LuLayers,
   LuPlus,
+  LuRefreshCw,
   LuSlidersHorizontal,
 } from "react-icons/lu";
 import { Button } from "@/components/ui/button";
@@ -53,6 +54,7 @@ interface WorkspaceSwitcherProps {
   onCreateWorkspace?: () => void;
   collapsed?: boolean;
   totalProfilesCount?: number;
+  isLoading?: boolean;
 }
 
 export function WorkspaceSwitcher({
@@ -64,6 +66,7 @@ export function WorkspaceSwitcher({
   onCreateWorkspace,
   collapsed = false,
   totalProfilesCount,
+  isLoading = false,
 }: WorkspaceSwitcherProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -239,6 +242,7 @@ export function WorkspaceSwitcher({
           size="sm"
           role="combobox"
           aria-expanded={open}
+          aria-busy={isLoading}
           aria-label={t("header.workspaceLabel", { defaultValue: "Workspace" })}
           className={cn(
             "border-border/60 bg-background/80 font-medium transition-all hover:bg-muted/80 shadow-2xs",
@@ -287,7 +291,16 @@ export function WorkspaceSwitcher({
                   ) : null}
                 </div>
               </div>
-              <LuChevronDown className="size-3.5 shrink-0 text-muted-foreground opacity-70 ml-0.5" />
+              {isLoading ? (
+                <LuRefreshCw
+                  className="ml-0.5 size-3.5 shrink-0 animate-spin text-muted-foreground"
+                  aria-label={t("common.buttons.loading", {
+                    defaultValue: "Đang tải",
+                  })}
+                />
+              ) : (
+                <LuChevronDown className="ml-0.5 size-3.5 shrink-0 text-muted-foreground opacity-70" />
+              )}
             </>
           )}
         </Button>
@@ -411,10 +424,19 @@ export function WorkspaceSwitcher({
           </div>
 
           <CommandList className="max-h-72 overflow-y-auto flex-1 min-h-0">
-            <CommandEmpty className="py-3 text-center text-xs text-muted-foreground">
-              {t("workspaceSwitcher.noWorkspaceFound", {
-                defaultValue: "Không tìm thấy không gian làm việc phù hợp.",
-              })}
+            <CommandEmpty className="flex items-center justify-center gap-2 py-3 text-center text-xs text-muted-foreground">
+              {isLoading ? (
+                <>
+                  <LuRefreshCw className="size-3 animate-spin" />
+                  {t("common.buttons.loading", {
+                    defaultValue: "Đang tải dữ liệu...",
+                  })}
+                </>
+              ) : (
+                t("workspaceSwitcher.noWorkspaceFound", {
+                  defaultValue: "Không tìm thấy không gian làm việc phù hợp.",
+                })
+              )}
             </CommandEmpty>
 
             {orgGroups.map((group) => {

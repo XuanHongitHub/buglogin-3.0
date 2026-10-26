@@ -228,6 +228,7 @@ export interface RailNavProps {
   selectedWorkspaceId?: string;
   onWorkspaceSelect?: (workspaceId: string) => void;
   onManageWorkspaces?: () => void;
+  workspaceLoading?: boolean;
   totalProfilesCount?: number;
 }
 
@@ -316,6 +317,7 @@ export function RailNav({
   selectedWorkspaceId = "",
   onWorkspaceSelect,
   onManageWorkspaces,
+  workspaceLoading = false,
   totalProfilesCount,
 }: RailNavProps) {
   const { t } = useTranslation();
@@ -497,6 +499,7 @@ export function RailNav({
             selectedWorkspaceId={selectedWorkspaceId}
             onWorkspaceSelect={onWorkspaceSelect}
             onManageWorkspaces={onManageWorkspaces}
+            isLoading={workspaceLoading}
             onOpenOrgCenter={onOpenOrgCenter ?? (() => onNavigate("orgCenter"))}
             collapsed={isCollapsed}
             totalProfilesCount={totalProfilesCount}
