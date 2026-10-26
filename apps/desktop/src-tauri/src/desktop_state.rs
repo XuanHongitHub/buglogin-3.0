@@ -4620,53 +4620,32 @@ impl ProductionDesktopState {
             };
             let mut fingerprint_warning = None;
             if let Some(target) = fingerprint_target.as_ref() {
-                let cdp_port = match fingerprint_cdp_port {
-                    Some(port) => port,
-                    None => {
-                        if let Err(mut cleanup_error) =
-                            self.profile_runtime.stop(profile_id.clone()).await
-                        {
-                            cleanup_error.correlation_id = correlation_id.clone();
-                            return Err(cleanup_error);
-                        }
-                        let _ = self.projection.clear_active_session_marker(&profile_id);
-                        return Err(Problem::new(
-                            "wayfern_cdp_unavailable",
-                            "Wayfern local control port was not configured",
-                            503,
+                let fingerprint_result = match fingerprint_cdp_port {
+                    Some(cdp_port) => {
+                        apply_wayfern_fingerprint(
+                            &profile_path,
+                            target,
+                            profile.value.runtime_version.as_deref().unwrap_or_default(),
+                            cdp_port,
                             &correlation_id,
-                        ));
+                        )
+                        .await
                     }
+                    None => Err(Problem::new(
+                        "wayfern_cdp_unavailable",
+                        "Wayfern local control port was not configured",
+                        503,
+                        &correlation_id,
+                    )),
                 };
-                match apply_wayfern_fingerprint(
-                    &profile_path,
-                    target,
-                    profile.value.runtime_version.as_deref().unwrap_or_default(),
-                    cdp_port,
-                    &correlation_id,
-                )
-                .await
-                {
-                    Ok(warning) => {
-                        if let Some(warning) = warning {
-                            crate::diagnostics::report_problem_failure(
-                                DesktopState::Production(self.clone()),
-                                "profile.fingerprint.default",
-                                warning.clone(),
-                            );
-                            fingerprint_warning = Some(warning);
-                        }
-                    }
-                    Err(error) => {
-                        if let Err(mut cleanup_error) =
-                            self.profile_runtime.stop(profile_id.clone()).await
-                        {
-                            cleanup_error.correlation_id = correlation_id.clone();
-                            return Err(cleanup_error);
-                        }
-                        let _ = self.projection.clear_active_session_marker(&profile_id);
-                        return Err(error);
-                    }
+                let warning = fingerprint_apply_warning(fingerprint_result);
+                if let Some(warning) = warning {
+                    crate::diagnostics::report_problem_failure(
+                        DesktopState::Production(self.clone()),
+                        "profile.fingerprint.default",
+                        warning.clone(),
+                    );
+                    fingerprint_warning = Some(warning);
                 }
             }
             if let Err(error) = self
@@ -7809,6 +7788,10 @@ fn launch_state_allows_start(state: &ProfileState, archived: bool, locally_runni
     matches!(state, ProfileState::Ready | ProfileState::Running)
 }
 
+fn fingerprint_apply_warning(result: Result<Option<Problem>, Problem>) -> Option<Problem> {
+    result.unwrap_or_else(Some)
+}
+
 fn result(command_id: &str, correlation_id: &str, data: Value) -> CommandResult<Value> {
     CommandResult {
         command_id: command_id.to_owned(),
@@ -7903,9 +7886,10 @@ fn production_sync_not_ready() -> Problem {
 mod tests {
     use super::{
         ConfirmedKeyRotationRecipient, DesktopState, ProxyCredentialInput, ProxyImportInput,
-        WorkspaceSelectionStore, launch_state_allows_start, local_proxy_parse,
-        production_sync_not_ready, production_transport, runtime_dispatch_operation_key,
-        shutdown_idempotency_key, validate_key_rotation_confirmation,
+        WorkspaceSelectionStore, fingerprint_apply_warning, launch_state_allows_start,
+        local_proxy_parse, production_sync_not_ready, production_transport,
+        runtime_dispatch_operation_key, shutdown_idempotency_key,
+        validate_key_rotation_confirmation,
     };
     use buglogin_api::services::{
         device_key_directory::DeviceEncryptionKey,
@@ -7949,6 +7933,19 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn fingerprint_failure_is_a_launch_warning_not_a_lifecycle_error() {
+        let error = Problem::new(
+            "wayfern_fingerprint_provider_unavailable",
+            "Wayfern fingerprint provider unavailable",
+            409,
+            "test-correlation",
+        );
+        let warning = fingerprint_apply_warning(Err(error));
+        assert!(warning.is_some());
+        assert!(fingerprint_apply_warning(Ok(None)).is_none());
     }
 
     #[test]
