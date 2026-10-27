@@ -246,7 +246,10 @@ impl ProcessController for SystemProcessController {
             })
             .unwrap_or(ProcessStatus::Unknown);
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        ProcessStatus::Unknown
+        {
+            let _ = identity;
+            ProcessStatus::Unknown
+        }
     }
     fn terminate(&self, identity: &ProcessIdentity) -> Result<(), Problem> {
         #[cfg(target_os = "windows")]
@@ -256,7 +259,10 @@ impl ProcessController for SystemProcessController {
         return MacOsProcessGroupController::system()
             .terminate(&decode_tree_identity(identity).ok_or_else(identity_unverified)?);
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        Err(identity_unverified())
+        {
+            let _ = identity;
+            Err(identity_unverified())
+        }
     }
 
     fn approve_executable(&self, path: &Path) -> Result<(), Problem> {
