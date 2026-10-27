@@ -1280,14 +1280,18 @@ impl RemoteApiClient {
         Ok(token)
     }
 
-    pub async fn logout(&self, correlation: &str) -> Result<(), Problem> {
+    pub async fn logout(
+        &self,
+        correlation: &str,
+        idempotency_key: &str,
+    ) -> Result<(), Problem> {
         let _: Value = self
             .send(
                 Method::POST,
                 "/v1/auth/logout",
                 Some(json!({})),
                 correlation,
-                None,
+                Some(idempotency_key),
                 None,
                 &[],
             )
@@ -5303,6 +5307,19 @@ mod tests {
             );
             commit_stream.write_all(response.as_bytes()).await.unwrap();
             commit_stream.write_all(unavailable).await.unwrap();
+
+            // The shared transport retries idempotent writes once after a 503.
+            let (mut retry_stream, _) = listener.accept().await.unwrap();
+            let retry_request = read_http_request(&mut retry_stream).await;
+            assert!(retry_request.starts_with(
+                "PUT /v1/workspaces/ws_reconcile/resources/res_reconcile/manifest HTTP/1.1"
+            ));
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/problem+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                unavailable.len()
+            );
+            retry_stream.write_all(response.as_bytes()).await.unwrap();
+            retry_stream.write_all(unavailable).await.unwrap();
 
             let (mut reconcile_stream, _) = listener.accept().await.unwrap();
             let reconcile_request = read_http_request(&mut reconcile_stream).await;

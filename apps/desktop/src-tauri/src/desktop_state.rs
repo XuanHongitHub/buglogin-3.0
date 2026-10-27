@@ -4,7 +4,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, MutexGuard, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -35,7 +35,7 @@ use buglogin_browser::{
 use buglogin_domain::{
     entities::{ProfileState, Runtime, SyncMode},
     errors::Problem,
-    ids::{AccountId, CredentialId, DeviceId, GrantId, ProfileId, ProxyId, WorkspaceId},
+    ids::{AccountId, CredentialId, GrantId, ProfileId, ProxyId, WorkspaceId},
     permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope},
     profile::{
         ConfirmedProfileKeyShareEnvelope, ProfileArchiveState, ProfileKeyRotationEnvelopeUpdate,
@@ -199,12 +199,14 @@ pub struct ProductionDesktopState {
     auth_refresh_uncertain: Arc<Mutex<bool>>,
     auth_refresh_gate: Arc<AsyncMutex<()>>,
     pending_sso: Arc<Mutex<Option<(Zeroizing<String>, std::time::Instant)>>>,
-    projection: ProfileProjection,
+    projection: Arc<RwLock<Option<Arc<ProfileProjection>>>>,
+    projection_root: PathBuf,
     device_key_vault: Arc<DeviceKeyVault>,
     device_key_enrolled: Arc<AtomicBool>,
     sync_key_vault: Arc<SyncKeyVault>,
     proxy_credential_vault: Arc<ProxyCredentialVault>,
-    cookies: Arc<Mutex<CookieAuthority<NativeVault>>>,
+    cookies: Arc<Mutex<Option<CookieAuthority<NativeVault>>>>,
+    cookie_authority_root: PathBuf,
     proxy_mutation_gate: Arc<AsyncMutex<()>>,
     workspace_selections: Arc<Mutex<WorkspaceSelectionStore>>,
     selected_workspace_path: PathBuf,
@@ -564,9 +566,11 @@ impl ProductionDesktopState {
         };
         let token = token.or(stored_access_token);
         let (client, auth) = production_transport(api_base_url, token)?;
+        let cookie_authority_root = profiles_root.join(".cookie-authority");
+        // Cookie storage has an exclusive process lock. A second desktop instance
+        // must still authenticate and manage accounts while the first owns it.
         let cookie_authority =
-            CookieAuthority::open(NativeVault::new(), profiles_root.join(".cookie-authority"))
-                .map_err(|error| error.as_problem("desktop-cookie-authority"))?;
+            CookieAuthority::open(NativeVault::new(), &cookie_authority_root).ok();
         let approved = runtime_targets.approved_executables()?;
         let coordination = auth.clone().map(|auth| ManagedCoordination {
             backend: Arc::new(client.clone()),
@@ -576,6 +580,8 @@ impl ProductionDesktopState {
         });
         let profile_runtime =
             spawn_profile_runtime(SystemProcessController::new(approved), coordination);
+        let projection_root = profiles_root.clone();
+        let projection = ProfileProjection::open(&projection_root).ok().map(Arc::new);
         let state = Self {
             client,
             auth: Arc::new(RwLock::new(auth)),
@@ -587,12 +593,14 @@ impl ProductionDesktopState {
             auth_refresh_uncertain: Arc::new(Mutex::new(stored_refresh_pending)),
             auth_refresh_gate: Arc::new(AsyncMutex::new(())),
             pending_sso: Arc::new(Mutex::new(None)),
-            projection: ProfileProjection::open(profiles_root)?,
+            projection: Arc::new(RwLock::new(projection)),
+            projection_root,
             device_key_vault: Arc::new(DeviceKeyVault::native()),
             device_key_enrolled: Arc::new(AtomicBool::new(false)),
             sync_key_vault: Arc::new(SyncKeyVault::native()),
             proxy_credential_vault: Arc::new(ProxyCredentialVault::native()),
             cookies: Arc::new(Mutex::new(cookie_authority)),
+            cookie_authority_root,
             proxy_mutation_gate: Arc::new(AsyncMutex::new(())),
             workspace_selections: Arc::new(Mutex::new(workspace_selections)),
             selected_workspace_path,
@@ -610,6 +618,44 @@ impl ProductionDesktopState {
             runtime_dispatch_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         Ok(state)
+    }
+
+    fn cookie_authority(
+        &self,
+        correlation_id: &str,
+    ) -> Result<MutexGuard<'_, Option<CookieAuthority<NativeVault>>>, Problem> {
+        let mut authority = self
+            .cookies
+            .lock()
+            .map_err(|_| desktop_state_problem(correlation_id))?;
+        if authority.is_none() {
+            *authority = Some(
+                CookieAuthority::open(NativeVault::new(), &self.cookie_authority_root)
+                    .map_err(|error| error.as_problem(correlation_id))?,
+            );
+        }
+        Ok(authority)
+    }
+
+    fn profile_projection(&self, correlation_id: &str) -> Result<Arc<ProfileProjection>, Problem> {
+        let mut projection = self
+            .projection
+            .write()
+            .map_err(|_| desktop_state_problem(correlation_id))?;
+        if projection.is_none() {
+            *projection = Some(
+                ProfileProjection::open(&self.projection_root)
+                    .map(Arc::new)
+                    .map_err(|mut error| {
+                        error.correlation_id = correlation_id.to_owned();
+                        error
+                    })?,
+            );
+        }
+        projection
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| desktop_state_problem(correlation_id))
     }
 
     pub fn start_background_auth_refresh(&self) {
@@ -1245,10 +1291,8 @@ impl ProductionDesktopState {
                 })
             })
             .collect::<Result<Vec<_>, Problem>>()?;
-        let mut authority = self
-            .cookies
-            .lock()
-            .map_err(|_| desktop_state_problem(correlation_id))?;
+        let mut authority_guard = self.cookie_authority(correlation_id)?;
+        let authority = authority_guard.as_mut().expect("cookie authority opened");
         authority.set_profile_state(
             scope.clone(),
             if matches!(
@@ -1425,10 +1469,8 @@ impl ProductionDesktopState {
             ));
         }
         let already_committed = {
-            let authority = self
-                .cookies
-                .lock()
-                .map_err(|_| desktop_state_problem(correlation_id))?;
+            let authority_guard = self.cookie_authority(correlation_id)?;
+            let authority = authority_guard.as_ref().expect("cookie authority opened");
             authority
                 .hosted_job_receipts()
                 .map_err(|error| error.as_problem(correlation_id))?
@@ -1495,8 +1537,8 @@ impl ProductionDesktopState {
                     correlation_id,
                 )
             })?;
-        let source_path = self
-            .projection
+        let local_projection = self.profile_projection(correlation_id)?;
+        let source_path = local_projection
             .existing_local_generation(&source_profile, &manifest)?
             .ok_or_else(|| {
                 Problem::new(
@@ -1568,10 +1610,8 @@ impl ProductionDesktopState {
             profile_id: destination_profile,
         };
         let stage_id = {
-            let mut authority = self
-                .cookies
-                .lock()
-                .map_err(|_| desktop_state_problem(correlation_id))?;
+            let mut authority_guard = self.cookie_authority(correlation_id)?;
+            let authority = authority_guard.as_mut().expect("cookie authority opened");
             authority
                 .stage_import(destination_scope, source_cookies)
                 .map_err(|error| error.as_problem(correlation_id))?
@@ -1642,10 +1682,8 @@ impl ProductionDesktopState {
             ));
         }
         let existing_receipt = {
-            let authority = self
-                .cookies
-                .lock()
-                .map_err(|_| desktop_state_problem(correlation_id))?;
+            let authority_guard = self.cookie_authority(correlation_id)?;
+            let authority = authority_guard.as_ref().expect("cookie authority opened");
             authority
                 .hosted_job_receipts()
                 .map_err(|error| error.as_problem(correlation_id))?
@@ -1666,10 +1704,8 @@ impl ProductionDesktopState {
                 ));
             }
         } else {
-            let authority = self
-                .cookies
-                .lock()
-                .map_err(|_| desktop_state_problem(correlation_id))?;
+            let authority_guard = self.cookie_authority(correlation_id)?;
+            let authority = authority_guard.as_ref().expect("cookie authority opened");
             if authority.generation(&scope_cookie) != job.expected_generation {
                 return Err(Problem::new(
                     "cookie_generation_mismatch",
@@ -1696,8 +1732,8 @@ impl ProductionDesktopState {
                     correlation_id,
                 )
             })?;
-        let profile_path = self
-            .projection
+        let local_projection = self.profile_projection(correlation_id)?;
+        let profile_path = local_projection
             .existing_local_generation(&profile_id, &manifest)?
             .ok_or_else(|| {
                 Problem::new(
@@ -1835,10 +1871,8 @@ impl ProductionDesktopState {
         let now_seconds = unix_time_seconds(correlation_id)?;
         let now_millis = unix_time_millis(correlation_id)?;
         let mutation_attempt = (|| -> Result<CookieMutationResult, Problem> {
-            let mut authority = self
-                .cookies
-                .lock()
-                .map_err(|_| desktop_state_problem(correlation_id))?;
+            let mut authority_guard = self.cookie_authority(correlation_id)?;
+            let authority = authority_guard.as_mut().expect("cookie authority opened");
             authority.set_profile_state(scope_cookie.clone(), ProfileRuntimeState::Stopped);
             authority
                 .set_current_lease(scope_cookie.clone(), cookie_lease.clone())
@@ -1945,10 +1979,9 @@ impl ProductionDesktopState {
             Ok(mutation) => mutation,
             Err(error) => {
                 let has_hosted_receipt = self
-                    .cookies
-                    .lock()
+                    .cookie_authority(correlation_id)
                     .ok()
-                    .and_then(|authority| authority.hosted_job_receipts().ok())
+                    .and_then(|authority| authority.as_ref()?.hosted_job_receipts().ok())
                     .is_some_and(|records| {
                         records.iter().any(|record| record.job.job_id == job.job_id)
                     });
@@ -1981,10 +2014,8 @@ impl ProductionDesktopState {
                 .saturating_add(mutation.report.replaced);
         }
         let listed = {
-            let authority = self
-                .cookies
-                .lock()
-                .map_err(|_| desktop_state_problem(correlation_id))?;
+            let authority_guard = self.cookie_authority(correlation_id)?;
+            let authority = authority_guard.as_ref().expect("cookie authority opened");
             authority
                 .list(&scope_cookie, &local_cookie_principal(), &[])
                 .map_err(|error| error.as_problem(correlation_id))?
@@ -2027,7 +2058,7 @@ impl ProductionDesktopState {
     }
 
     pub fn profiles_root(&self) -> &Path {
-        self.projection.root()
+        &self.projection_root
     }
 
     pub fn auth_status(&self) -> Result<DesktopAuthStatus, Problem> {
@@ -2203,7 +2234,11 @@ impl ProductionDesktopState {
         self.auth_status()
     }
 
-    pub async fn logout(&self, correlation_id: &str) -> Result<DesktopAuthStatus, Problem> {
+    pub async fn logout(
+        &self,
+        correlation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<DesktopAuthStatus, Problem> {
         self.refresh_session_if_needed(correlation_id).await?;
         let running = self.profile_runtime.running_profiles().await?;
         if !running.is_empty() {
@@ -2215,7 +2250,7 @@ impl ProductionDesktopState {
             ));
         }
         if self.client.has_token()? {
-            self.client.logout(correlation_id).await?;
+            self.client.logout(correlation_id, idempotency_key).await?;
         }
         self.profile_runtime.set_coordination(None).await?;
         self.client.clear_token()?;
@@ -2680,9 +2715,13 @@ impl ProductionDesktopState {
                 let local_changes_pending = manifest
                     .as_ref()
                     .map(|manifest| {
-                        self.projection
-                            .dirty_local_generation(&profile_id, manifest)
-                            .map(|path| path.is_some())
+                        match self.profile_projection(correlation_id) {
+                            Ok(projection) => projection
+                                .dirty_local_generation(&profile_id, manifest)
+                                .map(|path| path.is_some()),
+                            Err(error) if error.code == "profile_projection_in_use" => Ok(true),
+                            Err(error) => Err(error),
+                        }
                     })
                     .transpose()?
                     .unwrap_or(false);
@@ -4015,6 +4054,7 @@ impl ProductionDesktopState {
         idempotency_key: String,
         correlation_id: String,
     ) -> Result<Value, Problem> {
+        let local_projection = self.profile_projection(&correlation_id)?;
         let auth = self.auth(&correlation_id)?;
         let mut profile = self.client.profile(&profile_id, &correlation_id).await?;
         // Reconcile the process table before deciding whether this profile is
@@ -4254,11 +4294,9 @@ impl ProductionDesktopState {
             .profile_proxy_assignment(&binding.workspace_id, &profile_id, &correlation_id)
             .await?;
         let stale_proxy_dependency = manifest_proxy_stale || pending_proxy_assignment.is_some();
-        let recovery_path = self
-            .projection
+        let recovery_path = local_projection
             .active_session_recovery_path(&profile_id, &manifest)?
-            .or(self
-                .projection
+            .or(local_projection
                 .dirty_local_generation(&profile_id, &manifest)?);
         let mut deferred_recovery_error = None;
         let mut local_recovery_receipt = None;
@@ -4320,8 +4358,7 @@ impl ProductionDesktopState {
                     if current != manifest {
                         return Err(error);
                     }
-                    local_recovery_receipt = self
-                        .projection
+                    local_recovery_receipt = local_projection
                         .verified_local_recovery_receipt(&profile_id, &current)?;
                     let Some(_) = local_recovery_receipt else {
                         return Err(error);
@@ -4414,7 +4451,7 @@ impl ProductionDesktopState {
                 if let Some(receipt) = local_recovery_receipt.clone() {
                     (receipt, Vec::new())
                 } else {
-                    self.projection
+                    local_projection
                         .hydrate_encrypted_with_proxy_credentials(
                             &self.client,
                             &auth,
@@ -4633,8 +4670,7 @@ impl ProductionDesktopState {
             let runtime_key = runtime_projection_idempotency_key(&idempotency_key, "started");
             let lease_for_projection = lease.clone();
             if let Err(error) =
-                self.projection
-                    .begin_active_session(&profile_id, generation, &root_checksum)
+                local_projection.begin_active_session(&profile_id, generation, &root_checksum)
             {
                 if let Some(bridge) = proxy_bridge.take() {
                     let _ = bridge.stop().await;
@@ -4663,7 +4699,7 @@ impl ProductionDesktopState {
             {
                 Ok(receipt) => receipt,
                 Err(mut error) => {
-                    let _ = self.projection.clear_active_session_marker(&profile_id);
+                    let _ = local_projection.clear_active_session_marker(&profile_id);
                     error.correlation_id = correlation_id.clone();
                     return Err(error);
                 }
@@ -4679,7 +4715,7 @@ impl ProductionDesktopState {
                             cleanup_error.correlation_id = correlation_id.clone();
                             return Err(cleanup_error);
                         }
-                        let _ = self.projection.clear_active_session_marker(&profile_id);
+                        let _ = local_projection.clear_active_session_marker(&profile_id);
                         return Err(Problem::new(
                             "wayfern_cdp_unavailable",
                             "Wayfern local control port was not configured",
@@ -4714,7 +4750,7 @@ impl ProductionDesktopState {
                             cleanup_error.correlation_id = correlation_id.clone();
                             return Err(cleanup_error);
                         }
-                        let _ = self.projection.clear_active_session_marker(&profile_id);
+                        let _ = local_projection.clear_active_session_marker(&profile_id);
                         return Err(error);
                     }
                 }
@@ -4927,6 +4963,7 @@ impl ProductionDesktopState {
         preacquired_lease: Option<LeaseGrant>,
         mut preheld_stop: Option<StopReceipt>,
     ) -> Result<Value, Problem> {
+        let local_projection = self.profile_projection(&correlation_id)?;
         let binding = self
             .client
             .profile_binding(&profile_id, &correlation_id)
@@ -5103,7 +5140,7 @@ impl ProductionDesktopState {
         let dirty_local_path = if browser_was_running {
             None
         } else {
-            self.projection
+            local_projection
                 .dirty_local_generation(&profile_id, &previous)?
         };
         let proxy_refresh_required = stale_proxy_dependency || pending_proxy_assignment.is_some();
@@ -5153,7 +5190,7 @@ impl ProductionDesktopState {
         let local_sync_path = if browser_was_running {
             None
         } else if proxy_refresh_required || preacquired_lease.is_some() {
-            self.projection
+            local_projection
                 .existing_local_generation(&profile_id, &previous)?
                 .or(dirty_local_path)
         } else {
@@ -5418,7 +5455,7 @@ impl ProductionDesktopState {
                     &correlation_id,
                 )
                 .await?;
-            let (descriptor, files, manifest) = self.projection.snapshot_with_proxy_encryption(
+            let (descriptor, files, manifest) = local_projection.snapshot_with_proxy_encryption(
                 &stopped.profile_path,
                 &previous,
                 lease.fencing_token,
@@ -5438,7 +5475,7 @@ impl ProductionDesktopState {
                 &correlation_id,
             )
             .await?;
-            self.projection
+            local_projection
                 .prepare_sync_commit(&profile_id, &previous, &manifest)?;
             if let Some(envelopes) = rotation_envelopes.as_ref() {
                 self.client
@@ -5483,7 +5520,7 @@ impl ProductionDesktopState {
                     &correlation_id,
                 ));
             }
-            self.projection.clear_active_session(&profile_id)?;
+            local_projection.clear_active_session(&profile_id)?;
             let key_rotation_error = if rotation_envelopes.is_some() {
                 if rotation_keys.is_some() {
                     self.sync_key_vault
@@ -6152,6 +6189,7 @@ impl ProductionDesktopState {
         idempotency_key: String,
         correlation_id: String,
     ) -> Result<Value, Problem> {
+        let local_projection = self.profile_projection(&correlation_id)?;
         let binding = self
             .client
             .profile_binding(&profile_id, &correlation_id)
@@ -6223,8 +6261,7 @@ impl ProductionDesktopState {
             )
             .await?;
         if let Err(error) =
-            self.projection
-                .stage_legacy_profile_data(&profile_id, &current, &source_root)
+            local_projection.stage_legacy_profile_data(&profile_id, &current, &source_root)
         {
             let _ = self
                 .client
@@ -6278,6 +6315,7 @@ impl ProductionDesktopState {
         idempotency_key: &str,
         correlation_id: &str,
     ) -> Result<StopReceipt, Problem> {
+        let local_projection = self.profile_projection(correlation_id)?;
         let (previous, stale_proxy_dependency) = match self
             .client
             .current_manifest(scope.clone(), &binding.resource_id)
@@ -6346,7 +6384,7 @@ impl ProductionDesktopState {
             )?
         };
         let hydration = if stale_proxy_dependency {
-            self.projection
+            local_projection
                 .hydrate_encrypted_with_proxy_credentials_for_repair(
                     &self.client,
                     scope.auth,
@@ -6358,7 +6396,7 @@ impl ProductionDesktopState {
                 )
                 .await
         } else {
-            self.projection
+            local_projection
                 .hydrate_encrypted_with_proxy_credentials(
                     &self.client,
                     scope.auth,
@@ -7331,10 +7369,14 @@ impl DesktopState {
         }
     }
 
-    pub async fn logout(&self, correlation_id: &str) -> Result<DesktopAuthStatus, Problem> {
+    pub async fn logout(
+        &self,
+        correlation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<DesktopAuthStatus, Problem> {
         match self {
             Self::Local(_) => Err(auth_not_applicable(correlation_id)),
-            Self::Production(state) => state.logout(correlation_id).await,
+            Self::Production(state) => state.logout(correlation_id, idempotency_key).await,
             Self::Unavailable(problem) => Err(problem.clone()),
         }
     }

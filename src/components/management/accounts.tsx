@@ -24,6 +24,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -42,6 +50,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -204,6 +217,104 @@ function MultiScope({
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function WorkspaceTagPicker({
+  options,
+  selected,
+  onChange,
+  label,
+  disabled,
+  unavailableIds = [],
+}: {
+  options: { id: string; name: string }[];
+  selected: string[];
+  onChange: (items: string[]) => void;
+  label: string;
+  disabled?: boolean;
+  unavailableIds?: string[];
+}) {
+  const { t } = useTranslation("managementAccounts");
+  const [open, setOpen] = useState(false);
+  const chosen = options.filter((item) => selected.includes(item.id));
+  return (
+    <div className="flex min-h-9 min-w-0 flex-wrap items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1.5 focus-within:ring-2 focus-within:ring-ring">
+      {chosen.map((item) => (
+        <Badge
+          key={item.id}
+          variant="secondary"
+          className="max-w-full gap-1 pr-1 font-normal"
+        >
+          <span className="truncate">{item.name}</span>
+          {!disabled ? (
+            <button
+              type="button"
+              aria-label={t("removeWorkspace", { name: item.name })}
+              className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => onChange(selected.filter((id) => id !== item.id))}
+            >
+              <LuX className="size-3" />
+            </button>
+          ) : null}
+        </Badge>
+      ))}
+      <Popover open={open} onOpenChange={disabled ? undefined : setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 shrink-0 gap-1 px-2 text-muted-foreground"
+            disabled={disabled || options.length === 0}
+            aria-expanded={open}
+          >
+            <LuPlus className="size-3.5" />
+            {label}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-72 p-0">
+          <Command>
+            <CommandInput placeholder={t("searchWorkspace")} />
+            <CommandList>
+              <CommandEmpty>{t("noResults")}</CommandEmpty>
+              <CommandGroup>
+                {options.map((item) => {
+                  const isSelected = selected.includes(item.id);
+                  const unavailable = unavailableIds.includes(item.id);
+                  return (
+                    <CommandItem
+                      key={item.id}
+                      value={`${item.name} ${item.id}`}
+                      disabled={unavailable}
+                      onSelect={() =>
+                        onChange(
+                          isSelected
+                            ? selected.filter((id) => id !== item.id)
+                            : [...selected, item.id],
+                        )
+                      }
+                    >
+                      <LuCheck
+                        className={`size-4 shrink-0 ${isSelected ? "opacity-100" : "opacity-0"}`}
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {item.name}
+                      </span>
+                      {unavailable ? (
+                        <span className="text-xs text-muted-foreground">
+                          {t("alreadyAssigned")}
+                        </span>
+                      ) : null}
+                    </CommandItem>
+                  );
+                })}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
   );
 }
 
@@ -998,7 +1109,7 @@ export function AccountProvisioning({
             <>
               <p className="text-sm text-muted-foreground">{t("scopeHint")}</p>
               <div className="grid gap-3 rounded-lg border border-border p-3 lg:grid-cols-4">
-                <MultiScope
+                <WorkspaceTagPicker
                   label={t("selectWorkspace")}
                   options={workspaces}
                   selected={defaultWorkspaceIds}
@@ -1053,7 +1164,7 @@ export function AccountProvisioning({
                           </span>
                         </td>
                         <td className={td}>
-                          <MultiScope
+                          <WorkspaceTagPicker
                             label={t("selectWorkspace")}
                             options={workspaces}
                             selected={row.workspaceIds}
@@ -1339,6 +1450,7 @@ type DirectoryEntry = {
   orgStatus?: string;
   identity?: AccountIdentity;
   accountRevision?: number;
+  workspaceIds: string[];
   workspaceNames: string[];
   orgMemberId?: string;
   orgRevision?: number;
@@ -1381,7 +1493,6 @@ export function AccountDirectory({
   >({});
   const [editResults, setEditResults] = useState<Record<string, string>>({});
   const [assigning, setAssigning] = useState(false);
-  const [assignWorkspace, setAssignWorkspace] = useState("");
   const [assignRole, setAssignRole] = useState<MemberRole>("member");
   const [status, setStatus] = useState<AccountStatus>();
   const [orgStatus, setOrgStatus] = useState<"active" | "suspended">();
@@ -1406,6 +1517,7 @@ export function AccountDirectory({
             status: item.account.status,
             accountRevision: item.account.revision,
             identity: item.identity ?? undefined,
+            workspaceIds: [],
             workspaceNames: [],
           });
       }
@@ -1428,6 +1540,7 @@ export function AccountDirectory({
             email: item.email,
             status: map.get(item.accountId)?.status ?? item.status,
             orgStatus: item.status,
+            workspaceIds: [],
             workspaceNames: [],
             orgMemberId: item.id,
             orgRevision: item.revision,
@@ -1444,15 +1557,17 @@ export function AccountDirectory({
           if (result.status === "fulfilled")
             for (const member of result.value.members) {
               const existing = map.get(member.accountId);
-              if (existing)
+              if (existing) {
+                existing.workspaceIds.push(result.value.workspace.id);
                 existing.workspaceNames.push(result.value.workspace.name);
-              else
+              } else
                 map.set(member.accountId, {
                   accountId: member.accountId,
                   username: member.identity?.username ?? "",
                   displayName: "",
                   email: member.identity?.email ?? "",
                   status: member.status,
+                  workspaceIds: [result.value.workspace.id],
                   workspaceNames: [result.value.workspace.name],
                 });
             }
@@ -1470,6 +1585,7 @@ export function AccountDirectory({
               displayName: "",
               email: member.identity?.email ?? "",
               status: member.status,
+              workspaceIds: [workspaceId],
               workspaceNames: [],
             });
       }
@@ -1492,6 +1608,18 @@ export function AccountDirectory({
   const selectedEntries = entries.filter((entry) =>
     selected.includes(entry.accountId),
   );
+  const assignableWorkspaces = workspaces.filter(
+    (workspace) =>
+      viewer?.platformAdmin ||
+      viewer?.managedWorkspaceIds.includes(workspace.id),
+  );
+  const unavailableWorkspaceIds = assignableWorkspaces
+    .filter((workspace) =>
+      selectedEntries.every((entry) =>
+        entry.workspaceIds.includes(workspace.id),
+      ),
+    )
+    .map((workspace) => workspace.id);
   const editable = (entry: DirectoryEntry) =>
     viewer?.platformAdmin || viewer?.accountId === entry.accountId;
   const canAssignWorkspace = (entry: DirectoryEntry) =>
@@ -1658,21 +1786,31 @@ export function AccountDirectory({
     }
   }
   async function assign() {
+    const targets = selectedEntries.flatMap((entry) =>
+      assignWorkspaceIds
+        .filter((id) => !entry.workspaceIds.includes(id))
+        .map((workspaceId) => ({ entry, workspaceId })),
+    );
+    if (!targets.length) {
+      setError(t("allWorkspacesAssigned"));
+      return;
+    }
     setPending(true);
     setError("");
     try {
       const result = await api.managementBatch(
         {
-          items: selectedEntries
+          items: targets
             .filter(
-              (entry) => entry.orgMemberId && entry.orgRevision !== undefined,
+              ({ entry }) =>
+                entry.orgMemberId && entry.orgRevision !== undefined,
             )
-            .map((entry) => ({
-              key: entry.accountId,
+            .map(({ entry, workspaceId }) => ({
+              key: `${entry.accountId}:${workspaceId}`,
               commandId: "organization.member.workspace.assign",
               input: {
                 organizationId,
-                workspaceId: assignWorkspace,
+                workspaceId,
                 organizationMemberId: entry.orgMemberId,
                 organizationMemberRevision: entry.orgRevision,
                 role: assignRole,
@@ -1683,9 +1821,23 @@ export function AccountDirectory({
       );
       setOutcomes(
         result.items.map((item) => ({
-          label:
-            entries.find((entry) => entry.accountId === item.key)?.username ||
-            t("accounts"),
+          label: (() => {
+            const target = targets.find(
+              ({ entry, workspaceId }) =>
+                `${entry.accountId}:${workspaceId}` === item.key,
+            );
+            const accountName =
+              target?.entry.displayName ||
+              target?.entry.username ||
+              target?.entry.email ||
+              t("accounts");
+            const workspaceName = workspaces.find(
+              (workspace) => workspace.id === target?.workspaceId,
+            )?.name;
+            return workspaceName
+              ? `${accountName} · ${workspaceName}`
+              : accountName;
+          })(),
           result:
             item.status === "succeeded"
               ? t("success")
@@ -1774,7 +1926,10 @@ export function AccountDirectory({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setAssigning(true)}
+              onClick={() => {
+                setAssignWorkspaceIds([]);
+                setAssigning(true);
+              }}
             >
               {t("assignWorkspace")}
             </Button>
@@ -1941,6 +2096,7 @@ export function AccountDirectory({
                                 <DropdownMenuItem
                                   onSelect={() => {
                                     setSelected([entry.accountId]);
+                                    setAssignWorkspaceIds([]);
                                     setAssigning(true);
                                   }}
                                 >
@@ -2198,22 +2354,29 @@ export function AccountDirectory({
           <DialogHeader>
             <DialogTitle>{t("assignWorkspace")}</DialogTitle>
             <DialogDescription>
-              {t("selected", { count: selected.length })}
+              {t("assignWorkspacePreview", {
+                accounts: selected.length,
+                workspaces: assignWorkspaceIds.length,
+                assignments: selectedEntries.reduce(
+                  (count, entry) =>
+                    count +
+                    assignWorkspaceIds.filter(
+                      (id) => !entry.workspaceIds.includes(id),
+                    ).length,
+                  0,
+                ),
+              })}
             </DialogDescription>
           </DialogHeader>
           <AccountError message={error} />
-          <Select value={assignWorkspace} onValueChange={setAssignWorkspace}>
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder={t("selectWorkspace")} />
-            </SelectTrigger>
-            <SelectContent>
-              {workspaces.map((item) => (
-                <SelectItem key={item.id} value={item.id}>
-                  {item.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <WorkspaceTagPicker
+            label={t("addWorkspace")}
+            options={assignableWorkspaces}
+            selected={assignWorkspaceIds}
+            onChange={setAssignWorkspaceIds}
+            unavailableIds={unavailableWorkspaceIds}
+            disabled={pending}
+          />
           <RolePicker value={assignRole} onChange={setAssignRole} />
           <p className="text-xs text-muted-foreground">{t("roleHint")}</p>
           <DialogFooter>
@@ -2225,10 +2388,19 @@ export function AccountDirectory({
               {t("cancel")}
             </Button>
             <Button
-              disabled={pending || !assignWorkspace || !selected.length}
+              disabled={
+                pending ||
+                !assignWorkspaceIds.length ||
+                !selected.length ||
+                unavailableWorkspaceIds.length === assignWorkspaceIds.length
+              }
               onClick={() => void assign()}
             >
-              {pending ? t("processing") : t("assign")}
+              {pending
+                ? t("processing")
+                : t("assignWorkspaceCount", {
+                    count: assignWorkspaceIds.length,
+                  })}
             </Button>
           </DialogFooter>
         </DialogContent>

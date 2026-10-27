@@ -43,14 +43,17 @@ export function ExtensionGroupAssignmentDialog({
 }: ExtensionGroupAssignmentDialogProps) {
   const { t } = useTranslation();
   const [groups, setGroups] = useState<ExtensionGroup[]>([]);
-  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isAssigning, setIsAssigning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [completedProfiles, setCompletedProfiles] = useState<string[]>([]);
+  const [failedProfiles, setFailedProfiles] = useState<string[]>([]);
 
   const loadGroups = useCallback(async () => {
     setIsLoading(true);
-    setError(null);
+    setGroupsError(null);
     try {
       if (!workspaceId) throw new Error("Select a workspace first.");
       const groupList = await invoke<ExtensionGroup[]>(
@@ -60,7 +63,7 @@ export function ExtensionGroupAssignmentDialog({
       setGroups(groupList);
     } catch (err) {
       console.error("Failed to load extension groups:", err);
-      setError(
+      setGroupsError(
         err instanceof Error ? err.message : t("extensions.loadGroupsFailed"),
       );
     } finally {
@@ -71,30 +74,67 @@ export function ExtensionGroupAssignmentDialog({
   const handleAssign = useCallback(async () => {
     setIsAssigning(true);
     setError(null);
-    try {
-      for (const profileId of selectedProfiles) {
+    const pendingProfiles = failedProfiles.length
+      ? failedProfiles
+      : selectedProfiles.filter(
+          (profileId) => !completedProfiles.includes(profileId),
+        );
+    const failures: string[] = [];
+    const failureReasons: string[] = [];
+    for (const profileId of pendingProfiles) {
+      try {
         await invoke("assign_extension_group_to_profile", {
           workspaceId,
           profileId,
-          extensionGroupId: selectedGroupId,
+          extensionGroupId:
+            selectedGroupId === "__no_group__" ? null : selectedGroupId,
         });
+        setCompletedProfiles((current) =>
+          current.includes(profileId) ? current : [...current, profileId],
+        );
+      } catch (err) {
+        failures.push(profileId);
+        const reason =
+          err &&
+          typeof err === "object" &&
+          "code" in err &&
+          err.code === "api_unavailable"
+            ? t("extensions.apiUnavailable")
+            : err instanceof Error
+              ? err.message
+              : typeof err === "string"
+                ? err
+                : err && typeof err === "object" && "title" in err
+                  ? String(err.title)
+                  : t("extensions.assignGroupFailed");
+        if (!failureReasons.includes(reason)) failureReasons.push(reason);
       }
-
-      toast.success(t("extensions.assignSuccess"));
+    }
+    setFailedProfiles(failures);
+    if (failures.length) {
+      setError(
+        t("extensions.assignPartial", {
+          succeeded:
+            completedProfiles.length + pendingProfiles.length - failures.length,
+          failed: failures.length,
+          reason: failureReasons[0] ?? t("extensions.assignGroupFailed"),
+        }),
+      );
+    } else {
+      toast.success(
+        t("extensions.assignSuccess", {
+          count: completedProfiles.length + pendingProfiles.length,
+        }),
+      );
       onAssignmentComplete();
       onClose();
-    } catch (err) {
-      console.error("Failed to assign extension group:", err);
-      const errorMessage =
-        err instanceof Error ? err.message : t("extensions.assignGroupFailed");
-      setError(errorMessage);
-      toast.error(errorMessage);
-    } finally {
-      setIsAssigning(false);
     }
+    setIsAssigning(false);
   }, [
     selectedProfiles,
     selectedGroupId,
+    completedProfiles,
+    failedProfiles,
     workspaceId,
     onAssignmentComplete,
     onClose,
@@ -104,8 +144,11 @@ export function ExtensionGroupAssignmentDialog({
   useEffect(() => {
     if (isOpen) {
       void loadGroups();
-      setSelectedGroupId(null);
+      setSelectedGroupId("");
+      setCompletedProfiles([]);
+      setFailedProfiles([]);
       setError(null);
+      setGroupsError(null);
     }
   }, [isOpen, loadGroups]);
 
@@ -130,9 +173,32 @@ export function ExtensionGroupAssignmentDialog({
                   const profile = profiles.find(
                     (p: BrowserProfile) => p.id === profileId,
                   );
-                  const displayName = profile ? profile.name : profileId;
+                  const displayName =
+                    profile?.name || t("extensions.profileUnavailable");
                   return (
-                    <li key={profileId} className="truncate">
+                    <li
+                      key={profileId}
+                      className="flex min-w-0 items-center gap-2 truncate"
+                    >
+                      {completedProfiles.includes(profileId) ? (
+                        <>
+                          <span className="text-primary" aria-hidden="true">
+                            ✓
+                          </span>
+                          <span className="sr-only">
+                            {t("extensions.assignmentDone")}
+                          </span>
+                        </>
+                      ) : failedProfiles.includes(profileId) ? (
+                        <>
+                          <span className="text-destructive" aria-hidden="true">
+                            !
+                          </span>
+                          <span className="sr-only">
+                            {t("extensions.assignmentFailed")}
+                          </span>
+                        </>
+                      ) : null}
                       • {displayName}
                     </li>
                   );
@@ -151,16 +217,14 @@ export function ExtensionGroupAssignmentDialog({
               </div>
             ) : (
               <Select
-                value={selectedGroupId ?? "none"}
-                onValueChange={(value) => {
-                  setSelectedGroupId(value === "none" ? null : value);
-                }}
+                value={selectedGroupId || undefined}
+                onValueChange={setSelectedGroupId}
               >
-                <SelectTrigger>
-                  <SelectValue />
+                <SelectTrigger disabled={isAssigning}>
+                  <SelectValue placeholder={t("extensions.chooseGroup")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">
+                  <SelectItem value="__no_group__">
                     {t("extensions.noGroup")}
                   </SelectItem>
                   {groups.map((group) => (
@@ -171,11 +235,36 @@ export function ExtensionGroupAssignmentDialog({
                 </SelectContent>
               </Select>
             )}
+            {groupsError ? (
+              <div
+                role="alert"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+              >
+                <span className="min-w-0 break-words">{groupsError}</span>
+                <RippleButton
+                  variant="outline"
+                  onClick={() => void loadGroups()}
+                  disabled={isLoading || isAssigning}
+                >
+                  {t("common.buttons.retry")}
+                </RippleButton>
+              </div>
+            ) : null}
           </div>
 
           {error && (
-            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive-text">
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+            >
               {error}
+              {failedProfiles.length > 0 ? (
+                <p className="mt-1 text-xs">
+                  {t("extensions.retryOnlyFailed", {
+                    count: failedProfiles.length,
+                  })}
+                </p>
+              ) : null}
             </div>
           )}
         </div>
@@ -191,9 +280,16 @@ export function ExtensionGroupAssignmentDialog({
           <LoadingButton
             isLoading={isAssigning}
             onClick={() => void handleAssign()}
-            disabled={isLoading}
+            disabled={
+              isLoading ||
+              Boolean(groupsError) ||
+              selectedGroupId === "" ||
+              selectedProfiles.length === 0
+            }
           >
-            {t("common.buttons.apply")}
+            {failedProfiles.length > 0
+              ? t("extensions.retryFailedProfiles")
+              : t("common.buttons.apply")}
           </LoadingButton>
         </DialogFooter>
       </DialogContent>

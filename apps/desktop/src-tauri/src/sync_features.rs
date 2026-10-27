@@ -230,8 +230,16 @@ pub async fn cloud_exchange_device_code(code: String) -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn cloud_logout(state: State<'_, DesktopState>) -> Result<(), String> {
+    let idempotency_key = format!(
+        "cloud-logout-{}-{}",
+        now_secs(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
     state
-        .logout("cor_logout")
+        .logout("cor_logout", &idempotency_key)
         .await
         .map(|_| ())
         .map_err(|e| e.title)

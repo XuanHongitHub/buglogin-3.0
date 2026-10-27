@@ -70,6 +70,13 @@ const vi = {
   scopeHint:
     "Quyền được kiểm tra lại ở server khi tạo. Chỉ chọn các phạm vi bạn được quản lý.",
   addWorkspace: "Thêm workspace",
+  searchWorkspace: "Tìm workspace…",
+  removeWorkspace: "Xóa workspace {{name}}",
+  alreadyAssigned: "Đã cấp",
+  assignWorkspacePreview:
+    "{{accounts}} tài khoản · {{workspaces}} workspace · {{assignments}} lượt cấp mới",
+  assignWorkspaceCount: "Cấp {{count}} workspace",
+  allWorkspacesAssigned: "Các tài khoản đã có đủ những workspace đã chọn.",
   groupHint:
     "Cấp đọc và sử dụng profile thuộc nhóm; quyền quản lý vẫn theo role và policy.",
   noGroup: "Chưa chọn nhóm",
@@ -281,6 +288,14 @@ const en: Record<keyof typeof vi, string> = {
   scopeHint:
     "The server checks access again when creating accounts. Select only scopes you can manage.",
   addWorkspace: "Add workspace",
+  searchWorkspace: "Search workspaces…",
+  removeWorkspace: "Remove workspace {{name}}",
+  alreadyAssigned: "Already assigned",
+  assignWorkspacePreview:
+    "{{accounts}} accounts · {{workspaces}} workspaces · {{assignments}} new assignments",
+  assignWorkspaceCount: "Assign {{count}} workspaces",
+  allWorkspacesAssigned:
+    "The selected accounts already have all selected workspaces.",
   groupHint:
     "Grant read and profile use for the group; management capabilities still depend on role and policy.",
   noGroup: "No group selected",

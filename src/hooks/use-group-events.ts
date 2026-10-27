@@ -2,26 +2,32 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "@/i18n";
-import type { GroupWithCount } from "@/types";
+import type { BrowserProfile, GroupWithCount } from "@/types";
 
 /**
  * Custom hook to manage group-related state and listen for backend events.
  * This hook eliminates the need for manual UI refreshes by automatically
  * updating state when the backend emits group change events.
  */
-export function useGroupEvents() {
+export function useGroupEvents(profiles?: BrowserProfile[]) {
   const [groups, setGroups] = useState<GroupWithCount[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const groupsRequestRef = useRef(0);
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
 
   // Load groups from backend
   const loadGroups = useCallback(async () => {
     const request = ++groupsRequestRef.current;
     try {
-      const groupsWithCounts = await invoke<GroupWithCount[]>(
-        "get_groups_with_profile_counts",
-      );
+      const profileSnapshot = profilesRef.current;
+      const groupsWithCounts =
+        profileSnapshot === undefined
+          ? await invoke<GroupWithCount[]>("get_groups_with_profile_counts")
+          : await invoke<GroupWithCount[]>("get_groups_with_profile_counts", {
+              profiles: profileSnapshot,
+            });
       if (request !== groupsRequestRef.current) return;
       setGroups(groupsWithCounts);
       setError(null);
@@ -42,6 +48,18 @@ export function useGroupEvents() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (profiles === undefined) return;
+    let active = true;
+    setIsLoading(true);
+    void loadGroups().finally(() => {
+      if (active) setIsLoading(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [loadGroups, profiles]);
 
   // Clear error state
   const clearError = useCallback(() => {
@@ -93,10 +111,12 @@ export function useGroupEvents() {
           "profiles-changed",
           () =>
             listen("profiles-changed", () => {
-              console.log(
-                "Received profiles-changed event, reloading groups for updated counts",
-              );
-              void loadGroups();
+              if (profilesRef.current === undefined) {
+                console.log(
+                  "Received profiles-changed event, reloading groups for updated counts",
+                );
+                void loadGroups();
+              }
             }),
           (unlisten) => (profilesUnlisten = unlisten),
         );
@@ -104,7 +124,7 @@ export function useGroupEvents() {
         // Subscribe before the initial request so workspace refresh events are
         // not missed while that request is pending.
         if (disposed) return;
-        await loadGroups();
+        if (profilesRef.current === undefined) await loadGroups();
 
         console.log("Group event listeners set up successfully");
       } catch (err) {
@@ -119,7 +139,7 @@ export function useGroupEvents() {
       } finally {
         if (!disposed) {
           if (listenerError) setError(listenerError);
-          setIsLoading(false);
+          if (profilesRef.current === undefined) setIsLoading(false);
         }
       }
     };

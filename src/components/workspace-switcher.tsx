@@ -269,9 +269,13 @@ export function WorkspaceSwitcher({
                     title={activeWorkspace?.name}
                   >
                     {activeWorkspace?.name ||
-                      t("header.selectWorkspace", {
-                        defaultValue: "Chọn Workspace",
-                      })}
+                      (isLoading
+                        ? t("header.loadingWorkspaces", {
+                            defaultValue: "Đang tải workspace…",
+                          })
+                        : t("header.selectWorkspace", {
+                            defaultValue: "Chọn Workspace",
+                          }))}
                   </span>
                   {activeWorkspace ? (
                     <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground leading-tight mt-0.5 min-w-0">

@@ -104,7 +104,6 @@ import {
 import { useBrowserState } from "@/hooks/use-browser-state";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { useLaunchActivity } from "@/hooks/use-launch-activity";
-import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { useScrollFade } from "@/hooks/use-scroll-fade";
 import { useTablePreferences } from "@/hooks/use-table-preferences";
 import { useTableSorting } from "@/hooks/use-table-sorting";
@@ -1661,6 +1660,7 @@ NoteCell.displayName = "NoteCell";
 interface ProfilesDataTableProps {
   workspaceId: string | null;
   profiles: BrowserProfile[];
+  storedProxies: StoredProxy[];
   onLaunchProfile: (profile: BrowserProfile) => void | Promise<void>;
   onKillProfile: (profile: BrowserProfile) => void | Promise<void>;
   onCloneProfile: (profile: BrowserProfile) => void | Promise<void>;
@@ -1731,6 +1731,7 @@ interface ProfilesDataTableProps {
 export function ProfilesDataTable({
   workspaceId,
   profiles,
+  storedProxies,
   onLaunchProfile,
   onKillProfile,
   onCloneProfile,
@@ -1892,7 +1893,6 @@ export function ProfilesDataTable({
     new Set(),
   );
 
-  const { storedProxies } = useProxyEvents();
   const { user } = useCloudAuth();
   const {
     isProfileLocked,

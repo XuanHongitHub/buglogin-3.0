@@ -9,24 +9,26 @@ import type { StoredProxy } from "@/types";
  * This hook eliminates the need for manual UI refreshes by automatically
  * updating state when the backend emits proxy change events.
  */
-export function useProxyEvents() {
+export function useProxyEvents(profiles?: Array<{ proxy_id?: string }>) {
   const [storedProxies, setStoredProxies] = useState<StoredProxy[]>([]);
   const [proxyUsage, setProxyUsage] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const proxiesRequestRef = useRef(0);
   const usageRequestRef = useRef(0);
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
 
   // Load proxy usage (how many profiles are using each proxy)
   const loadProxyUsage = useCallback(async () => {
     const request = ++usageRequestRef.current;
     try {
-      const profiles = await invoke<{ proxy_id?: string }[]>(
-        "list_browser_profiles",
-      );
+      const profileList =
+        profilesRef.current ??
+        (await invoke<{ proxy_id?: string }[]>("list_browser_profiles"));
       if (request !== usageRequestRef.current) return;
       const counts: Record<string, number> = {};
-      for (const p of profiles) {
+      for (const p of profileList) {
         if (p.proxy_id) counts[p.proxy_id] = (counts[p.proxy_id] ?? 0) + 1;
       }
       setProxyUsage(counts);
@@ -37,6 +39,10 @@ export function useProxyEvents() {
     }
   }, []);
 
+  useEffect(() => {
+    if (profiles !== undefined) void loadProxyUsage();
+  }, [loadProxyUsage, profiles]);
+
   // Load proxies from backend
   const loadProxies = useCallback(async () => {
     const request = ++proxiesRequestRef.current;
@@ -44,8 +50,6 @@ export function useProxyEvents() {
       const stored = await invoke<StoredProxy[]>("get_stored_proxies");
       if (request !== proxiesRequestRef.current) return;
       setStoredProxies(stored);
-      await loadProxyUsage();
-      if (request !== proxiesRequestRef.current) return;
       setError(null);
     } catch (err: unknown) {
       if (request !== proxiesRequestRef.current) return;
@@ -63,7 +67,7 @@ export function useProxyEvents() {
         setError(i18n.t("errors.loadProxiesFailed", { error: errorDetail }));
       }
     }
-  }, [loadProxyUsage]);
+  }, []);
 
   // Clear error state
   const clearError = useCallback(() => {
@@ -117,10 +121,12 @@ export function useProxyEvents() {
           "profiles-changed",
           () =>
             listen("profiles-changed", () => {
-              console.log(
-                "Received profiles-changed event, reloading proxy usage",
-              );
-              void loadProxyUsage();
+              if (profilesRef.current === undefined) {
+                console.log(
+                  "Received profiles-changed event, reloading proxy usage",
+                );
+                void loadProxyUsage();
+              }
             }),
           (unlisten) => (profilesUnlisten = unlisten),
         );

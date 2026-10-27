@@ -363,6 +363,7 @@ fn now_unix_millis() -> u64 {
 #[tauri::command]
 pub async fn get_groups_with_profile_counts(
     state: State<'_, DesktopState>,
+    profiles: Option<Vec<Value>>,
 ) -> Result<Vec<Value>, Problem> {
     let workspace_id = default_workspace_id(&state).await?;
     let group_result = state
@@ -373,7 +374,10 @@ pub async fn get_groups_with_profile_counts(
             json!({ "workspaceId": workspace_id }),
         )
         .await?;
-    let profiles = list_all_profiles(&state).await?;
+    let profiles = match profiles {
+        Some(profiles) => profiles,
+        None => list_all_profiles(&state).await?,
+    };
     let groups = group_result
         .data
         .as_array()
@@ -382,23 +386,30 @@ pub async fn get_groups_with_profile_counts(
     Ok(groups.iter().map(|record| {
         let group = record.get("group").unwrap_or(record);
         let id = group.get("id").and_then(Value::as_str).unwrap_or_default();
-        let count = profiles.iter().filter(|profile| {
-            profile.get("groupIds").and_then(Value::as_array)
-                .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
-        }).count();
+        let count = profiles
+            .iter()
+            .filter(|profile| {
+                profile
+                    .get("groupIds")
+                    .or_else(|| profile.get("group_ids"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
+                    || profile.get("group_id").and_then(Value::as_str) == Some(id)
+            })
+            .count();
         json!({ "id": id, "name": group.get("name").cloned().unwrap_or(Value::Null), "count": count })
     }).collect())
 }
 
 #[tauri::command]
 pub async fn get_profile_groups(state: State<'_, DesktopState>) -> Result<Vec<Value>, Problem> {
-    get_groups_with_profile_counts(state).await
+    get_groups_with_profile_counts(state, None).await
 }
 
 /// Compatibility name used by the profile information dialog.
 #[tauri::command]
 pub async fn get_groups(state: State<'_, DesktopState>) -> Result<Vec<Value>, Problem> {
-    get_groups_with_profile_counts(state).await
+    get_groups_with_profile_counts(state, None).await
 }
 
 #[tauri::command]

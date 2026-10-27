@@ -1110,6 +1110,15 @@ export function OrganizationManagement({
         <DeleteTenancy
           target={deleteTarget}
           onClose={() => setDeleteTarget(null)}
+          onNavigate={(tab) => {
+            const organization =
+              "workspace" in deleteTarget
+                ? deleteTarget.organization
+                : deleteTarget;
+            setDeleteTarget(null);
+            setRoute({ orgId: organization.id, workspaceId: null });
+            setOrgTab(tab);
+          }}
           onSaved={() => {
             setRoute({ orgId: null, workspaceId: null });
             void changed();
@@ -1120,6 +1129,11 @@ export function OrganizationManagement({
         <TransferOwnership
           organization={transferTarget}
           onClose={() => setTransferTarget(null)}
+          onManageMembers={() => {
+            setRoute({ orgId: transferTarget.id, workspaceId: null });
+            setOrgTab("accounts");
+            setTransferTarget(null);
+          }}
           onSaved={() => void changed()}
         />
       ) : null}
@@ -2124,10 +2138,12 @@ function DeleteTenancy({
   target,
   onClose,
   onSaved,
+  onNavigate,
 }: {
   target: Organization | WorkspaceEntry;
   onClose: () => void;
   onSaved: () => void;
+  onNavigate: (tab: "workspaces" | "accounts") => void;
 }) {
   const { t } = useTranslation("managementOrg");
   const workspace = "workspace" in target ? target : null;
@@ -2135,7 +2151,46 @@ function DeleteTenancy({
   const name = workspace?.workspace.name ?? org.name;
   const [confirmation, setConfirmation] = useState(""),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState<string | null>(null);
+    [error, setError] = useState<string | null>(null),
+    [dependencyCheck, setDependencyCheck] = useState<{
+      members: number;
+      workspaces: number;
+    } | null>(workspace ? null : { members: 0, workspaces: 0 }),
+    [checkingDependencies, setCheckingDependencies] = useState(!workspace),
+    [dependencyError, setDependencyError] = useState<string | null>(null);
+  const refreshDependencies = useCallback(async () => {
+    if (workspace) return;
+    setCheckingDependencies(true);
+    setDependencyError(null);
+    try {
+      const [members, workspaces] = await Promise.all([
+        api.listOrganizationMembers(org.id),
+        api.listWorkspaces(org.id),
+      ]);
+      setDependencyCheck({
+        members: members.items.filter(
+          (member) => member.accountId !== org.accountId,
+        ).length,
+        workspaces: workspaces.items.length,
+      });
+    } catch (err) {
+      setDependencyCheck(null);
+      setDependencyError(errorMessage(err));
+    } finally {
+      setCheckingDependencies(false);
+    }
+  }, [org.id, org.accountId, workspace]);
+  useEffect(() => {
+    void refreshDependencies();
+  }, [refreshDependencies]);
+  const blockedByDependencies = Boolean(
+    !workspace &&
+      (checkingDependencies ||
+        dependencyError ||
+        !dependencyCheck ||
+        dependencyCheck.members > 0 ||
+        dependencyCheck.workspaces > 0),
+  );
   const remove = async () => {
     setBusy(true);
     setError(null);
@@ -2183,17 +2238,84 @@ function DeleteTenancy({
           </DialogDescription>
         </DialogHeader>
         {error ? <ErrorNotice message={error} /> : null}
+        {!workspace ? (
+          <section
+            className="space-y-2 rounded-md border border-border bg-muted/20 p-3"
+            aria-live="polite"
+          >
+            <p className="text-sm font-medium">{t("deleteDependencies")}</p>
+            {checkingDependencies ? (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <LuLoaderCircle className="size-4 animate-spin" />
+                {t("checkingDependencies")}
+              </p>
+            ) : dependencyError ? (
+              <div className="space-y-2">
+                <ErrorNotice message={dependencyError} />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void refreshDependencies()}
+                >
+                  <LuRefreshCw />
+                  {t("retry")}
+                </Button>
+              </div>
+            ) : dependencyCheck ? (
+              <>
+                <ul className="space-y-1 text-sm text-muted-foreground">
+                  <li>
+                    {t("organizationMemberCount", {
+                      count: dependencyCheck.members,
+                    })}
+                  </li>
+                  <li>
+                    {t("organizationWorkspaceCount", {
+                      count: dependencyCheck.workspaces,
+                    })}
+                  </li>
+                </ul>
+                {blockedByDependencies ? (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {dependencyCheck.members > 0 ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onNavigate("accounts")}
+                      >
+                        <LuUsers />
+                        {t("directory")}
+                      </Button>
+                    ) : null}
+                    {dependencyCheck.workspaces > 0 ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onNavigate("workspaces")}
+                      >
+                        <LuBuilding2 />
+                        {t("goWorkspaces")}
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </section>
+        ) : null}
         <p className="break-words text-sm font-semibold">{name}</p>
-        <div className="space-y-1.5">
-          <Label htmlFor="delete-tenancy-confirm">{t("confirmName")}</Label>
-          <Input
-            id="delete-tenancy-confirm"
-            value={confirmation}
-            onChange={(event) => setConfirmation(event.target.value)}
-            autoComplete="off"
-            disabled={busy}
-          />
-        </div>
+        {!blockedByDependencies ? (
+          <div className="space-y-1.5">
+            <Label htmlFor="delete-tenancy-confirm">{t("confirmName")}</Label>
+            <Input
+              id="delete-tenancy-confirm"
+              value={confirmation}
+              onChange={(event) => setConfirmation(event.target.value)}
+              autoComplete="off"
+              disabled={busy}
+            />
+          </div>
+        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("cancel")}
@@ -2201,7 +2323,7 @@ function DeleteTenancy({
           <Button
             variant="destructive"
             onClick={() => void remove()}
-            disabled={busy || confirmation !== name}
+            disabled={busy || confirmation !== name || blockedByDependencies}
           >
             {busy ? <LuLoaderCircle className="animate-spin" /> : <LuTrash2 />}
             {t("delete")}
@@ -2216,10 +2338,12 @@ function TransferOwnership({
   organization,
   onClose,
   onSaved,
+  onManageMembers,
 }: {
   organization: Organization;
   onClose: () => void;
   onSaved: () => void;
+  onManageMembers: () => void;
 }) {
   const { t } = useTranslation("managementOrg");
   const [people, setPeople] = useState<OrganizationMemberView[]>([]),
@@ -2311,9 +2435,15 @@ function TransferOwnership({
             </SelectContent>
           </Select>
           {!loading && people.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              {t("noEligibleAccounts")}
-            </p>
+            <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
+              <p className="text-sm text-muted-foreground">
+                {t("noEligibleAccounts")}
+              </p>
+              <Button size="sm" variant="outline" onClick={onManageMembers}>
+                <LuUsers />
+                {t("directory")}
+              </Button>
+            </div>
           ) : null}
         </div>
         {confirm ? (

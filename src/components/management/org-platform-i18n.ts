@@ -112,7 +112,11 @@ const en = {
   transferOwner: "Transfer ownership",
   deleteTitle: "Confirm deletion",
   deleteOrgHelp:
-    "Only an empty organization can be deleted. Dependent workspaces must be removed first.",
+    "An organization can be deleted only after its members and workspaces are removed.",
+  deleteDependencies: "Items that must be removed first",
+  checkingDependencies: "Checking organization members and workspaces…",
+  organizationMemberCount: "{{count}} organization members",
+  organizationWorkspaceCount: "{{count}} workspaces",
   deleteWorkspaceHelp:
     "The server checks profiles, resources, members and active work before deleting this workspace.",
   confirmName: "Type the exact name to confirm",
@@ -279,8 +283,11 @@ const vi: typeof en = {
   deleteWorkspace: "Xóa workspace",
   transferOwner: "Chuyển chủ sở hữu",
   deleteTitle: "Xác nhận xóa",
-  deleteOrgHelp:
-    "Chỉ xóa được tổ chức trống. Cần xử lý các workspace phụ thuộc trước.",
+  deleteOrgHelp: "Chỉ xóa được tổ chức sau khi gỡ hết thành viên và workspace.",
+  deleteDependencies: "Các mục cần xử lý trước",
+  checkingDependencies: "Đang kiểm tra thành viên và workspace…",
+  organizationMemberCount: "{{count}} thành viên tổ chức",
+  organizationWorkspaceCount: "{{count}} workspace",
   deleteWorkspaceHelp:
     "Máy chủ kiểm tra profile, tài nguyên, thành viên và công việc đang chạy trước khi xóa.",
   confirmName: "Nhập chính xác tên để xác nhận",
@@ -289,7 +296,8 @@ const vi: typeof en = {
     "Chọn tài khoản đã có trong tổ chức. Máy chủ kiểm tra điều kiện và ảnh hưởng tới quyền truy cập.",
   newOwner: "Chủ sở hữu mới",
   transfer: "Chuyển quyền sở hữu",
-  noEligibleAccounts: "Chưa có tài khoản đủ điều kiện.",
+  noEligibleAccounts:
+    "Tổ chức chưa có thành viên đang hoạt động đủ điều kiện chuyển quyền sở hữu.",
   incompleteUsage:
     "Không tải được mức sử dụng của một số workspace. Cần làm mới trước khi đổi hạn mức các dòng đó.",
   goWorkspaces: "Quản lý workspaces",

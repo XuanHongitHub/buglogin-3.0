@@ -3,17 +3,15 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "@/i18n";
 import { followLatestProfileLoadResult } from "@/lib/profile-workspace-state";
-import type { BrowserProfile, GroupWithCount } from "@/types";
+import type { BrowserProfile } from "@/types";
 
 interface UseProfileEventsReturn {
   profiles: BrowserProfile[];
-  groups: GroupWithCount[];
   runningProfiles: Set<string>;
   isLoading: boolean;
   isRefreshing: boolean;
   error: string | null;
   loadProfiles: () => Promise<boolean>;
-  loadGroups: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -24,7 +22,6 @@ interface UseProfileEventsReturn {
  */
 export function useProfileEvents(): UseProfileEventsReturn {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
-  const [groups, setGroups] = useState<GroupWithCount[]>([]);
   const [runningProfiles, setRunningProfiles] = useState<Set<string>>(
     new Set(),
   );
@@ -33,7 +30,6 @@ export function useProfileEvents(): UseProfileEventsReturn {
   const [error, setError] = useState<string | null>(null);
   const profilesRequestRef = useRef(0);
   const profilesRequestPromiseRef = useRef<Promise<boolean> | null>(null);
-  const groupsRequestRef = useRef(0);
   const runningRequestRef = useRef(0);
   const runningStateRevisionRef = useRef(0);
 
@@ -81,23 +77,6 @@ export function useProfileEvents(): UseProfileEventsReturn {
     return result;
   }, []);
 
-  // Load groups from backend
-  const loadGroups = useCallback(async () => {
-    const request = ++groupsRequestRef.current;
-    try {
-      const groupsWithCounts = await invoke<GroupWithCount[]>(
-        "get_groups_with_profile_counts",
-      );
-      if (request !== groupsRequestRef.current) return;
-      setGroups(groupsWithCounts);
-      setError(null);
-    } catch (err) {
-      if (request !== groupsRequestRef.current) return;
-      console.error("Failed to load groups with counts:", err);
-      setGroups([]);
-    }
-  }, []);
-
   // Clear error state
   const clearError = useCallback(() => {
     setError(null);
@@ -140,10 +119,9 @@ export function useProfileEvents(): UseProfileEventsReturn {
           () =>
             listen("profiles-changed", () => {
               console.log(
-                "Received profiles-changed event, reloading profiles and groups",
+                "Received profiles-changed event, reloading profiles",
               );
               void loadProfiles();
-              void loadGroups();
             }),
           (unlisten) => (profilesUnlisten = unlisten),
         );
@@ -154,7 +132,6 @@ export function useProfileEvents(): UseProfileEventsReturn {
           () =>
             listen("profile-updated", () => {
               void loadProfiles();
-              void loadGroups();
             }),
           (unlisten) => (profileUpdatedUnlisten = unlisten),
         );
@@ -186,7 +163,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
         // while those requests are pending; request generations prevent stale
         // responses from replacing data loaded after the change.
         if (disposed) return;
-        await Promise.all([loadProfiles(), loadGroups()]);
+        await loadProfiles();
 
         console.log("Profile event listeners set up successfully");
       } catch (err) {
@@ -212,12 +189,11 @@ export function useProfileEvents(): UseProfileEventsReturn {
     return () => {
       disposed = true;
       profilesRequestRef.current += 1;
-      groupsRequestRef.current += 1;
       if (profilesUnlisten) profilesUnlisten();
       if (profileUpdatedUnlisten) profileUpdatedUnlisten();
       if (runningUnlisten) runningUnlisten();
     };
-  }, [loadProfiles, loadGroups]);
+  }, [loadProfiles]);
 
   // Recover from missed desktop events and refresh when returning to the app.
   useEffect(() => {
@@ -273,13 +249,11 @@ export function useProfileEvents(): UseProfileEventsReturn {
 
   return {
     profiles,
-    groups,
     runningProfiles,
     isLoading,
     isRefreshing,
     error,
     loadProfiles,
-    loadGroups,
     clearError,
   };
 }

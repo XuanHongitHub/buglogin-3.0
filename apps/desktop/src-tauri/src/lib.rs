@@ -1201,8 +1201,9 @@ fn desktop_deep_link_current(app: tauri::AppHandle) -> Result<Vec<String>, Probl
 async fn desktop_auth_logout(
     state: State<'_, DesktopState>,
     correlation_id: String,
+    idempotency_key: String,
 ) -> Result<DesktopAuthStatus, Problem> {
-    let result = state.logout(&correlation_id).await;
+    let result = state.logout(&correlation_id, &idempotency_key).await;
     report_profile_command_result(&state, "auth.logout", result)
 }
 

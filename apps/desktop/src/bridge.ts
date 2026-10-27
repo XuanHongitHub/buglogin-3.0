@@ -560,16 +560,26 @@ export function createTauriDesktopApi(
     }
     throw new Error("Unreachable desktop command retry state");
   };
-  const callAuth = async (command: string, correlation = true) => {
+  const callAuth = async (
+    command: string,
+    correlation = true,
+    idempotent = false,
+  ) => {
     const correlationId = createRequestId("cor");
-    try {
-      return await invoke<DesktopAuthStatus>(
-        command,
-        correlation ? { correlationId } : undefined,
-      );
-    } catch (error) {
-      throw normalizeProblem(error, correlationId);
+    const idempotencyKey = idempotent ? createRequestId("idem") : undefined;
+    for (let attempt = 0; attempt < (idempotent ? 2 : 1); attempt += 1) {
+      try {
+        return await invoke<DesktopAuthStatus>(command, {
+          ...(correlation ? { correlationId } : {}),
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+        });
+      } catch (error) {
+        const problem = normalizeProblem(error, correlationId);
+        if (!idempotent || !problem.retryable || attempt > 0) throw problem;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     }
+    throw new Error("Unreachable auth command retry state");
   };
   return {
     getSystemHealth: () => call(invokeNames.systemHealthGet, {}),
@@ -751,7 +761,7 @@ export function createTauriDesktopApi(
         throw normalizeProblem(error, correlationId);
       }
     },
-    logout: () => callAuth(invokeNames.authLogout),
+    logout: () => callAuth(invokeNames.authLogout, true, true),
     listOrganizations: () =>
       call<Page<Organization>>(invokeNames.organizationList, {}),
     getOrganization: (input) =>

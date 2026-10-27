@@ -861,6 +861,13 @@ impl ApiState {
 
     pub async fn readiness(&self) -> Result<(), Problem> {
         self.control_persistence.readiness()?;
+        if !self.local_account_provisioning && !self.external_object_storage {
+            return Err(problem(
+                "object_storage_not_configured",
+                "Remote object storage is not configured",
+                503,
+            ));
+        }
         if !self.local_account_provisioning
             && self
                 .profile_key_wrapping_key
@@ -877,13 +884,6 @@ impl ApiState {
             return Err(problem(
                 "profile_key_provider_not_configured",
                 "Profile key management is not configured",
-                503,
-            ));
-        }
-        if !self.local_account_provisioning && !self.external_object_storage {
-            return Err(problem(
-                "object_storage_not_configured",
-                "Remote object storage is not configured",
                 503,
             ));
         }

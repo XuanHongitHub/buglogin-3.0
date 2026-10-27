@@ -145,7 +145,6 @@ function DesktopHome({
     error: profilesError,
     loadProfiles: refreshProfiles,
     clearError: clearProfileError,
-    loadGroups,
   } = useProfileEvents();
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
@@ -189,9 +188,10 @@ function DesktopHome({
       null,
     [workspaces, selectedWorkspaceId],
   );
-  const profiles = visibleProfilesForWorkspace(
-    loadedProfiles,
-    profilesReadyForWorkspace,
+  const profiles = useMemo(
+    () =>
+      visibleProfilesForWorkspace(loadedProfiles, profilesReadyForWorkspace),
+    [loadedProfiles, profilesReadyForWorkspace],
   );
 
   // Keep the active workspace count tied only to a successful profile response
@@ -243,10 +243,7 @@ function DesktopHome({
         if (request !== workspaceSelectionRequestRef.current) return;
         setSelectedWorkspaceId(workspaceId);
         setProfilesWorkspaceId(null);
-        const [profilesLoaded] = await Promise.all([
-          refreshProfiles(),
-          loadGroups(),
-        ]);
+        const profilesLoaded = await refreshProfiles();
         if (request !== workspaceSelectionRequestRef.current) return;
         if (profilesLoaded) {
           setProfilesWorkspaceId(workspaceId);
@@ -270,7 +267,7 @@ function DesktopHome({
         }
       }
     },
-    [t, refreshProfiles, loadGroups, clearProfileError],
+    [t, refreshProfiles, clearProfileError],
   );
 
   const refreshSelectedWorkspaceProfiles = useCallback(async () => {
@@ -314,19 +311,6 @@ function DesktopHome({
         const available = await invoke<Array<any>>("get_available_workspaces");
         if (disposed) return;
 
-        // Fetch organizations to resolve human-readable names
-        const orgNamesMap = new Map<string, string>();
-        try {
-          const orgPage = await desktopApi.listOrganizations();
-          if (orgPage?.items) {
-            for (const org of orgPage.items) {
-              orgNamesMap.set(org.id, org.name);
-            }
-          }
-        } catch {
-          // ignore
-        }
-
         if (available && available.length > 0) {
           const mapped: WorkspaceItem[] = available.map((w: any) => ({
             id: w.id,
@@ -334,7 +318,6 @@ function DesktopHome({
             organizationId: w.organizationId,
             organizationName:
               w.organizationName ||
-              orgNamesMap.get(w.organizationId) ||
               (w.organizationId
                 ? t("header.mainOrg", { defaultValue: "Tổ Chức Chính" })
                 : t("header.personalSpace", {
@@ -376,6 +359,29 @@ function DesktopHome({
             }
             setWorkspaceProfilesLoading(false);
           }
+          // Organization names are supplementary; don't hold the active
+          // workspace and its profiles behind a second network request.
+          void desktopApi
+            .listOrganizations()
+            .then((orgPage) => {
+              if (disposed || !orgPage?.items?.length) return;
+              const names = new Map(
+                orgPage.items.map((org) => [org.id, org.name]),
+              );
+              setWorkspaces((current) =>
+                current.map((workspace) =>
+                  workspace.organizationName || !workspace.organizationId
+                    ? workspace
+                    : {
+                        ...workspace,
+                        organizationName:
+                          names.get(workspace.organizationId) ??
+                          workspace.organizationName,
+                      },
+                ),
+              );
+            })
+            .catch(() => {});
         } else {
           setWorkspaces([]);
           setSelectedWorkspaceId("");
@@ -385,9 +391,8 @@ function DesktopHome({
       } catch (error: unknown) {
         if (!disposed) {
           console.warn("Workspace list remote init error:", error);
-          setWorkspaces([]);
-          setSelectedWorkspaceId("");
-          setProfilesWorkspaceId(null);
+          // Keep the last known workspace and selection visible if refresh fails.
+          showErrorToast(t("errors.loadWorkspaceFailed"));
         }
       } finally {
         if (!disposed) setWorkspaceLoading(false);
@@ -431,13 +436,13 @@ function DesktopHome({
     groups: groupsData,
     isLoading: groupsLoading,
     error: groupsError,
-  } = useGroupEvents();
+  } = useGroupEvents(profilesReadyForWorkspace ? profiles : undefined);
 
   const {
     storedProxies,
     isLoading: proxiesLoading,
     error: proxiesError,
-  } = useProxyEvents();
+  } = useProxyEvents(profilesReadyForWorkspace ? profiles : undefined);
 
   // Synchronizer sessions
   const { getProfileSyncInfo } = useSyncSessions();
@@ -1682,6 +1687,7 @@ function DesktopHome({
                   profiles.length === 0
                 }
                 profiles={profileFilters.rows}
+                storedProxies={storedProxies}
                 filterControls={
                   <TableFilterControls
                     {...profileFilters}

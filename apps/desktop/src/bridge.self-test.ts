@@ -507,3 +507,12 @@ assert.equal(calls.at(-2)?.command, "desktop_auth_sso_complete");
 assert.equal(calls.at(-2)?.args?.callbackState, "a".repeat(64));
 assert.equal(calls.at(-2)?.args?.token, "sso_test_token_123456");
 assert.equal(calls.at(-1)?.command, "desktop_deep_link_current");
+
+let logoutArgs: Record<string, unknown> | undefined;
+const logoutApi = createTauriDesktopApi(async (_command, args) => {
+  logoutArgs = args;
+  return { state: "unauthenticated" } as never;
+});
+await logoutApi.logout();
+assert.match(String(logoutArgs?.correlationId), /^cor_/);
+assert.match(String(logoutArgs?.idempotencyKey), /^idem_/);
