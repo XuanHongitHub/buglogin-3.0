@@ -62,6 +62,8 @@ fn every_registered_command_has_canonical_action() {
         ("profile.stop", Action::Execute),
         ("profile.sync.recovery.code.get", Action::Read),
         ("profile.sync.recover", Action::Read),
+        ("profile.runtime.status.batch", Action::Read),
+        ("profile.runtime.syncing", Action::Execute),
         ("profile.delete", Action::Delete),
         ("profile.archive", Action::Update),
         ("profile.restore", Action::Update),
@@ -126,6 +128,14 @@ fn every_registered_command_has_canonical_action() {
         ("account.create.scoped", Action::Create),
         ("account.list", Action::Read),
         ("account.status.update", Action::Manage),
+        ("account.identity.own.get", Action::Read),
+        ("account.identity.get", Action::Read),
+        ("account.identity.update", Action::Update),
+        ("account.password.change", Action::Update),
+        ("account.sessions.list", Action::Read),
+        ("account.sessions.revoke", Action::Manage),
+        ("management.account.drafts.generate", Action::Create),
+        ("management.batch.execute", Action::Manage),
         ("organization.list", Action::Read),
         ("organization.get", Action::Read),
         ("organization.record.get", Action::Read),
@@ -135,11 +145,14 @@ fn every_registered_command_has_canonical_action() {
         ("organization.account.create", Action::Create),
         ("organization.member.status.update", Action::Manage),
         ("organization.member.workspace.assign", Action::Create),
+        ("organization.delete", Action::Delete),
+        ("organization.owner.transfer", Action::Manage),
         ("workspace.list", Action::Read),
         ("workspace.get", Action::Read),
         ("workspace.record.get", Action::Read),
         ("workspace.create", Action::Create),
         ("workspace.update", Action::Update),
+        ("workspace.delete", Action::Delete),
         ("group.list", Action::Read),
         ("group.get", Action::Read),
         ("group.create", Action::Create),
@@ -171,6 +184,7 @@ fn every_registered_command_has_canonical_action() {
         ("member.activate", Action::Manage),
         ("member.suspend", Action::Manage),
         ("member.role.update", Action::Manage),
+        ("member.remove", Action::Delete),
         ("resource.list", Action::Read),
         ("resource.get", Action::Read),
         ("resource.register", Action::Create),
@@ -437,6 +451,7 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
                 | "runtime.dispatch.claim"
                 | "runtime.dispatch.complete"
                 | "runtime.dispatch.fail"
+                | "management.account.drafts.generate"
         ) {
             assert!(command.idempotency_required, "{}", command.id.as_str());
         }
