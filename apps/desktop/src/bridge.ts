@@ -12,7 +12,6 @@ import {
   type AccountPasswordChangeInput,
   type AccountPasswordChangeReceipt,
   type AccountProvisioningReceipt,
-  type AccountSessionRevokeInput,
   type AccountSessionRevokeReceipt,
   type AccountSessionsListInput,
   type AccountStatusUpdateCommandInput,
