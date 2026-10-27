@@ -289,7 +289,8 @@ fn role_allows(
         return false;
     }
 
-    let workspace_operation = capability.starts_with("CAP-WS-")
+    let workspace_operation = capability == "profile.create"
+        || capability.starts_with("CAP-WS-")
         || capability.starts_with("CAP-TEAM-")
         || capability.starts_with("CAP-MEM-")
         || capability.starts_with("CAP-RES-")

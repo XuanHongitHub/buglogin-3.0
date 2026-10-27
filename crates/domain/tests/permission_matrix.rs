@@ -84,6 +84,13 @@ fn admin_manages_workspace_resources_but_not_global_scope() {
 
     assert!(is_allowed(
         &principal,
+        &capability("profile.create"),
+        Action::Create,
+        &workspace_scope(),
+        &[]
+    ));
+    assert!(is_allowed(
+        &principal,
         &capability("CAP-RES-001"),
         Action::Manage,
         &workspace_scope(),
