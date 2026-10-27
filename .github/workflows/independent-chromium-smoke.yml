@@ -25,6 +25,9 @@ jobs:
       - uses: ./.github/actions/setup-buglogin
         with:
           install-node-dependencies: false
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          shared-key: independent-chromium-native
       - name: Verify adapter and existing Wayfern contract
         run: cargo test --locked -p buglogin-browser --test independent_chromium --test runtime_contract
       - name: Build native process probe

@@ -11,6 +11,8 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
+    thread,
+    time::{Duration, Instant},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,13 +48,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         adapter.launch_specification(&binary, &profile_path, &args.collect::<Vec<_>>())?;
     let controller = SystemProcessController::new([ApprovedExecutable::new(&binary_path)?]);
     let mut child = controller.launch(&specification)?;
+    let initial_status = child.status()?;
+    #[cfg(target_os = "macos")]
+    if initial_status == ProcessStatus::Unknown {
+        for (program, arguments) in [
+            (
+                "/bin/ps",
+                vec![
+                    "-p".to_owned(),
+                    child.identity().pid.to_string(),
+                    "-o".into(),
+                    "comm=".into(),
+                    "-o".into(),
+                    "stat=".into(),
+                    "-o".into(),
+                    "pgid=".into(),
+                ],
+            ),
+            (
+                "/usr/sbin/lsof",
+                vec![
+                    "-a".to_owned(),
+                    "-p".into(),
+                    child.identity().pid.to_string(),
+                    "-d".into(),
+                    "txt".into(),
+                    "-Fn".into(),
+                ],
+            ),
+        ] {
+            let output = std::process::Command::new(program)
+                .args(arguments)
+                .output()?;
+            eprintln!(
+                "native identity diagnostic {program}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
     println!(
         "{}",
-        serde_json::json!({"pid": child.identity().pid, "status": "launched"})
+        serde_json::json!({"pid": child.identity().pid, "status": "launched", "processState": format!("{initial_status:?}")})
     );
     io::stdout().flush()?;
     let mut command = String::new();
     let _ = io::stdin().read_line(&mut command);
+    if command.trim() == "closed" {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline && child.status()? != ProcessStatus::Exited {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
     child.stop()?;
     if child.status()? != ProcessStatus::Exited {
         return Err("native process tree did not stop".into());

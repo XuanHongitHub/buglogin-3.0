@@ -214,7 +214,7 @@ async function launch(label, extra = []) {
       const started = performance.now();
       if (graceful) await cdp.call("Browser.close").catch(() => {});
       cdp.close();
-      child.stdin.end("stop\n");
+      child.stdin.end(graceful ? "closed\n" : "stop\n");
       // The shared Windows controller allows 15s for graceful shutdown before
       // terminating its job. Give that policy time to finish and report it.
       const timeout = setTimeout(() => child.kill(), 30000);
