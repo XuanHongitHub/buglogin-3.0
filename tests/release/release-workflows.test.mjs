@@ -42,6 +42,27 @@ test("release workflows satisfy fail-closed static policy", async () => {
   assert.match(promotion, /CANDIDATE_RUN_ID/);
 });
 
+test("native API artifacts are verified against the BugLogin 3 publisher identity", async () => {
+  const workflow = await readFile(
+    ".github/workflows/native-api-artifact.yml",
+    "utf8",
+  );
+  const packageScript = await readFile(
+    "scripts/release/package-api-linux.ps1",
+    "utf8",
+  );
+  const deployScript = await readFile(
+    "scripts/release/deploy-api-systemd.ps1",
+    "utf8",
+  );
+  const identity =
+    "https://github\\.com/XuanHongitHub/buglogin-3\\.0/\\.github/workflows/native-api-artifact\\.yml@refs/heads/main";
+  for (const source of [workflow, packageScript, deployScript]) {
+    assert.ok(source.includes(identity));
+    assert.doesNotMatch(source, /keyduc91[\\/]Malvanut-Login/);
+  }
+});
+
 test("desktop release contract prevents external frontend paths and surprise updates", async () => {
   const contract = await readFile(
     "docs/release/desktop-release-contract.md",

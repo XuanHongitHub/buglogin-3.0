@@ -78,7 +78,7 @@ jobs:
         run: >-
           cosign verify-blob dist/native-api/release-manifest.json
           --bundle dist/native-api/release-manifest.sigstore.json
-          --certificate-identity-regexp '^https://github\.com/keyduc91/Malvanut-Login/\.github/workflows/native-api-artifact\.yml@refs/heads/main$'
+          --certificate-identity-regexp '^https://github\.com/XuanHongitHub/buglogin-3\.0/\.github/workflows/native-api-artifact\.yml@refs/heads/main$'
           --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

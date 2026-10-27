@@ -94,7 +94,7 @@ $openApiHash = Get-Sha256 $openApiPath
 if ($manifest.artifacts.openApiSha256.ToLowerInvariant() -ne $openApiHash) {
     throw "Release OpenAPI hash does not match the CI artifact."
 }
-& cosign.exe verify-blob $manifestPath --bundle $manifestSignaturePath --certificate-identity-regexp '^https://github\.com/keyduc91/Malvanut-Login/\.github/workflows/native-api-artifact\.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com | Out-Null
+& cosign.exe verify-blob $manifestPath --bundle $manifestSignaturePath --certificate-identity-regexp '^https://github\.com/XuanHongitHub/buglogin-3\.0/\.github/workflows/native-api-artifact\.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Sigstore build provenance verification failed for release-manifest.json."
 }
