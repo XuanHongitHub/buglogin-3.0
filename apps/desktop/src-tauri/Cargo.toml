@@ -39,7 +39,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "=2.5.4"
-tauri-plugin-log = "2.8.0"
+tauri-plugin-log = "=2.10.1"
 tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["native-tls", "zip"] }
 image = "0.25"
 dirs = "6"
