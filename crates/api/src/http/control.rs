@@ -5997,8 +5997,7 @@ async fn commit_resource_manifest(
                 correlation(&headers),
             ));
         }
-        Some(device_id)
-    };
+    }
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     let resource_id = ResourceId::from_str(&resource_id).map_err(|_| bad_id("resource_id"))?;
     let grants = grants(&state)?;
