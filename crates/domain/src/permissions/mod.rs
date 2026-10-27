@@ -220,11 +220,13 @@ pub fn is_allowed(
 
 /// Checks the API token's additional capability ceiling.
 ///
-/// Platform-admin tokens may use `CAP-ADM-001` as the explicit scope for the
-/// admin capability family. The account must still hold the PlatformAdmin
-/// role, and the requested action must be present in the token scope. Tokens
-/// without this admin scope remain restricted to their exact capabilities.
+/// API-token scopes limit regular principals. An authenticated PlatformAdmin
+/// is governed by its account role and explicit DENY grants, not by the
+/// narrower scopes attached to the bearer token used to authenticate it.
 pub fn token_scope_allows(principal: &Principal, capability: &Capability, action: Action) -> bool {
+    if principal.roles.contains(&Role::PlatformAdmin) {
+        return true;
+    }
     let Some(scopes) = principal.token_scopes.as_ref() else {
         return true;
     };
@@ -242,14 +244,7 @@ pub fn token_scope_allows(principal: &Principal, capability: &Capability, action
         return true;
     }
 
-    let is_platform_admin_capability = matches!(
-        capability.as_str(),
-        "CAP-ID-001" | "CAP-ORG-001" | "CAP-WS-001" | "CAP-MEM-001" | "CAP-AUD-001"
-    );
-    principal.roles.contains(&Role::PlatformAdmin)
-        && is_platform_admin_capability
-        && (scopes.contains(&format!("CAP-ADM-001:{action_name}"))
-            || scopes.contains("CAP-ADM-001:*"))
+    false
 }
 
 fn grant_matches_principal(grant: &Grant, principal: &Principal) -> bool {
@@ -416,12 +411,12 @@ mod organization_parent_gate_tests {
     }
 
     #[test]
-    fn platform_admin_token_admin_scope_covers_admin_capability_family_by_action() {
+    fn platform_admin_role_is_not_limited_by_api_token_scopes() {
         let admin_scope = Capability::new("CAP-ADM-001").unwrap();
         let org_scope = Capability::new("CAP-ORG-001").unwrap();
         let platform_admin = Principal {
             roles: BTreeSet::from([Role::PlatformAdmin]),
-            token_scopes: Some(BTreeSet::from(["CAP-ADM-001:create".to_owned()])),
+            token_scopes: Some(BTreeSet::new()),
             ..Principal::default()
         };
         let org_create_scope = ResourceScope {
@@ -436,7 +431,7 @@ mod organization_parent_gate_tests {
             &org_create_scope,
             &[]
         ));
-        assert!(!is_allowed(
+        assert!(is_allowed(
             &platform_admin,
             &org_scope,
             Action::Read,
@@ -454,7 +449,7 @@ mod organization_parent_gate_tests {
             &org_create_scope,
             &[]
         ));
-        assert!(!is_allowed(
+        assert!(is_allowed(
             &Principal {
                 roles: BTreeSet::from([Role::PlatformAdmin]),
                 token_scopes: Some(BTreeSet::new()),
@@ -468,6 +463,15 @@ mod organization_parent_gate_tests {
         assert!(token_scope_allows(
             &platform_admin,
             &admin_scope,
+            Action::Create
+        ));
+        assert!(token_scope_allows(
+            &Principal {
+                roles: BTreeSet::from([Role::PlatformAdmin]),
+                token_scopes: Some(BTreeSet::from(["CAP-ORG-001:read".to_owned()])),
+                ..Principal::default()
+            },
+            &org_scope,
             Action::Create
         ));
     }

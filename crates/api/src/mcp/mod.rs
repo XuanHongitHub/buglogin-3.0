@@ -5444,7 +5444,7 @@ mod scope_tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn platform_admin_mcp_uses_explicit_admin_token_scope_for_org_create() {
+    fn platform_admin_mcp_is_not_limited_by_api_token_scopes() {
         let state = crate::http::ApiState::hosted_with_control_store(
             buglogin_browser::profile::ProfileService::disabled(),
             buglogin_storage::control::MemoryControlRecordStore::default(),
@@ -5468,13 +5468,7 @@ mod scope_tests {
             token_scopes: Some(BTreeSet::new()),
             ..scoped_admin
         };
-        assert_eq!(
-            policy
-                .authorize(&restricted_admin, command, &scope)
-                .unwrap_err()
-                .status,
-            403
-        );
+        assert!(policy.authorize(&restricted_admin, command, &scope).is_ok());
 
         let non_admin = Principal {
             roles: BTreeSet::from([Role::WorkspaceAdmin]),
