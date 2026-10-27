@@ -262,6 +262,7 @@ impl RuntimeAdapter for WayfernAdapter {
             chromium_compatible_user_data_dir(profile_path)
         )];
         args.extend(extra_args.iter().cloned());
+        args.push("--disable-background-mode".to_owned());
         Ok(LaunchSpecification {
             runtime: Runtime::Wayfern,
             version: binary.version.clone(),
@@ -326,6 +327,7 @@ mod tests {
             vec![
                 format!("--user-data-dir={}", profile_path.to_string_lossy()),
                 "--disable-sync".to_owned(),
+                "--disable-background-mode".to_owned(),
             ]
         );
     }
@@ -408,11 +410,7 @@ mod tests {
                 preferences["ntp"]["most_visited_blacklist"][top_site_blacklist_key(url)],
                 serde_json::Value::Null
             );
-            assert!(
-                preferences["ntp"]["most_visited_blacklist"]
-                    .get(*url)
-                    .is_none()
-            );
+            assert!(preferences["ntp"]["most_visited_blacklist"].get(*url).is_none());
         }
         assert_eq!(
             preferences["custom_links"]["list"],

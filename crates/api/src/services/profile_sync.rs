@@ -130,7 +130,8 @@ pub(crate) fn authorize_resource_access(
             })
             .transpose()?
             .unwrap_or(false);
-        if state.resource_key_rotation_pending(workspace_id, resource_id)? && !managed_key_available
+        if state.resource_key_rotation_pending(workspace_id, resource_id)?
+            && !managed_key_available
         {
             let can_rotate = crate::services::profile_hosted::HostedProfileService::authorized(
                 state,

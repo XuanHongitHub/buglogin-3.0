@@ -525,6 +525,7 @@
     },
     "profileName": "Profile Name",
     "profileNamePlaceholder": "Enter profile name",
+    "extensionGroupsLoadFailed": "Could not load the workspace extension group setting. Close and reopen this dialog before creating a profile.",
     "proxy": {
       "title": "Proxy",
       "addProxy": "Add Proxy",
@@ -967,7 +968,9 @@
       "profileLockedShort": "In use",
       "cannotLaunchLocked": "Cannot launch — profile is in use by {{owner}}",
       "leaseExpiry": " · access ends at {{time}}",
-      "leaseUnknown": "BugLogin could not confirm that the browser has closed, so this profile is temporarily locked to prevent duplicate use. Close the browser window using this profile, then try again.",
+      "remoteSyncing": "{{owner}} is finishing the profile sync. You can open it when syncing is done.",
+      "anotherDevice": "Another device",
+      "leaseUnknown": "The latest status could not be fetched. When you start the profile, the server will check current access.",
       "createdBy": "Created by {{email}}",
       "roleLauncher": "Launcher"
     },
@@ -1801,6 +1804,9 @@
     "description": "Manage browser extensions and extension groups for your profiles.",
     "catalogUnavailable": "Extension package management is unavailable. Extension groups and profile assignments are available.",
     "upload": "Upload",
+    "addExtension": "Add extension",
+    "importArchive": "From ZIP/CRX file",
+    "addFromGit": "From GitHub / URL",
     "delete": "Delete",
     "extensionsTab": "Extensions",
     "groupsTab": "Groups",

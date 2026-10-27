@@ -1976,6 +1976,7 @@ function DesktopHome({
       <CreateProfileDialog
         isOpen={createProfileDialogOpen}
         workspaceId={selectedWorkspaceId}
+        organizationId={activeWorkspace?.organizationId ?? null}
         onClose={() => {
           setCreateProfileDialogOpen(false);
         }}

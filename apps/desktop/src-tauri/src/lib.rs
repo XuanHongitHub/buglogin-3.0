@@ -12,7 +12,6 @@ mod device_key_vault;
 mod diagnostics;
 mod event_stream;
 mod extension_features;
-mod extension_packages;
 mod legacy_compat;
 mod local_preferences;
 mod migration_commands;
@@ -20,6 +19,7 @@ mod network_features;
 mod profile_cookie_manager;
 mod profile_lifecycle;
 mod profile_password;
+mod extension_packages;
 mod profile_projection;
 pub mod profile_runtime;
 mod proxy_bridge;
@@ -235,6 +235,7 @@ pub fn run() {
             resource_get,
             resource_lease_get,
             profile_runtime_get,
+            profile_runtime_status_batch,
             get_runtime_device_id,
             resource_register,
             group_list,
@@ -1376,12 +1377,7 @@ macro_rules! remote_mutation_command {
             payload: Value,
         ) -> Result<CommandResult<Value>, Problem> {
             state
-                .invoke(
-                    $command,
-                    &correlation_id,
-                    idempotency_key.as_deref(),
-                    payload,
-                )
+                .invoke($command, &correlation_id, idempotency_key.as_deref(), payload)
                 .await
         }
     };
@@ -1390,10 +1386,7 @@ macro_rules! remote_mutation_command {
 remote_read_command!(account_identity_own_get, "account_identity_own_get");
 remote_read_command!(account_identity_get, "account_identity_get");
 remote_read_command!(account_sessions_list, "account_sessions_list");
-remote_read_command!(
-    management_account_drafts_generate,
-    "management_account_drafts_generate"
-);
+remote_read_command!(management_account_drafts_generate, "management_account_drafts_generate");
 remote_mutation_command!(account_identity_update, "account_identity_update");
 remote_mutation_command!(account_password_change, "account_password_change");
 remote_mutation_command!(account_sessions_revoke, "account_sessions_revoke");
@@ -1762,6 +1755,17 @@ async fn profile_runtime_get(
 }
 
 #[tauri::command]
+async fn profile_runtime_status_batch(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke("profile_runtime_status_batch", &correlation_id, None, payload)
+        .await
+}
+
+#[tauri::command]
 fn get_runtime_device_id(state: State<'_, DesktopState>) -> Option<String> {
     state.runtime_device_id()
 }
@@ -1989,15 +1993,8 @@ async fn list_extension_groups(
         .await?;
     let rows = result.data.as_array().cloned().unwrap_or_default();
     for row in &rows {
-        extension_features::remember_group_sources(&row["group"]).map_err(|message| {
-            Problem::new(
-                "extension_source_invalid",
-                "Cannot load extension sources",
-                422,
-                "extension-group-list",
-            )
-            .with_detail(message)
-        })?;
+        extension_features::remember_group_sources(&row["group"]).map_err(|message|
+            Problem::new("extension_source_invalid", "Cannot load extension sources", 422, "extension-group-list").with_detail(message))?;
     }
     Ok(rows
         .into_iter()
@@ -2052,18 +2049,8 @@ async fn update_extension_group(
             .unwrap_or_else(|| json!([]))
     });
     let sync_mode = group.get("syncMode").cloned().unwrap_or(json!("local"));
-    let extension_sources =
-        extension_features::group_git_sources(&extension_ids, &group["extensionSources"]).map_err(
-            |message| {
-                Problem::new(
-                    "extension_source_invalid",
-                    "Invalid extension source",
-                    422,
-                    "extension-group-update",
-                )
-                .with_detail(message)
-            },
-        )?;
+    let extension_sources = extension_features::group_git_sources(&extension_ids, &group["extensionSources"])
+        .map_err(|message| Problem::new("extension_source_invalid", "Invalid extension source", 422, "extension-group-update").with_detail(message))?;
     let result = state.invoke(
         "extension_group_update", &extension_command_id("extension-group-update")?,
         Some(&extension_command_id("extension-group-update-key")?),

@@ -758,7 +758,6 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: false,
-            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -779,9 +778,9 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
                     max_members: 10,
                     max_storage_bytes: 1024 * 1024,
                     offline_entitled: false,
+                    default_extension_group_id: None,
                 },
                 created_at: "2026-07-22T00:00:00Z".into(),
-                default_extension_group_id: None,
             },
         )
         .unwrap();
@@ -1361,7 +1360,6 @@ async fn hosted_profile_archive_restore_replays_and_survives_restart() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: false,
-            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -1382,9 +1380,9 @@ async fn hosted_profile_archive_restore_replays_and_survives_restart() {
                     max_members: 10,
                     max_storage_bytes: 1024 * 1024,
                     offline_entitled: false,
+                    default_extension_group_id: None,
                 },
                 created_at: "2026-07-22T00:00:00Z".into(),
-                default_extension_group_id: None,
             },
         )
         .unwrap();

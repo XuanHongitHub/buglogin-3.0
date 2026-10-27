@@ -7,12 +7,6 @@ import type { ProfileLockInfo } from "@/types";
 const BUGLOGIN_DESKTOP =
   process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET === "desktop";
 type CommandResult<T> = { data: T };
-type ProfileBinding = {
-  profileId: string;
-  resourceId: string;
-  workspaceId: string;
-  archiveState: string;
-};
 type LeaseStatus = {
   ownerId: string;
   issuedAtMs: number;
@@ -22,9 +16,14 @@ type RuntimeProjection = {
   deviceId: string;
   ownerId: string;
   ownerEmail?: string | null;
-  state: "running" | "stopped";
+  state: "running" | "syncing" | "stopped";
   updatedAtMs: number;
 } | null;
+type RuntimeStatusSnapshot = {
+  profileId: string;
+  lease: LeaseStatus | null;
+  runtime: RuntimeProjection;
+};
 
 export function useTeamLocks(
   currentUserId?: string,
@@ -62,88 +61,72 @@ export function useTeamLocks(
           return;
         }
         const nextLocks: ProfileLockInfo[] = [];
-        const checked = new Set<string>();
         const unconfirmed = new Set<string>();
         const runtimeRunning = new Set<string>();
         const targetIds = onlyProfileIds
           ? profileIds.filter((profileId) => onlyProfileIds.includes(profileId))
           : profileIds;
         if (targetIds.length === 0) return;
-        await Promise.all(
-          targetIds.map(async (profileId) => {
-            try {
-              const correlationId = `lease-status-${crypto.randomUUID()}`;
-              const bindingResult = await invoke<CommandResult<ProfileBinding>>(
-                "profile_binding_get",
-                { correlationId, payload: { profileId } },
-              );
-              const binding = bindingResult.data;
-              if (
-                binding.archiveState !== "active" ||
-                binding.workspaceId !== workspaceId
-              ) {
-                checked.add(profileId);
-                return;
-              }
-              const leaseResult = await invoke<
-                CommandResult<LeaseStatus | null>
-              >("resource_lease_get", {
-                correlationId: `lease-status-${crypto.randomUUID()}`,
-                payload: {
-                  workspaceId: binding.workspaceId,
-                  resourceId: binding.resourceId,
-                },
-              });
-              const lease = leaseResult.data;
-              checked.add(profileId);
-              if (!lease) return;
-
-              let runtime: RuntimeProjection;
-              try {
-                const runtimeResult = await invoke<
-                  CommandResult<RuntimeProjection>
-                >("profile_runtime_get", {
-                  correlationId: `runtime-status-${crypto.randomUUID()}`,
-                  payload: { profileId },
-                });
-                runtime = runtimeResult.data;
-              } catch {
-                unconfirmed.add(profileId);
-                return;
-              }
-
-              const lockState = resolveTeamLockState(
-                lease,
-                runtime,
-                localDeviceId,
-                locallyRunningProfileIds.has(profileId),
-              );
-              if (lockState.unknown) {
-                unconfirmed.add(profileId);
-                return;
-              }
-              if (lockState.runningRemotely && runtime) {
-                runtimeRunning.add(profileId);
-                nextLocks.push({
-                  profileId,
-                  lockedBy: lease.ownerId,
-                  lockedByEmail: runtime.ownerEmail ?? undefined,
-                  ownerLabel: runtime.ownerEmail ?? undefined,
-                  lockedAt: new Date(lease.issuedAtMs).toISOString(),
-                  expiresAt: new Date(lease.expiresAtMs).toISOString(),
-                });
-              }
-            } catch {
-              // A failed read is unknown, not evidence of an active lock.
+        try {
+          const response = await invoke<CommandResult<RuntimeStatusSnapshot[]>>(
+            "profile_runtime_status_batch",
+            {
+              correlationId: `runtime-status-batch-${crypto.randomUUID()}`,
+              payload: { workspaceId, profileIds: targetIds },
+            },
+          );
+          const snapshots = new Map(
+            response.data.map((snapshot) => [snapshot.profileId, snapshot]),
+          );
+          for (const profileId of targetIds) {
+            const snapshot = snapshots.get(profileId);
+            if (!snapshot) {
+              unconfirmed.add(profileId);
+              continue;
             }
-          }),
-        );
-        // The server is authoritative; a failed read must not leave stale locks visible.
+            if (!snapshot.lease) continue;
+            const lockState = resolveTeamLockState(
+              snapshot.lease,
+              snapshot.runtime,
+              localDeviceId,
+              locallyRunningProfileIds.has(profileId),
+            );
+            if (lockState.unknown) {
+              unconfirmed.add(profileId);
+              continue;
+            }
+            if (lockState.lockedRemotely) {
+              if (lockState.runningRemotely) runtimeRunning.add(profileId);
+              nextLocks.push({
+                profileId,
+                lockedBy: snapshot.lease.ownerId,
+                lockedByEmail: snapshot.runtime?.ownerEmail ?? undefined,
+                ownerLabel: snapshot.runtime?.ownerEmail ?? undefined,
+                lockedAt: new Date(snapshot.lease.issuedAtMs).toISOString(),
+                expiresAt: new Date(snapshot.lease.expiresAtMs).toISOString(),
+                activity: lockState.runningRemotely
+                  ? "running"
+                  : lockState.syncingRemotely
+                    ? "syncing"
+                    : "locked",
+              });
+            }
+          }
+        } catch {
+          for (const profileId of targetIds) unconfirmed.add(profileId);
+        }
         if (sequence !== requestSequence.current) return;
         if (onlyProfileIds) {
           const refreshedIds = new Set(targetIds);
+          const failedIds = new Set(
+            targetIds.filter((profileId) => unconfirmed.has(profileId)),
+          );
           setLocks((current) => [
-            ...current.filter((lock) => !refreshedIds.has(lock.profileId)),
+            ...current.filter(
+              (lock) =>
+                !refreshedIds.has(lock.profileId) ||
+                failedIds.has(lock.profileId),
+            ),
             ...nextLocks,
           ]);
           setUnknownProfileIds((current) => {
@@ -151,9 +134,7 @@ export function useTeamLocks(
               [...current].filter((profileId) => !refreshedIds.has(profileId)),
             );
             for (const profileId of targetIds) {
-              if (!checked.has(profileId) || unconfirmed.has(profileId)) {
-                next.add(profileId);
-              }
+              if (unconfirmed.has(profileId)) next.add(profileId);
             }
             return next;
           });
@@ -165,13 +146,14 @@ export function useTeamLocks(
             return next;
           });
         } else {
-          setLocks(nextLocks);
-          setUnknownProfileIds(
-            new Set([
-              ...profileIds.filter((profileId) => !checked.has(profileId)),
-              ...unconfirmed,
-            ]),
+          const failedIds = new Set(
+            profileIds.filter((profileId) => unconfirmed.has(profileId)),
           );
+          setLocks((current) => [
+            ...current.filter((lock) => failedIds.has(lock.profileId)),
+            ...nextLocks,
+          ]);
+          setUnknownProfileIds(new Set([...unconfirmed]));
           setRuntimeRunningProfileIds(runtimeRunning);
         }
         return;
@@ -239,7 +221,7 @@ export function useTeamLocks(
   useEffect(() => {
     void fetchLocks();
     if (BUGLOGIN_DESKTOP) {
-      const interval = window.setInterval(() => void fetchLocks(), 15_000);
+      const interval = window.setInterval(() => void fetchLocks(), 5_000);
       const refreshWhenActive = () => {
         if (document.visibilityState === "visible") {
           void fetchLocks(undefined, true);
@@ -267,15 +249,6 @@ export function useTeamLocks(
       });
     };
   }, [fetchLocks]);
-
-  useEffect(() => {
-    if (!BUGLOGIN_DESKTOP || unknownProfileIds.size === 0) return;
-    const interval = window.setInterval(
-      () => void fetchLocks([...unknownProfileIds]),
-      2_500,
-    );
-    return () => window.clearInterval(interval);
-  }, [fetchLocks, unknownProfileIds]);
 
   const isProfileLocked = useCallback(
     (profileId: string): boolean => {

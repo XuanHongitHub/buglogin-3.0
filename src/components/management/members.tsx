@@ -749,11 +749,14 @@ export function WorkspaceMembers({
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Checkbox
+                  id="member-edit-roles"
                   aria-label={t("editRoles")}
                   checked={changeRole}
                   onCheckedChange={(checked) => setChangeRole(checked === true)}
                 />
-                <span>{t("editRoles")}</span>
+                <Label htmlFor="member-edit-roles" className="cursor-pointer">
+                  {t("editRoles")}
+                </Label>
               </div>
               <RolePicker
                 value={editRole}
@@ -778,13 +781,19 @@ export function WorkspaceMembers({
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Checkbox
+                  id="member-replace-groups"
                   aria-label={t("replaceGroups")}
                   checked={replaceGroups}
                   onCheckedChange={(checked) =>
                     setReplaceGroups(checked === true)
                   }
                 />
-                <span>{t("replaceGroups")}</span>
+                <Label
+                  htmlFor="member-replace-groups"
+                  className="cursor-pointer"
+                >
+                  {t("replaceGroups")}
+                </Label>
               </div>
               <div className="max-h-64 space-y-1 overflow-auto rounded-md border border-border p-2">
                 {groups.map((group) => (
@@ -793,6 +802,7 @@ export function WorkspaceMembers({
                     key={group.group.id}
                   >
                     <Checkbox
+                      id={`member-group-${group.group.id}`}
                       aria-label={group.group.name}
                       disabled={!replaceGroups}
                       checked={selectedGroups.includes(group.group.id)}
@@ -804,7 +814,12 @@ export function WorkspaceMembers({
                         )
                       }
                     />
-                    {group.group.name}
+                    <Label
+                      htmlFor={`member-group-${group.group.id}`}
+                      className="cursor-pointer"
+                    >
+                      {group.group.name}
+                    </Label>
                   </div>
                 ))}
               </div>
@@ -912,6 +927,7 @@ export function WorkspaceMembers({
                   key={entry.id}
                 >
                   <Checkbox
+                    id={`member-add-${entry.id}`}
                     aria-label={entry.username || entry.email}
                     checked={addSelected.includes(entry.id)}
                     onCheckedChange={(checked) =>
@@ -922,14 +938,17 @@ export function WorkspaceMembers({
                       )
                     }
                   />
-                  <span className="min-w-0">
+                  <Label
+                    htmlFor={`member-add-${entry.id}`}
+                    className="min-w-0 cursor-pointer"
+                  >
                     <span className="block truncate text-sm font-medium">
                       {entry.username || entry.email}
                     </span>
                     <span className="block truncate text-xs text-muted-foreground">
                       {entry.email}
                     </span>
-                  </span>
+                  </Label>
                 </div>
               ))}
           </div>

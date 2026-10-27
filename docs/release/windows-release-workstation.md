@@ -177,7 +177,7 @@ The protected signing job must produce and verify:
 
 - Windows NSIS installer plus matching Tauri `.exe.sig` updater signature.
 - macOS arm64 signed app and DMG, accepted by Apple notarization, stapled, and validated by Gatekeeper; plus the signed `.app.tar.gz` and `.sig` updater pair.
-- SHA-256 checksums, SPDX SBOM, a keyless Sigstore bundle signed with GitHub OIDC and verified against the repository/workflow identity, and version/platform evidence.
+- SHA-256 checksums, SPDX SBOM, GitHub build provenance attestations, and version/platform evidence.
 - `latest.json` for signed Tauri updater URLs/signatures and `downloads.json` for manual installer URLs (if using the current Actions workflow), both matching the version and immutable S3 artifact prefix.
 - Private GitHub workflow artifacts and S3 immutable artifacts whose downloaded bytes have the recorded checksums. The canonical public stable updater/download manifests are the S3 objects.
 
@@ -214,7 +214,7 @@ After a successful run, verify from an unauthenticated client:
 
 1. `GET` stable `latest.json` and (for the current Actions workflow) `downloads.json` return HTTP 200 and valid JSON with the intended version and both supported platforms.
 2. Each updater URL returns HTTP 200 on `HEAD`; each detached signature verifies against the embedded public key. Never publish a private signing key.
-3. Compare downloaded feed/checksum files with the workflow's candidate files; verify installer and updater artifact SHA-256, SBOM, and the Sigstore provenance bundle.
+3. Compare downloaded feed/checksum files with the workflow's candidate files; verify installer and updater artifact SHA-256, SBOM, and provenance attestations.
 4. Verify `https://app3.buglogin.com/api/downloads/latest` and both platform redirects against the same stable version. Install/update from the stable feed on Windows and macOS. Confirm the About/manual check and automatic check can parse the feed, the app and daemon stop before replacement, the new version opens, and existing profiles/settings remain usable.
 5. If the API or browser catalog changed, verify API health/OpenAPI/catalog after the API workflow/deploy. If the landing handler changed, deploy and verify it separately; desktop stable promotion does not deploy either service.
 6. Save the run URLs, both repository SHAs/tags, hashes, HEAD results, acceptance evidence, and any defects. If a required check fails, stop promotion and follow the rollback policy; do not overwrite the tag or immutable artifact.

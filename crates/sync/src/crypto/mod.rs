@@ -682,7 +682,9 @@ fn crypto_problem(code: &'static str) -> Problem {
 
 #[cfg(test)]
 mod error_contract_tests {
-    use super::{ClientKey, ManagedResourceKeyEnvelope, crypto_problem};
+    use super::{
+        ClientKey, ManagedResourceKeyEnvelope, crypto_problem,
+    };
     use buglogin_domain::ids::{ResourceId, WorkspaceId};
 
     #[test]
@@ -722,15 +724,13 @@ mod error_contract_tests {
                 .unwrap(),
             resource_key
         );
-        assert!(
-            envelope
-                .unwrap(
-                    &WorkspaceId::from_str("ws_another_managed_key_test").unwrap(),
-                    &resource,
-                    &envelope.key_version,
-                    &wrapping
-                )
-                .is_err()
-        );
+        assert!(envelope
+            .unwrap(
+                &WorkspaceId::from_str("ws_another_managed_key_test").unwrap(),
+                &resource,
+                &envelope.key_version,
+                &wrapping
+            )
+            .is_err());
     }
 }

@@ -83,9 +83,7 @@ pub struct ExtensionGroupService {
 
 impl ExtensionGroupService {
     pub(crate) fn has_workspace_records(&self, workspace_id: &WorkspaceId) -> bool {
-        self.groups
-            .values()
-            .any(|record| &record.workspace_id == workspace_id)
+        self.groups.values().any(|record| &record.workspace_id == workspace_id)
     }
 
     pub fn create(
@@ -193,13 +191,9 @@ impl ExtensionGroupService {
         if let Some(sources) = input.extension_sources.as_ref() {
             validate_sources(&input.extension_ids, sources)?;
         }
-        let sources = input
-            .extension_sources
-            .unwrap_or_else(|| record.group.extension_sources.clone());
-        let sources: BTreeMap<_, _> = sources
-            .into_iter()
-            .filter(|(id, _)| input.extension_ids.contains(id))
-            .collect();
+        let sources = input.extension_sources.unwrap_or_else(|| record.group.extension_sources.clone());
+        let sources: BTreeMap<_, _> = sources.into_iter()
+            .filter(|(id, _)| input.extension_ids.contains(id)).collect();
         validate_sources(&input.extension_ids, &sources)?;
         record.revision = record
             .revision
@@ -291,27 +285,14 @@ fn authorize(
     }
 }
 
-pub fn validate_sources(
-    ids: &[ExtensionId],
-    sources: &BTreeMap<ExtensionId, GitExtensionSource>,
-) -> Result<(), Problem> {
+pub fn validate_sources(ids: &[ExtensionId], sources: &BTreeMap<ExtensionId, GitExtensionSource>) -> Result<(), Problem> {
     if sources.len() > 256 || sources.keys().any(|id| !ids.contains(id)) {
-        return Err(problem(
-            "extension_source_invalid",
-            "Source must belong to an extension in this group",
-            422,
-        ));
+        return Err(problem("extension_source_invalid", "Source must belong to an extension in this group", 422));
     }
     for (id, source) in sources {
-        source
-            .validate()
-            .map_err(|reason| problem("extension_source_invalid", reason, 422))?;
+        source.validate().map_err(|reason| problem("extension_source_invalid", reason, 422))?;
         if id.as_str() != source.extension_id() {
-            return Err(problem(
-                "extension_source_invalid",
-                "Git extension ID does not match its source",
-                422,
-            ));
+            return Err(problem("extension_source_invalid", "Git extension ID does not match its source", 422));
         }
     }
     Ok(())
@@ -352,12 +333,7 @@ mod tests {
         let actor = admin();
         let ws = workspace("wsp_alpha");
         let mut input = create_input("wsp_alpha", "extgrp_git", "Git group");
-        let source = GitExtensionSource {
-            repository_url: "https://github.com/BaoNgoThien18/facebook-profile-sync-extension"
-                .into(),
-            reference: "main".into(),
-            subdirectory: String::new(),
-        };
+        let source = GitExtensionSource { repository_url: "https://github.com/BaoNgoThien18/facebook-profile-sync-extension".into(), reference: "main".into(), subdirectory: String::new() };
         let ext = ExtensionId::from_str(&source.extension_id()).unwrap();
         input.extension_ids = vec![ext.clone()];
         input.extension_sources.insert(ext.clone(), source.clone());
@@ -365,52 +341,20 @@ mod tests {
         let created = service.create(&actor, &[], &ws, input).unwrap();
         let snapshot = serde_json::to_vec(&service).unwrap();
         let mut service: ExtensionGroupService = serde_json::from_slice(&snapshot).unwrap();
-        let mut update = ExtensionGroupUpdateInput {
-            workspace_id: ws.clone(),
-            extension_group_id: created.group.id.clone(),
-            expected_revision: 1,
-            name: "Renamed".into(),
-            extension_ids: vec![ext.clone()],
-            extension_sources: None,
-            sync_mode: Some(SyncMode::Managed),
-        };
+        let mut update = ExtensionGroupUpdateInput { workspace_id: ws.clone(), extension_group_id: created.group.id.clone(), expected_revision: 1, name: "Renamed".into(), extension_ids: vec![ext.clone()], extension_sources: None, sync_mode: Some(SyncMode::Managed) };
         let updated = service.update(&actor, &[], &ws, update.clone()).unwrap();
         assert_eq!(updated.group.extension_sources[&ext], source);
-        assert!(
-            service
-                .get(&actor, &[], &workspace("wsp_beta"), &created.group.id)
-                .is_err()
-        );
+        assert!(service.get(&actor, &[], &workspace("wsp_beta"), &created.group.id).is_err());
         update.expected_revision = 2;
         let mut unsafe_source = source.clone();
         unsafe_source.repository_url = "https://127.0.0.1/private".into();
         update.extension_sources = Some([(ext.clone(), unsafe_source)].into());
-        assert_eq!(
-            service
-                .update(&actor, &[], &ws, update.clone())
-                .unwrap_err()
-                .code,
-            "extension_source_invalid"
-        );
-        update.extension_sources =
-            Some([(ExtensionId::from_str("ext_not_in_group").unwrap(), source)].into());
-        assert_eq!(
-            service
-                .update(&actor, &[], &ws, update.clone())
-                .unwrap_err()
-                .code,
-            "extension_source_invalid"
-        );
+        assert_eq!(service.update(&actor, &[], &ws, update.clone()).unwrap_err().code, "extension_source_invalid");
+        update.extension_sources = Some([(ExtensionId::from_str("ext_not_in_group").unwrap(), source)].into());
+        assert_eq!(service.update(&actor, &[], &ws, update.clone()).unwrap_err().code, "extension_source_invalid");
         update.extension_sources = None;
         update.extension_ids.clear();
-        assert!(
-            service
-                .update(&actor, &[], &ws, update)
-                .unwrap()
-                .group
-                .extension_sources
-                .is_empty()
-        );
+        assert!(service.update(&actor, &[], &ws, update).unwrap().group.extension_sources.is_empty());
     }
     use buglogin_domain::permissions::Role;
 

@@ -198,6 +198,7 @@ pub struct ProductionDesktopState {
     auth_expires_at: Arc<Mutex<u64>>,
     auth_refresh_uncertain: Arc<Mutex<bool>>,
     auth_refresh_gate: Arc<AsyncMutex<()>>,
+    pending_sso: Arc<Mutex<Option<(Zeroizing<String>, std::time::Instant)>>>,
     projection: ProfileProjection,
     device_key_vault: Arc<DeviceKeyVault>,
     device_key_enrolled: Arc<AtomicBool>,
@@ -585,6 +586,7 @@ impl ProductionDesktopState {
             auth_expires_at: Arc::new(Mutex::new(stored_expires_at)),
             auth_refresh_uncertain: Arc::new(Mutex::new(stored_refresh_pending)),
             auth_refresh_gate: Arc::new(AsyncMutex::new(())),
+            pending_sso: Arc::new(Mutex::new(None)),
             projection: ProfileProjection::open(profiles_root)?,
             device_key_vault: Arc::new(DeviceKeyVault::native()),
             device_key_enrolled: Arc::new(AtomicBool::new(false)),
@@ -654,7 +656,7 @@ impl ProductionDesktopState {
         let runtime_state = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 if runtime_state.client.has_token().unwrap_or(false) {
                     runtime_state.reconcile_exited_browser_profiles().await;
                 }
@@ -666,7 +668,7 @@ impl ProductionDesktopState {
         let operation_busy = || {
             self.operation_gate
                 .lock()
-                .map(|gate| gate.draining || gate.in_flight > 0)
+                .map(|gate| gate.draining)
                 .unwrap_or(true)
         };
         if operation_busy() {
@@ -2079,9 +2081,37 @@ impl ProductionDesktopState {
                 correlation_id,
             ));
         }
-        self.client
+        let response = self
+            .client
             .buglab_sso_start(&self.device_id, correlation_id)
-            .await
+            .await?;
+        let authorization_url = reqwest::Url::parse(&response.authorization_url).map_err(|_| {
+            Problem::new(
+                "api_auth_response_invalid",
+                "BugLogin returned an invalid sign-in response",
+                502,
+                correlation_id,
+            )
+        })?;
+        let state = authorization_url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+            .ok_or_else(|| {
+                Problem::new(
+                    "api_auth_response_invalid",
+                    "BugLogin returned an invalid sign-in response",
+                    502,
+                    correlation_id,
+                )
+            })?;
+        *self
+            .pending_sso
+            .lock()
+            .map_err(|_| desktop_state_problem(correlation_id))? = Some((
+            Zeroizing::new(state),
+            std::time::Instant::now() + Duration::from_secs(response.expires_in),
+        ));
+        Ok(response)
     }
 
     pub async fn complete_buglab_sso(
@@ -2104,10 +2134,30 @@ impl ProductionDesktopState {
             self.ensure_device_key_registered(correlation_id).await?;
             return Ok(DesktopAuthStatus::Authenticated);
         }
+        let pending_matches = self
+            .pending_sso
+            .lock()
+            .map_err(|_| desktop_state_problem(correlation_id))?
+            .as_ref()
+            .is_some_and(|(expected, expires_at)| {
+                *expires_at > std::time::Instant::now() && expected.as_str() == state.as_str()
+            });
+        if !pending_matches {
+            return Err(Problem::new(
+                "invalid_sso_callback",
+                "Start BugLab ID sign-in again in this app",
+                401,
+                correlation_id,
+            ));
+        }
         let token = self
             .client
             .buglab_sso_complete(state.as_str(), provider_token.as_str(), correlation_id)
             .await?;
+        *self
+            .pending_sso
+            .lock()
+            .map_err(|_| desktop_state_problem(correlation_id))? = None;
         self.install_session_tokens(token, correlation_id).await
     }
 
@@ -2904,56 +2954,30 @@ impl ProductionDesktopState {
         key_version: &str,
         correlation_id: &str,
     ) -> Result<crate::sync_key_vault::ResourceKeys, Problem> {
-        match self
-            .client
-            .fetch_profile_managed_key(profile_id, correlation_id)
-            .await
-        {
+        match self.client.fetch_profile_managed_key(profile_id, correlation_id).await {
             Ok(mut managed) => {
                 let mut raw = decode_profile_key_hex(&managed.resource_key).ok_or_else(|| {
-                    Problem::new(
-                        "managed_profile_key_invalid",
-                        "Managed profile key is invalid",
-                        502,
-                        correlation_id,
-                    )
+                    Problem::new("managed_profile_key_invalid", "Managed profile key is invalid", 502, correlation_id)
                 })?;
                 managed.resource_key.zeroize();
                 let client = buglogin_sync::crypto::ClientKey::from_bytes(raw);
                 raw.zeroize();
                 if format!("{:x}", Sha256::digest(client.as_bytes())) != key_version {
-                    return Err(Problem::new(
-                        "profile_key_version_mismatch",
-                        "Managed profile key does not match the active manifest",
-                        409,
-                        correlation_id,
-                    ));
+                    return Err(Problem::new("profile_key_version_mismatch", "Managed profile key does not match the active manifest", 409, correlation_id));
                 }
                 let recovery = buglogin_sync::crypto::RecoveryKey::generate()?;
                 self.sync_key_vault.replace_recovered_for_manifest(
-                    &binding.workspace_id,
-                    &binding.resource_id,
-                    client,
-                    recovery,
-                    key_version,
-                    correlation_id,
+                    &binding.workspace_id, &binding.resource_id, client, recovery,
+                    key_version, correlation_id,
                 )?;
-                return self
-                    .sync_key_vault
-                    .load_for_manifest(
-                        &binding.workspace_id,
-                        &binding.resource_id,
-                        key_version,
-                        correlation_id,
-                    )?
-                    .ok_or_else(|| {
-                        Problem::new(
-                            "sync_key_vault_unavailable",
-                            "Managed profile key was not persisted on this device",
-                            503,
-                            correlation_id,
-                        )
-                    });
+                return self.sync_key_vault.load_for_manifest(
+                    &binding.workspace_id, &binding.resource_id, key_version, correlation_id,
+                )?.ok_or_else(|| Problem::new(
+                    "sync_key_vault_unavailable",
+                    "Managed profile key was not persisted on this device",
+                    503,
+                    correlation_id,
+                ));
             }
             Err(error) if error.code == "managed_profile_key_not_enrolled" => {}
             Err(error) => return Err(error),
@@ -2968,7 +2992,7 @@ impl ProductionDesktopState {
             Err(error) if error.code == "profile_key_envelope_not_found" => {
                 return Err(Problem::new(
                     "sync_key_recovery_required",
-                    "This legacy profile key is not enrolled on the server; sync the profile once from a device that can already open it",
+                    "Enter this profile's recovery code on this device to open it",
                     409,
                     correlation_id,
                 ));
@@ -3048,21 +3072,14 @@ impl ProductionDesktopState {
                         correlation_id,
                     )
                 })?;
-            let keys = match self.sync_key_vault.load(
-                &binding.workspace_id,
-                &binding.resource_id,
-                correlation_id,
-            )? {
+            let keys = match self
+                .sync_key_vault
+                .load(&binding.workspace_id, &binding.resource_id, correlation_id)?
+            {
                 Some(keys) => keys,
-                None => {
-                    self.recover_profile_key_envelope(
-                        &binding,
-                        &request.profile_id,
-                        key_version,
-                        correlation_id,
-                    )
-                    .await?
-                }
+                None => self.recover_profile_key_envelope(
+                    &binding, &request.profile_id, key_version, correlation_id,
+                ).await?,
             };
             let actual_key_version = format!("{:x}", Sha256::digest(keys.client.as_bytes()));
             if actual_key_version != key_version {
@@ -3074,13 +3091,11 @@ impl ProductionDesktopState {
                 ));
             }
 
-            self.client
-                .enroll_profile_managed_key(
-                    &request.profile_id,
-                    &encode_hex(keys.client.as_bytes()),
-                    correlation_id,
-                )
-                .await?;
+            self.client.enroll_profile_managed_key(
+                &request.profile_id,
+                &encode_hex(keys.client.as_bytes()),
+                correlation_id,
+            ).await?;
             request.recipient_key_envelopes.clear();
         } else {
             request.recipient_key_envelopes.clear();
@@ -4078,66 +4093,27 @@ impl ProductionDesktopState {
         };
         // Optional extension preparation never changes profile authorization or sync authority.
         // Read group sources through the authenticated API, then install on this device in Rust.
-        let extension_preparation: Result<crate::extension_features::PreparedExtensions, Problem> =
-            async {
-                let Some(group_id) = profile.value.extension_group_id.as_ref() else {
-                    return Ok(crate::extension_features::PreparedExtensions::default());
-                };
-                let response = self
-                    .client
-                    .invoke(
-                        "extension_group_get",
-                        &correlation_id,
-                        None,
-                        json!({"workspaceId": binding.workspace_id, "extensionGroupId": group_id}),
-                    )
-                    .await?;
-                let group: buglogin_domain::entities::ExtensionGroup =
-                    serde_json::from_value(response.data["group"].clone())
-                        .map_err(|_| serialization(&correlation_id))?;
-                crate::extension_features::prepare_for_profile(
-                    profile_id.as_str(),
-                    &group.extension_ids,
-                    &group.extension_sources,
-                )
-                .await
-                .map_err(|message| {
-                    Problem::new(
-                        "extension_prepare_failed",
-                        "Extensions could not be prepared",
-                        503,
-                        &correlation_id,
-                    )
-                    .with_detail(message)
-                })
-            }
-            .await;
+        let extension_preparation: Result<crate::extension_features::PreparedExtensions, Problem> = async {
+            let Some(group_id) = profile.value.extension_group_id.as_ref() else {
+                return Ok(crate::extension_features::PreparedExtensions::default());
+            };
+            let response = self.client.invoke("extension_group_get", &correlation_id, None,
+                json!({"workspaceId": binding.workspace_id, "extensionGroupId": group_id})).await?;
+            let group: buglogin_domain::entities::ExtensionGroup = serde_json::from_value(response.data["group"].clone())
+                .map_err(|_| serialization(&correlation_id))?;
+            crate::extension_features::prepare_for_profile(profile_id.as_str(), &group.extension_ids, &group.extension_sources).await
+                .map_err(|message| Problem::new("extension_prepare_failed", "Extensions could not be prepared", 503, &correlation_id).with_detail(message))
+        }.await;
         let prepared_extensions = match extension_preparation {
             Ok(prepared) => prepared,
             Err(error) => {
-                crate::diagnostics::report_problem_failure(
-                    DesktopState::Production(self.clone()),
-                    "profile.extensions.prepare",
-                    error.clone(),
-                );
-                crate::extension_features::PreparedExtensions {
-                    paths: Vec::new(),
-                    warnings: vec![error.title],
-                }
+                crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.extensions.prepare", error.clone());
+                crate::extension_features::PreparedExtensions { paths: Vec::new(), warnings: vec![error.title] }
             }
         };
         for warning in &prepared_extensions.warnings {
-            crate::diagnostics::report_problem_failure(
-                DesktopState::Production(self.clone()),
-                "profile.extensions.update",
-                Problem::new(
-                    "extension_update_deferred",
-                    "Extension update deferred",
-                    503,
-                    &correlation_id,
-                )
-                .with_detail(warning.clone()),
-            );
+            crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.extensions.update",
+                Problem::new("extension_update_deferred", "Extension update deferred", 503, &correlation_id).with_detail(warning.clone()));
         }
         let (mut manifest, manifest_proxy_stale) = match self
             .client
@@ -4448,12 +4424,7 @@ impl ProductionDesktopState {
                 }
             };
             if !prepared_extensions.paths.is_empty() {
-                let paths = prepared_extensions
-                    .paths
-                    .iter()
-                    .map(|path| path.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let paths = prepared_extensions.paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>().join(",");
                 push_or_replace_arg(&mut specification.args, format!("--load-extension={paths}"));
             }
             let mut proxy_bridge = None;
@@ -4620,32 +4591,49 @@ impl ProductionDesktopState {
             };
             let mut fingerprint_warning = None;
             if let Some(target) = fingerprint_target.as_ref() {
-                let fingerprint_result = match fingerprint_cdp_port {
-                    Some(cdp_port) => {
-                        apply_wayfern_fingerprint(
-                            &profile_path,
-                            target,
-                            profile.value.runtime_version.as_deref().unwrap_or_default(),
-                            cdp_port,
+                let cdp_port = match fingerprint_cdp_port {
+                    Some(port) => port,
+                    None => {
+                        if let Err(mut cleanup_error) =
+                            self.profile_runtime.stop(profile_id.clone()).await
+                        {
+                            cleanup_error.correlation_id = correlation_id.clone();
+                            return Err(cleanup_error);
+                        }
+                        let _ = self.projection.clear_active_session_marker(&profile_id);
+                        return Err(Problem::new(
+                            "wayfern_cdp_unavailable",
+                            "Wayfern local control port was not configured",
+                            503,
                             &correlation_id,
-                        )
-                        .await
+                        ));
                     }
-                    None => Err(Problem::new(
-                        "wayfern_cdp_unavailable",
-                        "Wayfern local control port was not configured",
-                        503,
-                        &correlation_id,
-                    )),
                 };
-                let warning = fingerprint_apply_warning(fingerprint_result);
-                if let Some(warning) = warning {
-                    crate::diagnostics::report_problem_failure(
-                        DesktopState::Production(self.clone()),
-                        "profile.fingerprint.default",
-                        warning.clone(),
-                    );
-                    fingerprint_warning = Some(warning);
+                match apply_wayfern_fingerprint(
+                    &profile_path,
+                    target,
+                    profile.value.runtime_version.as_deref().unwrap_or_default(),
+                    cdp_port,
+                    &correlation_id,
+                )
+                .await
+                {
+                    Ok(warning) => {
+                        if let Some(warning) = warning {
+                            crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.fingerprint.default", warning.clone());
+                            fingerprint_warning = Some(warning);
+                        }
+                    }
+                    Err(error) => {
+                    if let Err(mut cleanup_error) =
+                        self.profile_runtime.stop(profile_id.clone()).await
+                    {
+                        cleanup_error.correlation_id = correlation_id.clone();
+                        return Err(cleanup_error);
+                    }
+                    let _ = self.projection.clear_active_session_marker(&profile_id);
+                    return Err(error);
+                    }
                 }
             }
             if let Err(error) = self
@@ -4930,32 +4918,34 @@ impl ProductionDesktopState {
             Err(error) => return Err(error),
         };
         if let Some(stopped) = preheld_stop.as_ref().filter(|stopped| stopped.was_launched) {
-            let lease = stopped.lease.as_ref().ok_or_else(|| {
-                Problem::new(
-                    "production_write_authority_required",
-                    "Production write authority is required",
-                    409,
-                    &correlation_id,
-                )
-            })?;
-            self.client
-                .runtime_stopped(
-                    &profile_id,
-                    auth.actor_id(),
-                    previous.generation,
-                    &previous.root_checksum,
-                    lease,
-                    &runtime_projection_idempotency_key(
-                        &idempotency_key,
-                        "process-stopped-preflight",
-                    ),
-                    &correlation_id,
-                )
-                .await?;
+            if let Some(lease) = stopped.lease.as_ref() {
+                if let Err(error) = self
+                    .client
+                    .runtime_stopped(
+                        &profile_id,
+                        auth.actor_id(),
+                        previous.generation,
+                        &previous.root_checksum,
+                        lease,
+                        &runtime_projection_idempotency_key(
+                            &idempotency_key,
+                            "process-stopped-preflight",
+                        ),
+                        &correlation_id,
+                    )
+                    .await
+                {
+                    crate::diagnostics::report_problem_failure(
+                        DesktopState::Production(self.clone()),
+                        "profile.runtime.stopped",
+                        error,
+                    );
+                }
+            }
         }
-        // Publish the stopped state before device-key enrollment and key-rotation
-        // checks. Those can reject the sync after the browser is already closed;
-        // the remote profile must not remain marked Running in that case.
+        // The browser is already closed when this path is reached. Publish the
+        // operation phase only after its write lease is held, immediately before
+        // the sync work starts; this is telemetry and must never block syncing.
         self.ensure_device_key_registered(&correlation_id).await?;
         let rotation_recipients = match self
             .client
@@ -5040,6 +5030,28 @@ impl ProductionDesktopState {
             && !proxy_refresh_required
             && rotation_recipients.is_none()
         {
+            if let Some(stopped) = preheld_stop.as_ref()
+                && stopped.was_launched
+                && let Some(lease) = stopped.lease.as_ref()
+                && let Err(error) = self
+                    .client
+                    .runtime_stopped(
+                        &profile_id,
+                        auth.actor_id(),
+                        previous.generation,
+                        &previous.root_checksum,
+                        lease,
+                        &runtime_projection_idempotency_key(&idempotency_key, "already-synced"),
+                        &correlation_id,
+                    )
+                    .await
+            {
+                crate::diagnostics::report_problem_failure(
+                    DesktopState::Production(self.clone()),
+                    "profile.runtime.stopped",
+                    error,
+                );
+            }
             self.profile_runtime
                 .complete_stop(profile_id.clone())
                 .await
@@ -5151,6 +5163,27 @@ impl ProductionDesktopState {
                 &correlation_id,
             ));
         };
+        if let Some(lease) = stopped.lease.as_ref() {
+            if let Err(error) = self
+                .client
+                .runtime_syncing(
+                    &profile_id,
+                    auth.actor_id(),
+                    previous.generation,
+                    &previous.root_checksum,
+                    lease,
+                    &runtime_projection_idempotency_key(&idempotency_key, "syncing"),
+                    &correlation_id,
+                )
+                .await
+            {
+                crate::diagnostics::report_problem_failure(
+                    DesktopState::Production(self.clone()),
+                    "profile.runtime.syncing",
+                    error,
+                );
+            }
+        }
         let sync_result = async {
             if stopped.was_launched
                 && stopped
@@ -5193,30 +5226,6 @@ impl ProductionDesktopState {
                     )
                     .await?;
                 stopped.was_launched = was_launched;
-                if was_launched {
-                    let refreshed_lease = stopped.lease.as_ref().ok_or_else(|| {
-                        Problem::new(
-                            "production_write_authority_required",
-                            "Production write authority is required",
-                            409,
-                            &correlation_id,
-                        )
-                    })?;
-                    self.client
-                        .runtime_stopped(
-                            &profile_id,
-                            auth.actor_id(),
-                            previous.generation,
-                            &previous.root_checksum,
-                            refreshed_lease,
-                            &runtime_projection_idempotency_key(
-                                &idempotency_key,
-                                "process-stopped-fence-refresh",
-                            ),
-                            &correlation_id,
-                        )
-                        .await?;
-                }
             }
             let lease = stopped.lease.as_ref().ok_or_else(|| {
                 Problem::new(
@@ -5407,8 +5416,9 @@ impl ProductionDesktopState {
             } else {
                 None
             };
-            if stopped.was_launched {
-                self.client
+            if let Some(lease) = stopped.lease.as_ref() {
+                if let Err(error) = self
+                    .client
                     .runtime_stopped(
                         &profile_id,
                         auth.actor_id(),
@@ -5418,7 +5428,14 @@ impl ProductionDesktopState {
                         &runtime_projection_idempotency_key(&idempotency_key, "stopped"),
                         &correlation_id,
                     )
-                    .await?;
+                    .await
+                {
+                    crate::diagnostics::report_problem_failure(
+                        DesktopState::Production(self.clone()),
+                        "profile.runtime.stopped",
+                        error,
+                    );
+                }
             }
             self.profile_runtime
                 .complete_stop(profile_id.clone())
@@ -7282,6 +7299,12 @@ impl DesktopState {
                 409,
                 correlation_id,
             )),
+            Self::Local(_) if invoke_name == "profile_runtime_status_batch" => Err(Problem::new(
+                "hosted_coordination_required",
+                "Managed profile runtime status requires the authenticated workspace API",
+                409,
+                correlation_id,
+            )),
             Self::Local(state) => {
                 state
                     .invoke(invoke_name, correlation_id, idempotency_key, payload)
@@ -7788,10 +7811,6 @@ fn launch_state_allows_start(state: &ProfileState, archived: bool, locally_runni
     matches!(state, ProfileState::Ready | ProfileState::Running)
 }
 
-fn fingerprint_apply_warning(result: Result<Option<Problem>, Problem>) -> Option<Problem> {
-    result.unwrap_or_else(Some)
-}
-
 fn result(command_id: &str, correlation_id: &str, data: Value) -> CommandResult<Value> {
     CommandResult {
         command_id: command_id.to_owned(),
@@ -7886,10 +7905,9 @@ fn production_sync_not_ready() -> Problem {
 mod tests {
     use super::{
         ConfirmedKeyRotationRecipient, DesktopState, ProxyCredentialInput, ProxyImportInput,
-        WorkspaceSelectionStore, fingerprint_apply_warning, launch_state_allows_start,
-        local_proxy_parse, production_sync_not_ready, production_transport,
-        runtime_dispatch_operation_key, shutdown_idempotency_key,
-        validate_key_rotation_confirmation,
+        WorkspaceSelectionStore, launch_state_allows_start, local_proxy_parse,
+        production_sync_not_ready, production_transport, runtime_dispatch_operation_key,
+        shutdown_idempotency_key, validate_key_rotation_confirmation,
     };
     use buglogin_api::services::{
         device_key_directory::DeviceEncryptionKey,
@@ -7933,19 +7951,6 @@ mod tests {
             false,
             false
         ));
-    }
-
-    #[test]
-    fn fingerprint_failure_is_a_launch_warning_not_a_lifecycle_error() {
-        let error = Problem::new(
-            "wayfern_fingerprint_provider_unavailable",
-            "Wayfern fingerprint provider unavailable",
-            409,
-            "test-correlation",
-        );
-        let warning = fingerprint_apply_warning(Err(error));
-        assert!(warning.is_some());
-        assert!(fingerprint_apply_warning(Ok(None)).is_none());
     }
 
     #[test]

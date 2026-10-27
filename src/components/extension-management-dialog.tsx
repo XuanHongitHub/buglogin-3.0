@@ -56,6 +56,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -236,7 +242,9 @@ export function ExtensionManagementDialog({
 
   // Tab — keyed off `initialTab` so remounting the dialog with a new initial
   // tab (e.g. via the Mod+E shortcut toggle) jumps to that tab.
-  const [activeTab, setActiveTab] = useState<"extensions" | "groups">("groups");
+  const [activeTab, setActiveTab] = useState<"extensions" | "groups">(
+    "extensions",
+  );
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
@@ -1472,66 +1480,34 @@ export function ExtensionManagementDialog({
                 </AnimatedTabsList>
                 <div className="flex items-center gap-2">
                   {activeTab === "extensions" && (
-                    <>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <RippleButton
-                            size="sm"
-                            variant="soft"
-                            onClick={() =>
-                              document.getElementById("ext-file-input")?.click()
-                            }
-                            aria-label={t("extensions.upload")}
-                          >
-                            <LuUpload className="size-4" />
-                            <span className="hidden @2xl:inline">
-                              {t("extensions.upload")}
-                            </span>
-                          </RippleButton>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {t("extensions.upload")}
-                        </TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <RippleButton
-                            size="sm"
-                            variant="soft"
-                            onClick={() => void handleLoadUnpacked()}
-                            aria-label={t("extensions.loadUnpacked")}
-                          >
-                            <LuFolderOpen className="size-4" />
-                            <span className="hidden @2xl:inline">
-                              {t("extensions.loadUnpacked")}
-                            </span>
-                          </RippleButton>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {t("extensions.loadUnpackedTooltip")}
-                        </TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <RippleButton
-                            size="sm"
-                            variant="soft"
-                            onClick={() => {
-                              setShowUrlForm((open) => !open);
-                            }}
-                            aria-label={t("extensions.fromUrl")}
-                          >
-                            <LuGlobe className="size-4" />
-                            <span className="hidden @2xl:inline">
-                              {t("extensions.fromUrl")}
-                            </span>
-                          </RippleButton>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {t("extensions.fromUrlTooltip")}
-                        </TooltipContent>
-                      </Tooltip>
-                    </>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="sm">
+                          <GoPlus className="size-4" />
+                          {t("extensions.addExtension")}
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onSelect={() =>
+                            document.getElementById("ext-file-input")?.click()
+                          }
+                        >
+                          <LuUpload />
+                          {t("extensions.importArchive")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={() => void handleLoadUnpacked()}
+                        >
+                          <LuFolderOpen />
+                          {t("extensions.loadUnpacked")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => setShowUrlForm(true)}>
+                          <LuGlobe />
+                          {t("extensions.addFromGit")}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                   {activeTab === "groups" && (
                     <Tooltip>

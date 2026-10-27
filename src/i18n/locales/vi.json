@@ -525,6 +525,7 @@
     },
     "profileName": "Tên hồ sơ",
     "profileNamePlaceholder": "Nhập tên hồ sơ",
+    "extensionGroupsLoadFailed": "Không tải được cấu hình nhóm tiện ích của workspace. Hãy đóng rồi mở lại hộp thoại trước khi tạo profile.",
     "proxy": {
       "title": "Proxy",
       "addProxy": "Thêm Proxy",
@@ -967,7 +968,9 @@
       "profileLockedShort": "Đang sử dụng",
       "cannotLaunchLocked": "Không thể khởi chạy — profile đang được sử dụng bởi {{owner}}",
       "leaseExpiry": " · quyền sử dụng hết hạn lúc {{time}}",
-      "leaseUnknown": "Chưa xác nhận được trình duyệt đã đóng nên profile đang tạm khóa để tránh mở trùng. Hãy đóng cửa sổ trình duyệt đang dùng profile rồi thử lại.",
+      "remoteSyncing": "{{owner}} đang hoàn tất đồng bộ hồ sơ. Bạn có thể mở khi đồng bộ xong.",
+      "anotherDevice": "Thiết bị khác",
+      "leaseUnknown": "Chưa cập nhật được trạng thái từ máy chủ. Khi bạn bấm mở, máy chủ sẽ kiểm tra quyền sử dụng mới nhất.",
       "createdBy": "Được tạo bởi {{email}}",
       "roleLauncher": "Người khởi chạy"
     },
@@ -1801,6 +1804,9 @@
     "description": "Quản lý tiện ích trình duyệt và nhóm tiện ích cho profile của bạn.",
     "catalogUnavailable": "Quản lý gói tiện ích hiện chưa được API hỗ trợ. Bạn vẫn có thể quản lý nhóm tiện ích và gán nhóm cho profile.",
     "upload": "Tải lên",
+    "addExtension": "Thêm tiện ích",
+    "importArchive": "Từ tệp ZIP/CRX",
+    "addFromGit": "Từ GitHub / URL",
     "delete": "Xóa",
     "extensionsTab": "Tiện ích",
     "groupsTab": "Nhóm",

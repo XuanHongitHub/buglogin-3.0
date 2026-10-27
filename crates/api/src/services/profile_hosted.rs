@@ -70,9 +70,7 @@ fn has_managed_profile_key(
     profile_id: &ProfileId,
     binding: &ProfileResource,
 ) -> Result<bool, Problem> {
-    let Some(manifest) =
-        state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
-    else {
+    let Some(manifest) = state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)? else {
         return Ok(false);
     };
     let Some(key_version) = manifest
@@ -90,57 +88,6 @@ fn has_managed_profile_key(
 }
 
 impl HostedProfileService {
-    pub fn apply_workspace_extension_default(
-        state: &ApiState,
-        workspace_id: &WorkspaceId,
-        profile: &mut Profile,
-    ) -> Result<(), Problem> {
-        let workspace = state
-            .workspaces
-            .read()
-            .map_err(|_| {
-                problem(
-                    "workspace_unavailable",
-                    "Workspace service unavailable",
-                    503,
-                )
-            })?
-            .find_workspace_by_id(workspace_id)?;
-        let group_id = match workspace.default_extension_group_id {
-            Some(group_id) => Some(group_id),
-            None => state
-                .workspaces
-                .read()
-                .map_err(|_| {
-                    problem(
-                        "workspace_unavailable",
-                        "Workspace service unavailable",
-                        503,
-                    )
-                })?
-                .organization_policy_for_workspace(workspace_id)?
-                .default_extension_groups_by_workspace
-                .get(workspace_id)
-                .cloned(),
-        };
-        let Some(group_id) = group_id else {
-            return Ok(());
-        };
-        state
-            .extension_groups
-            .read()
-            .map_err(|_| {
-                problem(
-                    "extension_group_unavailable",
-                    "Extension groups unavailable",
-                    503,
-                )
-            })?
-            .get_in_workspace(workspace_id, &group_id)?;
-        profile.extension_group_id = Some(group_id);
-        Ok(())
-    }
-
     pub fn activate_member(
         state: &ApiState,
         principal: &Principal,
@@ -1486,7 +1433,6 @@ impl HostedProfileService {
                 &binding.workspace_id,
                 &target_resource_id,
             )?;
-            Self::apply_workspace_extension_default(state, &binding.workspace_id, &mut target)?;
             let plan = Self::prepare_provision(target, binding.workspace_id.clone())?;
             state
                 .resources
@@ -2122,12 +2068,12 @@ fn profile_key_enrollment_required() -> Problem {
 
 #[cfg(test)]
 mod authorization_tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     use super::*;
     use buglogin_domain::{
         grant::ResourceGrant,
-        ids::{AccountId, ExtensionGroupId, GrantId, OrganizationId},
+        ids::{AccountId, GrantId, OrganizationId},
         member::{Member, MemberRole, MemberStatus},
         organization::{Organization, OrganizationPolicy},
         permissions::{Effect, Role},
@@ -2140,166 +2086,6 @@ mod authorization_tests {
         assert!(valid_profile_clone_name(&"é".repeat(200)));
         assert!(!valid_profile_clone_name(&"é".repeat(201)));
         assert!(!valid_profile_clone_name("   "));
-    }
-
-    #[test]
-    fn organization_extension_default_is_applied_unless_workspace_overrides_it() {
-        use crate::services::extension_groups::ExtensionGroupCreateInput;
-
-        let organization = Organization {
-            id: OrganizationId::new("org_extension_defaults").unwrap(),
-            account_id: AccountId::new("acct_extension_defaults").unwrap(),
-            name: "Extension defaults".into(),
-            created_at: "2026-10-27T00:00:00Z".into(),
-        };
-        let workspace_id = WorkspaceId::new("ws_extension_defaults").unwrap();
-        let org_group_id = ExtensionGroupId::new("extgrp_org_default").unwrap();
-        let workspace_group_id = ExtensionGroupId::new("extgrp_workspace_default").unwrap();
-        let admin = Principal {
-            roles: BTreeSet::from([Role::PlatformAdmin]),
-            ..Principal::default()
-        };
-        let policy = OrganizationPolicy {
-            max_workspaces: 4,
-            offline_entitled: false,
-            default_extension_groups_by_workspace: BTreeMap::from([(
-                workspace_id.clone(),
-                org_group_id.clone(),
-            )]),
-        };
-        let mut workspaces = crate::services::workspaces::WorkspaceService::new(
-            organization.clone(),
-            policy.clone(),
-        )
-        .unwrap();
-        workspaces
-            .create_workspace(
-                &admin,
-                &[],
-                &organization.id,
-                Workspace {
-                    id: workspace_id.clone(),
-                    organization_id: organization.id.clone(),
-                    name: "Defaults".into(),
-                    policy: WorkspacePolicy {
-                        max_profiles: 10,
-                        max_members: 10,
-                        max_storage_bytes: 1024,
-                        offline_entitled: false,
-                    },
-                    created_at: "2026-10-27T00:00:00Z".into(),
-                    default_extension_group_id: None,
-                },
-            )
-            .unwrap();
-        let state = crate::http::ApiState::hosted_with_control_store(
-            buglogin_browser::profile::ProfileService::disabled(),
-            buglogin_storage::control::MemoryControlRecordStore::default(),
-        )
-        .unwrap();
-        *state.workspaces.write().unwrap() = workspaces;
-        for group_id in [&org_group_id, &workspace_group_id] {
-            state
-                .extension_groups
-                .write()
-                .unwrap()
-                .create(
-                    &admin,
-                    &[],
-                    &workspace_id,
-                    ExtensionGroupCreateInput {
-                        workspace_id: workspace_id.clone(),
-                        extension_group_id: group_id.clone(),
-                        name: format!("{group_id:?}"),
-                        extension_ids: Vec::new(),
-                        extension_sources: BTreeMap::new(),
-                        sync_mode: None,
-                    },
-                )
-                .unwrap();
-        }
-        let mut profile = buglogin_domain::entities::Profile {
-            id: ProfileId::new("prf_extension_default").unwrap(),
-            name: "Default extensions".into(),
-            runtime: buglogin_domain::entities::Runtime::Wayfern,
-            runtime_version: None,
-            runtime_config: None,
-            state: ProfileState::Created,
-            archived: false,
-            fingerprint: None,
-            note: None,
-            proxy_id: None,
-            vpn_id: None,
-            group_ids: Vec::new(),
-            tags: Vec::new(),
-            extension_group_id: None,
-            sync_mode: None,
-            created_at: "2026-10-27T00:00:00Z".into(),
-            updated_at: "2026-10-27T00:00:00Z".into(),
-        };
-        HostedProfileService::apply_workspace_extension_default(
-            &state,
-            &workspace_id,
-            &mut profile,
-        )
-        .unwrap();
-        assert_eq!(profile.extension_group_id, Some(org_group_id));
-
-        let organization_record = state
-            .workspaces
-            .read()
-            .unwrap()
-            .get_organization(&admin, &[], &organization.id)
-            .unwrap();
-        state
-            .workspaces
-            .write()
-            .unwrap()
-            .update_organization(
-                &admin,
-                &[],
-                &organization.id,
-                crate::services::workspaces::OrganizationUpdate {
-                    organization: organization.clone(),
-                    policy: OrganizationPolicy {
-                        max_workspaces: 4,
-                        offline_entitled: false,
-                        default_extension_groups_by_workspace: BTreeMap::new(),
-                    },
-                    expected_revision: organization_record.revision,
-                },
-            )
-            .unwrap();
-        let mut workspace = state
-            .workspaces
-            .read()
-            .unwrap()
-            .get_workspace(&admin, &[], &organization.id, &workspace_id)
-            .unwrap();
-        workspace.default_extension_group_id = Some(workspace_group_id.clone());
-        state
-            .workspaces
-            .write()
-            .unwrap()
-            .update_workspace(
-                &admin,
-                &[],
-                &organization.id,
-                &workspace_id,
-                crate::services::workspaces::WorkspaceUpdate {
-                    workspace,
-                    expected_revision: 1,
-                },
-            )
-            .unwrap();
-        profile.extension_group_id = None;
-        HostedProfileService::apply_workspace_extension_default(
-            &state,
-            &workspace_id,
-            &mut profile,
-        )
-        .unwrap();
-        assert_eq!(profile.extension_group_id, Some(workspace_group_id));
     }
 
     #[test]
@@ -2439,7 +2225,6 @@ mod authorization_tests {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
-                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -2460,9 +2245,9 @@ mod authorization_tests {
                         max_members: 10,
                         max_storage_bytes: 1024,
                         offline_entitled: false,
+                        default_extension_group_id: None,
                     },
                     created_at: "2026-10-12T00:00:00Z".into(),
-                    default_extension_group_id: None,
                 },
             )
             .unwrap();
@@ -2517,7 +2302,6 @@ mod authorization_tests {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
-                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -2539,9 +2323,9 @@ mod authorization_tests {
                         max_members: 10,
                         max_storage_bytes: 1024,
                         offline_entitled: false,
+                        default_extension_group_id: None,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
-                    default_extension_group_id: None,
                 },
             )
             .unwrap();

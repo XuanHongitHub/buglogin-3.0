@@ -119,23 +119,6 @@ fn valid_export() -> Vec<u8> {
             "workspaceId": "workspace-a",
             "groupId": "group-a"
         }],
-        "profiles": [{
-            "id": "prf_0123456789abcdef0123456789abcdef",
-            "workspaceId": "workspace-a",
-            "name": "Primary profile",
-            "runtime": "wayfern",
-            "runtimeVersion": "154.0.8037.57",
-            "releaseType": "stable",
-            "proxyId": null,
-            "vpnId": null,
-            "groupId": null,
-            "extensionGroupId": null,
-            "ephemeral": false,
-            "createdAt": "2025-01-01T00:00:00Z",
-            "updatedAt": "2025-01-03T00:00:00Z",
-            "tags": [],
-            "note": null
-        }],
         "shareGrants": [{
             "id": "share-a",
             "workspaceId": "workspace-a",
@@ -266,26 +249,23 @@ fn packages_all_control_plane_entities_without_report_leakage() {
 #[test]
 fn includes_hosted_profiles_missing_from_local_snapshot_as_preserve_only() {
     let mut value: serde_json::Value = serde_json::from_slice(&valid_export()).unwrap();
-    value["profiles"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "id": "prf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "workspaceId": "workspace-a",
-            "name": "Cloud-only profile",
-            "runtime": "bugox",
-            "runtimeVersion": "1.0",
-            "releaseType": "stable",
-            "proxyId": null,
-            "vpnId": null,
-            "groupId": null,
-            "extensionGroupId": null,
-            "ephemeral": false,
-            "createdAt": "2025-01-03T00:00:00Z",
-            "updatedAt": "2025-01-03T00:00:00Z",
-            "tags": [],
-            "note": null
-        }));
+    value["profiles"] = serde_json::json!([{
+        "id": "prf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workspaceId": "workspace-a",
+        "name": "Cloud-only profile",
+        "runtime": "bugox",
+        "runtimeVersion": "1.0",
+        "releaseType": "stable",
+        "proxyId": null,
+        "vpnId": null,
+        "groupId": null,
+        "extensionGroupId": null,
+        "ephemeral": false,
+        "createdAt": "2025-01-03T00:00:00Z",
+        "updatedAt": "2025-01-03T00:00:00Z",
+        "tags": [],
+        "note": null
+    }]);
     let source = source(&serde_json::to_vec(&value).unwrap());
     let (report, snapshot) = inspect_source(source.path()).unwrap();
     let package = build_encrypted_profile_package(
@@ -349,13 +329,13 @@ fn rejects_dangling_profile_resource_binding() {
     )
     .unwrap_err();
 
-    assert_eq!(error.code, "migration_control_plane_invalid");
+    assert_eq!(error.code, "migration_profile_resource_invalid");
     assert_eq!(
         error
             .fields
             .get("field")
             .and_then(serde_json::Value::as_str),
-        Some("profile share grant has no hosted profile")
+        Some("dangling profile resource profile reference")
     );
 }
 

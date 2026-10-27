@@ -1220,13 +1220,19 @@ export function AccountProvisioning({
                 </p>
                 <div className="flex items-center gap-2 text-xs">
                   <Checkbox
+                    id="secret-export-confirm"
                     aria-label={t("confirmSecretExport")}
                     checked={secretExport}
                     onCheckedChange={(checked) =>
                       setSecretExport(checked === true)
                     }
                   />
-                  <span>{t("confirmSecretExport")}</span>
+                  <Label
+                    htmlFor="secret-export-confirm"
+                    className="cursor-pointer"
+                  >
+                    {t("confirmSecretExport")}
+                  </Label>
                 </div>
                 <div className="flex gap-2">
                   <Button
@@ -2067,11 +2073,11 @@ export function AccountDirectory({
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label htmlFor={`account-display-${entry.accountId}`}>
+                    <Label htmlFor={`account-${entry.accountId}-display-name`}>
                       {t("displayName")}
                     </Label>
                     <Input
-                      id={`account-display-${entry.accountId}`}
+                      id={`account-${entry.accountId}-display-name`}
                       disabled={!editable(entry)}
                       value={editValues[entry.accountId]?.displayName ?? ""}
                       onChange={(event) =>
@@ -2086,11 +2092,11 @@ export function AccountDirectory({
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label htmlFor={`account-username-${entry.accountId}`}>
+                    <Label htmlFor={`account-${entry.accountId}-username`}>
                       {t("username")}
                     </Label>
                     <Input
-                      id={`account-username-${entry.accountId}`}
+                      id={`account-${entry.accountId}-username`}
                       disabled={!editable(entry)}
                       value={editValues[entry.accountId]?.username ?? ""}
                       onChange={(event) =>
@@ -2105,11 +2111,11 @@ export function AccountDirectory({
                     />
                   </div>
                   <div className="space-y-1.5 sm:col-span-2">
-                    <Label htmlFor={`account-email-${entry.accountId}`}>
+                    <Label htmlFor={`account-${entry.accountId}-email`}>
                       {t("email")}
                     </Label>
                     <Input
-                      id={`account-email-${entry.accountId}`}
+                      id={`account-${entry.accountId}-email`}
                       disabled={!editable(entry)}
                       value={editValues[entry.accountId]?.email ?? ""}
                       onChange={(event) =>
@@ -2127,11 +2133,13 @@ export function AccountDirectory({
                   (editValues[entry.accountId]?.username !== entry.username ||
                     editValues[entry.accountId]?.email !== entry.email) ? (
                     <div className="space-y-1.5 sm:col-span-2">
-                      <Label htmlFor={`account-password-${entry.accountId}`}>
+                      <Label
+                        htmlFor={`account-${entry.accountId}-current-password`}
+                      >
                         {t("currentPassword")}
                       </Label>
                       <Input
-                        id={`account-password-${entry.accountId}`}
+                        id={`account-${entry.accountId}-current-password`}
                         type="password"
                         autoComplete="current-password"
                         value={

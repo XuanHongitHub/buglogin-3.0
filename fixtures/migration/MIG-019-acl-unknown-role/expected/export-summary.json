@@ -1,7 +1,1 @@
-{
-  "code": "migration_control_plane_invalid",
-  "packageBuilt": false,
-  "status": "blocked",
-  "unknownAccessModeField": "membership resource access mode",
-  "unknownRoleField": "membership role"
-}
+{"status":"blocked","code":"migration_control_plane_invalid","unknownRoleField":"membership role","unknownAccessModeField":"membership resource access mode","packageBuilt":false}

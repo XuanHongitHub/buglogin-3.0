@@ -16,7 +16,6 @@ $artifactRoot = (Resolve-Path $ArtifactDirectory).Path
 $apiPath = Join-Path $artifactRoot "buglogin-api"
 $adminPath = Join-Path $artifactRoot "buglogin-admin-password-reset"
 $manifestPath = Join-Path $artifactRoot "release-manifest.json"
-$manifestSignaturePath = Join-Path $artifactRoot "release-manifest.sigstore.json"
 $openApiPath = Join-Path $artifactRoot "openapi-v1.yaml"
 $remoteHelper = Join-Path $PSScriptRoot "deploy-api-systemd-remote.sh"
 
@@ -52,7 +51,7 @@ if ($aheadBehind -notmatch "^0\s+0$") {
     throw "Refusing deployment: current commit is not exactly synchronized with $upstream."
 }
 
-foreach ($path in @($apiPath, $adminPath, $manifestPath, $manifestSignaturePath, $openApiPath, $remoteHelper)) {
+foreach ($path in @($apiPath, $adminPath, $manifestPath, $openApiPath, $remoteHelper)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required release input is missing: $path"
     }
@@ -62,8 +61,8 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.commit -ne $commit -or $manifest.target -ne "x86_64-unknown-linux-gnu") {
     throw "Release manifest must identify the current commit and x86_64-unknown-linux-gnu target."
 }
-if (-not (Get-Command "cosign.exe" -ErrorAction SilentlyContinue)) {
-    throw "Cosign is required to verify native API build provenance."
+if (-not (Get-Command "gh.exe" -ErrorAction SilentlyContinue)) {
+    throw "GitHub CLI is required to verify native API build provenance."
 }
 
 function Get-Sha256([string]$Path) {
@@ -94,9 +93,18 @@ $openApiHash = Get-Sha256 $openApiPath
 if ($manifest.artifacts.openApiSha256.ToLowerInvariant() -ne $openApiHash) {
     throw "Release OpenAPI hash does not match the CI artifact."
 }
-& cosign.exe verify-blob $manifestPath --bundle $manifestSignaturePath --certificate-identity-regexp '^https://github\.com/(?:keyduc91/Malvanut-Login|XuanHongitHub/buglogin-3\.0)/\.github/workflows/native-api-artifact\.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Sigstore build provenance verification failed for release-manifest.json."
+$repositoryUrl = Get-CommandOutput "git.exe" @("-C", $repoRoot, "remote", "get-url", "origin")
+$repositoryUrl = $repositoryUrl -replace "\.git$", ""
+if ($repositoryUrl -match "github\.com[:/]([^/]+/[^/]+)$") {
+    $repository = $Matches[1]
+} else {
+    throw "Origin must be a GitHub repository so the release attestation can be verified."
+}
+foreach ($path in @($apiPath, $adminPath, (Join-Path $artifactRoot "openapi-v1.yaml"), $manifestPath)) {
+    & gh.exe attestation verify $path --repo $repository | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "GitHub build provenance verification failed for $([IO.Path]::GetFileName($path))."
+    }
 }
 
 $ssh = (Get-Command "ssh.exe").Source

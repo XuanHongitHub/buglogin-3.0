@@ -1,22 +1,10 @@
 {
-  "snapshotId": "sha256:ecf48a0ff08b8f53b365d8f82625b7a9613f0fdd2344c7f5105533f1faf25ebf",
-  "sourceTreeSha256": "ecf48a0ff08b8f53b365d8f82625b7a9613f0fdd2344c7f5105533f1faf25ebf",
-  "totalBytes": 263,
-  "files": [
-    {
-      "path": "profiles/25000000-0000-4000-8000-000000000025/metadata.json",
-      "bytes": 97,
-      "sha256": "c0416948fd27282923b7206b105573a071cfcae51087b4eee5945db0d593ecec"
-    },
-    {
-      "path": "profiles/25000000-0000-4000-8000-000000000025/profile/Preferences",
-      "bytes": 43,
-      "sha256": "54ad1d2a3b2558ac1b5868b89cffb668f8541a1e55e93a31c84aac4bd7c27d6d"
-    },
-    {
-      "path": "version.json",
-      "bytes": 123,
-      "sha256": "a0f6070407f74739c287f408a96d791399b6fe830fdf2aa85807329e702ca430"
-    }
+  "snapshotId":"sha256:ecf48a0ff08b8f53b365d8f82625b7a9613f0fdd2344c7f5105533f1faf25ebf",
+  "sourceTreeSha256":"ecf48a0ff08b8f53b365d8f82625b7a9613f0fdd2344c7f5105533f1faf25ebf",
+  "totalBytes":263,
+  "files":[
+    {"path":"profiles/25000000-0000-4000-8000-000000000025/metadata.json","bytes":97,"sha256":"c0416948fd27282923b7206b105573a071cfcae51087b4eee5945db0d593ecec"},
+    {"path":"profiles/25000000-0000-4000-8000-000000000025/profile/Preferences","bytes":43,"sha256":"54ad1d2a3b2558ac1b5868b89cffb668f8541a1e55e93a31c84aac4bd7c27d6d"},
+    {"path":"version.json","bytes":123,"sha256":"a0f6070407f74739c287f408a96d791399b6fe830fdf2aa85807329e702ca430"}
   ]
 }

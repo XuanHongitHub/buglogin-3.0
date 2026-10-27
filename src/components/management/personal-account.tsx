@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { createTauriDesktopApi } from "../../../apps/desktop/src/bridge";
 import type {
   AccountIdentity,
@@ -26,6 +27,7 @@ const api = createTauriDesktopApi();
 
 export function PersonalAccount() {
   const { t } = useTranslation("managementAccounts");
+  const { logout } = useCloudAuth();
   const [identity, setIdentity] = useState<AccountIdentity | null>(null);
   const [sessions, setSessions] = useState<WebSession[]>([]);
   const [values, setValues] = useState({
@@ -127,6 +129,19 @@ export function PersonalAccount() {
       await api.revokeAccountSession("me", sessionId);
       await reload();
       setNotice(t("signedOut"));
+    } catch (reason) {
+      setError(accountError(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function signOut() {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await logout();
     } catch (reason) {
       setError(accountError(reason));
     } finally {
@@ -375,7 +390,7 @@ export function PersonalAccount() {
           <div className="flex justify-end xl:col-span-2">
             <Button
               variant="outline"
-              onClick={() => void api.logout()}
+              onClick={() => void signOut()}
               disabled={saving}
             >
               <LuLogOut />

@@ -359,16 +359,10 @@ fn synthetic_control_plane_rehearsal_preserves_acl_boundary_and_dry_run_state() 
         .collect::<Vec<_>>();
     assert_eq!(
         keys,
-        [
-            "memberships",
-            "organizations",
-            "profiles",
-            "shareGrants",
-            "workspaces",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>()
+        ["memberships", "organizations", "shareGrants", "workspaces"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
     );
     let canonical_text = String::from_utf8(canonical.clone()).expect("canonical ACL UTF-8");
     for forbidden in ["password", "bearer", "cookie", "secret", "token"] {

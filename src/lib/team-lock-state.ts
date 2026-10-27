@@ -1,11 +1,3 @@
-const RUNTIME_LEASE_TTL_MS = 60_000;
-const RUNTIME_HEARTBEAT_INTERVAL_MS = 15_000;
-const RUNTIME_HEARTBEAT_JITTER_MS = 3_000;
-const MIN_LEASE_REMAINING_FOR_RUNNING_MS =
-  RUNTIME_LEASE_TTL_MS -
-  RUNTIME_HEARTBEAT_INTERVAL_MS -
-  RUNTIME_HEARTBEAT_JITTER_MS;
-
 export type TeamLeaseSnapshot = {
   ownerId: string;
   issuedAtMs: number;
@@ -16,7 +8,7 @@ export type TeamRuntimeSnapshot = {
   deviceId: string;
   ownerId: string;
   ownerEmail?: string | null;
-  state: "running" | "stopped";
+  state: "running" | "syncing" | "stopped";
   updatedAtMs: number;
 } | null;
 
@@ -25,33 +17,55 @@ export function resolveTeamLockState(
   runtime: TeamRuntimeSnapshot,
   localDeviceId: string | null,
   locallyRunning: boolean,
-  nowMs = Date.now(),
-): { unknown: boolean; runningRemotely: boolean } {
+  _nowMs = Date.now(),
+): {
+  unknown: boolean;
+  lockedRemotely: boolean;
+  runningRemotely: boolean;
+  syncingRemotely: boolean;
+} {
   // The coordination lease is the launch authority. With no lease there is
   // no team lock, even if the informational runtime projection is unavailable.
-  if (!lease) return { unknown: false, runningRemotely: false };
+  if (!lease) {
+    return {
+      unknown: false,
+      lockedRemotely: false,
+      runningRemotely: false,
+      syncingRemotely: false,
+    };
+  }
 
-  const recentlyRenewed =
-    lease.expiresAtMs - nowMs > MIN_LEASE_REMAINING_FOR_RUNNING_MS;
+  // The coordination API filters expired leases using server time. Do not
+  // reinterpret a confirmed lease with the desktop clock, which may be skewed.
   const runtimeMatchesLease =
     runtime?.ownerId === lease.ownerId && Boolean(runtime.deviceId);
 
-  if (
-    lease &&
-    runtime?.state === "running" &&
-    runtimeMatchesLease &&
-    recentlyRenewed
-  ) {
-    if (
-      localDeviceId === null ||
-      (runtime.deviceId === localDeviceId && !locallyRunning)
-    ) {
-      return { unknown: true, runningRemotely: false };
-    }
-    return { unknown: false, runningRemotely: true };
+  if (runtimeMatchesLease && runtime?.state === "syncing") {
+    return {
+      unknown: false,
+      lockedRemotely: true,
+      runningRemotely: false,
+      syncingRemotely: true,
+    };
   }
 
-  // A live lease without matching process evidence may be protecting sync or
-  // a crashed device. Keep it blocked until expiry/reconciliation.
-  return { unknown: true, runningRemotely: false };
+  if (runtimeMatchesLease && runtime?.state === "running") {
+    const runningRemotely =
+      localDeviceId !== null && runtime.deviceId !== localDeviceId;
+    return {
+      unknown: false,
+      lockedRemotely: runningRemotely || !locallyRunning,
+      runningRemotely,
+      syncingRemotely: false,
+    };
+  }
+
+  // A live lease is definitive lock evidence. Missing/stale runtime detail
+  // affects the activity label, not whether a second device may use the data.
+  return {
+    unknown: false,
+    lockedRemotely: true,
+    runningRemotely: false,
+    syncingRemotely: false,
+  };
 }

@@ -1,20 +1,10 @@
 {
-  "schema": "buglogin.proxy-batch-analysis/1",
-  "policy": "atomic",
-  "validRecords": 0,
-  "invalidRecords": 2,
-  "rows": [
-    {
-      "sourceRef": "proxies/duplicate-a.json",
-      "sourceId": "duplicate-proxy",
-      "status": "invalid",
-      "code": "migration_proxy_duplicate_source_id"
-    },
-    {
-      "sourceRef": "proxies/duplicate-b.json",
-      "sourceId": "duplicate-proxy",
-      "status": "invalid",
-      "code": "migration_proxy_duplicate_source_id"
-    }
+  "schema":"buglogin.proxy-batch-analysis/1",
+  "policy":"atomic",
+  "validRecords":0,
+  "invalidRecords":2,
+  "rows":[
+    {"sourceRef":"proxies/duplicate-a.json","sourceId":"duplicate-proxy","status":"invalid","code":"migration_proxy_duplicate_source_id"},
+    {"sourceRef":"proxies/duplicate-b.json","sourceId":"duplicate-proxy","status":"invalid","code":"migration_proxy_duplicate_source_id"}
   ]
 }

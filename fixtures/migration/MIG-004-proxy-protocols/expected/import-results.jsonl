@@ -1,4 +1,4 @@
-{"createCredentials":2,"createProxies":4,"destinationChanged":false,"status":"planned"}
-{"createdCredentials":2,"createdProxies":4,"ipv6Preserved":true,"protocols":["http","https","socks4","socks5"],"status":"activated"}
-{"reusedCredentials":2,"reusedProxies":4,"status":"repeated"}
-{"quarantinedProxies":4,"removedCredentials":2,"status":"rolledBack","vaultEmpty":true}
+{"status":"planned","createProxies":4,"createCredentials":2,"destinationChanged":false}
+{"status":"activated","createdProxies":4,"createdCredentials":2,"protocols":["http","https","socks4","socks5"],"ipv6Preserved":true}
+{"status":"repeated","reusedProxies":4,"reusedCredentials":2}
+{"status":"rolledBack","quarantinedProxies":4,"removedCredentials":2,"vaultEmpty":true}

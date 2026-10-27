@@ -1509,7 +1509,6 @@ fn merge_workspaces(
                         .try_into()
                         .map_err(|_| invalid("organization workspace count"))?,
                     offline_entitled: offline.into_iter().next().unwrap_or(false),
-                    default_extension_groups_by_workspace: Default::default(),
                 },
             ),
         );
@@ -1535,9 +1534,9 @@ fn merge_workspaces(
                 max_members: record.data.policy.max_members,
                 max_storage_bytes: record.data.policy.max_storage_bytes,
                 offline_entitled: record.data.policy.offline_entitled,
+                default_extension_group_id: None,
             },
             created_at,
-            default_extension_group_id: None,
         });
     }
 

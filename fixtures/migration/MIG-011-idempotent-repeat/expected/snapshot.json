@@ -1,22 +1,10 @@
 {
-  "snapshotId": "sha256:49907b55172d490644474f0ed92c3479f4c0ab0e6fa2e2dc73e9ce5351e5a5c8",
-  "sourceTreeSha256": "49907b55172d490644474f0ed92c3479f4c0ab0e6fa2e2dc73e9ce5351e5a5c8",
-  "totalBytes": 271,
-  "files": [
-    {
-      "path": "profiles/11000000-0000-4000-8000-000000000011/metadata.json",
-      "bytes": 94,
-      "sha256": "4f757992488a029ca5d72a7f42a2ef346a57f672f5de7f3caddfff69a4ece86f"
-    },
-    {
-      "path": "profiles/11000000-0000-4000-8000-000000000011/profile/Preferences",
-      "bytes": 49,
-      "sha256": "b0cc36c67db5916b47daa951fe774d801a9a715e21b26facdffb4670f103d982"
-    },
-    {
-      "path": "version.json",
-      "bytes": 128,
-      "sha256": "7ed7898e84afcbacf05277a5ad43bb55dc972feb41697e7b2fb85d451e0075ec"
-    }
+  "snapshotId":"sha256:49907b55172d490644474f0ed92c3479f4c0ab0e6fa2e2dc73e9ce5351e5a5c8",
+  "sourceTreeSha256":"49907b55172d490644474f0ed92c3479f4c0ab0e6fa2e2dc73e9ce5351e5a5c8",
+  "totalBytes":271,
+  "files":[
+    {"path":"profiles/11000000-0000-4000-8000-000000000011/metadata.json","bytes":94,"sha256":"4f757992488a029ca5d72a7f42a2ef346a57f672f5de7f3caddfff69a4ece86f"},
+    {"path":"profiles/11000000-0000-4000-8000-000000000011/profile/Preferences","bytes":49,"sha256":"b0cc36c67db5916b47daa951fe774d801a9a715e21b26facdffb4670f103d982"},
+    {"path":"version.json","bytes":128,"sha256":"7ed7898e84afcbacf05277a5ad43bb55dc972feb41697e7b2fb85d451e0075ec"}
   ]
 }

@@ -62,17 +62,10 @@ fn init_db() -> Result<Connection, rusqlite::Error> {
         conn.execute("ALTER TABLE extensions ADD COLUMN package_data BLOB", [])?;
     }
     for column in ["git_source", "source_revision"] {
-        let exists = conn
-            .prepare("PRAGMA table_info(extensions)")?
+        let exists = conn.prepare("PRAGMA table_info(extensions)")?
             .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(Result::ok)
-            .any(|name| name == column);
-        if !exists {
-            conn.execute(
-                &format!("ALTER TABLE extensions ADD COLUMN {column} TEXT"),
-                [],
-            )?;
-        }
+            .filter_map(Result::ok).any(|name| name == column);
+        if !exists { conn.execute(&format!("ALTER TABLE extensions ADD COLUMN {column} TEXT"), [])?; }
     }
     Ok(conn)
 }
@@ -140,18 +133,8 @@ pub async fn list_extensions() -> Result<Vec<ExtensionItem>, String> {
                 description: r.get(9)?,
                 author: r.get(10)?,
                 homepage_url: r.get(11)?,
-                git_source: r
-                    .get::<_, Option<String>>(12)?
-                    .map(|value| {
-                        serde_json::from_str(&value).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                12,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })
-                    })
-                    .transpose()?,
+                git_source: r.get::<_, Option<String>>(12)?.map(|value| serde_json::from_str(&value)
+                    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error)))).transpose()?,
                 source_revision: r.get(13)?,
             })
         })
@@ -194,26 +177,14 @@ pub async fn add_extension(
     let manifest = crate::extension_packages::read_manifest(&file_data)?;
     let source_revision = if let Some(source) = git_source.as_ref() {
         source.validate().map_err(str::to_owned)?;
-        Some(
-            source_revision
-                .filter(|revision| {
-                    revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit())
-                })
-                .ok_or("Hãy tải lại thông tin repository trước khi lưu tiện ích Git.")?,
-        )
-    } else {
-        None
-    };
-    let id = git_source
-        .as_ref()
-        .map(crate::extension_packages::source_id)
-        .unwrap_or_else(|| {
-            format!(
-                "ext_{}_{}",
-                now_secs(),
-                NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            )
-        });
+        Some(source_revision.filter(|revision| revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or("Hãy tải lại thông tin repository trước khi lưu tiện ích Git.")?)
+    } else { None };
+    let id = git_source.as_ref().map(crate::extension_packages::source_id).unwrap_or_else(|| format!(
+        "ext_{}_{}",
+        now_secs(),
+        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let item = ExtensionItem {
         id: id.clone(),
         name,
@@ -223,14 +194,8 @@ pub async fn add_extension(
         created_at: now_secs(),
         updated_at: now_secs(),
         sync_enabled: false,
-        version: manifest
-            .get("version")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        description: manifest
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        version: manifest.get("version").and_then(Value::as_str).map(str::to_owned),
+        description: manifest.get("description").and_then(Value::as_str).map(str::to_owned),
         author: None,
         homepage_url: None,
         git_source,
@@ -359,35 +324,18 @@ pub async fn delete_extension(app: AppHandle, extension_id: String) -> Result<()
 
 #[tauri::command]
 pub async fn fetch_extension_from_url(url: String) -> Result<FetchedExtension, String> {
-    if Url::parse(url.trim()).ok().is_some_and(|url| {
-        url.host_str() == Some("github.com") && url.path().trim_matches('/').split('/').count() == 2
-    }) {
+    if Url::parse(url.trim()).ok().is_some_and(|url| url.host_str() == Some("github.com")
+        && url.path().trim_matches('/').split('/').count() == 2) {
         let source = crate::extension_packages::source_from_url(&url).await?;
         let revision = crate::extension_packages::resolve_revision(&source).await?;
         let package = crate::extension_packages::fetch(source, revision).await?;
         return Ok(FetchedExtension {
-            name: package
-                .manifest
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            version: package
-                .manifest
-                .get("version")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            description: package
-                .manifest
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            author: None,
-            file_name: "github-extension.zip".into(),
+            name: package.manifest.get("name").and_then(Value::as_str).map(str::to_owned),
+            version: package.manifest.get("version").and_then(Value::as_str).map(str::to_owned),
+            description: package.manifest.get("description").and_then(Value::as_str).map(str::to_owned),
+            author: None, file_name: "github-extension.zip".into(),
             file_data: Some(base64::engine::general_purpose::STANDARD.encode(package.bytes)),
-            path: None,
-            source_url: Some(url),
-            git_source: Some(package.source),
-            source_revision: Some(package.revision),
+            path: None, source_url: Some(url), git_source: Some(package.source), source_revision: Some(package.revision),
         });
     }
     const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -583,25 +531,13 @@ pub fn group_git_sources(ids: &Value, existing: &Value) -> Result<Value, String>
     let mut result = serde_json::Map::new();
     for id in ids.as_array().ok_or("Danh sách tiện ích không hợp lệ.")? {
         let id = id.as_str().ok_or("ID tiện ích không hợp lệ.")?;
-        let local: Option<Option<String>> = conn
-            .query_row(
-                "SELECT git_source FROM extensions WHERE id = ?1",
-                [id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
+        let local: Option<Option<String>> = conn.query_row("SELECT git_source FROM extensions WHERE id = ?1", [id], |row| row.get(0))
+            .optional().map_err(|e| e.to_string())?;
         if let Some(Some(source)) = local.as_ref() {
-            let source: GitExtensionSource =
-                serde_json::from_str(&source).map_err(|e| e.to_string())?;
+            let source: GitExtensionSource = serde_json::from_str(&source).map_err(|e| e.to_string())?;
             source.validate().map_err(str::to_owned)?;
-            result.insert(
-                id.into(),
-                serde_json::to_value(source).map_err(|e| e.to_string())?,
-            );
-        } else if local.is_none()
-            && let Some(source) = existing.get(id)
-        {
+            result.insert(id.into(), serde_json::to_value(source).map_err(|e| e.to_string())?);
+        } else if local.is_none() && let Some(source) = existing.get(id) {
             result.insert(id.into(), source.clone());
         }
     }
@@ -609,22 +545,13 @@ pub fn group_git_sources(ids: &Value, existing: &Value) -> Result<Value, String>
 }
 
 pub fn remember_group_sources(group: &Value) -> Result<(), String> {
-    let Some(sources) = group.get("extensionSources").and_then(Value::as_object) else {
-        return Ok(());
-    };
+    let Some(sources) = group.get("extensionSources").and_then(Value::as_object) else { return Ok(()); };
     let conn = init_db().map_err(|e| e.to_string())?;
     for (id, value) in sources {
-        let source: GitExtensionSource =
-            serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        let source: GitExtensionSource = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
         source.validate().map_err(str::to_owned)?;
-        if id != &source.extension_id() {
-            return Err("ID tiện ích Git không khớp nguồn.".into());
-        }
-        let name = source
-            .repository_url
-            .rsplit('/')
-            .next()
-            .unwrap_or("GitHub extension");
+        if id != &source.extension_id() { return Err("ID tiện ích Git không khớp nguồn.".into()); }
+        let name = source.repository_url.rsplit('/').next().unwrap_or("GitHub extension");
         conn.execute("INSERT INTO extensions (id, name, file_name, file_type, browser_compatibility, created_at, updated_at, sync_enabled, git_source) VALUES (?1, ?2, 'github-extension.zip', 'zip', '[\"chromium\"]', ?3, ?3, 0, ?4) ON CONFLICT(id) DO NOTHING",
             params![id, name, now_secs(), serde_json::to_string(&source).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
     }
@@ -647,138 +574,64 @@ struct LocalPackage {
 
 fn local_packages() -> Result<Vec<LocalPackage>, String> {
     let conn = init_db().map_err(|e| e.to_string())?;
-    let mut statement = conn
-        .prepare("SELECT id, file_type, file_name, package_data, git_source FROM extensions")
-        .map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<Vec<u8>>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
-        })
+    let mut statement = conn.prepare("SELECT id, file_type, file_name, package_data, git_source FROM extensions").map_err(|e| e.to_string())?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?, row.get::<_, Option<Vec<u8>>>(3)?, row.get::<_, Option<String>>(4)?)))
         .map_err(|e| e.to_string())?;
     rows.map(|row| {
         let (id, kind, path, bytes, source) = row.map_err(|e| e.to_string())?;
-        Ok(LocalPackage {
-            id,
-            kind,
-            path,
-            bytes,
-            source: source
-                .map(|value| serde_json::from_str(&value))
-                .transpose()
-                .map_err(|e| e.to_string())?,
-        })
-    })
-    .collect()
+        Ok(LocalPackage { id, kind, path, bytes, source: source.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())? })
+    }).collect()
 }
 
-pub async fn prepare_for_profile(
-    profile_id: &str,
-    ids: &[ExtensionId],
-    sources: &BTreeMap<ExtensionId, GitExtensionSource>,
-) -> Result<PreparedExtensions, String> {
+pub async fn prepare_for_profile(profile_id: &str, ids: &[ExtensionId], sources: &BTreeMap<ExtensionId, GitExtensionSource>) -> Result<PreparedExtensions, String> {
     use sha2::{Digest, Sha256};
     let packages = local_packages()?;
     let root = get_app_data_dir().join("profile-extensions");
     let mut prepared = PreparedExtensions::default();
     for id in ids {
         let local = packages.iter().find(|package| package.id == id.as_str());
-        let source = sources
-            .get(id)
-            .cloned()
-            .or_else(|| local.and_then(|package| package.source.clone()));
-        let cached = crate::extension_packages::installed(&root, profile_id, id.as_str()).filter(
-            |(_, revision)| {
-                source.as_ref().is_none_or(|source| {
-                    revision.starts_with(&format!(
-                        "{}:",
-                        crate::extension_packages::source_id(source)
-                    ))
-                })
-            },
-        );
+        let source = sources.get(id).cloned().or_else(|| local.and_then(|package| package.source.clone()));
+        let cached = crate::extension_packages::installed(&root, profile_id, id.as_str())
+            .filter(|(_, revision)| source.as_ref().is_none_or(|source| revision.starts_with(&format!("{}:", crate::extension_packages::source_id(source)))));
         let result: Result<PathBuf, String> = async {
             if let Some(source) = source {
                 let revision = crate::extension_packages::resolve_revision(&source).await?;
                 // Include source identity: changing a group's source must not reuse another repo's cache.
-                let identity = format!(
-                    "{}:{revision}",
-                    crate::extension_packages::source_id(&source)
-                );
+                let identity = format!("{}:{revision}", crate::extension_packages::source_id(&source));
                 if let Some((path, installed_revision)) = cached.as_ref() {
-                    if installed_revision == &identity {
-                        return Ok(path.clone());
-                    }
+                    if installed_revision == &identity { return Ok(path.clone()); }
                 }
                 let package = crate::extension_packages::fetch(source, revision).await?;
-                let root = root.clone();
-                let profile_id = profile_id.to_owned();
-                let id = id.as_str().to_owned();
-                return tokio::task::spawn_blocking(move || {
-                    crate::extension_packages::install(
-                        &root,
-                        &profile_id,
-                        &id,
-                        &identity,
-                        &package.bytes,
-                    )
-                })
-                .await
-                .map_err(|e| e.to_string())?;
+                let root = root.clone(); let profile_id = profile_id.to_owned(); let id = id.as_str().to_owned();
+                return tokio::task::spawn_blocking(move || crate::extension_packages::install(&root, &profile_id, &id, &identity, &package.bytes))
+                    .await.map_err(|e| e.to_string())?;
             }
             let local = local.ok_or("Chưa tải gói tiện ích trên thiết bị này.")?;
             if local.kind == "unpacked" {
-                let path = std::fs::canonicalize(&local.path)
-                    .map_err(|_| "Không tìm thấy thư mục tiện ích.")?;
-                let manifest: Value = serde_json::from_slice(
-                    &std::fs::read(path.join("manifest.json"))
-                        .map_err(|_| "Thư mục tiện ích thiếu manifest.json.")?,
-                )
-                .map_err(|_| "Manifest tiện ích không hợp lệ.")?;
-                if manifest.get("manifest_version").is_none() {
-                    return Err("Manifest tiện ích không hợp lệ.".into());
-                }
+                let path = std::fs::canonicalize(&local.path).map_err(|_| "Không tìm thấy thư mục tiện ích.")?;
+                let manifest: Value = serde_json::from_slice(&std::fs::read(path.join("manifest.json")).map_err(|_| "Thư mục tiện ích thiếu manifest.json.")?)
+                    .map_err(|_| "Manifest tiện ích không hợp lệ.")?;
+                if manifest.get("manifest_version").is_none() { return Err("Manifest tiện ích không hợp lệ.".into()); }
                 return Ok(path);
             }
-            let bytes = local
-                .bytes
-                .as_ref()
-                .ok_or("Tiện ích chưa có dữ liệu gói.")?;
+            let bytes = local.bytes.as_ref().ok_or("Tiện ích chưa có dữ liệu gói.")?;
             let revision = format!("{:x}", Sha256::digest(bytes));
             if let Some((path, installed_revision)) = cached.as_ref() {
-                if installed_revision == &revision {
-                    return Ok(path.clone());
-                }
+                if installed_revision == &revision { return Ok(path.clone()); }
             }
-            let root = root.clone();
-            let profile_id = profile_id.to_owned();
-            let id = id.as_str().to_owned();
-            let bytes = bytes.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::extension_packages::install(&root, &profile_id, &id, &revision, &bytes)
-            })
-            .await
-            .map_err(|e| e.to_string())?
-        }
-        .await;
+            let root = root.clone(); let profile_id = profile_id.to_owned(); let id = id.as_str().to_owned(); let bytes = bytes.clone();
+            tokio::task::spawn_blocking(move || crate::extension_packages::install(&root, &profile_id, &id, &revision, &bytes))
+                .await.map_err(|e| e.to_string())?
+        }.await;
         match result {
             Ok(path) => prepared.paths.push(path),
             Err(error) => {
                 if let Some((path, _)) = cached {
                     prepared.paths.push(path);
-                    prepared.warnings.push(format!(
-                        "{}: chưa cập nhật được, đang dùng bản đã cài. {error}",
-                        id.as_str()
-                    ));
+                    prepared.warnings.push(format!("{}: chưa cập nhật được, đang dùng bản đã cài. {error}", id.as_str()));
                 } else {
-                    prepared
-                        .warnings
-                        .push(format!("{}: chưa cài được tiện ích. {error}", id.as_str()));
+                    prepared.warnings.push(format!("{}: chưa cài được tiện ích. {error}", id.as_str()));
                 }
             }
         }
