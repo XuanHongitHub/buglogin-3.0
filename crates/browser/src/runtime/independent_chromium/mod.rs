@@ -348,20 +348,34 @@ impl RuntimeAdapter for IndependentChromiumAdapter {
 }
 
 fn protected_argument(argument: &str) -> bool {
-    let name = argument
+    // Chromium also accepts a single dash, and Windows accepts a slash.
+    // Normalize those prefixes before checking identity overrides.
+    let argument = argument.trim();
+    let switch = argument
+        .strip_prefix("--")
+        .or_else(|| argument.strip_prefix('-'))
+        .or_else(|| {
+            cfg!(target_os = "windows")
+                .then(|| argument.strip_prefix('/'))
+                .flatten()
+        });
+    let Some(switch) = switch else {
+        return false;
+    };
+    let name = switch
         .split_once('=')
-        .map_or(argument, |(name, _)| name)
+        .map_or(switch, |(name, _)| name)
         .to_ascii_lowercase();
-    name == "--fingerprint"
-        || name.starts_with("--fingerprint-")
+    name == "fingerprint"
+        || name.starts_with("fingerprint-")
         || matches!(
             name.as_str(),
-            "--user-data-dir"
-                | "--profile-directory"
-                | "--user-agent"
-                | "--disable-spoofing"
-                | "--incognito"
-                | "--guest"
+            "user-data-dir"
+                | "profile-directory"
+                | "user-agent"
+                | "disable-spoofing"
+                | "incognito"
+                | "guest"
         )
 }
 

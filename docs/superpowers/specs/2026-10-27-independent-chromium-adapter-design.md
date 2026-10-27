@@ -47,6 +47,12 @@ Latest candidate has no macOS asset; macOS parity cannot be claimed from it.
 - New adapter refuses pre-existing Wayfern or untracked Chromium profile data
   without an explicit identity migration. Existing Wayfern profiles are not
   reidentified and new runtime profiles are not enabled in the product UI.
+- Native CI at `c4c3c9d4d9f087c93af10e04115ed907dcc0f48b` passed on Windows
+  x64 and macOS arm64: https://github.com/XuanHongitHub/buglogin-3.0/actions/runs/40491491634.
+  macOS cleanup waits for verified process exit after CDP close; it does not
+  reinterpret an unverified process as stopped. Shared process code is unchanged.
+- Override validation follows Chromium switch prefixes (`--`, `-`, and Windows
+  `/`), including identity/profile arguments, before creating identity files.
 
 Required checks: argument and checksum rejection, identity persistence/restart,
 cross-profile isolation, native fingerprint readback, process-tree stop, cookie
@@ -57,3 +63,20 @@ This is an adapter packet, not a production runtime-catalog promotion or a UI
 feature. Production selection requires an approved signed artifact and separate
 review of the current Wayfern-only selection gates. No production readiness claim
 without native Windows/macOS evidence.
+
+## Controlled Rust integration
+
+Use `runtime::independent_chromium::{ChromiumIdentity, IndependentChromiumAdapter}`.
+For a dedicated existing profile directory, load `ChromiumIdentity::load` first;
+generate only if it returns `None`. Construct the adapter, validate the approved
+`RuntimeBinary`, then call the existing `RuntimeAdapter::launch_specification`
+and `SystemProcessController`. Read errors are errors, never a reason to generate
+a replacement identity. The native example demonstrates this complete path.
+
+The checksum-pinned native smoke is reproducible by dispatching
+`.github/workflows/independent-chromium-smoke.yml`. Its artifacts contain engine
+metadata and measured checks. It does not modify the release catalog or publish
+browser packages. Linux and macOS Intel are not covered by this native matrix.
+Canvas/audio stability on one machine is verified; cross-machine identity
+portability, cross-OS emulation, external bot-detector scores and parity with
+every paid Wayfern fingerprint feature are not proven by these tests.

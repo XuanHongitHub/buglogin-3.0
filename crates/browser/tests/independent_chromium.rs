@@ -119,7 +119,21 @@ fn identity_and_profile_overrides_are_rejected_before_profile_mutation() {
         "--disable-spoofing",
         "--incognito",
         "--guest",
+        "-user-data-dir=other",
+        "-fingerprint=42",
+        "-fingerprint-platform=macos",
+        " -user-agent=other ",
     ] {
+        assert_eq!(
+            adapter
+                .launch_specification(&binary, &fixture.0, &[argument.into()])
+                .unwrap_err()
+                .code,
+            "chromium_identity_override_forbidden"
+        );
+    }
+    #[cfg(target_os = "windows")]
+    for argument in ["/user-data-dir=other", "/fingerprint=42", "/guest"] {
         assert_eq!(
             adapter
                 .launch_specification(&binary, &fixture.0, &[argument.into()])
