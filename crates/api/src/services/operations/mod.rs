@@ -76,8 +76,14 @@ impl Default for OperationService {
 }
 
 impl OperationService {
-    pub(crate) fn has_active_workspace_operations(&self, workspace_id: &buglogin_domain::ids::WorkspaceId) -> bool {
-        self.operations.values().any(|operation| operation.scope.workspace_id.as_ref() == Some(workspace_id) && !operation.status.is_terminal())
+    pub(crate) fn has_active_workspace_operations(
+        &self,
+        workspace_id: &buglogin_domain::ids::WorkspaceId,
+    ) -> bool {
+        self.operations.values().any(|operation| {
+            operation.scope.workspace_id.as_ref() == Some(workspace_id)
+                && !operation.status.is_terminal()
+        })
     }
 
     pub fn with_capacity(capacity: usize) -> Result<Self, Problem> {

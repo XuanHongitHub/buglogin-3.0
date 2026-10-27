@@ -797,7 +797,9 @@ mod tests {
                 .as_nanos()
         ));
         let writer = Connection::open(&path).unwrap();
-        writer.execute_batch("CREATE TABLE cookies (name TEXT); INSERT INTO cookies VALUES ('qa');").unwrap();
+        writer
+            .execute_batch("CREATE TABLE cookies (name TEXT); INSERT INTO cookies VALUES ('qa');")
+            .unwrap();
         drop(writer);
 
         let canonical_path = std::fs::canonicalize(&path).unwrap();

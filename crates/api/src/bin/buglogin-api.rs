@@ -295,9 +295,9 @@ fn with_configured_profile_key_provider(
     let key = migration_key_from_env("BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX")?;
     match key {
         Some(key) => Ok(state.with_profile_key_wrapping_key(ClientKey::from_bytes(*key))),
-        None if production => Err(
-            "BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX is required in production".into(),
-        ),
+        None if production => {
+            Err("BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX is required in production".into())
+        }
         None => Ok(state),
     }
 }
