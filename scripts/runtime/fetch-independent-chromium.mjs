@@ -103,10 +103,46 @@ await fs.mkdir(extracted);
 let binary;
 if (fury) {
   console.log("Extracting Fury package");
-  execFileSync("tar", ["-xf", archive, "-C", extracted], {
-    stdio: "inherit",
-    timeout: 15 * 60 * 1000,
-  });
+  if (process.platform === "win32") {
+    const sevenZipCandidates = [
+      process.env.ProgramFiles &&
+        path.join(process.env.ProgramFiles, "7-Zip", "7z.exe"),
+      process.env["ProgramFiles(x86)"] &&
+        path.join(process.env["ProgramFiles(x86)"], "7-Zip", "7z.exe"),
+    ].filter(Boolean);
+    let sevenZip;
+    for (const candidate of sevenZipCandidates) {
+      try {
+        await fs.access(candidate);
+        sevenZip = candidate;
+        break;
+      } catch {
+        // Check the next standard Windows installation location.
+      }
+    }
+    assert.ok(sevenZip, "7-Zip is required to unpack the Windows Fury smoke package");
+    const tarStage = path.join(directory, "fury-tar-stage");
+    await fs.mkdir(tarStage);
+    execFileSync(
+      sevenZip,
+      ["x", "-bd", "-y", "-bso0", "-bsp0", `-o${tarStage}`, archive],
+      { stdio: "inherit", timeout: 5 * 60 * 1000 },
+    );
+    const tarFiles = await fs.readdir(tarStage);
+    const tarName = release.name.slice(0, -3);
+    assert.deepEqual(tarFiles, [tarName], "expected one TAR stream inside the XZ package");
+    console.log("XZ stream decoded; extracting TAR contents");
+    execFileSync(
+      sevenZip,
+      ["x", "-bd", "-y", "-bso0", "-bsp0", `-o${extracted}`, path.join(tarStage, tarName)],
+      { stdio: "inherit", timeout: 5 * 60 * 1000 },
+    );
+  } else {
+    execFileSync("tar", ["-xf", archive, "-C", extracted], {
+      stdio: "inherit",
+      timeout: 5 * 60 * 1000,
+    });
+  }
   console.log("Fury package extracted");
   if (process.platform === "win32") {
     binary = path.join(extracted, "Fury", "chrome.exe");
