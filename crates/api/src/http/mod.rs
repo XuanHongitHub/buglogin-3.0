@@ -476,6 +476,8 @@ pub struct ApiState {
     control_revision: Arc<RwLock<u64>>,
     control_mutation: Arc<Mutex<()>>,
     pub(crate) control_snapshot_gate: Arc<tokio::sync::RwLock<()>>,
+    control_snapshot_refresh:
+        Arc<tokio::sync::Mutex<Option<(tokio::time::Instant, Result<(), Problem>)>>>,
     materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
     platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
     local_account_provisioning: bool,
@@ -747,6 +749,7 @@ impl ApiState {
             control_revision: Arc::new(RwLock::new(revision)),
             control_mutation: Arc::new(Mutex::new(())),
             control_snapshot_gate: Arc::new(tokio::sync::RwLock::new(())),
+            control_snapshot_refresh: Arc::new(tokio::sync::Mutex::new(None)),
             local_account_provisioning,
             external_object_storage: false,
             require_runtime_catalog_for_readiness: false,
@@ -4300,7 +4303,29 @@ impl ApiState {
         Ok(())
     }
 
+    pub(crate) async fn refresh_control_aggregate_async(&self) -> Result<(), Problem> {
+        if self.local_authority_enabled() {
+            return Ok(());
+        }
+        let mut last_refresh = self.control_snapshot_refresh.lock().await;
+        if let Some((refreshed_at, result)) = last_refresh.as_ref() {
+            if refreshed_at.elapsed() < Duration::from_millis(100) {
+                return result.clone();
+            }
+        }
+        let state = self.clone();
+        let result = tokio::task::spawn_blocking(move || state.refresh_control_aggregate_sync())
+            .await
+            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
+        *last_refresh = Some((tokio::time::Instant::now(), result.clone()));
+        result
+    }
+
     pub(crate) fn refresh_control_aggregate(&self) -> Result<(), Problem> {
+        self.refresh_control_aggregate_sync()
+    }
+
+    fn refresh_control_aggregate_sync(&self) -> Result<(), Problem> {
         if self.local_authority_enabled() {
             return Ok(());
         }
@@ -8467,7 +8492,10 @@ async fn fail_cookie_job(
     Json(input): Json<FailCookieJobInput>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let token = bearer_token(&headers)?;
-    state.refresh_control_aggregate().map_err(response)?;
+    state
+        .refresh_control_aggregate_async()
+        .await
+        .map_err(response)?;
     let (account_id, device_id) = state
         .auth
         .read()
@@ -9703,7 +9731,7 @@ async fn launch_profile(
         .as_ref()
         .map_or("local", AccountId::as_str);
     let operation_id = operation_id(&headers, "profile.launch", actor_id, id.as_str())?;
-    if let Some(operation) = existing_operation(&state, &operation_id)? {
+    if let Some(operation) = existing_operation(&state, &operation_id).await? {
         return Ok((StatusCode::ACCEPTED, Json(operation)));
     }
     begin_operation(&state, &operation_id, "profile.launch", actor_id)?;
@@ -9752,7 +9780,7 @@ async fn stop_profile(
         .as_ref()
         .map_or("local", AccountId::as_str);
     let operation_id = operation_id(&headers, "profile.stop", actor_id, id.as_str())?;
-    if let Some(operation) = existing_operation(&state, &operation_id)? {
+    if let Some(operation) = existing_operation(&state, &operation_id).await? {
         return Ok((StatusCode::ACCEPTED, Json(operation)));
     }
     begin_operation(&state, &operation_id, "profile.stop", actor_id)?;
@@ -9859,7 +9887,10 @@ async fn get_operation(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<crate::services::operations::Operation>, Response> {
-    state.refresh_control_aggregate().map_err(response)?;
+    state
+        .refresh_control_aggregate_async()
+        .await
+        .map_err(response)?;
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let read_operation = || {
@@ -10029,7 +10060,7 @@ async fn inspect_migration(
         actor_id,
         source_scope.as_ref(),
     )?;
-    if let Some(operation) = existing_operation(&state, &operation_id)? {
+    if let Some(operation) = existing_operation(&state, &operation_id).await? {
         return Ok((StatusCode::ACCEPTED, Json(operation)));
     }
     begin_operation(&state, &operation_id, "migration.inspect", actor_id)?;
@@ -10092,7 +10123,7 @@ async fn import_migration(
     let destination_scope = destination.to_string_lossy().into_owned();
     let migration_scope = sha256_parts(&[&source_scope, &destination_scope]);
     let operation_id = operation_id(&headers, "migration.import", actor_id, &migration_scope)?;
-    if let Some(operation) = existing_operation(&state, &operation_id)? {
+    if let Some(operation) = existing_operation(&state, &operation_id).await? {
         return Ok((StatusCode::ACCEPTED, Json(operation)));
     }
     begin_operation(&state, &operation_id, "migration.import", actor_id)?;
@@ -10207,8 +10238,14 @@ async fn import_migration(
     }
 }
 
-fn existing_operation(state: &ApiState, operation_id: &str) -> Result<Option<Operation>, Response> {
-    state.refresh_control_aggregate().map_err(response)?;
+async fn existing_operation(
+    state: &ApiState,
+    operation_id: &str,
+) -> Result<Option<Operation>, Response> {
+    state
+        .refresh_control_aggregate_async()
+        .await
+        .map_err(response)?;
     state
         .operations
         .read()
@@ -13120,7 +13157,7 @@ mod persistence_tests {
         assert_eq!(completed.status, OperationStatus::Completed);
         assert_eq!(completed.result, Some(serde_json::json!({ "ok": true })));
 
-        first.refresh_control_aggregate().unwrap();
+        first.refresh_control_aggregate_sync().unwrap();
         assert_eq!(
             first
                 .operations

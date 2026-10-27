@@ -704,29 +704,38 @@ pub async fn prepare_for_profile(
         );
         let result: Result<PathBuf, String> = async {
             if let Some(source) = source {
-                let revision = crate::extension_packages::resolve_revision(&source).await?;
-                // Include source identity: changing a group's source must not reuse another repo's cache.
-                let identity = format!(
-                    "{}:{revision}",
-                    crate::extension_packages::source_id(&source)
-                );
-                if let Some((path, installed_revision)) = cached.as_ref() {
-                    if installed_revision == &identity {
-                        return Ok(path.clone());
+                // GitHub is an optional updater, not part of profile lifecycle.
+                // Bound its network work so an unavailable GitHub cannot hold
+                // the browser launch open; use the installed revision instead.
+                let update = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    let revision = crate::extension_packages::resolve_revision(&source).await?;
+                    // Include source identity: changing a group's source must not reuse another repo's cache.
+                    let identity = format!(
+                        "{}:{revision}",
+                        crate::extension_packages::source_id(&source)
+                    );
+                    if cached
+                        .as_ref()
+                        .is_some_and(|(_, installed_revision)| installed_revision == &identity)
+                    {
+                        return Ok(None);
                     }
-                }
-                let package = crate::extension_packages::fetch(source, revision).await?;
+                    let package = crate::extension_packages::fetch(source, revision).await?;
+                    Ok::<_, String>(Some((identity, package.bytes)))
+                })
+                .await
+                .map_err(|_| "GitHub extension update timed out.".to_owned())??;
+                let Some((identity, bytes)) = update else {
+                    return cached
+                        .as_ref()
+                        .map(|(path, _)| path.clone())
+                        .ok_or_else(|| "Extension cache is missing.".to_owned());
+                };
                 let root = root.clone();
                 let profile_id = profile_id.to_owned();
                 let id = id.as_str().to_owned();
                 return tokio::task::spawn_blocking(move || {
-                    crate::extension_packages::install(
-                        &root,
-                        &profile_id,
-                        &id,
-                        &identity,
-                        &package.bytes,
-                    )
+                    crate::extension_packages::install(&root, &profile_id, &id, &identity, &bytes)
                 })
                 .await
                 .map_err(|e| e.to_string())?;

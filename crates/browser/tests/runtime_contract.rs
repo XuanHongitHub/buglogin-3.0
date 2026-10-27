@@ -36,13 +36,12 @@ fn wayfern_validates_checksum_and_builds_launch_specification() {
     assert_eq!(adapter.runtime(), Runtime::Wayfern);
     assert!(adapter.capabilities().contains(&RuntimeCapability::Proxy));
     assert_eq!(spec.executable, binary_path);
-    assert_eq!(
-        spec.args,
-        vec![
-            format!("--user-data-dir={}", profile_path.to_string_lossy()),
-            "--headless".to_owned(),
-        ]
-    );
+    assert_eq!(spec.args.len(), 3);
+    let user_data_dir = spec.args[0]
+        .strip_prefix("--user-data-dir=")
+        .expect("launch spec must set the isolated user data directory");
+    assert!(PathBuf::from(user_data_dir).ends_with("profile_1"));
+    assert_eq!(&spec.args[1..], ["--headless", "--disable-background-mode"]);
     let _ = fs::remove_dir_all(root);
 }
 

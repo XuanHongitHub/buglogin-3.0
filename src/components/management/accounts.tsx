@@ -1493,6 +1493,7 @@ export function AccountDirectory({
   >({});
   const [editResults, setEditResults] = useState<Record<string, string>>({});
   const [assigning, setAssigning] = useState(false);
+  const [assignWorkspaceIds, setAssignWorkspaceIds] = useState<string[]>([]);
   const [assignRole, setAssignRole] = useState<MemberRole>("member");
   const [status, setStatus] = useState<AccountStatus>();
   const [orgStatus, setOrgStatus] = useState<"active" | "suspended">();

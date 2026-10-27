@@ -264,11 +264,24 @@ impl ProfileRuntimeHandle {
         result: Result<T, Problem>,
     ) -> Result<T, Problem> {
         if result.is_err() {
-            // Sync failed after the process was stopped. Preserve its files and
-            // recovery markers, but do not retain the local runtime lock.
-            let _ = self.complete_stop(profile_id).await;
+            // Keep the stopped profile in the reconcile queue. The local commit
+            // marker is durable, so dropping this state here stranded valid
+            // local changes until the user manually closed/retried the profile.
+            self.queue_sync_retry(profile_id).await;
         }
         result
+    }
+
+    pub async fn queue_sync_retry(&self, profile_id: ProfileId) {
+        let (reply, response) = oneshot::channel();
+        if self
+            .commands
+            .send(RuntimeCommand::QueueSyncRetry { profile_id, reply })
+            .await
+            .is_ok()
+        {
+            let _ = response.await;
+        }
     }
 
     pub async fn write_authority(
@@ -376,6 +389,10 @@ enum RuntimeCommand {
     },
     UnexpectedlyStoppedProfiles {
         reply: oneshot::Sender<Vec<ProfileId>>,
+    },
+    QueueSyncRetry {
+        profile_id: ProfileId,
+        reply: oneshot::Sender<()>,
     },
     SetCoordination {
         coordination: Option<ManagedCoordination>,
@@ -513,6 +530,14 @@ where
                 }
                 Some(RuntimeCommand::UnexpectedlyStoppedProfiles { reply }) => {
                     let _ = reply.send(runtime.unexpectedly_stopped.iter().cloned().collect());
+                }
+                Some(RuntimeCommand::QueueSyncRetry { profile_id, reply }) => {
+                    if runtime.running.get_mut(&profile_id).is_some_and(|running| {
+                        running.process_stopped && running.sync_pending
+                    }) {
+                        runtime.unexpectedly_stopped.insert(profile_id);
+                    }
+                    let _ = reply.send(());
                 }
                 Some(RuntimeCommand::SetCoordination { coordination, reply }) => {
                     let result = runtime.set_coordination(coordination);
@@ -820,7 +845,9 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 // the local profile files remain available for retry/recovery.
                 let _ = release(self.coordination.clone(), &lease).await;
                 self.running.remove(&profile_id);
-                self.unexpectedly_stopped.remove(&profile_id);
+                // The lease hold is bounded, but retry intent survives it. The
+                // desktop reconciler can reacquire a lease from the dirty local
+                // generation instead of abandoning the user's pending changes.
                 continue;
             }
             if self
@@ -1602,7 +1629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_sync_releases_runtime_lock_and_keeps_dirty_profile_files() {
+    async fn failed_sync_stays_queued_for_automatic_retry_and_keeps_dirty_files() {
         let path = profile_path("sync-failure-cleanup");
         fs::create_dir_all(path.join("Default")).unwrap();
         fs::write(path.join("Default/Cookies"), b"dirty cookie data").unwrap();
@@ -1628,14 +1655,54 @@ mod tests {
             .finish_sync_result(profile_id.clone(), Err(injected))
             .await;
         assert_eq!(result.unwrap_err().code, "injected_sync_failure");
-        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
+        assert_eq!(
+            handle.unexpectedly_stopped_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
         assert_eq!(
             fs::read(path.join("Default/Cookies")).unwrap(),
             b"dirty cookie data"
         );
-        assert!(log.lock().unwrap().contains(&"release"));
+        assert!(!log.lock().unwrap().contains(&"release"));
+
+        handle.complete_stop(profile_id.clone()).await.unwrap();
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert!(
+            handle
+                .unexpectedly_stopped_profiles()
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_sync_lease_releases_lock_but_keeps_retry_intent() {
+        let path = profile_path("expired-sync-retry-intent");
+        let controller = TestController::default();
+        let backend = Arc::new(TestCoordination::new(controller.log.clone()));
+        let mut runtime = runtime(controller, managed_coordination(backend));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        runtime.launch(request(&path, true)).await.unwrap();
+        runtime.stop_for_sync(&profile_id).await.unwrap();
+        runtime.unexpectedly_stopped.insert(profile_id.clone());
+        runtime
+            .running
+            .get_mut(&profile_id)
+            .unwrap()
+            .sync_started_at = Some(Instant::now() - MAX_STOP_SYNC_HOLD);
+
+        runtime.renew().await;
+
+        assert!(!runtime.running.contains_key(&profile_id));
+        assert!(runtime.unexpectedly_stopped.contains(&profile_id));
         fs::remove_dir_all(path).unwrap();
     }
 

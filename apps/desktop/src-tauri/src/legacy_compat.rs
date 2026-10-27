@@ -6,6 +6,7 @@ use buglogin_domain::entities::ProxyProtocol;
 use buglogin_domain::errors::Problem;
 use buglogin_network::proxy::parse_lines;
 use buglogin_storage::secrets::SecretValue;
+use futures_util::{StreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -376,7 +377,7 @@ pub async fn get_groups_with_profile_counts(
         .await?;
     let profiles = match profiles {
         Some(profiles) => profiles,
-        None => list_all_profiles(&state).await?,
+        None => list_all_profiles(&state, None).await?,
     };
     let groups = group_result
         .data
@@ -1081,83 +1082,134 @@ async fn get_available_workspace_records(
         .get("items")
         .and_then(Value::as_array)
         .ok_or_else(|| invalid_response("organization-list"))?;
-    let mut workspaces = Vec::new();
-    for org in orgs {
-        let Some(org_id) = org.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let org_name = org.get("name").and_then(Value::as_str).unwrap_or("");
-        let org_owner_id = org.get("accountId").and_then(Value::as_str);
-        let is_org_owner = account_id.as_deref().is_some() && org_owner_id == account_id.as_deref();
+    let organization_rows: Vec<(String, String, Option<String>)> = orgs
+        .iter()
+        .filter_map(|org| {
+            Some((
+                org.get("id")?.as_str()?.to_owned(),
+                org.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                org.get("accountId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ))
+        })
+        .collect();
 
-        let response = state
-            .invoke(
-                "workspace_list",
-                &request_id("workspace-list"),
-                None,
-                json!({ "organizationId": org_id }),
-            )
-            .await?;
-        if let Some(items) = response.data.get("items").and_then(Value::as_array) {
-            for item in items {
-                let mut normalized = item
-                    .get("workspace")
+    // Workspace discovery used to perform every organization, membership, and
+    // profile-count request serially. On refresh this made latency grow with
+    // the number of organizations/workspaces. Keep the same server-authorized
+    // reads, but overlap independent requests with a small concurrency bound.
+    let workspace_pages: Vec<Result<(String, String, Option<String>, Vec<Value>), Problem>> =
+        stream::iter(organization_rows.into_iter().map(
+            |(org_id, org_name, owner_id)| async move {
+                let response = state
+                    .invoke(
+                        "workspace_list",
+                        &request_id("workspace-list"),
+                        None,
+                        json!({ "organizationId": org_id }),
+                    )
+                    .await?;
+                let items = response
+                    .data
+                    .get("items")
+                    .and_then(Value::as_array)
                     .cloned()
-                    .unwrap_or_else(|| item.clone());
-                normalized["organizationId"] = json!(org_id);
-                normalized["organizationName"] = json!(org_name);
+                    .unwrap_or_default();
+                Ok((org_id, org_name, owner_id, items))
+            },
+        ))
+        .buffer_unordered(4)
+        .collect()
+        .await;
 
-                let ws_id = normalized
+    let mut workspace_rows = Vec::new();
+    for page in workspace_pages {
+        let (org_id, org_name, owner_id, items) = page?;
+        let is_org_owner =
+            account_id.as_deref().is_some() && owner_id.as_deref() == account_id.as_deref();
+        for item in items {
+            let mut normalized = item
+                .get("workspace")
+                .cloned()
+                .unwrap_or_else(|| item.clone());
+            normalized["organizationId"] = json!(org_id);
+            normalized["organizationName"] = json!(org_name);
+            workspace_rows.push((normalized, is_org_owner));
+        }
+    }
+
+    let mut workspaces: Vec<Value> = stream::iter(workspace_rows.into_iter().map(
+        |(mut workspace, is_org_owner)| {
+            let account_id = account_id.clone();
+            async move {
+                let workspace_id = workspace
                     .get("id")
                     .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let mut user_role = if is_org_owner {
-                    Some("owner".to_string())
-                } else {
-                    None
-                };
-
-                if user_role.is_none() && !ws_id.is_empty() {
-                    if let Ok(m_resp) = state
+                    .unwrap_or_default()
+                    .to_owned();
+                let member_future = async {
+                    if is_org_owner || workspace_id.is_empty() {
+                        return None;
+                    }
+                    state
                         .invoke(
                             "member_list",
                             &request_id("member-list"),
                             None,
-                            json!({ "workspaceId": ws_id }),
+                            json!({ "workspaceId": workspace_id }),
                         )
                         .await
-                    {
-                        if let Some(members) = m_resp.data.get("items").and_then(Value::as_array) {
-                            for m in members {
-                                if m.get("accountId").and_then(Value::as_str)
-                                    == account_id.as_deref()
-                                {
-                                    if let Some(r) = m.get("role").and_then(Value::as_str) {
-                                        user_role = Some(r.to_string());
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                        .ok()
+                        .and_then(|response| response.data.get("items")?.as_array().cloned())
+                        .and_then(|members| {
+                            members.into_iter().find_map(|member| {
+                                (member.get("accountId").and_then(Value::as_str)
+                                    == account_id.as_deref())
+                                .then(|| {
+                                    member
+                                        .get("role")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned)
+                                })
+                                .flatten()
+                            })
+                        })
+                };
+                let count_future = async {
+                    if workspace_id.is_empty() {
+                        None
+                    } else {
+                        count_profiles_for_workspace(state, &workspace_id).await
                     }
-                }
-                normalized["role"] = json!(user_role.unwrap_or_else(|| "member".to_string()));
-                if let Some(max) = normalized
+                };
+                let (member_role, profile_count) = tokio::join!(member_future, count_future);
+                let role = if is_org_owner {
+                    "owner".to_owned()
+                } else {
+                    member_role.unwrap_or_else(|| "member".to_owned())
+                };
+                workspace["role"] = json!(role);
+                if let Some(max) = workspace
                     .get("policy")
-                    .and_then(|p| p.get("maxProfiles"))
+                    .and_then(|policy| policy.get("maxProfiles"))
                     .and_then(Value::as_u64)
                 {
-                    normalized["maxProfiles"] = json!(max);
+                    workspace["maxProfiles"] = json!(max);
                 }
-                if !ws_id.is_empty() {
-                    let count = count_profiles_for_workspace(state, &ws_id).await;
-                    normalized["profileCount"] = json!(count);
+                if !workspace_id.is_empty() {
+                    workspace["profileCount"] = json!(profile_count);
                 }
-                workspaces.push(normalized);
+                workspace
             }
-        }
-    }
+        },
+    ))
+    .buffer_unordered(4)
+    .collect()
+    .await;
     workspaces.sort_by(|left, right| {
         left.get("name")
             .and_then(Value::as_str)
@@ -1353,8 +1405,11 @@ pub fn parse_txt_proxies(content: String) -> Vec<Value> {
         .collect()
 }
 #[tauri::command]
-pub async fn list_browser_profiles(state: State<'_, DesktopState>) -> Result<Vec<Value>, Problem> {
-    Ok(list_all_profiles(&state)
+pub async fn list_browser_profiles(
+    state: State<'_, DesktopState>,
+    workspace_id: Option<String>,
+) -> Result<Vec<Value>, Problem> {
+    Ok(list_all_profiles(&state, workspace_id.as_deref())
         .await?
         .iter()
         .map(legacy_profile)
@@ -1364,13 +1419,22 @@ pub async fn list_browser_profiles(state: State<'_, DesktopState>) -> Result<Vec
 /// Compatibility name used by the profile-group bulk actions.
 #[tauri::command]
 pub async fn get_browser_profiles(state: State<'_, DesktopState>) -> Result<Vec<Value>, Problem> {
-    list_browser_profiles(state).await
+    list_browser_profiles(state, None).await
 }
 
-async fn list_all_profiles(state: &DesktopState) -> Result<Vec<Value>, Problem> {
+async fn list_all_profiles(
+    state: &DesktopState,
+    requested_workspace_id: Option<&str>,
+) -> Result<Vec<Value>, Problem> {
     let mut items = Vec::new();
     let mut cursor: Option<String> = None;
-    let workspace_id = default_workspace_id(state).await?;
+    let workspace_id = match requested_workspace_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(workspace_id) => workspace_id.to_owned(),
+        None => default_workspace_id(state).await?,
+    };
     loop {
         let correlation_id = request_id("profile-list");
         let mut payload =

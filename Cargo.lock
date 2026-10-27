@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-api"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "argon2",
  "async-trait",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-browser"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "aes",
  "buglogin-domain",
@@ -771,11 +771,11 @@ dependencies = [
 
 [[package]]
 name = "buglogin-control"
-version = "3.0.19"
+version = "3.0.20"
 
 [[package]]
 name = "buglogin-control-app"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "axum",
  "buglogin-api",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-desktop-app"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "aes",
  "argon2",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-domain"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "getrandom 0.3.4",
  "serde",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-migration"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "blake3",
  "buglogin-domain",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-network"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "buglogin-domain",
  "serde",
@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-storage"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "buglogin-domain",
  "http",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-sync"
-version = "3.0.19"
+version = "3.0.20"
 dependencies = [
  "aes-gcm",
  "async-trait",

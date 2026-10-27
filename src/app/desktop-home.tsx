@@ -136,6 +136,7 @@ function DesktopHome({
   appUpdates?: ReturnType<typeof useAppUpdateNotifications>;
 } = {}) {
   const { t } = useTranslation();
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
   // Use the profile events hook for centralized profile management
   const {
     profiles: loadedProfiles,
@@ -145,9 +146,11 @@ function DesktopHome({
     error: profilesError,
     loadProfiles: refreshProfiles,
     clearError: clearProfileError,
-  } = useProfileEvents();
+  } = useProfileEvents({
+    skipInitialLoad: true,
+    workspaceId: selectedWorkspaceId || undefined,
+  });
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
   const [profilesWorkspaceId, setProfilesWorkspaceId] = useState<string | null>(
     null,
   );
@@ -243,7 +246,7 @@ function DesktopHome({
         if (request !== workspaceSelectionRequestRef.current) return;
         setSelectedWorkspaceId(workspaceId);
         setProfilesWorkspaceId(null);
-        const profilesLoaded = await refreshProfiles();
+        const profilesLoaded = await refreshProfiles(workspaceId);
         if (request !== workspaceSelectionRequestRef.current) return;
         if (profilesLoaded) {
           setProfilesWorkspaceId(workspaceId);
@@ -278,7 +281,7 @@ function DesktopHome({
     setWorkspaceProfilesFailed(false);
     clearProfileError();
     try {
-      const loaded = await refreshProfiles();
+      const loaded = await refreshProfiles(workspaceId);
       if (
         request !== workspaceSelectionRequestRef.current ||
         workspaceId !== selectedWorkspaceId
@@ -344,7 +347,7 @@ function DesktopHome({
             setSelectedWorkspaceId(selected.id);
             setWorkspaceProfilesLoading(true);
             clearProfileError();
-            const profilesLoaded = await refreshProfiles();
+            const profilesLoaded = await refreshProfiles(selected.id);
             if (disposed) return;
             if (profilesLoaded) {
               setProfilesWorkspaceId(selected.id);

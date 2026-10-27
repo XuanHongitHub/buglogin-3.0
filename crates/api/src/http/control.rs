@@ -1384,7 +1384,7 @@ pub(super) async fn refresh_hosted_snapshot(
     let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
         .read_owned()
         .await;
-    if let Err(error) = state.refresh_control_aggregate() {
+    if let Err(error) = state.refresh_control_aggregate_async().await {
         return response(error);
     }
     next.run(request).await

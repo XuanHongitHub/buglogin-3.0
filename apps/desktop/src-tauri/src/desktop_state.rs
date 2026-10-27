@@ -4164,42 +4164,109 @@ impl ProductionDesktopState {
             workspace_id: &binding.workspace_id,
             auth: &auth,
         };
-        // Optional extension preparation never changes profile authorization or sync authority.
-        // Read group sources through the authenticated API, then install on this device in Rust.
-        let extension_preparation: Result<crate::extension_features::PreparedExtensions, Problem> =
-            async {
-                let Some(group_id) = profile.value.extension_group_id.as_ref() else {
-                    return Ok(crate::extension_features::PreparedExtensions::default());
-                };
-                let response = self
-                    .client
-                    .invoke(
-                        "extension_group_get",
-                        &correlation_id,
-                        None,
-                        json!({"workspaceId": binding.workspace_id, "extensionGroupId": group_id}),
-                    )
-                    .await?;
-                let group: buglogin_domain::entities::ExtensionGroup =
-                    serde_json::from_value(response.data["group"].clone())
-                        .map_err(|_| serialization(&correlation_id))?;
-                crate::extension_features::prepare_for_profile(
-                    profile_id.as_str(),
-                    &group.extension_ids,
-                    &group.extension_sources,
+        // These reads do not depend on one another. Run them together so the
+        // launch wait is bounded by the slowest required request, not their sum.
+        // Extension lookup/update is optional and has a short deadline; a slow
+        // extension service must never hold the profile lifecycle open.
+        let extension_future = async {
+            let Some(group_id) = profile.value.extension_group_id.as_ref() else {
+                return Ok(crate::extension_features::PreparedExtensions::default());
+            };
+            let response = tokio::time::timeout(
+                Duration::from_secs(3),
+                self.client.invoke(
+                    "extension_group_get",
+                    &correlation_id,
+                    None,
+                    json!({"workspaceId": binding.workspace_id, "extensionGroupId": group_id}),
+                ),
+            )
+            .await
+            .map_err(|_| {
+                Problem::new(
+                    "extension_group_load_timeout",
+                    "Extension group lookup timed out; continuing without extensions",
+                    504,
+                    &correlation_id,
                 )
+            })??;
+            let group: buglogin_domain::entities::ExtensionGroup =
+                serde_json::from_value(response.data["group"].clone())
+                    .map_err(|_| serialization(&correlation_id))?;
+            crate::extension_features::prepare_for_profile(
+                profile_id.as_str(),
+                &group.extension_ids,
+                &group.extension_sources,
+            )
+            .await
+            .map_err(|message| {
+                Problem::new(
+                    "extension_prepare_failed",
+                    "Extensions could not be prepared",
+                    503,
+                    &correlation_id,
+                )
+                .with_detail(message)
+            })
+        };
+        let manifest_future = async {
+            match self
+                .client
+                .current_manifest(scope.clone(), &binding.resource_id)
                 .await
-                .map_err(|message| {
-                    Problem::new(
-                        "extension_prepare_failed",
-                        "Extensions could not be prepared",
-                        503,
+            {
+                Ok(Some(manifest)) => Ok((manifest, false)),
+                Err(error) if error.code == "manifest_dependency_stale" => self
+                    .client
+                    .current_manifest_for_proxy_repair(
+                        scope.clone(),
+                        &binding.resource_id,
                         &correlation_id,
                     )
-                    .with_detail(message)
-                })
+                    .await?
+                    .map(|manifest| (manifest, true))
+                    .ok_or_else(|| {
+                        Problem::new(
+                            "production_manifest_not_found",
+                            "Production profile manifest not found for proxy repair",
+                            409,
+                            &correlation_id,
+                        )
+                    }),
+                Ok(None) => Err(Problem::new(
+                    "production_manifest_not_found",
+                    "Production profile manifest not found",
+                    409,
+                    &correlation_id,
+                )),
+                Err(error) => Err(error),
             }
-            .await;
+        };
+        let key_rotation_future = self
+            .client
+            .profile_key_rotation_recipients(&profile_id, &correlation_id);
+        let pending_proxy_future = self.client.profile_proxy_assignment(
+            &binding.workspace_id,
+            &profile_id,
+            &correlation_id,
+        );
+        let device_key_future = self.ensure_device_key_registered(&correlation_id);
+        let (
+            extension_preparation,
+            manifest_result,
+            key_rotation_result,
+            pending_proxy_result,
+            device_key_result,
+        ) = tokio::join!(
+            extension_future,
+            manifest_future,
+            key_rotation_future,
+            pending_proxy_future,
+            device_key_future,
+        );
+        let (mut manifest, manifest_proxy_stale) = manifest_result?;
+        let pending_proxy_assignment = pending_proxy_result?;
+        device_key_result?;
         let prepared_extensions = match extension_preparation {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -4227,46 +4294,7 @@ impl ProductionDesktopState {
                 .with_detail(warning.clone()),
             );
         }
-        let (mut manifest, manifest_proxy_stale) = match self
-            .client
-            .current_manifest(scope.clone(), &binding.resource_id)
-            .await
-        {
-            Ok(Some(manifest)) => (manifest, false),
-            Err(error) if error.code == "manifest_dependency_stale" => (
-                self.client
-                    .current_manifest_for_proxy_repair(
-                        scope.clone(),
-                        &binding.resource_id,
-                        &correlation_id,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        Problem::new(
-                            "production_manifest_not_found",
-                            "Production profile manifest not found for proxy repair",
-                            409,
-                            &correlation_id,
-                        )
-                    })?,
-                true,
-            ),
-            Ok(None) => {
-                return Err(Problem::new(
-                    "production_manifest_not_found",
-                    "Production profile manifest not found",
-                    409,
-                    &correlation_id,
-                ));
-            }
-            Err(error) => return Err(error),
-        };
-        self.ensure_device_key_registered(&correlation_id).await?;
-        match self
-            .client
-            .profile_key_rotation_recipients(&profile_id, &correlation_id)
-            .await
-        {
+        match key_rotation_result {
             Ok(_)
                 if manifest.generation == 1
                     && manifest.parent_generation.is_none()
@@ -4287,10 +4315,6 @@ impl ProductionDesktopState {
                     || error.status == 404 => {}
             Err(error) => return Err(error),
         }
-        let pending_proxy_assignment = self
-            .client
-            .profile_proxy_assignment(&binding.workspace_id, &profile_id, &correlation_id)
-            .await?;
         let stale_proxy_dependency = manifest_proxy_stale || pending_proxy_assignment.is_some();
         let recovery_path = local_projection
             .active_session_recovery_path(&profile_id, &manifest)?
@@ -4943,6 +4967,20 @@ impl ProductionDesktopState {
                 .await
                 .is_ok_and(|active| !active.contains(&cleanup_profile_id))
         {
+            // A closed browser with a failed upload stays in the background
+            // reconciliation queue. Only release runtime bookkeeping when the
+            // failure happened before a stopped sync could be retried.
+            self.profile_runtime
+                .queue_sync_retry(cleanup_profile_id.clone())
+                .await;
+            if self
+                .profile_runtime
+                .unexpectedly_stopped_profiles()
+                .await
+                .is_ok_and(|queued| queued.contains(&cleanup_profile_id))
+            {
+                return result;
+            }
             // Cover failures before the sync transaction has a StopReceipt
             // (for example key/manifest preflight or proxy shutdown). Never
             // clear state while the browser is still active.

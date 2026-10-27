@@ -349,7 +349,10 @@ pub(super) async fn import_sync_authorized(
         .as_str()
         .to_owned();
     input.export.validate().map_err(response)?;
-    state.refresh_control_aggregate().map_err(response)?;
+    state
+        .refresh_control_aggregate_async()
+        .await
+        .map_err(response)?;
     let now = checked_now("sync-import-preflight").map_err(response)?;
     let principal = state
         .authenticate_token(&bearer_token(headers)?, now)

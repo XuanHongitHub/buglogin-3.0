@@ -11,7 +11,7 @@ interface UseProfileEventsReturn {
   isLoading: boolean;
   isRefreshing: boolean;
   error: string | null;
-  loadProfiles: () => Promise<boolean>;
+  loadProfiles: (workspaceId?: string) => Promise<boolean>;
   clearError: () => void;
 }
 
@@ -20,7 +20,13 @@ interface UseProfileEventsReturn {
  * This hook eliminates the need for manual UI refreshes by automatically
  * updating state when the backend emits profile change events.
  */
-export function useProfileEvents(): UseProfileEventsReturn {
+export function useProfileEvents({
+  skipInitialLoad = false,
+  workspaceId,
+}: {
+  skipInitialLoad?: boolean;
+  workspaceId?: string;
+} = {}): UseProfileEventsReturn {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [runningProfiles, setRunningProfiles] = useState<Set<string>>(
     new Set(),
@@ -30,52 +36,62 @@ export function useProfileEvents(): UseProfileEventsReturn {
   const [error, setError] = useState<string | null>(null);
   const profilesRequestRef = useRef(0);
   const profilesRequestPromiseRef = useRef<Promise<boolean> | null>(null);
+  const activeWorkspaceIdRef = useRef<string | undefined>(workspaceId);
+  activeWorkspaceIdRef.current = workspaceId;
   const runningRequestRef = useRef(0);
   const runningStateRevisionRef = useRef(0);
 
   // Load profiles from backend
-  const loadProfiles = useCallback((): Promise<boolean> => {
-    const request = ++profilesRequestRef.current;
-    setIsRefreshing(true);
-    const operation = (async (): Promise<boolean | null> => {
-      try {
-        const profileList = await invoke<BrowserProfile[]>(
-          "list_browser_profiles",
-        );
-        if (request !== profilesRequestRef.current) return null;
-        setProfiles(profileList);
-        setError(null);
-        return true;
-      } catch (err: unknown) {
-        if (request !== profilesRequestRef.current) return null;
-        console.warn("Passive load profiles notice:", err);
-        const isUnavailable =
-          typeof err === "object" &&
-          err !== null &&
-          ((err as any).code === "api_unavailable" ||
-            (err as any).status === 503);
-        if (!isUnavailable) {
-          const errorDetail =
-            typeof err === "object" && err !== null && "title" in err
-              ? String((err as any).title)
-              : String(err);
-          setError(i18n.t("errors.loadProfilesFailed", { error: errorDetail }));
+  const loadProfiles = useCallback(
+    (requestedWorkspaceId?: string): Promise<boolean> => {
+      const request = ++profilesRequestRef.current;
+      const activeWorkspaceId =
+        requestedWorkspaceId ?? activeWorkspaceIdRef.current;
+      setIsRefreshing(true);
+      const operation = (async (): Promise<boolean | null> => {
+        try {
+          const profileList = await invoke<BrowserProfile[]>(
+            "list_browser_profiles",
+            activeWorkspaceId ? { workspaceId: activeWorkspaceId } : undefined,
+          );
+          if (request !== profilesRequestRef.current) return null;
+          setProfiles(profileList);
+          setError(null);
+          return true;
+        } catch (err: unknown) {
+          if (request !== profilesRequestRef.current) return null;
+          console.warn("Passive load profiles notice:", err);
+          const isUnavailable =
+            typeof err === "object" &&
+            err !== null &&
+            ((err as any).code === "api_unavailable" ||
+              (err as any).status === 503);
+          if (!isUnavailable) {
+            const errorDetail =
+              typeof err === "object" && err !== null && "title" in err
+                ? String((err as any).title)
+                : String(err);
+            setError(
+              i18n.t("errors.loadProfilesFailed", { error: errorDetail }),
+            );
+          }
+          return false;
+        } finally {
+          if (request === profilesRequestRef.current) setIsRefreshing(false);
         }
-        return false;
-      } finally {
-        if (request === profilesRequestRef.current) setIsRefreshing(false);
-      }
-    })();
-    const result: Promise<boolean> = operation.then(async (success) => {
-      return followLatestProfileLoadResult(
-        success,
-        profilesRequestPromiseRef.current,
-        result,
-      );
-    });
-    profilesRequestPromiseRef.current = result;
-    return result;
-  }, []);
+      })();
+      const result: Promise<boolean> = operation.then(async (success) => {
+        return followLatestProfileLoadResult(
+          success,
+          profilesRequestPromiseRef.current,
+          result,
+        );
+      });
+      profilesRequestPromiseRef.current = result;
+      return result;
+    },
+    [],
+  );
 
   // Clear error state
   const clearError = useCallback(() => {
@@ -163,7 +179,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
         // while those requests are pending; request generations prevent stale
         // responses from replacing data loaded after the change.
         if (disposed) return;
-        await loadProfiles();
+        if (!skipInitialLoad) await loadProfiles();
 
         console.log("Profile event listeners set up successfully");
       } catch (err) {
@@ -193,7 +209,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
       if (profileUpdatedUnlisten) profileUpdatedUnlisten();
       if (runningUnlisten) runningUnlisten();
     };
-  }, [loadProfiles]);
+  }, [loadProfiles, skipInitialLoad]);
 
   // Recover from missed desktop events and refresh when returning to the app.
   useEffect(() => {

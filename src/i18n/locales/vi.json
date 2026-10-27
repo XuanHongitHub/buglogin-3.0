@@ -2373,7 +2373,7 @@
     "syncTooltipNotSynced": "Profile chỉ được lưu trên máy này, chưa có bản sao trên Cloud.",
     "nativeFingerprintWarning": "Profile đã mở bằng fingerprint mặc định của trình duyệt. Tạo custom identity hiện chưa được Wayfern cho phép.",
     "noTags": "Không có thẻ",
-    "syncTooltipCloseToSync": "Có thay đổi trên máy chưa đồng bộ lên Cloud. Đóng profile để thử đồng bộ lại.",
+    "syncTooltipCloseToSync": "Có thay đổi đang chờ đồng bộ lên Cloud. BugLogin sẽ tự thử lại khi profile đã đóng.",
     "syncTooltipDisabledWithLast": "Đã tắt đồng bộ, lần đồng bộ cuối {{time}}",
     "addTagsPlaceholder": "Thêm thẻ",
     "tagsHeader": "Thẻ",
