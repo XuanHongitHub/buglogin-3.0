@@ -86,3 +86,36 @@ test("Tauri Cargo stages the migration sidecar only for desktop builds", () => {
     false,
   );
 });
+
+test("Tauri JavaScript plugins match the Rust plugin minor versions", async () => {
+  const manifest = JSON.parse(await readFile("package.json", "utf8"));
+  const lockfile = await readFile("Cargo.lock", "utf8");
+
+  for (const [jsName, rustName] of [
+    ["@tauri-apps/plugin-dialog", "tauri-plugin-dialog"],
+    ["@tauri-apps/plugin-fs", "tauri-plugin-fs"],
+  ]) {
+    const jsVersion = manifest.dependencies[jsName].match(
+      /\d+\.\d+\.\d+/,
+    )?.[0];
+    const rustVersion = lockfile.match(
+      new RegExp(
+        `\\[\\[package\\]\\]\\nname = "${rustName}"\\nversion = "([^"]+)"`,
+      ),
+    )?.[1];
+
+    assert.ok(
+      jsVersion,
+      `missing JavaScript dependency version for ${jsName}`,
+    );
+    assert.ok(
+      rustVersion,
+      `missing Rust lockfile version for ${rustName}`,
+    );
+    assert.equal(
+      jsVersion.split(".").slice(0, 2).join("."),
+      rustVersion.split(".").slice(0, 2).join("."),
+      `${jsName} ${jsVersion} must match ${rustName} ${rustVersion}`,
+    );
+  }
+});
