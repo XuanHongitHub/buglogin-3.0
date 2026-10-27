@@ -38,7 +38,9 @@ const s3Environment = (() => {
     "BUGLOGIN_S3_SECRET_KEY",
   ];
   for (const name of required) {
-    if (!process.env[name]?.trim()) throw new Error(`${name} is required for S3 sync E2E`);
+    if (!process.env[name]?.trim()) {
+      throw new Error(`${name} is required for S3 sync E2E`);
+    }
   }
   if (new URL(process.env.BUGLOGIN_S3_ENDPOINT).protocol !== "https:") {
     throw new Error("S3 sync E2E requires an HTTPS endpoint");
