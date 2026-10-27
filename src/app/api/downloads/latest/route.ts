@@ -53,18 +53,19 @@ function installerUrl(
   platform: "windows" | "macos",
 ): string | null {
   if (!value || typeof value !== "object") return null;
-  const item = value as { filename?: unknown; url?: unknown };
-  if (typeof item.filename !== "string" || typeof item.url !== "string")
-    return null;
+  const item = value as { url?: unknown };
+  if (typeof item.url !== "string") return null;
   try {
     const url = new URL(item.url);
     const pathParts = url.pathname.startsWith(ARTIFACT_PREFIX)
       ? url.pathname.slice(ARTIFACT_PREFIX.length).split("/")
       : [];
+    const filename =
+      pathParts.length === 3 ? decodeURIComponent(pathParts[2]) : "";
     const expectedFilename =
       platform === "windows"
-        ? item.filename === `BugLogin_${version}_x64-setup.exe`
-        : item.filename === `BugLogin_${version}_aarch64.dmg`;
+        ? filename === `BugLogin_${version}_x64-setup.exe`
+        : filename === `BugLogin_${version}_aarch64.dmg`;
     if (
       url.protocol !== "https:" ||
       url.hostname !== ARTIFACT_HOST ||
@@ -75,7 +76,6 @@ function installerUrl(
       pathParts.length !== 3 ||
       pathParts[0] !== `v${version}` ||
       !/^\d+$/.test(pathParts[1]) ||
-      decodeURIComponent(pathParts[2]) !== item.filename ||
       !expectedFilename
     )
       return null;
