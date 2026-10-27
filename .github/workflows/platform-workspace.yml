@@ -36,6 +36,23 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-buglogin
+      - name: Prepare ephemeral unlocked keychain for macOS Intel tests
+        if: matrix.platform == 'macos-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/buglogin-cookie-tests.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          original_keychain="$(security default-keychain -d user | tr -d '\"')"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 3600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -d user -s "$keychain_path"
+          {
+            printf 'BUGLOGIN_TEST_KEYCHAIN=%s\n' "$keychain_path"
+            printf 'BUGLOGIN_ORIGINAL_KEYCHAIN=%s\n' "$original_keychain"
+          } >> "$GITHUB_ENV"
       - name: Install pinned native target
         shell: bash
         run: rustup target add "$TARGET" --toolchain 1.95.0
@@ -56,3 +73,14 @@ jobs:
       - name: Build desktop presentation
         shell: bash
         run: pnpm --filter @buglogin/desktop build
+      - name: Remove ephemeral macOS Intel test keychain
+        if: always() && matrix.platform == 'macos-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${BUGLOGIN_ORIGINAL_KEYCHAIN:-}" ]]; then
+            security default-keychain -d user -s "$BUGLOGIN_ORIGINAL_KEYCHAIN"
+          fi
+          if [[ -n "${BUGLOGIN_TEST_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$BUGLOGIN_TEST_KEYCHAIN"
+          fi
