@@ -19,6 +19,7 @@ const TENANT: &str = "identity";
 const RECORD_TYPE: &str = "session";
 const FAMILY_RECORD_TYPE: &str = "session_family";
 const REFRESH_RECORD_TYPE: &str = "device_refresh";
+const DEVICE_HEAD_RECORD_TYPE: &str = "device_session_head";
 const SESSION_RETENTION_SECONDS: u64 = 30 * 24 * 60 * 60;
 const SESSION_CLEANUP_BATCH: usize = 128;
 
@@ -29,6 +30,13 @@ struct SessionFamilyRecord {
     revoked_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceSessionHead {
+    account_id: AccountId,
+    family_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -394,17 +402,48 @@ impl SessionPersistence {
         session: &SessionRecord,
         refresh: &DeviceRefreshRecord,
         account_revision: Option<u64>,
+        additional_puts: Vec<ControlPut>,
+        deletes: Vec<ControlDelete>,
+    ) -> Result<(), Problem> {
+        self.create_device_session_with_revision_retry(
+            session,
+            refresh,
+            account_revision,
+            additional_puts,
+            deletes,
+            0,
+        )
+    }
+
+    fn create_device_session_with_revision_retry(
+        &self,
+        session: &SessionRecord,
+        refresh: &DeviceRefreshRecord,
+        account_revision: Option<u64>,
         mut additional_puts: Vec<ControlPut>,
         deletes: Vec<ControlDelete>,
+        attempt: u8,
     ) -> Result<(), Problem> {
         validate_device_pair(session, refresh)?;
         let access_id = session_id(&session.token_hash);
         let refresh_id = session_id(&refresh.token_hash);
         let family_id = session.family_id.as_deref().ok_or_else(corrupt)?;
+        let head_id = device_session_head_id(&session.account_id, &refresh.device_id);
+        let current_head = self.store.load_versioned::<DeviceSessionHead>(
+            TENANT,
+            DEVICE_HEAD_RECORD_TYPE,
+            &head_id,
+        )?;
+        if current_head.as_ref().is_some_and(|(head, _)| {
+            head.account_id != session.account_id || !is_family_id(&head.family_id)
+        }) {
+            return Err(corrupt());
+        }
+        let head_revision = current_head.as_ref().map_or(0, |(_, revision)| *revision);
         let account_put = account_revision
             .map(|revision| self.account_revision_put(&session.account_id, revision))
             .transpose()?;
-        let expected_revisions = account_revision.map_or_else(BTreeMap::new, |revision| {
+        let mut expected_revisions = account_revision.map_or_else(BTreeMap::new, |revision| {
             BTreeMap::from([(
                 ControlRecordKey {
                     tenant_id: "control".into(),
@@ -414,7 +453,58 @@ impl SessionPersistence {
                 revision,
             )])
         });
-        self.store.execute(ExecuteControlCommand {
+        expected_revisions.insert(
+            ControlRecordKey {
+                tenant_id: TENANT.into(),
+                record_type: DEVICE_HEAD_RECORD_TYPE.into(),
+                record_id: head_id.clone(),
+            },
+            head_revision,
+        );
+        let mut puts = vec![
+            ControlPut {
+                tenant_id: TENANT.into(),
+                record_type: RECORD_TYPE.into(),
+                record_id: access_id.clone(),
+                expected_revision: Some(0),
+                value: serde_json::to_value(session).map_err(|_| corrupt())?,
+            },
+            ControlPut {
+                tenant_id: TENANT.into(),
+                record_type: REFRESH_RECORD_TYPE.into(),
+                record_id: refresh_id.clone(),
+                expected_revision: Some(0),
+                value: serde_json::to_value(refresh).map_err(|_| corrupt())?,
+            },
+            ControlPut {
+                tenant_id: TENANT.into(),
+                record_type: FAMILY_RECORD_TYPE.into(),
+                record_id: family_id.into(),
+                expected_revision: Some(0),
+                value: serde_json::to_value(SessionFamilyRecord {
+                    account_id: session.account_id.clone(),
+                    revoked_at: None,
+                    expires_at: Some(refresh.expires_at),
+                })
+                .map_err(|_| corrupt())?,
+            },
+            ControlPut {
+                tenant_id: TENANT.into(),
+                record_type: DEVICE_HEAD_RECORD_TYPE.into(),
+                record_id: head_id.clone(),
+                expected_revision: Some(head_revision),
+                value: serde_json::to_value(DeviceSessionHead {
+                    account_id: session.account_id.clone(),
+                    family_id: family_id.into(),
+                })
+                .map_err(|_| corrupt())?,
+            },
+        ];
+        if let Some(account_put) = account_put {
+            puts.push(account_put);
+        }
+        puts.append(&mut additional_puts);
+        let result = self.store.execute(ExecuteControlCommand {
             tenant_id: TENANT.into(),
             command_id: "session.device.issue".into(),
             idempotency_key: format!(
@@ -423,42 +513,8 @@ impl SessionPersistence {
                 &refresh_id[..16]
             ),
             expected_revisions,
-            puts: {
-                let mut puts = vec![
-                    ControlPut {
-                        tenant_id: TENANT.into(),
-                        record_type: RECORD_TYPE.into(),
-                        record_id: access_id.clone(),
-                        expected_revision: Some(0),
-                        value: serde_json::to_value(session).map_err(|_| corrupt())?,
-                    },
-                    ControlPut {
-                        tenant_id: TENANT.into(),
-                        record_type: REFRESH_RECORD_TYPE.into(),
-                        record_id: refresh_id,
-                        expected_revision: Some(0),
-                        value: serde_json::to_value(refresh).map_err(|_| corrupt())?,
-                    },
-                    ControlPut {
-                        tenant_id: TENANT.into(),
-                        record_type: FAMILY_RECORD_TYPE.into(),
-                        record_id: family_id.into(),
-                        expected_revision: Some(0),
-                        value: serde_json::to_value(SessionFamilyRecord {
-                            account_id: session.account_id.clone(),
-                            revoked_at: None,
-                            expires_at: Some(refresh.expires_at),
-                        })
-                        .map_err(|_| corrupt())?,
-                    },
-                ];
-                if let Some(account_put) = account_put {
-                    puts.push(account_put);
-                }
-                puts.append(&mut additional_puts);
-                puts
-            },
-            deletes,
+            puts,
+            deletes: deletes.clone(),
             audit: ControlAuditEntry {
                 tenant_id: TENANT.into(),
                 command_id: "session.device.issue".into(),
@@ -467,7 +523,56 @@ impl SessionPersistence {
                 detail: json!({ "sessionId": access_id, "state": "issued" }),
             },
             response: success_response(),
-        })?;
+        });
+        if let Err(error) = result {
+            if error.code == "storage_revision_conflict" {
+                let latest_head_revision = self
+                    .store
+                    .revision(TENANT, DEVICE_HEAD_RECORD_TYPE, &head_id)?
+                    .unwrap_or(0);
+                if latest_head_revision == head_revision {
+                    return Err(error);
+                }
+                if let Some(expected_revision) = account_revision {
+                    let actual_revision = AccountPersistence::new(self.store.clone())
+                        .load_active_versioned(&session.account_id)?
+                        .map(|(_, revision)| revision);
+                    if actual_revision != Some(expected_revision) {
+                        return Err(error);
+                    }
+                }
+                if attempt < 2 {
+                    let retry_puts = session
+                        .created_at
+                        .map(|now| {
+                            self.device_session_revocation_puts(
+                                &session.account_id,
+                                &refresh.device_id,
+                                now,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    return self.create_device_session_with_revision_retry(
+                        session,
+                        refresh,
+                        account_revision,
+                        retry_puts,
+                        deletes,
+                        attempt + 1,
+                    );
+                }
+                let mut conflict = Problem::new(
+                    "device_session_issue_conflict",
+                    "A sign-in for this device conflicted with another request",
+                    409,
+                    "session.device.issue",
+                );
+                conflict.retryable = true;
+                return Err(conflict);
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1201,6 +1306,38 @@ fn session_id(hash: &[u8; 32]) -> String {
     hex(hash)
 }
 
+fn device_session_head_id(account_id: &AccountId, device_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"buglogin-device-session-head-v1\0");
+    digest.update(account_id.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(device_id.as_bytes());
+    hex(&digest.finalize())
+}
+
+#[cfg(test)]
+#[test]
+fn device_session_head_ids_are_stable_and_do_not_expose_device_ids() {
+    let account = AccountId::new("acct_device_head_id").unwrap();
+    let first = device_session_head_id(&account, "desktop-device-alpha");
+    assert_eq!(
+        first,
+        device_session_head_id(&account, "desktop-device-alpha")
+    );
+    assert_ne!(
+        first,
+        device_session_head_id(&account, "desktop-device-beta")
+    );
+    assert_ne!(
+        first,
+        device_session_head_id(
+            &AccountId::new("acct_other").unwrap(),
+            "desktop-device-alpha"
+        )
+    );
+    assert!(!first.contains("desktop-device-alpha"));
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut value = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -1283,6 +1420,81 @@ mod tests {
     use buglogin_storage::control::{
         ControlRecordKey, ControlRecordStore, MemoryControlRecordStore,
     };
+
+    #[test]
+    fn device_session_issue_updates_head_and_revokes_prior_device_family_atomically() {
+        let store = MemoryControlRecordStore::default();
+        let persistence = SessionPersistence::new(ControlPersistence::new(store));
+        let account_id = AccountId::new("acct_device_head_atomic").unwrap();
+        let device_id = "device-head-atomic";
+        let make_pair = |suffix: &str, issued_at: u64| {
+            let mut issued = issue_for_device(
+                account_id.clone(),
+                issued_at + 3_600,
+                Some(device_id.to_owned()),
+            )
+            .unwrap();
+            issued.record.created_at = Some(issued_at);
+            issued.record.last_seen_at = Some(issued_at);
+            let family_id = issued.record.family_id.clone().unwrap();
+            let refresh = DeviceRefreshRecord {
+                account_id: account_id.clone(),
+                token_hash: Sha256::digest(suffix.as_bytes()).into(),
+                access_token_hash: issued.record.token_hash,
+                device_id: device_id.to_owned(),
+                family_id,
+                expires_at: issued_at + 86_400,
+                consumed_at: None,
+                credential_version: None,
+                refresh_replay: None,
+            };
+            (issued.record.clone(), refresh)
+        };
+
+        let (first_session, first_refresh) = make_pair("device-head-first", 100);
+        let first_family = first_session.family_id.clone().unwrap();
+        persistence
+            .create_device_session_with_account_revision_and_mutations(
+                &first_session,
+                &first_refresh,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        let (next_session, next_refresh) = make_pair("device-head-next", 200);
+        let next_family = next_session.family_id.clone().unwrap();
+        let revocations = persistence
+            .device_session_revocation_puts(&account_id, device_id, 200)
+            .unwrap();
+        persistence
+            .create_device_session_with_account_revision_and_mutations(
+                &next_session,
+                &next_refresh,
+                None,
+                revocations,
+                Vec::new(),
+            )
+            .unwrap();
+
+        let head_id = device_session_head_id(&account_id, device_id);
+        let (head, revision) = persistence
+            .store
+            .load_versioned::<DeviceSessionHead>(TENANT, DEVICE_HEAD_RECORD_TYPE, &head_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision, 2);
+        assert_eq!(head.account_id, account_id);
+        assert_eq!(head.family_id, next_family);
+        assert_eq!(
+            persistence
+                .family_revocations(&account_id)
+                .unwrap()
+                .get(&first_family),
+            Some(&200)
+        );
+    }
 
     #[test]
     fn device_issue_and_rotation_are_fenced_by_durable_account_status_revision() {

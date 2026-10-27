@@ -370,3 +370,10 @@
 - Không có Codex Google Sheets session; link export CSV công khai tải được nên đã đọc metadata trực tiếp. Không in/ghi credential values vào chat hoặc log.
 - CSV có 59 dòng; 41 dòng đủ Team + Mail Login mới + Password; 41 login không trùng; 22 Team khác nhau theo chữ thường; 18 dòng thiếu ít nhất một trường. Trong 41 dòng đủ, 25 login trông như email, 16 không đúng định dạng email; 20 password đạt API min 12 ký tự, 21 ngắn hơn.
 - API organization account create yêu cầu email và password tối thiểu 12 ký tự. Không tự bịa email, nới policy mật khẩu, hay đổi password nguồn; production account write chưa thực hiện. Cần xử lý dữ liệu đầu vào theo API contract trước khi provision.
+
+## Điều phối 67: CAS cho phiên đăng nhập cùng thiết bị
+- `SessionPersistence` trước đây scan session cùng `device_id` rồi commit việc revoke + cấp phiên mà không có revision fence theo cặp account/device. Hai API instance có thể cùng đọc snapshot cũ và cùng để lại session active.
+- Bổ sung `device_session_head` với record ID SHA-256 có domain separation trên account/device; head revision, session/refresh/family, account revision và các revoke/delete được commit trong cùng transaction.
+- Khi CAS head thua race, reload/recompute revoke và retry tối đa 3 lần; account revision stale và conflict ở delete/device-code giữ nguyên lỗi gốc. Sau 3 race trả lỗi retryable `device_session_issue_conflict`.
+- Regression head/revocation và login replacement same-device pass; `cargo test --locked -p buglogin-api --lib` PASS 279/279; `cargo fmt`/`git diff --check` pass. Đây là fix race có thể tái hiện ở kiến trúc multi-instance, chưa chứng minh toàn bộ lịch sử 108 session production do race này gây ra.
+- Chưa commit/push hoặc release. Stable hiện là 3.0.21; session mới cần đồng bộ source/action repo và đi qua candidate gates trước khi promote stable.
