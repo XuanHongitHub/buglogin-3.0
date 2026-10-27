@@ -233,12 +233,17 @@ async fn update_identity(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PasswordChangeInput {
-    current_password: String,
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    current_password: Option<String>,
     new_password: String,
 }
 impl Drop for PasswordChangeInput {
     fn drop(&mut self) {
-        self.current_password.zeroize();
+        if let Some(password) = self.current_password.as_mut() {
+            password.zeroize();
+        }
         self.new_password.zeroize();
     }
 }
@@ -248,7 +253,17 @@ async fn change_password(
     headers: HeaderMap,
     Json(input): Json<PasswordChangeInput>,
 ) -> Result<Response, Response> {
-    let account_id = super::super::authenticated_account_for_mutation(&state, &headers)?;
+    let actor = authenticate(&state, &headers)?
+        .account_id
+        .ok_or_else(|| bad_id("actor"))?;
+    let account_id = input
+        .account_id
+        .as_deref()
+        .map(AccountId::from_str)
+        .transpose()
+        .map_err(|_| bad_id("account_id"))?
+        .unwrap_or_else(|| actor.clone());
+    own_or_platform(&state, &headers, &account_id, true)?;
     let identity = state
         .identity_persistence
         .load(&account_id)
@@ -262,23 +277,51 @@ async fn change_password(
             )
         })?;
     let now = super::super::request_now(&headers)?;
-    let verified = state
-        .credentials
-        .authenticate(&identity.username, &input.current_password, now)
-        .map_err(response_problem)?;
-    if verified != account_id {
+    if actor == account_id {
+        let current_password = input.current_password.as_deref().ok_or_else(|| {
+            problem_response(
+                "current_password_required",
+                "Confirm your current password before changing it",
+                400,
+                correlation(&headers),
+            )
+        })?;
+        let verified = state
+            .credentials
+            .authenticate(&identity.username, current_password, now)
+            .map_err(response_problem)?;
+        if verified != account_id {
+            return Err(problem_response(
+                "invalid_credentials",
+                "Current password is invalid",
+                401,
+                correlation(&headers),
+            ));
+        }
+    } else if input.current_password.is_some() {
         return Err(problem_response(
-            "invalid_credentials",
-            "Current password is invalid",
-            401,
+            "current_password_not_allowed",
+            "Do not send the target account's current password",
+            400,
             correlation(&headers),
         ));
     }
     let key = require_idempotency(&headers)?;
-    let password_put = state
+    let password_put = if state
         .credentials
-        .password_reset_put(&account_id, &input.new_password, now)
-        .map_err(response_problem)?;
+        .password_version(&account_id)
+        .map_err(response_problem)?
+        .is_some()
+    {
+        state
+            .credentials
+            .password_change_put(&account_id, &input.new_password, now)
+    } else {
+        state
+            .credentials
+            .prepare_initial_password_put(&account_id, &input.new_password, now)
+    }
+    .map_err(response_problem)?;
     let mut puts = vec![password_put];
     puts.extend(
         state
@@ -309,7 +352,7 @@ async fn change_password(
             audit: ControlAuditEntry {
                 tenant_id: "identity".into(),
                 command_id: "account.password.change".into(),
-                actor_id: account_id.as_str().into(),
+                actor_id: actor.as_str().into(),
                 allowed: true,
                 detail: json!({"revokedSessions":true,"revokedApiTokens":true}),
             },
@@ -575,15 +618,15 @@ async fn batch(
             .control_persistence
             .load_versioned::<BatchStored>("management", "batch_item", &record_id)
             .map_err(response_problem)?;
-        if let Some((stored, _)) = &stored {
-            if stored.input_hash != digest {
-                return Err(problem_response(
-                    "idempotency_conflict",
-                    "Batch key was reused with different input",
-                    409,
-                    correlation(&headers),
-                ));
-            }
+        if let Some((stored, _)) = &stored
+            && stored.input_hash != digest
+        {
+            return Err(problem_response(
+                "idempotency_conflict",
+                "Batch key was reused with different input",
+                409,
+                correlation(&headers),
+            ));
         }
         all_replayed &= stored.as_ref().is_some_and(|(stored, _)| {
             stored.result.get("status").and_then(Value::as_str) == Some("succeeded")
@@ -753,6 +796,7 @@ fn batch_request(item: &BatchItem) -> Result<(Method, String, Value), Response> 
             }
             (Method::PATCH, format!("/v1/accounts/{account}/identity"))
         }
+        "account.password.change" => (Method::PUT, "/v1/account/password".into()),
         "account.status.update" => {
             let account = arg(input, "accountId")?;
             if let Some(object) = body.as_object_mut() {

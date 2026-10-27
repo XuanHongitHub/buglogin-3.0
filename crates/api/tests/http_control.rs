@@ -296,6 +296,59 @@ async fn account_admin_and_team_crud_are_acl_and_revision_checked() {
             .unwrap()["identity"]["email"],
         "created@example.test"
     );
+    let reset_account = AccountId::from_str("acct_control_created").unwrap();
+    let reset_session = auth
+        .write()
+        .unwrap()
+        .issue_browser(reset_account, u64::MAX, 1)
+        .unwrap();
+
+    let denied_password_reset = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/v1/account/password",
+            Some(&denied_token),
+            Some("account-password-reset-denied-idem"),
+            Some("account-password-reset-denied"),
+            Some(json!({
+                "accountId": "acct_control_created",
+                "newPassword": "new target password that is long enough"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied_password_reset.status(), StatusCode::FORBIDDEN);
+
+    let password_reset = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/v1/account/password",
+            Some(&admin_token),
+            Some("account-password-reset-admin-idem"),
+            Some("account-password-reset-admin"),
+            Some(json!({
+                "accountId": "acct_control_created",
+                "newPassword": "new target password that is long enough"
+            })),
+        ))
+        .await
+        .unwrap();
+    let password_reset_status = password_reset.status();
+    let password_reset_body = json_body(password_reset).await;
+    assert_eq!(
+        password_reset_status,
+        StatusCode::OK,
+        "{password_reset_body}"
+    );
+    assert_eq!(password_reset_body["changed"], true);
+    let revoked_by_password_reset = auth
+        .read()
+        .unwrap()
+        .authenticate_browser(&reset_session.raw_session, &reset_session.raw_csrf, 2)
+        .unwrap_err();
+    assert_eq!(revoked_by_password_reset.code, "session_revoked");
 
     let suspended = app
         .clone()
