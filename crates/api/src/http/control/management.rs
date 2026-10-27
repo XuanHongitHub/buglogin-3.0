@@ -1,6 +1,8 @@
 //! Account self service and bounded, resumable administrative batch execution.
 //! Child commands pass through their existing REST handlers and authorization.
 use super::*;
+
+const BATCH_ITEM_COMMAND_ID: &str = "management.batch.item";
 use buglogin_domain::account::canonical_username;
 use buglogin_storage::control::{ControlAuditEntry, ExecuteControlCommand, HttpResponse};
 use std::collections::BTreeSet;
@@ -500,6 +502,27 @@ struct BatchStored {
     result: Value,
 }
 
+fn batch_receipt_identity(
+    actor_id: &str,
+    item_command_id: &str,
+    record_id: &str,
+    status: StatusCode,
+) -> (String, ControlAuditEntry) {
+    let command_id = BATCH_ITEM_COMMAND_ID.to_owned();
+    let audit = ControlAuditEntry {
+        tenant_id: "management".into(),
+        command_id: command_id.clone(),
+        actor_id: actor_id.into(),
+        allowed: status.is_success(),
+        detail: json!({
+            "batchItem": record_id,
+            "itemCommandId": item_command_id,
+            "status": status.as_u16(),
+        }),
+    };
+    (command_id, audit)
+}
+
 async fn batch(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -605,11 +628,13 @@ async fn batch(
             input_hash: digest,
             result: result.clone(),
         };
+        let (command_id, audit) =
+            batch_receipt_identity(actor.as_str(), &item.command_id, &record_id, status);
         state
             .control_persistence
             .execute(ExecuteControlCommand {
                 tenant_id: "management".into(),
-                command_id: "management.batch.item".into(),
+                command_id,
                 idempotency_key: format!("batch-receipt-{record_id}-{revision}"),
                 expected_revisions: Default::default(),
                 puts: vec![ControlPut {
@@ -620,13 +645,7 @@ async fn batch(
                     value: serde_json::to_value(receipt).map_err(internal)?,
                 }],
                 deletes: vec![],
-                audit: ControlAuditEntry {
-                    tenant_id: "management".into(),
-                    command_id: item.command_id.clone(),
-                    actor_id: actor.as_str().into(),
-                    allowed: status.is_success(),
-                    detail: json!({"batchItem":record_id,"status":status.as_u16()}),
-                },
+                audit,
                 response: HttpResponse {
                     status: 200,
                     headers: Default::default(),
@@ -858,6 +877,21 @@ fn batch_request(item: &BatchItem) -> Result<(Method, String, Value), Response> 
 #[cfg(test)]
 mod batch_route_tests {
     use super::*;
+
+    #[test]
+    fn batch_receipt_audit_uses_receipt_command_id_and_records_item_command() {
+        let item_command_id = "account.create.scoped";
+        let (command_id, audit) = batch_receipt_identity(
+            "acct_owner",
+            item_command_id,
+            "batch-item-1",
+            StatusCode::CREATED,
+        );
+
+        assert_eq!(audit.command_id, command_id);
+        assert_eq!(audit.detail["itemCommandId"], item_command_id);
+        assert_eq!(audit.allowed, true);
+    }
 
     #[test]
     fn organization_member_status_batch_uses_scoped_status_route() {

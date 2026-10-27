@@ -356,7 +356,11 @@ fn safe_problem_failure_context(
         context.insert("apiRoute".into(), Value::String(route.clone()));
     }
     if let Some(Value::String(reason)) = fields.get("cdpFailureReason")
-        && matches!(reason.as_str(), "generation_state_unavailable" | "custom_fingerprint_plan_required") {
+        && matches!(
+            reason.as_str(),
+            "generation_state_unavailable" | "custom_fingerprint_plan_required"
+        )
+    {
         context.insert("cdpFailureReason".into(), Value::String(reason.clone()));
     }
     if let Some(Value::String(class)) = fields.get("cdpErrorClass")

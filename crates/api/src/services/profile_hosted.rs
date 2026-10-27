@@ -70,7 +70,9 @@ fn has_managed_profile_key(
     profile_id: &ProfileId,
     binding: &ProfileResource,
 ) -> Result<bool, Problem> {
-    let Some(manifest) = state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)? else {
+    let Some(manifest) =
+        state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
+    else {
         return Ok(false);
     };
     let Some(key_version) = manifest

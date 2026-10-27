@@ -51,10 +51,12 @@ mod tests {
         });
         let policy: WorkspacePolicy = serde_json::from_value(legacy).unwrap();
         assert!(policy.default_extension_group_id.is_none());
-        assert!(serde_json::to_value(policy)
-            .unwrap()
-            .get("defaultExtensionGroupId")
-            .is_none());
+        assert!(
+            serde_json::to_value(policy)
+                .unwrap()
+                .get("defaultExtensionGroupId")
+                .is_none()
+        );
     }
 }
 impl OfflineEntitlement {

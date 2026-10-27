@@ -217,7 +217,10 @@ mod tests {
         assert_eq!(callback.host_str(), Some("sso"));
         assert_eq!(callback.path(), "/callback");
         assert_eq!(
-            callback.query_pairs().find(|(key, _)| key == "state").map(|(_, value)| value.into_owned()),
+            callback
+                .query_pairs()
+                .find(|(key, _)| key == "state")
+                .map(|(_, value)| value.into_owned()),
             Some(expected_state.clone())
         );
         assert_eq!(
