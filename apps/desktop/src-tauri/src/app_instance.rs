@@ -43,6 +43,10 @@ impl AppInstance {
         self.id.is_some()
     }
 
+    pub(crate) fn uses_single_instance_guard(&self) -> bool {
+        !self.is_isolated()
+    }
+
     pub(crate) fn id(&self) -> Option<&str> {
         self.id.as_deref()
     }
@@ -110,6 +114,7 @@ mod tests {
         let base = PathBuf::from("data");
 
         assert!(!instance.is_isolated());
+        assert!(instance.uses_single_instance_guard());
         assert_eq!(instance.namespace_path(base.clone()), base);
         assert_eq!(
             instance.device_identity_namespace("buglogin-device-identity"),
@@ -125,6 +130,8 @@ mod tests {
         let first = AppInstance::from_id(Some("qa-a")).unwrap();
         let second = AppInstance::from_id(Some("qa-b")).unwrap();
 
+        assert!(!first.uses_single_instance_guard());
+        assert!(!second.uses_single_instance_guard());
         assert_ne!(
             first.namespace_path(PathBuf::from("data")),
             second.namespace_path(PathBuf::from("data"))
