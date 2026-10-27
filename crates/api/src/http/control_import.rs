@@ -47,7 +47,7 @@ use super::{
 
 const JOURNAL_TYPE: &str = "migration_import";
 const COMMAND: &str = "migration.control.import";
-pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 16] = [
+pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 15] = [
     "CAP-WS-001",
     "CAP-TEAM-001",
     "CAP-MEM-001",
@@ -63,8 +63,31 @@ pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 16] = [
     "events.read",
     "operation.read",
     "profile.read",
-    "profile.create",
 ];
+// Command permissions and legacy capability families describe the same
+// workspace operations. Keep role defaults, imports, and existing persisted
+// grants aligned through this explicit mapping rather than global role flags.
+pub(super) const PROFILE_PERMISSION_ALIASES: [(&str, Action, &str, Action); 10] = [
+    ("CAP-PROF-001", Action::Read, "profile.read", Action::Read),
+    ("CAP-PROF-001", Action::Create, "profile.create", Action::Create),
+    ("CAP-PROF-001", Action::Update, "profile.update", Action::Update),
+    ("CAP-PROF-001", Action::Delete, "profile.delete", Action::Delete),
+    ("CAP-PROF-001", Action::Update, "profile.archive", Action::Update),
+    ("CAP-PROF-001", Action::Update, "profile.restore", Action::Update),
+    ("CAP-PROF-002", Action::Execute, "profile.launch", Action::Execute),
+    ("CAP-PROF-002", Action::Execute, "profile.stop", Action::Execute),
+    ("CAP-PROF-001", Action::Share, "CAP-SHARE-001", Action::Manage),
+    ("CAP-PROF-001", Action::Read, "CAP-SHARE-001", Action::Read),
+];
+
+fn expand_profile_permissions(pairs: &mut BTreeSet<(String, Action)>) {
+    for (source, source_action, target, target_action) in PROFILE_PERMISSION_ALIASES {
+        if pairs.contains(&(source.to_owned(), source_action)) {
+            pairs.insert((target.to_owned(), target_action));
+        }
+    }
+}
+
 const ALL_ACTIONS: [Action; 7] = [
     Action::Read,
     Action::Create,
@@ -1859,10 +1882,11 @@ fn materialized_grants(
     role: &MemberRole,
     override_value: &Value,
 ) -> Result<Vec<Grant>, Problem> {
-    let universe = MEMBERSHIP_CAPABILITIES
+    let mut universe = MEMBERSHIP_CAPABILITIES
         .iter()
         .flat_map(|capability| ALL_ACTIONS.map(|action| ((*capability).to_owned(), action)))
         .collect::<BTreeSet<_>>();
+    expand_profile_permissions(&mut universe);
     let mut allowed = if override_value.is_null() {
         role_default_pairs(role)
     } else {
@@ -1878,11 +1902,7 @@ fn materialized_grants(
             })
             .collect::<Result<BTreeSet<_>, _>>()?
     };
-    // `profile.create` is the command permission checked by REST/MCP. Legacy
-    // custom roles express this operation as `create_profile`.
-    if allowed.contains(&("CAP-PROF-001".to_owned(), Action::Create)) {
-        allowed.insert(("profile.create".to_owned(), Action::Create));
-    }
+    expand_profile_permissions(&mut allowed);
     let explicit = !override_value.is_null();
     universe
         .into_iter()
@@ -1975,6 +1995,7 @@ pub(super) fn role_default_pairs(role: &MemberRole) -> BTreeSet<(String, Action)
                 .map(|action| (capability.to_owned(), *action)),
         );
     }
+    expand_profile_permissions(&mut defaults);
     defaults
 }
 
@@ -2714,6 +2735,26 @@ mod tests {
     }
 
     #[test]
+    fn member_operator_and_lead_profile_permissions_follow_role_limits() {
+        for role in [MemberRole::Member, MemberRole::Operator, MemberRole::Lead] {
+            let pairs = role_default_pairs(&role);
+            for pair in [
+                ("profile.read", Action::Read),
+                ("profile.launch", Action::Execute),
+                ("profile.stop", Action::Execute),
+            ] {
+                assert!(pairs.contains(&(pair.0.into(), pair.1)), "{role:?}: {pair:?}");
+            }
+            for capability in ["profile.create", "profile.update", "profile.archive", "profile.restore"] {
+                let action = if capability == "profile.create" { Action::Create } else { Action::Update };
+                assert_eq!(pairs.contains(&(capability.into(), action)), role != MemberRole::Member);
+            }
+            assert!(!pairs.contains(&("profile.delete".into(), Action::Delete)));
+            assert!(!pairs.contains(&("CAP-WS-001".into(), Action::Manage)));
+        }
+    }
+
+    #[test]
     fn imported_custom_profile_create_grant_materializes_command_permission() {
         let grants = materialized_grants(
             &MemberId::from_str("mem_profile_create_import").unwrap(),
@@ -2729,6 +2770,19 @@ mod tests {
                 && grant.action == Action::Create
                 && grant.effect == Effect::Allow
         }));
+        for (capability, action) in [
+            ("profile.launch", Action::Execute),
+            ("profile.stop", Action::Execute),
+            ("profile.update", Action::Update),
+            ("profile.delete", Action::Delete),
+            ("CAP-SHARE-001", Action::Manage),
+        ] {
+            assert!(grants.iter().any(|grant| {
+                grant.capability.as_str() == capability
+                    && grant.action == action
+                    && grant.effect == Effect::Deny
+            }));
+        }
     }
 
     #[test]

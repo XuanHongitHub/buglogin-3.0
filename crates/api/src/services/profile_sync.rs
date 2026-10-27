@@ -171,17 +171,29 @@ pub(crate) fn authorize_resource_access(
         )? {
             return Ok(());
         }
-        // An Operate share permits a member to launch and use an encrypted
-        // profile. Allow that same device-authorized session to upload the
-        // resulting browser snapshot under its lease, without granting profile
-        // metadata updates or access to unencrypted/shared read-only profiles.
+        // Workspace operators can upload the browser snapshot produced under
+        // their lease, including the first upload before an encrypted manifest
+        // exists. An encrypted Operate share permits the same for its device.
+        // This permission applies to sync payloads, not profile metadata edits.
         // The pending-key-rotation branch above deliberately runs first and
         // continues to require the profile owner/update authority.
         if action == Action::Update
             && capability_name == "profile.update"
-            && state
+            && (state
                 .current_sync_manifest(workspace_id, resource_id)?
                 .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                || is_allowed(
+                    principal,
+                    &Capability::new("profile.launch").expect("static capability"),
+                    Action::Execute,
+                    &ResourceScope {
+                        workspace_id: Some(workspace_id.clone()),
+                        resource_id: Some(resource_id.clone()),
+                        profile_id: Some(binding.profile_id.clone()),
+                        ..ResourceScope::default()
+                    },
+                    grants,
+                ))
             && !profile_update_is_restricted(principal, grants, &binding)
             && crate::services::profile_hosted::HostedProfileService::authorized(
                 state,

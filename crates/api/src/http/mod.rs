@@ -5775,43 +5775,40 @@ impl ApiAuthorizationAuthority {
             .clone();
         for member in members {
             if materialized.contains(&member.id) {
-                // Older imports materialized CAP-PROF grants before the
-                // profile.create command permission was part of the role
-                // grant universe. Derive the command grant from the exact
-                // workspace-scoped profile-create grant, including DENY.
-                let metadata_capability = Capability::new("CAP-PROF-001").map_err(|_| {
-                    Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
-                })?;
-                let create_capability = Capability::new("profile.create").map_err(|_| {
-                    Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
-                })?;
+                // Older imports persist capability-family grants. Preserve
+                // their workspace boundary and ALLOW/DENY effects for every
+                // command used by CRUD, coordination, and synchronization.
                 let workspace_scope = ResourceScope::workspace(member.workspace_id.clone());
-                let aliases = grants
-                    .iter()
-                    .filter(|grant| {
+                let mut aliases = Vec::new();
+                for (source, source_action, target, target_action) in
+                    control_import::PROFILE_PERMISSION_ALIASES
+                {
+                    for grant in grants.iter().filter(|grant| {
                         grant.account_id.as_ref() == Some(&member.account_id)
                             && grant.member_id.is_none()
-                            && grant.capability == metadata_capability
-                            && grant.action == Action::Create
+                            && grant.capability.as_str() == source
+                            && grant.action == source_action
                             && grant.scope == workspace_scope
-                    })
-                    .map(|grant| {
+                    }) {
                         let effect_name = match grant.effect {
                             Effect::Allow => "allow",
                             Effect::Deny => "deny",
                         };
                         let mut alias = grant.clone();
                         alias.id = GrantId::new(format!(
-                            "membership:{}:profile.create:create:{effect_name}",
+                            "membership:{}:{target}:{target_action:?}:{effect_name}",
                             member.id.as_str()
                         ))
                         .map_err(|_| {
                             Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
                         })?;
-                        alias.capability = create_capability.clone();
-                        Ok(alias)
-                    })
-                    .collect::<Result<Vec<_>, Problem>>()?;
+                        alias.capability = Capability::new(target).map_err(|_| {
+                            Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
+                        })?;
+                        alias.action = target_action;
+                        aliases.push(alias);
+                    }
+                }
                 grants.extend(aliases);
                 continue;
             }
@@ -13282,6 +13279,131 @@ mod persistence_tests {
                 .status,
             OperationStatus::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_memberships_authorize_profile_crud_and_coordination() {
+        use buglogin_domain::ids::ResourceId;
+
+        for role in [MemberRole::Owner, MemberRole::Admin, MemberRole::Lead, MemberRole::Operator, MemberRole::Member] {
+            for materialized in [false, true] {
+                let state = ApiState::hosted_with_control_store(
+                    ProfileService::disabled(),
+                    MemoryControlRecordStore::default(),
+                ).unwrap();
+                let account_id = AccountId::new("acct_lifecycle_owner").unwrap();
+                let workspace_id = WorkspaceId::new("ws_lifecycle_owner").unwrap();
+                let resource_id = ResourceId::new("res_lifecycle_owner").unwrap();
+                let profile_id = ProfileId::new("prf_lifecycle_owner").unwrap();
+                let member_id = MemberId::new("mem_lifecycle_owner").unwrap();
+                let identity = AccountIdentity::new(
+                    account_id.clone(),
+                    "lifecycle-owner",
+                    "lifecycle-owner@example.com",
+                    "100",
+                )
+                .unwrap();
+                state.identity_persistence.create(&identity).unwrap();
+                state.account_persistence.provision_default(account_id.clone(), "100".into()).unwrap();
+                state.credentials.set_initial_password(
+                    &account_id,
+                    "correct horse battery staple",
+                    now(),
+                ).unwrap();
+                state.members.write().unwrap().provision_active(
+                    &Principal {
+                        roles: [Role::PlatformAdmin].into_iter().collect(),
+                        ..Principal::default()
+                    },
+                    &[],
+                    Member {
+                        id: member_id.clone(),
+                        account_id: account_id.clone(),
+                        workspace_id: workspace_id.clone(),
+                        team_id: None,
+                        role: role.clone(),
+                        status: MemberStatus::Active,
+                        invite_expires_at: None,
+                    },
+                ).unwrap();
+                if materialized {
+                    state.materialized_member_grants.write().unwrap().insert(member_id);
+                    let legacy = control_import::role_default_pairs(&role).into_iter()
+                        .filter(|(capability, _)| control_import::MEMBERSHIP_CAPABILITIES
+                            .contains(&capability.as_str()))
+                        .enumerate()
+                        .map(|(index, (capability, action))| Grant {
+                            id: GrantId::new(format!("legacy_lifecycle_{index}")).unwrap(),
+                            account_id: Some(account_id.clone()),
+                            member_id: None,
+                            capability: Capability::new(capability).unwrap(),
+                            action,
+                            scope: ResourceScope::workspace(workspace_id.clone()),
+                            effect: Effect::Allow,
+                        });
+                    state.grants.write().unwrap().extend(legacy);
+                }
+                let state = state.with_profile_resource(ProfileResource {
+                    profile_id: profile_id.clone(),
+                    resource_id: resource_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    archive_state: buglogin_domain::profile::ProfileArchiveState::Active,
+                });
+                let bearer = state.issue_token(account_id.as_str()).unwrap();
+                let authority = state.authorization_authority();
+                let principal = authority.authenticate_token(&bearer, now()).unwrap();
+                assert_eq!(principal.roles, [Role::Account].into_iter().collect());
+                let grants = authority.grants().unwrap();
+                let scope = ResourceScope {
+                    workspace_id: Some(workspace_id.clone()),
+                    resource_id: Some(resource_id.clone()),
+                    profile_id: Some(profile_id),
+                    ..ResourceScope::default()
+                };
+                for command in crate::commands::CommandRegistry::all().iter()
+                    .filter(|command| command.id.as_str().starts_with("profile."))
+                {
+                    let expected = match role {
+                        MemberRole::Owner | MemberRole::Admin => true,
+                        MemberRole::Lead | MemberRole::Operator => command.action != Action::Delete,
+                        MemberRole::Member => matches!(command.action, Action::Read | Action::Execute),
+                    };
+                    assert_eq!(is_allowed(
+                        &principal,
+                        &Capability::new(command.capability).unwrap(),
+                        command.action,
+                        &scope,
+                        &grants,
+                    ), expected, "{role:?}, materialized={materialized}: {}", command.id.as_str());
+                }
+                let auth = CoordinationAuth::new(account_id.as_str(), bearer).unwrap();
+                let authorizer = coordination_authorizer(&state);
+                for operation in [
+                    CoordinationOperation::LeaseAcquire,
+                    CoordinationOperation::LeaseRenew,
+                    CoordinationOperation::LeaseRelease,
+                    CoordinationOperation::LeaseRead,
+                    CoordinationOperation::ManifestRead,
+                    CoordinationOperation::ManifestWrite,
+                    CoordinationOperation::PayloadWrite,
+                    CoordinationOperation::EventRead,
+                ] {
+                    authorizer.authorize(&auth, AuthorizationRequest {
+                        operation,
+                        workspace_id: &workspace_id,
+                        resource_id: Some(&resource_id),
+                    }).await.unwrap_or_else(|error| panic!(
+                        "{role:?}, materialized={materialized}, {operation:?}: {error:?}"
+                    ));
+                }
+                let other_workspace = WorkspaceId::new("ws_lifecycle_other").unwrap();
+                assert_eq!(authorizer.authorize(&auth, AuthorizationRequest {
+                    operation: CoordinationOperation::LeaseAcquire,
+                    workspace_id: &other_workspace,
+                    resource_id: Some(&resource_id),
+                }).await.unwrap_err().code, "coordination_forbidden");
+            }
+        }
     }
 
     #[tokio::test]
