@@ -509,6 +509,13 @@ impl WorkspaceService {
             .organizations
             .get(organization_id)
             .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        if !buglogin_domain::permissions::token_scope_allows(
+            principal,
+            &Capability::new("CAP-ORG-001").expect("constant capability is valid"),
+            action,
+        ) {
+            return Err(problem("forbidden", "Organization access denied", 403));
+        }
         if principal
             .roles
             .contains(&buglogin_domain::permissions::Role::PlatformAdmin)
@@ -520,21 +527,6 @@ impl WorkspaceService {
             organization_id: Some(record.organization.id.clone()),
             ..ResourceScope::default()
         };
-        if principal.token_scopes.as_ref().is_some_and(|scopes| {
-            let action_name = match action {
-                Action::Read => "read",
-                Action::Create => "create",
-                Action::Update => "update",
-                Action::Delete => "delete",
-                Action::Execute => "execute",
-                Action::Share => "share",
-                Action::Manage => "manage",
-            };
-            !scopes.contains(&format!("CAP-ORG-001:{action_name}"))
-                && !scopes.contains("CAP-ORG-001:*")
-        }) {
-            return Err(problem("forbidden", "Organization access denied", 403));
-        }
         let explicit_deny = grants.iter().any(|grant| {
             grant.capability.as_str() == "CAP-ORG-001"
                 && grant.action == action
@@ -1212,14 +1204,31 @@ mod tests {
                 .status,
             403
         );
+        let restricted_platform_admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            token_scopes: Some(BTreeSet::new()),
+            ..Principal::default()
+        };
+        assert_eq!(
+            service
+                .authorize_organization_management(
+                    &restricted_platform_admin,
+                    &[],
+                    &organization.id,
+                    Action::Create,
+                )
+                .unwrap_err()
+                .status,
+            403
+        );
+        let scoped_platform_admin = Principal {
+            token_scopes: Some(BTreeSet::from(["CAP-ADM-001:create".to_owned()])),
+            ..restricted_platform_admin
+        };
         assert!(
             service
                 .authorize_organization_management(
-                    &Principal {
-                        roles: BTreeSet::from([Role::PlatformAdmin]),
-                        token_scopes: Some(BTreeSet::new()),
-                        ..Principal::default()
-                    },
+                    &scoped_platform_admin,
                     &[],
                     &organization.id,
                     Action::Create,

@@ -5444,6 +5444,53 @@ mod scope_tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn platform_admin_mcp_uses_explicit_admin_token_scope_for_org_create() {
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        let command = CommandRegistry::get("organization.create").unwrap();
+        let scope = ResourceScope {
+            account_id: Some(AccountId::new("acct_mcp_admin_scope").unwrap()),
+            organization_id: Some(OrganizationId::new("org_mcp_admin_scope").unwrap()),
+            ..ResourceScope::default()
+        };
+        let mut policy = ProductionMcpPolicy::new(state);
+        let scoped_admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            token_scopes: Some(BTreeSet::from(["CAP-ADM-001:create".to_owned()])),
+            ..Principal::default()
+        };
+        assert!(policy.authorize(&scoped_admin, command, &scope).is_ok());
+
+        let restricted_admin = Principal {
+            token_scopes: Some(BTreeSet::new()),
+            ..scoped_admin
+        };
+        assert_eq!(
+            policy
+                .authorize(&restricted_admin, command, &scope)
+                .unwrap_err()
+                .status,
+            403
+        );
+
+        let non_admin = Principal {
+            roles: BTreeSet::from([Role::WorkspaceAdmin]),
+            token_scopes: Some(BTreeSet::from(["CAP-ADM-001:*".to_owned()])),
+            ..Principal::default()
+        };
+        assert_eq!(
+            policy
+                .authorize(&non_admin, command, &scope)
+                .unwrap_err()
+                .status,
+            403
+        );
+    }
+
+    #[test]
     fn mcp_boundary_applies_request_correlation_to_service_problems() {
         let error = Problem::new("proxy_in_use", "Proxy is in use", 409, "proxy")
             .with_instance("service-instance");
