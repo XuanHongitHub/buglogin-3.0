@@ -2921,8 +2921,16 @@ fn api_route_template(path: &str) -> String {
             }
             redact_next = matches!(
                 segment,
-                "accounts" | "workspaces" | "profiles" | "resources" | "members"
-                    | "groups" | "extensions" | "proxies" | "devices" | "sessions"
+                "accounts"
+                    | "workspaces"
+                    | "profiles"
+                    | "resources"
+                    | "members"
+                    | "groups"
+                    | "extensions"
+                    | "proxies"
+                    | "devices"
+                    | "sessions"
             );
             segment
         })
@@ -3093,7 +3101,12 @@ fn legacy_workspace_update(
                 }
                 "maxStorageBytes" => value.as_u64().is_some(),
                 "offlineEntitled" => value.is_boolean(),
-                "defaultExtensionGroupId" => value.is_null() || value.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 128),
+                "defaultExtensionGroupId" => {
+                    value.is_null()
+                        || value
+                            .as_str()
+                            .is_some_and(|id| !id.is_empty() && id.len() <= 128)
+                }
                 _ => false,
             };
             if !valid {
@@ -3279,9 +3292,9 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        FeedbackSubmission, MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, canonical_workspace_update,
-        api_route_template, legacy_workspace_update, manifest_commit_idempotency_key, optional_bool,
-        optional_cursor, optional_page_limit, request_retry_safe,
+        FeedbackSubmission, MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, api_route_template,
+        canonical_workspace_update, legacy_workspace_update, manifest_commit_idempotency_key,
+        optional_bool, optional_cursor, optional_page_limit, request_retry_safe,
     };
     use crate::clock::unix_time_seconds_at;
     use crate::profile_runtime::DesktopSyncBackend;

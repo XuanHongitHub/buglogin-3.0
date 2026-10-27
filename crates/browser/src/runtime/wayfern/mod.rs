@@ -410,7 +410,11 @@ mod tests {
                 preferences["ntp"]["most_visited_blacklist"][top_site_blacklist_key(url)],
                 serde_json::Value::Null
             );
-            assert!(preferences["ntp"]["most_visited_blacklist"].get(*url).is_none());
+            assert!(
+                preferences["ntp"]["most_visited_blacklist"]
+                    .get(*url)
+                    .is_none()
+            );
         }
         assert_eq!(
             preferences["custom_links"]["list"],

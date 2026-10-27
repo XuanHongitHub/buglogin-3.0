@@ -1118,7 +1118,9 @@ fn routes_core() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}",
-            get(get_organization).patch(update_organization).delete(management_tenancy::delete_organization),
+            get(get_organization)
+                .patch(update_organization)
+                .delete(management_tenancy::delete_organization),
         )
         .route(
             "/v1/organizations/{organization_id}/owner",
@@ -1150,7 +1152,9 @@ fn routes_core() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}",
-            get(get_workspace).patch(update_workspace).delete(management_tenancy::delete_workspace),
+            get(get_workspace)
+                .patch(update_workspace)
+                .delete(management_tenancy::delete_workspace),
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}/record",
@@ -1915,7 +1919,11 @@ async fn create_scoped_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
-            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
+            management::set_provisioned_display_name(
+                &mut pending.identity,
+                &mut account_puts,
+                &input.display_name,
+            )?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -3674,7 +3682,11 @@ async fn create_organization_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
-            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
+            management::set_provisioned_display_name(
+                &mut pending.identity,
+                &mut account_puts,
+                &input.display_name,
+            )?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -5273,14 +5285,18 @@ async fn get_profile_runtime_status_batch(
                 "profile_status_batch_too_large"
             },
             "A status request must include between 1 and 250 profiles",
-            if query.profile_id.is_empty() { 400 } else { 413 },
+            if query.profile_id.is_empty() {
+                400
+            } else {
+                413
+            },
             correlation(&headers),
         ));
     }
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
-    let workspace_id = WorkspaceId::from_str(&workspace_path)
-        .map_err(|_| bad_id("workspace_id"))?;
+    let workspace_id =
+        WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
     let actor_id = principal.account_id.as_ref().ok_or_else(|| {
         problem_response(
             "account_missing",
@@ -5295,8 +5311,7 @@ async fn get_profile_runtime_status_batch(
     let mut authorized = Vec::with_capacity(query.profile_id.len());
     let mut seen = BTreeSet::new();
     for raw_profile_id in query.profile_id {
-        let profile_id =
-            ProfileId::from_str(&raw_profile_id).map_err(|_| bad_id("profile_id"))?;
+        let profile_id = ProfileId::from_str(&raw_profile_id).map_err(|_| bad_id("profile_id"))?;
         if !seen.insert(profile_id.clone()) {
             continue;
         }
@@ -5309,7 +5324,10 @@ async fn get_profile_runtime_status_batch(
             Action::Read,
             "profile.read",
         ) {
-            if matches!(response.status(), StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) {
+            if matches!(
+                response.status(),
+                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+            ) {
                 continue;
             }
             return Err(response);
@@ -5318,7 +5336,10 @@ async fn get_profile_runtime_status_batch(
             Ok(binding) if binding.workspace_id == workspace_id => binding,
             Ok(_) => continue,
             Err(response)
-                if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::CONFLICT) =>
+                if matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::CONFLICT
+                ) =>
             {
                 continue;
             }
@@ -5335,26 +5356,22 @@ async fn get_profile_runtime_status_batch(
         )?;
         authorized.push((profile_id, binding.resource_id));
     }
-    let mut lease_results = futures_util::stream::iter(authorized.into_iter().map(
-        |(profile_id, resource_id)| {
+    let mut lease_results =
+        futures_util::stream::iter(authorized.into_iter().map(|(profile_id, resource_id)| {
             let coordination = &coordination;
             let workspace_id = &workspace_id;
             let auth = &auth;
             async move {
                 coordination
-                    .lease_status(
-                        CoordinationScope { workspace_id, auth },
-                        &resource_id,
-                    )
+                    .lease_status(CoordinationScope { workspace_id, auth }, &resource_id)
                     .await
                     .map(|lease| (profile_id, lease))
                     .map_err(response_problem)
             }
-        },
-    ))
-    .buffer_unordered(32)
-    .try_collect::<Vec<_>>()
-    .await?;
+        }))
+        .buffer_unordered(32)
+        .try_collect::<Vec<_>>()
+        .await?;
     lease_results.sort_by(|left, right| left.0.cmp(&right.0));
     let mut snapshots = Vec::with_capacity(lease_results.len());
     for (profile_id, lease) in lease_results {
