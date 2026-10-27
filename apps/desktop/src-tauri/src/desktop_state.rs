@@ -2145,6 +2145,13 @@ impl ProductionDesktopState {
         Ok(response)
     }
 
+    pub fn cancel_pending_buglab_sso(&self, correlation_id: &str) -> Result<(), Problem> {
+        self.auth_vault
+            .lock()
+            .map_err(|_| desktop_state_problem(correlation_id))?
+            .remove_pending_sso(&self.device_id, correlation_id)
+    }
+
     pub async fn complete_buglab_sso(
         &self,
         state: Zeroizing<String>,
@@ -6630,6 +6637,14 @@ impl DesktopState {
         match self {
             Self::Local(_) => Err(auth_not_applicable(correlation_id)),
             Self::Production(state) => state.start_buglab_sso(correlation_id).await,
+            Self::Unavailable(problem) => Err(problem.clone()),
+        }
+    }
+
+    pub fn cancel_pending_buglab_sso(&self, correlation_id: &str) -> Result<(), Problem> {
+        match self {
+            Self::Local(_) => Ok(()),
+            Self::Production(state) => state.cancel_pending_buglab_sso(correlation_id),
             Self::Unavailable(problem) => Err(problem.clone()),
         }
     }

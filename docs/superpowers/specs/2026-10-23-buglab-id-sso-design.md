@@ -22,6 +22,10 @@ BugLogin currently issues its own device-bound sessions. Its production device a
 4. API validates active status, stable provider subject, canonical verified email, and explicit BugLogin account mapping. API links only an unambiguous account; any new account is provisioned without tenant grants.
 5. API issues BugLogin's normal device-bound session. Logout revokes that session and follows the approved IDP logout policy.
 
+### Native callback routing across isolated desktop instances
+
+When QA or another explicitly isolated desktop instance is running, it must keep its own device identity and credential-vault namespace. A protocol callback may start an untagged process, so the callback process must route the URL to the instance that owns the matching SSO `state` instead of attempting token exchange in the wrong instance. Each running instance advertises a short-lived route keyed by a domain-separated hash of the opaque SSO state in the OS credential vault. The route contains only the loopback listener port, an ephemeral HMAC key, and expiry. The callback URL is forwarded over `127.0.0.1` with an HMAC-authenticated, size-bounded message; the receiving instance validates the callback shape, route, signature, and expiry before dispatching it to the existing single-use SSO completion path. Raw callback URLs/tokens must not be written to disk, logs, analytics, or the route record. If route setup fails for an isolated instance, fail SSO start before opening the browser. The ordinary single-instance path remains compatible and may consume its own callback locally.
+
 The implementation expects `buglogin://sso/callback?token=...&state=...`. Production API configuration enables the provider with `BUGLAB_SSO_ENABLED=true`, a valid app code, and `buglogin://sso/callback`. The desktop binds callbacks to the nonce from the current, unexpired start request. Do not put the raw BugLab token into logs, analytics, or persistent desktop storage.
 
 ## Mapping and access policy

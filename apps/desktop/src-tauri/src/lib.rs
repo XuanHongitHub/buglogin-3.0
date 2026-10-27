@@ -27,6 +27,7 @@ mod proxy_store;
 mod remote_api;
 mod runtime_config;
 mod runtime_install;
+mod sso_callback_handoff;
 mod sync_features;
 mod sync_key_vault;
 mod system_features;
@@ -38,6 +39,7 @@ use buglogin_api::commands::CommandResult;
 use buglogin_domain::errors::Problem;
 use desktop_state::{DesktopAuthStatus, DesktopState};
 use serde_json::{Value, json};
+use sso_callback_handoff::SsoCallbackHandoff;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -80,7 +82,10 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    let mut builder = tauri::Builder::default().manage(DeepLinkInbox::default());
+    let callback_handoff = SsoCallbackHandoff::new().ok();
+    let mut builder = tauri::Builder::default()
+        .manage(DeepLinkInbox::default())
+        .manage(callback_handoff);
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     if app_instance.uses_single_instance_guard() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -90,8 +95,12 @@ pub fn run() {
                     // callback. Forward the URL to the authenticated app before
                     // focusing it; otherwise the SSO state stays in the first
                     // process and the callback is silently discarded.
-                    app.state::<DeepLinkInbox>().enqueue(argument);
-                    let _ = app.emit("buglogin://deep-link", argument.clone());
+                    if let Err(problem) = route_or_enqueue_deep_link(app, argument) {
+                        tauri_plugin_log::log::warn!(
+                            "BugLab sign-in callback handoff failed: {}",
+                            problem.code
+                        );
+                    }
                 }
             }
             if let Some(window) = app.get_webview_window("main") {
@@ -143,6 +152,22 @@ pub fn run() {
             let update_state = state.clone();
             app.manage(state);
             app.manage(event_stream::EventStreamManager::default());
+            if let Some(handoff) = app.state::<Option<SsoCallbackHandoff>>().as_ref() {
+                let callback_app = app.handle().clone();
+                if let Err(problem) = handoff.start_listener(move |url| {
+                    if let Err(problem) = route_or_enqueue_deep_link(&callback_app, &url) {
+                        tauri_plugin_log::log::warn!(
+                            "BugLab sign-in callback handoff failed: {}",
+                            problem.code
+                        );
+                    }
+                }) {
+                    tauri_plugin_log::log::warn!(
+                        "BugLab sign-in callback listener unavailable: {}",
+                        problem.code
+                    );
+                }
+            }
             if updater_configured {
                 let update_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -185,8 +210,12 @@ pub fn run() {
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
                     let url = url.to_string();
-                    handle.state::<DeepLinkInbox>().enqueue(&url);
-                    let _ = handle.emit("buglogin://deep-link", url);
+                    if let Err(problem) = route_or_enqueue_deep_link(&handle, &url) {
+                        tauri_plugin_log::log::warn!(
+                            "BugLab sign-in callback handoff failed: {}",
+                            problem.code
+                        );
+                    }
                 }
             });
 
@@ -608,6 +637,20 @@ pub fn run() {
 
 fn is_buglogin_deep_link_argument(argument: &str) -> bool {
     Url::parse(argument).is_ok_and(|url| url.scheme() == "buglogin")
+}
+
+fn route_or_enqueue_deep_link(app: &tauri::AppHandle, argument: &str) -> Result<bool, Problem> {
+    if !is_buglogin_deep_link_argument(argument) {
+        return Ok(false);
+    }
+    if let Some(handoff) = app.state::<Option<SsoCallbackHandoff>>().as_ref()
+        && handoff.forward(argument)?
+    {
+        return Ok(true);
+    }
+    app.state::<DeepLinkInbox>().enqueue(argument);
+    let _ = app.emit("buglogin://deep-link", argument.to_owned());
+    Ok(false)
 }
 
 #[derive(Default)]
@@ -1235,12 +1278,68 @@ async fn desktop_auth_login(
 async fn desktop_auth_sso_start(
     app: tauri::AppHandle,
     state: State<'_, DesktopState>,
+    handoff: State<'_, Option<SsoCallbackHandoff>>,
     correlation_id: String,
 ) -> Result<u64, Problem> {
+    let isolated = app_instance::AppInstance::from_environment()?.is_isolated();
+    if isolated
+        && !handoff
+            .as_ref()
+            .is_some_and(SsoCallbackHandoff::listener_ready)
+    {
+        return Err(Problem::new(
+            "sso_callback_handoff_unavailable",
+            "Secure callback routing is unavailable on this device",
+            503,
+            &correlation_id,
+        ));
+    }
     let response = state.start_buglab_sso(&correlation_id).await?;
+    let authorization_url = Url::parse(&response.authorization_url).map_err(|_| {
+        Problem::new(
+            "api_auth_response_invalid",
+            "BugLogin returned an invalid sign-in response",
+            502,
+            &correlation_id,
+        )
+    })?;
+    let callback_state = authorization_url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+        .ok_or_else(|| {
+            Problem::new(
+                "api_auth_response_invalid",
+                "BugLogin returned an invalid sign-in response",
+                502,
+                &correlation_id,
+            )
+        })?;
+    if let Some(handoff) = handoff.as_ref().filter(|handoff| handoff.listener_ready()) {
+        let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(now) => now.as_secs(),
+            Err(_) => {
+                let _ = state.cancel_pending_buglab_sso(&correlation_id);
+                return Err(Problem::new(
+                    "sso_callback_handoff_unavailable",
+                    "Secure callback routing is unavailable on this device",
+                    503,
+                    &correlation_id,
+                ));
+            }
+        };
+        let expires_at = now.saturating_add(response.expires_in);
+        if let Err(problem) = handoff.register(&callback_state, expires_at) {
+            let _ = state.cancel_pending_buglab_sso(&correlation_id);
+            return Err(problem);
+        }
+    }
     app.opener()
         .open_url(response.authorization_url, None::<&str>)
         .map_err(|_| {
+            if let Some(handoff) = handoff.as_ref() {
+                handoff.remove(&callback_state);
+            }
+            let _ = state.cancel_pending_buglab_sso(&correlation_id);
             Problem::new(
                 "sso_browser_open_failed",
                 "Could not open BugLab ID sign-in page",
@@ -1272,24 +1371,27 @@ fn desktop_deep_link_current(
     app: tauri::AppHandle,
     inbox: State<'_, DeepLinkInbox>,
 ) -> Result<Vec<String>, Problem> {
-    let mut queued = inbox.drain();
     match app.deep_link().get_current() {
         Ok(Some(urls)) => {
             for url in urls.into_iter().map(|url| url.to_string()) {
-                if !queued.iter().any(|existing| existing == &url) {
-                    queued.push(url);
-                }
+                route_or_enqueue_deep_link(&app, &url)?;
             }
-            Ok(queued)
+            Ok(inbox.drain())
         }
-        Ok(None) => Ok(queued),
-        Err(_) if !queued.is_empty() => Ok(queued),
-        Err(_) => Err(Problem::new(
-            "deep_link_unavailable",
-            "Could not read the sign-in callback",
-            503,
-            "desktop-deep-link",
-        )),
+        Ok(None) => Ok(inbox.drain()),
+        Err(_) => {
+            let queued = inbox.drain();
+            if !queued.is_empty() {
+                Ok(queued)
+            } else {
+                Err(Problem::new(
+                    "deep_link_unavailable",
+                    "Could not read the sign-in callback",
+                    503,
+                    "desktop-deep-link",
+                ))
+            }
+        }
     }
 }
 
