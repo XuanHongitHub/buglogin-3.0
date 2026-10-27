@@ -2,8 +2,8 @@
 
 use buglogin_browser::process::{ApprovedExecutable, ProcessController};
 use buglogin_browser::runtime::{
-    independent_chromium::fury::{FuryChromiumAdapter, FuryIdentity},
     RuntimeAdapter, RuntimeBinary,
+    independent_chromium::fury::{FuryChromiumAdapter, FuryIdentity},
 };
 use buglogin_domain::entities::{FingerprintOperatingSystem, ProfileFingerprintTarget};
 use serde_json::Value;
@@ -204,23 +204,27 @@ fn foreign_profiles_are_untouched_and_invalid_configs_rejected() {
     for field in ["platform", "hardwareConcurrency", "deviceMemory"] {
         let mut invalid = capture();
         invalid["navigator"][field] = Value::from("invalid");
-        assert!(FuryIdentity::generate(
+        assert!(
+            FuryIdentity::generate(
+                "155.0.8059.39".into(),
+                buglogin_storage::blob::checksum(b"fury-contract-fixture"),
+                target(),
+                invalid,
+            )
+            .is_err()
+        );
+    }
+    let mut invalid = capture();
+    invalid["clientHints"]["fullVersion"] = Value::from("154.0.0.1");
+    assert!(
+        FuryIdentity::generate(
             "155.0.8059.39".into(),
             buglogin_storage::blob::checksum(b"fury-contract-fixture"),
             target(),
             invalid,
         )
-        .is_err());
-    }
-    let mut invalid = capture();
-    invalid["clientHints"]["fullVersion"] = Value::from("154.0.0.1");
-    assert!(FuryIdentity::generate(
-        "155.0.8059.39".into(),
-        buglogin_storage::blob::checksum(b"fury-contract-fixture"),
-        target(),
-        invalid,
-    )
-    .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -267,13 +271,15 @@ fn pinned_core_contract_is_required_and_profile_noise_is_stable() {
 
     let mut incomplete = capture();
     incomplete.as_object_mut().unwrap().remove("fontsHidden");
-    assert!(FuryIdentity::generate(
-        "155.0.8059.39".into(),
-        buglogin_storage::blob::checksum(b"fury-contract-fixture"),
-        target(),
-        incomplete,
-    )
-    .is_err());
+    assert!(
+        FuryIdentity::generate(
+            "155.0.8059.39".into(),
+            buglogin_storage::blob::checksum(b"fury-contract-fixture"),
+            target(),
+            incomplete,
+        )
+        .is_err()
+    );
 }
 
 fn lookup<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {

@@ -1,6 +1,6 @@
 use buglogin_browser::runtime::{
-    independent_chromium::{ChromiumIdentity, IndependentChromiumAdapter},
     RuntimeAdapter, RuntimeBinary, RuntimeCapability,
+    independent_chromium::{ChromiumIdentity, IndependentChromiumAdapter},
 };
 use buglogin_domain::{
     entities::{FingerprintOperatingSystem, ProfileFingerprintTarget, Runtime},
@@ -102,9 +102,11 @@ fn restart_preserves_identity_and_normal_launch_cannot_rotate_it() {
         persisted
     );
     assert_eq!(first.runtime, Runtime::Bugium);
-    assert!(adapter
-        .capabilities()
-        .contains(&RuntimeCapability::Fingerprint));
+    assert!(
+        adapter
+            .capabilities()
+            .contains(&RuntimeCapability::Fingerprint)
+    );
 }
 
 #[test]
@@ -204,14 +206,18 @@ fn existing_wayfern_and_untracked_chromium_profiles_are_never_reidentified() {
             fs::read(fixture.0.join(marker)).unwrap(),
             b"existing-profile-data"
         );
-        assert!(!fixture
-            .0
-            .join("BugLogin/independent-chromium.json")
-            .exists());
-        assert!(!fixture
-            .0
-            .join("BugLogin/.independent-chromium.lock")
-            .exists());
+        assert!(
+            !fixture
+                .0
+                .join("BugLogin/independent-chromium.json")
+                .exists()
+        );
+        assert!(
+            !fixture
+                .0
+                .join("BugLogin/.independent-chromium.lock")
+                .exists()
+        );
     }
 }
 
