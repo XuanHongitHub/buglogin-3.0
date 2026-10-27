@@ -69,14 +69,54 @@ pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 15] = [
 // grants aligned through this explicit mapping rather than global role flags.
 pub(super) const PROFILE_PERMISSION_ALIASES: [(&str, Action, &str, Action); 10] = [
     ("CAP-PROF-001", Action::Read, "profile.read", Action::Read),
-    ("CAP-PROF-001", Action::Create, "profile.create", Action::Create),
-    ("CAP-PROF-001", Action::Update, "profile.update", Action::Update),
-    ("CAP-PROF-001", Action::Delete, "profile.delete", Action::Delete),
-    ("CAP-PROF-001", Action::Update, "profile.archive", Action::Update),
-    ("CAP-PROF-001", Action::Update, "profile.restore", Action::Update),
-    ("CAP-PROF-002", Action::Execute, "profile.launch", Action::Execute),
-    ("CAP-PROF-002", Action::Execute, "profile.stop", Action::Execute),
-    ("CAP-PROF-001", Action::Share, "CAP-SHARE-001", Action::Manage),
+    (
+        "CAP-PROF-001",
+        Action::Create,
+        "profile.create",
+        Action::Create,
+    ),
+    (
+        "CAP-PROF-001",
+        Action::Update,
+        "profile.update",
+        Action::Update,
+    ),
+    (
+        "CAP-PROF-001",
+        Action::Delete,
+        "profile.delete",
+        Action::Delete,
+    ),
+    (
+        "CAP-PROF-001",
+        Action::Update,
+        "profile.archive",
+        Action::Update,
+    ),
+    (
+        "CAP-PROF-001",
+        Action::Update,
+        "profile.restore",
+        Action::Update,
+    ),
+    (
+        "CAP-PROF-002",
+        Action::Execute,
+        "profile.launch",
+        Action::Execute,
+    ),
+    (
+        "CAP-PROF-002",
+        Action::Execute,
+        "profile.stop",
+        Action::Execute,
+    ),
+    (
+        "CAP-PROF-001",
+        Action::Share,
+        "CAP-SHARE-001",
+        Action::Manage,
+    ),
     ("CAP-PROF-001", Action::Read, "CAP-SHARE-001", Action::Read),
 ];
 
@@ -2691,8 +2731,7 @@ mod tests {
     use super::{
         changed_group_share_key_rotation_groups, control_import_lock_id, materialized_grants,
         migrated_profile_runtime, pending_group_share_resource_keys,
-        reject_unorchestrated_sync_package, requires_group_share_key_rotation,
-        role_default_pairs,
+        reject_unorchestrated_sync_package, requires_group_share_key_rotation, role_default_pairs,
     };
 
     #[test]
@@ -2743,11 +2782,26 @@ mod tests {
                 ("profile.launch", Action::Execute),
                 ("profile.stop", Action::Execute),
             ] {
-                assert!(pairs.contains(&(pair.0.into(), pair.1)), "{role:?}: {pair:?}");
+                assert!(
+                    pairs.contains(&(pair.0.into(), pair.1)),
+                    "{role:?}: {pair:?}"
+                );
             }
-            for capability in ["profile.create", "profile.update", "profile.archive", "profile.restore"] {
-                let action = if capability == "profile.create" { Action::Create } else { Action::Update };
-                assert_eq!(pairs.contains(&(capability.into(), action)), role != MemberRole::Member);
+            for capability in [
+                "profile.create",
+                "profile.update",
+                "profile.archive",
+                "profile.restore",
+            ] {
+                let action = if capability == "profile.create" {
+                    Action::Create
+                } else {
+                    Action::Update
+                };
+                assert_eq!(
+                    pairs.contains(&(capability.into(), action)),
+                    role != MemberRole::Member
+                );
             }
             assert!(!pairs.contains(&("profile.delete".into(), Action::Delete)));
             assert!(!pairs.contains(&("CAP-WS-001".into(), Action::Manage)));

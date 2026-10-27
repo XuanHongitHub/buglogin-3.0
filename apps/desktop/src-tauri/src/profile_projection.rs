@@ -3955,12 +3955,15 @@ mod tests {
         let server_interrupt_next_chunk = Arc::clone(&interrupt_next_chunk);
         let corrupt_next_chunk = Arc::new(AtomicBool::new(false));
         let server_corrupt_next_chunk = Arc::clone(&corrupt_next_chunk);
+        let (shutdown_server, mut shutdown_server_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let mut paths = Vec::new();
             loop {
-                let accepted =
-                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
-                let Ok(Ok((mut stream, _))) = accepted else {
+                let accepted = tokio::select! {
+                    _ = &mut shutdown_server_rx => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut stream, _)) = accepted else {
                     break;
                 };
                 let request = read_http_request(&mut stream).await;
@@ -4071,6 +4074,7 @@ mod tests {
         if corrupt_staging.exists() {
             assert_eq!(fs::read_dir(corrupt_staging).unwrap().count(), 0);
         }
+        let _ = shutdown_server.send(());
         let requested = server.await.unwrap();
         assert_eq!(requested.len(), manifest.objects.len() + 4);
         let _ = fs::remove_dir_all(root);

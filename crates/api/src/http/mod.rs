@@ -11567,8 +11567,8 @@ pub(crate) fn now() -> u64 {
 mod persistence_tests {
     use super::*;
     use buglogin_browser::profile::ProfileService;
-    use buglogin_storage::local::LocalRepository;
     use buglogin_domain::member::{Member, MemberRole, MemberStatus};
+    use buglogin_storage::local::LocalRepository;
     use buglogin_storage::{
         blob::checksum,
         control::{
@@ -13285,12 +13285,19 @@ mod persistence_tests {
     async fn workspace_memberships_authorize_profile_crud_and_coordination() {
         use buglogin_domain::ids::ResourceId;
 
-        for role in [MemberRole::Owner, MemberRole::Admin, MemberRole::Lead, MemberRole::Operator, MemberRole::Member] {
+        for role in [
+            MemberRole::Owner,
+            MemberRole::Admin,
+            MemberRole::Lead,
+            MemberRole::Operator,
+            MemberRole::Member,
+        ] {
             for materialized in [false, true] {
                 let state = ApiState::hosted_with_control_store(
                     ProfileService::disabled(),
                     MemoryControlRecordStore::default(),
-                ).unwrap();
+                )
+                .unwrap();
                 let account_id = AccountId::new("acct_lifecycle_owner").unwrap();
                 let workspace_id = WorkspaceId::new("ws_lifecycle_owner").unwrap();
                 let resource_id = ResourceId::new("res_lifecycle_owner").unwrap();
@@ -13304,33 +13311,46 @@ mod persistence_tests {
                 )
                 .unwrap();
                 state.identity_persistence.create(&identity).unwrap();
-                state.account_persistence.provision_default(account_id.clone(), "100".into()).unwrap();
-                state.credentials.set_initial_password(
-                    &account_id,
-                    "correct horse battery staple",
-                    now(),
-                ).unwrap();
-                state.members.write().unwrap().provision_active(
-                    &Principal {
-                        roles: [Role::PlatformAdmin].into_iter().collect(),
-                        ..Principal::default()
-                    },
-                    &[],
-                    Member {
-                        id: member_id.clone(),
-                        account_id: account_id.clone(),
-                        workspace_id: workspace_id.clone(),
-                        team_id: None,
-                        role: role.clone(),
-                        status: MemberStatus::Active,
-                        invite_expires_at: None,
-                    },
-                ).unwrap();
+                state
+                    .account_persistence
+                    .provision_default(account_id.clone(), "100".into())
+                    .unwrap();
+                state
+                    .credentials
+                    .set_initial_password(&account_id, "correct horse battery staple", now())
+                    .unwrap();
+                state
+                    .members
+                    .write()
+                    .unwrap()
+                    .provision_active(
+                        &Principal {
+                            roles: [Role::PlatformAdmin].into_iter().collect(),
+                            ..Principal::default()
+                        },
+                        &[],
+                        Member {
+                            id: member_id.clone(),
+                            account_id: account_id.clone(),
+                            workspace_id: workspace_id.clone(),
+                            team_id: None,
+                            role: role.clone(),
+                            status: MemberStatus::Active,
+                            invite_expires_at: None,
+                        },
+                    )
+                    .unwrap();
                 if materialized {
-                    state.materialized_member_grants.write().unwrap().insert(member_id);
-                    let legacy = control_import::role_default_pairs(&role).into_iter()
-                        .filter(|(capability, _)| control_import::MEMBERSHIP_CAPABILITIES
-                            .contains(&capability.as_str()))
+                    state
+                        .materialized_member_grants
+                        .write()
+                        .unwrap()
+                        .insert(member_id);
+                    let legacy = control_import::role_default_pairs(&role)
+                        .into_iter()
+                        .filter(|(capability, _)| {
+                            control_import::MEMBERSHIP_CAPABILITIES.contains(&capability.as_str())
+                        })
                         .enumerate()
                         .map(|(index, (capability, action))| Grant {
                             id: GrantId::new(format!("legacy_lifecycle_{index}")).unwrap(),
@@ -13360,21 +13380,29 @@ mod persistence_tests {
                     profile_id: Some(profile_id),
                     ..ResourceScope::default()
                 };
-                for command in crate::commands::CommandRegistry::all().iter()
+                for command in crate::commands::CommandRegistry::all()
+                    .iter()
                     .filter(|command| command.id.as_str().starts_with("profile."))
                 {
                     let expected = match role {
                         MemberRole::Owner | MemberRole::Admin => true,
                         MemberRole::Lead | MemberRole::Operator => command.action != Action::Delete,
-                        MemberRole::Member => matches!(command.action, Action::Read | Action::Execute),
+                        MemberRole::Member => {
+                            matches!(command.action, Action::Read | Action::Execute)
+                        }
                     };
-                    assert_eq!(is_allowed(
-                        &principal,
-                        &Capability::new(command.capability).unwrap(),
-                        command.action,
-                        &scope,
-                        &grants,
-                    ), expected, "{role:?}, materialized={materialized}: {}", command.id.as_str());
+                    assert_eq!(
+                        is_allowed(
+                            &principal,
+                            &Capability::new(command.capability).unwrap(),
+                            command.action,
+                            &scope,
+                            &grants,
+                        ),
+                        expected,
+                        "{role:?}, materialized={materialized}: {}",
+                        command.id.as_str()
+                    );
                 }
                 let auth = CoordinationAuth::new(account_id.as_str(), bearer).unwrap();
                 let authorizer = coordination_authorizer(&state);
@@ -13388,20 +13416,38 @@ mod persistence_tests {
                     CoordinationOperation::PayloadWrite,
                     CoordinationOperation::EventRead,
                 ] {
-                    authorizer.authorize(&auth, AuthorizationRequest {
-                        operation,
-                        workspace_id: &workspace_id,
-                        resource_id: Some(&resource_id),
-                    }).await.unwrap_or_else(|error| panic!(
-                        "{role:?}, materialized={materialized}, {operation:?}: {error:?}"
-                    ));
+                    authorizer
+                        .authorize(
+                            &auth,
+                            AuthorizationRequest {
+                                operation,
+                                workspace_id: &workspace_id,
+                                resource_id: Some(&resource_id),
+                            },
+                        )
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{role:?}, materialized={materialized}, {operation:?}: {error:?}"
+                            )
+                        });
                 }
                 let other_workspace = WorkspaceId::new("ws_lifecycle_other").unwrap();
-                assert_eq!(authorizer.authorize(&auth, AuthorizationRequest {
-                    operation: CoordinationOperation::LeaseAcquire,
-                    workspace_id: &other_workspace,
-                    resource_id: Some(&resource_id),
-                }).await.unwrap_err().code, "coordination_forbidden");
+                assert_eq!(
+                    authorizer
+                        .authorize(
+                            &auth,
+                            AuthorizationRequest {
+                                operation: CoordinationOperation::LeaseAcquire,
+                                workspace_id: &other_workspace,
+                                resource_id: Some(&resource_id),
+                            }
+                        )
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "coordination_forbidden"
+                );
             }
         }
     }
