@@ -504,8 +504,8 @@
       "oldest": "Cũ nhất trước"
     },
     "remote": {
-      "runningTooltip": "Đang chạy trên máy từ xa. Dừng lại để đưa hồ sơ về đây.",
-      "runningTooltipOwner": "Đang chạy trên máy từ xa bởi {{owner}}. Dừng lại để đưa hồ sơ về đây.",
+      "runningTooltip": "Hồ sơ đang chạy trên thiết bị khác. Hãy dừng tại đó và chờ đồng bộ xong trước khi mở ở đây.",
+      "runningTooltipOwner": "Hồ sơ đang chạy trên thiết bị khác bởi {{owner}}. Hãy dừng tại đó và chờ đồng bộ xong trước khi mở ở đây.",
       "pendingSyncTooltip": "Đang tải về những gì phiên từ xa đã thay đổi. Sẽ dùng lại được khi hoàn tất."
     }
   },
@@ -966,8 +966,8 @@
       "profileLocked": "Đang được sử dụng bởi {{owner}}",
       "profileLockedShort": "Đang sử dụng",
       "cannotLaunchLocked": "Không thể khởi chạy — profile đang được sử dụng bởi {{owner}}",
-      "leaseExpiry": " · lease hết hạn lúc {{time}}",
-      "leaseUnknown": "Chưa xác minh được trình duyệt đang chạy. Profile tạm bị chặn mở để tránh dùng trùng cho đến khi runtime hoặc lease được xác nhận.",
+      "leaseExpiry": " · quyền sử dụng hết hạn lúc {{time}}",
+      "leaseUnknown": "Chưa xác nhận được trình duyệt đã đóng nên profile đang tạm khóa để tránh mở trùng. Hãy đóng cửa sổ trình duyệt đang dùng profile rồi thử lại.",
       "createdBy": "Được tạo bởi {{email}}",
       "roleLauncher": "Người khởi chạy"
     },
@@ -1856,10 +1856,12 @@
     "loadUnpackedTooltip": "Tải tiện ích từ thư mục chưa đóng gói trên máy",
     "fromUrl": "Từ URL",
     "fromUrlTooltip": "Cài tiện ích từ Chrome Web Store hoặc link tải trực tiếp",
-    "urlPlaceholder": "Nhập link Chrome Web Store hoặc file CRX/ZIP...",
+    "urlPlaceholder": "Nhập link GitHub, Chrome Web Store hoặc file CRX/ZIP...",
     "fetching": "Đang tải tiện ích...",
     "fetchExtension": "Tải tiện ích",
-    "urlHint": "Dán đường dẫn cửa hàng Chrome Web Store hoặc liên kết tải trực tiếp.",
+    "urlHint": "Repo GitHub sẽ tự cập nhật từ nhánh mặc định mỗi lần mở profile. Cũng hỗ trợ Chrome Web Store và link CRX/ZIP.",
+    "gitSourceHint": "{{url}} · nhánh {{branch}}. Tự kiểm tra bản mới mỗi lần mở profile; giữ bản đã cài nếu GitHub tạm lỗi.",
+    "launchUpdateWarning": "Profile đã mở; {{count}} tiện ích chưa cập nhật được.",
     "selectedFolder": "Thư mục đã chọn",
     "fetchedIdentity": "Tiện ích: {{name}} (v{{version}})",
     "fetchedFrom": "Tải từ: {{source}}",
@@ -2333,6 +2335,19 @@
     "noProxy": "Không có proxy",
     "encrypted": "Đã mã hóa"
   },
+  "profileKeyRecovery": {
+    "title": "Khóa đồng bộ của profile",
+    "description": "Thiết bị cần khóa giải mã để mở dữ liệu đã đồng bộ. Quyền tài khoản và khóa giải mã được kiểm tra riêng.",
+    "codeLabel": "Mã khôi phục",
+    "sourceHint": "Trên thiết bị mở được profile này, vào Đồng bộ → Khóa đồng bộ để lấy mã, rồi dán vào đây.",
+    "getCode": "Lấy mã từ thiết bị này",
+    "exportedCode": "Mã khôi phục đã lấy",
+    "copyCode": "Sao chép mã khôi phục",
+    "recover": "Khôi phục khóa",
+    "working": "Đang xử lý…",
+    "success": "Đã khôi phục khóa; thiết bị này có thể giải mã profile.",
+    "failed": "Chưa khôi phục được khóa."
+  },
   "profileTable": {
     "syncTooltipDisabled": "Đã tắt đồng bộ",
     "syncTooltipSyncing": "Đang đồng bộ...",
@@ -2341,9 +2356,10 @@
     "syncTooltipWaiting": "Đang chờ đồng bộ",
     "syncTooltipErrorWith": "Lỗi đồng bộ: {{error}}",
     "syncTooltipError": "Lỗi đồng bộ",
-    "syncTooltipNotSynced": "Chưa đồng bộ",
+    "syncTooltipNotSynced": "Profile chỉ được lưu trên máy này, chưa có bản sao trên Cloud.",
+    "nativeFingerprintWarning": "Profile đã mở bằng fingerprint mặc định của trình duyệt. Tạo custom identity hiện chưa được Wayfern cho phép.",
     "noTags": "Không có thẻ",
-    "syncTooltipCloseToSync": "Đóng profile để đồng bộ",
+    "syncTooltipCloseToSync": "Có thay đổi trên máy chưa đồng bộ lên Cloud. Đóng profile để thử đồng bộ lại.",
     "syncTooltipDisabledWithLast": "Đã tắt đồng bộ, lần đồng bộ cuối {{time}}",
     "addTagsPlaceholder": "Thêm thẻ",
     "tagsHeader": "Thẻ",
@@ -4393,10 +4409,11 @@
   },
   "restorePoints": {
     "title": "Điểm khôi phục",
-    "hint": "Các bản sao dữ liệu của hồ sơ này trên máy chủ đồng bộ: mỗi ngày một bản sau khi có thay đổi, và những bản bạn tạo. Giữ 3 bản mới nhất của mỗi loại.",
+    "hint": "Các bản sao lưu dữ liệu cục bộ của hồ sơ này. Hãy tạo bản sao trước khi thay đổi quan trọng.",
     "create": "Tạo",
     "created": "Đã tạo điểm khôi phục.",
     "empty": "Chưa có điểm khôi phục nào.",
+    "snapshot": "Bản sao lưu",
     "restore": "Khôi phục",
     "restored": "Đã khôi phục từ điểm khôi phục.",
     "deleted": "Đã xóa điểm khôi phục.",

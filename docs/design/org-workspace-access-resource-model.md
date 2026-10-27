@@ -1,10 +1,12 @@
 # Organization, Workspace, and Resource Management Model
 
+> UI/interaction update (2026-10-26): [the canonical management UI/UX specification](../superpowers/specs/2026-10-26-management-ui-ux-design.md) replaces conflicting page/form layouts and action inventories below. Preserve this document's current-contract distinction between shared account identities, organization ownership and workspace-scoped memberships. The new target includes full single/bulk provisioning/editing, username-only internal accounts as a required backend slice, and self-service account flows; it removes archive/offline controls and profile lifecycle from management.
+
 Status: target product and interaction model; current API/UI boundaries are called out explicitly
 Last updated: 2026-10-24
 Related: [Information architecture](information-architecture.md), [UI authority](ui-authority.md), [Screen state matrix](screen-state-matrix.md)
 
-Implementation note (2026-10-24): the native desktop/API currently model Organizations → Workspaces → workspace members/groups/profiles. There is no separate organization-membership record: organization ownership authorizes work across that organization's workspaces, while ordinary member status and suspension are workspace scoped. Existing API supports direct scoped account provisioning, invitations, workspace member actions, group CRUD/shares, profile inventories/group assignment, and resource grants. The current working tree adds a dedicated workspace page with Members, Groups and Profiles tabs plus full-page account/invite flows. Remaining limits include cross-workspace profile transfer, API-derived capability discovery, full group/profile breadcrumb/deep-link state, visual/interactivity QA and release evidence. The diagrams distinguish current contract from target experience; they are not release evidence.
+Implementation note (2026-10-26): the canonical source now includes OrganizationMember records with independent status and revision. Organization suspension gates access to child workspaces and preserves their membership rows/grants for reactivation. Workspace roles and resource grants remain workspace scoped. The current working tree implements the new Org/Workspace/Platform management pages, account provisioning and editing, member flows, and Group/Profile governance routes. Automated contract, typecheck, backend, self-test and desktop-build gates have been run; visual interaction/screenshot QA and platform release evidence remain open. The diagrams distinguish implemented behavior from any remaining target work; they are not release evidence.
 
 This document defines the intended hierarchy, authorization boundaries, account-creation flows, and page-based management UI. It is a design contract for later implementation. Existing code must be inspected and verified before any capability is described as shipped.
 
@@ -156,7 +158,7 @@ Create account, invite, role changes, resource moves, and deactivation are dedic
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Organization overview may aggregate membership rows from its workspaces. Actions must navigate to the selected workspace before create/invite, role change, activate, or suspend. Until an organization-membership API exists, do not show “remove from organization” or claim one suspension revokes every workspace membership.
+Organization member records are managed in the organization account directory. Owners and Platform Admins can create accounts, assign active members to workspaces, and suspend/reactivate the parent membership. Suspension blocks access to child workspaces while preserving their membership rows and grants; reactivation restores access according to those existing rows. Workspace role and group changes remain in the selected workspace.
 
 The summary is read-only at organization scope in this contract. Create account/invite and every membership mutation are performed after entering a workspace, so the user sees the exact destination and role scope before submitting.
 

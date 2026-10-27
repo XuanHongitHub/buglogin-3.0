@@ -1,1 +1,6 @@
-{"status":"completed","lockedCode":"migration_source_locked","profileCount":1,"sourceUnchanged":true}
+{
+  "lockedCode": "migration_source_locked",
+  "profileCount": 1,
+  "sourceUnchanged": true,
+  "status": "completed"
+}

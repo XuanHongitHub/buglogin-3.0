@@ -89,6 +89,25 @@ pub struct IntegrationApiStatus {
     pub mcp_enabled: Option<bool>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProfileKeyEnrollment {
+    pub enrolled: bool,
+    pub key_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProfileKey {
+    pub resource_key: String,
+}
+
+impl Drop for ManagedProfileKey {
+    fn drop(&mut self) {
+        self.resource_key.zeroize();
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiTokenSummary {
@@ -1564,6 +1583,38 @@ impl RemoteApiClient {
         .await
     }
 
+    pub async fn enroll_profile_managed_key(
+        &self,
+        id: &ProfileId,
+        resource_key: &str,
+        correlation: &str,
+    ) -> Result<ManagedProfileKeyEnrollment, Problem> {
+        let key_version = format!("{:x}", Sha256::digest(resource_key.as_bytes()));
+        let idempotency_key = format!("profile-managed-key-enroll-{}-{key_version}", id.as_str());
+        self.send(
+            Method::POST,
+            &format!("/v1/profiles/{}/managed-key-envelope", id.as_str()),
+            Some(json!({ "resourceKey": resource_key })),
+            correlation,
+            Some(&idempotency_key),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn fetch_profile_managed_key(
+        &self,
+        id: &ProfileId,
+        correlation: &str,
+    ) -> Result<ManagedProfileKey, Problem> {
+        self.get(
+            &format!("/v1/profiles/{}/managed-key-envelope", id.as_str()),
+            correlation,
+        )
+        .await
+    }
+
     pub async fn profile_share_recipient_device_keys(
         &self,
         profile_id: &ProfileId,
@@ -1992,6 +2043,14 @@ impl RemoteApiClient {
         let result = match name {
             "system_health_get" => self.get::<Value>("/v1/health",correlation).await?,
             "account_get" => self.get::<Value>("/v1/account",correlation).await?,
+            "account_identity_own_get" => self.get::<Value>("/v1/account/identity",correlation).await?,
+            "account_identity_get" => { let id=path_arg(&payload,"accountId",correlation)?; self.get::<Value>(&format!("/v1/accounts/{id}/identity"),correlation).await? },
+            "account_identity_update" => { let id=path_arg(&payload,"accountId",correlation)?; let mut body=payload; if let Some(object)=body.as_object_mut(){object.remove("accountId");} self.send::<Value>(Method::PATCH,&format!("/v1/accounts/{id}/identity"),Some(body),correlation,idem,None,&[]).await? },
+            "account_password_change" => self.send::<Value>(Method::PUT,"/v1/account/password",Some(payload),correlation,idem,None,&[]).await?,
+            "account_sessions_list" => { let id=path_arg(&payload,"accountId",correlation)?; self.get::<Value>(&format!("/v1/accounts/{id}/sessions"),correlation).await? },
+            "account_sessions_revoke" => { let account=path_arg(&payload,"accountId",correlation)?; let session=path_arg(&payload,"sessionId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/accounts/{account}/sessions/{session}"),None,correlation,idem,None,&[]).await? },
+            "management_account_drafts_generate" => self.send::<Value>(Method::POST,"/v1/management/account-drafts",Some(payload),correlation,None,None,&[]).await?,
+            "management_batch_execute" => self.send::<Value>(Method::POST,"/v1/management/batch",Some(payload),correlation,idem,None,&[]).await?,
             "account_list" => self.get::<Value>("/v1/accounts",correlation).await?,
             "account_create" => self.send::<Value>(Method::POST,"/v1/accounts",Some(payload),correlation,idem,None,&[]).await?,
             "account_create_scoped" => {
@@ -1999,8 +2058,10 @@ impl RemoteApiClient {
                 let body = json!({
                     "accountId": payload.get("accountId").cloned().ok_or_else(|| bad_input("accountId", correlation))?,
                     "username": payload.get("username").cloned().ok_or_else(|| bad_input("username", correlation))?,
+                    "displayName": payload.get("displayName").cloned().unwrap_or_else(|| json!("")),
                     "email": payload.get("email").cloned().ok_or_else(|| bad_input("email", correlation))?,
                     "role": payload.get("role").cloned().ok_or_else(|| bad_input("role", correlation))?,
+                    "initialPassword": payload.get("initialPassword").cloned().ok_or_else(|| bad_input("initialPassword", correlation))?,
                 });
                 self.send::<Value>(Method::POST,&format!("/v1/workspaces/{workspace_id}/accounts"),Some(body),correlation,idem,None,&[]).await?
             },
@@ -2018,6 +2079,8 @@ impl RemoteApiClient {
             "organization_record_get" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/record"),correlation).await? },
             "organization_create" => self.send::<Value>(Method::POST,"/v1/organizations",Some(payload),correlation,idem,None,&[]).await?,
             "organization_update" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=payload.get("update").cloned().ok_or_else(||bad_input("update",correlation))?; self.send::<Value>(Method::PATCH,&format!("/v1/organizations/{id}"),Some(body),correlation,idem,None,&[]).await? },
+            "organization_delete" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::DELETE,&format!("/v1/organizations/{id}"),Some(body),correlation,idem,None,&[]).await? },
+            "organization_owner_transfer" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=json!({"accountId":payload.get("accountId").cloned().ok_or_else(||bad_input("accountId",correlation))?,"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::POST,&format!("/v1/organizations/{id}/owner"),Some(body),correlation,idem,None,&[]).await? },
             "organization_members_list" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/members"),correlation).await? },
             "organization_member_workspace_assign" => {
                 let organization_id = path_arg(&payload, "organizationId", correlation)?;
@@ -2068,7 +2131,8 @@ impl RemoteApiClient {
                 )
                 .await?
             },
-            "group_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; json!({"items":self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/groups"),correlation).await?,"nextCursor":Value::Null}) },
+            "workspace_delete" => { let org=path_arg(&payload,"organizationId",correlation)?; let id=path_arg(&payload,"workspaceId",correlation)?; let body=json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::DELETE,&format!("/v1/organizations/{org}/workspaces/{id}"),Some(body),correlation,idem,None,&[]).await? },
+            "group_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; json!(self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/groups"),correlation).await?) },
             "group_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/groups/{id}"),correlation).await? },
             "group_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/groups"),Some(payload),correlation,idem,None,&[]).await? },
             "group_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/groups/{id}"),Some(payload),correlation,idem,None,&[]).await? },
@@ -2216,6 +2280,7 @@ impl RemoteApiClient {
             "member_invitation_redeem" => { let id=path_arg(&payload,"invitationId",correlation)?; let body=json!({"code":payload.get("code").and_then(Value::as_str).ok_or_else(||bad_input("code",correlation))?}); self.send::<Value>(Method::POST,&format!("/v1/workspace-invitations/{id}/redeem"),Some(body),correlation,idem,None,&[]).await? },
             "member_invitation_revoke" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"invitationId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/invitations/{id}"),None,correlation,idem,None,&[]).await? },
             "member_activate" | "member_suspend" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; let action=if name=="member_activate" {"activate"} else {"suspend"}; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/members/{id}/{action}"),None,correlation,idem,None,&[]).await? },
+            "member_remove" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/members/{id}"),None,correlation,idem,None,&[]).await? },
             "member_role_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; let body=json!({"role":payload.get("role").cloned().ok_or_else(||bad_input("role",correlation))?}); self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/members/{id}/role"),Some(body),correlation,idem,None,&[]).await? },
             "resource_list" => {
                 let ws = path_arg(&payload, "workspaceId", correlation)?;
@@ -2994,6 +3059,14 @@ fn command_id(name: &str) -> &str {
     match name {
         "system_health_get" => "system.health.get",
         "account_get" => "account.get",
+        "account_identity_own_get" => "account.identity.own.get",
+        "account_identity_get" => "account.identity.get",
+        "account_identity_update" => "account.identity.update",
+        "account_password_change" => "account.password.change",
+        "account_sessions_list" => "account.sessions.list",
+        "account_sessions_revoke" => "account.sessions.revoke",
+        "management_account_drafts_generate" => "management.account.drafts.generate",
+        "management_batch_execute" => "management.batch.execute",
         "account_list" => "account.list",
         "account_create" => "account.create",
         "account_create_scoped" => "account.create.scoped",
@@ -3003,6 +3076,8 @@ fn command_id(name: &str) -> &str {
         "organization_record_get" => "organization.record.get",
         "organization_create" => "organization.create",
         "organization_update" => "organization.update",
+        "organization_delete" => "organization.delete",
+        "organization_owner_transfer" => "organization.owner.transfer",
         "organization_members_list" => "organization.members.list",
         "organization_account_create" => "organization.account.create",
         "organization_member_status_update" => "organization.member.status.update",
@@ -3012,6 +3087,7 @@ fn command_id(name: &str) -> &str {
         "workspace_record_get" => "workspace.record.get",
         "workspace_create" => "workspace.create",
         "workspace_update" => "workspace.update",
+        "workspace_delete" => "workspace.delete",
         "group_list" => "group.list",
         "group_get" => "group.get",
         "group_create" => "group.create",
@@ -3065,6 +3141,7 @@ fn command_id(name: &str) -> &str {
         "member_invite" => "member.invite",
         "member_activate" => "member.activate",
         "member_suspend" => "member.suspend",
+        "member_remove" => "member.remove",
         "member_role_update" => "member.role.update",
         "resource_list" => "resource.list",
         "resource_get" => "resource.get",

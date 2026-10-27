@@ -1,4 +1,4 @@
-{"status":"planned","activeProfiles":1,"deletedProfilesReported":1,"deletedRuntimeExcluded":true}
-{"status":"activated","createdProfiles":1,"deletedProfilesImported":0,"deletedBytesPackaged":false}
-{"status":"reconciled","result":"passed","unsupportedEntityCounts":{}}
-{"status":"rolledBack","quarantinedProfiles":1,"sourceUnchanged":true}
+{"activeProfiles":1,"deletedProfilesReported":1,"deletedRuntimeExcluded":true,"status":"planned"}
+{"createdProfiles":1,"deletedBytesPackaged":false,"deletedProfilesImported":0,"status":"activated"}
+{"result":"passed","status":"reconciled","unsupportedEntityCounts":{}}
+{"quarantinedProfiles":1,"sourceUnchanged":true,"status":"rolledBack"}

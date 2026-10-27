@@ -1,5 +1,7 @@
 # DES-02 Reference Package: Unified Switcher & Context Action Hub
 
+> Management layout override (2026-10-26): [the canonical management UI/UX specification](../../superpowers/specs/2026-10-26-management-ui-ux-design.md) reflects the user's later decision: keep the context switcher in the sidebar and page actions in the content toolbar beside refresh. Do not restore the duplicated header switcher/action hub or navigation strip from diagrams below. Reuse the shared Donut components and capability enforcement, subject to the newer screen specification.
+
 Status: approved design specification & interaction contract  
 Screen: Titlebar Context Switcher & Unified Creation Action Hub  
 Authority: [`docs/design/ui-authority.md`](../ui-authority.md), [`DESIGN.md`](../../DESIGN.md), [`docs/design/org-workspace-access-resource-model.md`](../org-workspace-access-resource-model.md)  

@@ -1,2 +1,2 @@
-{"status":"blocked","case":"exclusive_lock","code":"migration_source_locked","packageBuilt":false,"destinationChanged":false,"sourceUnchanged":true}
-{"status":"completed","case":"lock_released","packageBuilt":true,"sourceUnchanged":true}
+{"case":"exclusive_lock","code":"migration_source_locked","destinationChanged":false,"packageBuilt":false,"sourceUnchanged":true,"status":"blocked"}
+{"case":"lock_released","packageBuilt":true,"sourceUnchanged":true,"status":"completed"}

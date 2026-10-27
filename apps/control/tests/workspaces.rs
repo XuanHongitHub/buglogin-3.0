@@ -39,6 +39,7 @@ fn workspace(id: &str, organization_id: &OrganizationId) -> Workspace {
             offline_entitled: true,
         },
         created_at: "2026-07-20T00:00:00Z".into(),
+        default_extension_group_id: None,
     }
 }
 
@@ -70,6 +71,7 @@ fn acl_denies_before_lookup_and_explicit_deny_overrides_role() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: true,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -108,6 +110,7 @@ fn workspace_ids_are_unique_across_organizations_and_quota_is_enforced() {
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: true,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -132,6 +135,7 @@ fn workspace_ids_are_unique_across_organizations_and_quota_is_enforced() {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: true,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();

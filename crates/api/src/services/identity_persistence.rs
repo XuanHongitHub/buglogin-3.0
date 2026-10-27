@@ -1,10 +1,10 @@
 use buglogin_domain::{
-    account::{AccountIdentity, canonical_email, canonical_username},
+    account::{AccountIdentity, IdentityVerification, canonical_email, canonical_username},
     errors::Problem,
     ids::AccountId,
 };
 use buglogin_storage::control::{
-    ControlAuditEntry, ControlPut, ExecuteControlCommand, HttpResponse,
+    ControlAuditEntry, ControlDelete, ControlPut, ExecuteControlCommand, HttpResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -46,7 +46,7 @@ impl IdentityPersistence {
             || canonical_username(&identity.username)
                 .map(|canonical| canonical != identity.canonical_username)
                 .unwrap_or(true)
-            || canonical_email(&identity.email)
+            || canonical_identity_email(&identity)
                 .map(|canonical| canonical != identity.canonical_email)
                 .unwrap_or(true)
         {
@@ -60,7 +60,143 @@ impl IdentityPersistence {
     }
 
     pub fn find_by_email(&self, canonical: &str) -> Result<Option<AccountIdentity>, Problem> {
+        if canonical.is_empty() {
+            return Ok(None);
+        }
         self.find(EMAIL_INDEX, canonical)
+    }
+
+    /// Atomically update the identity and its unique login indexes. The HTTP authority
+    /// must authorize the actor and enforce email-verification policy before calling.
+    pub fn update(
+        &self,
+        account_id: &AccountId,
+        username: &str,
+        email: &str,
+        display_name: &str,
+        expected_revision: u64,
+        actor_id: &AccountId,
+        idempotency_key: &str,
+        updated_at: &str,
+    ) -> Result<AccountIdentity, Problem> {
+        let command_key = format!(
+            "identity-update-{:x}",
+            Sha256::digest(format!(
+                "{}:{}:{}",
+                actor_id.as_str(),
+                account_id.as_str(),
+                idempotency_key
+            ))
+        );
+        if let Some(replayed) = self.store.replay(TENANT, &command_key)? {
+            let identity: AccountIdentity =
+                serde_json::from_value(replayed.response.body).map_err(|_| corrupt())?;
+            if identity.username == username.trim()
+                && identity.email == email.trim()
+                && identity.display_name == display_name.trim()
+                && identity.revision == expected_revision.saturating_add(1)
+            {
+                return Ok(identity);
+            }
+            return Err(Problem::new(
+                "idempotency_conflict",
+                "Identity update key was reused with different input",
+                409,
+                "identity",
+            ));
+        }
+        let (current, revision) = self
+            .store
+            .load_versioned::<AccountIdentity>(TENANT, IDENTITY, account_id.as_str())?
+            .ok_or_else(|| {
+                Problem::new(
+                    "account_identity_not_found",
+                    "Account identity was not found",
+                    404,
+                    "identity",
+                )
+            })?;
+        if current.revision != expected_revision || revision != expected_revision {
+            return Err(Problem::new(
+                "revision_conflict",
+                "Identity has changed; refresh before saving",
+                409,
+                "identity",
+            ));
+        }
+        if display_name.trim().chars().count() > 120 || display_name.chars().any(char::is_control) {
+            return Err(Problem::new(
+                "invalid_display_name",
+                "Display name must be at most 120 characters",
+                400,
+                "identity",
+            ));
+        }
+        let mut next = current.clone();
+        next.username = username.trim().into();
+        next.canonical_username = canonical_username(username)?;
+        next.email = email.trim().into();
+        next.canonical_email = canonical_identity_email(&next)?;
+        next.display_name = display_name.trim().into();
+        next.revision = current.revision.checked_add(1).ok_or_else(corrupt)?;
+        next.updated_at = updated_at.into();
+        validate_identity_for_write(&next)?;
+        let mut puts = vec![ControlPut {
+            tenant_id: TENANT.into(),
+            record_type: IDENTITY.into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(revision),
+            value: serde_json::to_value(&next).map_err(|_| corrupt())?,
+        }];
+        let mut deletes = Vec::new();
+        for (kind, old, new, code) in [
+            (
+                USERNAME_INDEX,
+                &current.canonical_username,
+                &next.canonical_username,
+                "username_taken",
+            ),
+            (
+                EMAIL_INDEX,
+                &current.canonical_email,
+                &next.canonical_email,
+                "email_taken",
+            ),
+        ] {
+            if old == new {
+                continue;
+            }
+            if !new.is_empty() {
+                self.assert_available(kind, new, code)?;
+                puts.push(put(
+                    kind,
+                    &index_id(new),
+                    &IdentityIndex {
+                        account_id: account_id.clone(),
+                    },
+                )?);
+            }
+            if !old.is_empty() {
+                let (_, old_revision) = self
+                    .store
+                    .load_versioned::<IdentityIndex>(TENANT, kind, &index_id(old))?
+                    .ok_or_else(corrupt)?;
+                deletes.push(ControlDelete {
+                    tenant_id: TENANT.into(),
+                    record_type: kind.into(),
+                    record_id: index_id(old),
+                    expected_revision: Some(old_revision),
+                });
+            }
+        }
+        self.store.execute(ExecuteControlCommand {
+            tenant_id: TENANT.into(), command_id: "account.identity.update".into(),
+            idempotency_key: command_key,
+            expected_revisions: Default::default(), puts, deletes,
+            audit: ControlAuditEntry { tenant_id: TENANT.into(), command_id: "account.identity.update".into(), actor_id: actor_id.as_str().into(), allowed: true, detail: json!({"accountId": account_id, "usernameChanged": current.canonical_username != next.canonical_username, "emailChanged": current.canonical_email != next.canonical_email, "displayNameChanged": current.display_name != next.display_name}) },
+            response: HttpResponse { status: 200, headers: Default::default(), body: serde_json::to_value(&next).map_err(|_| corrupt())? },
+        })?;
+        self.load(account_id)?.ok_or_else(unavailable)
     }
 
     pub fn create(&self, identity: &AccountIdentity) -> Result<AccountIdentity, Problem> {
@@ -77,30 +213,37 @@ impl IdentityPersistence {
             &identity.canonical_username,
             "username_taken",
         )?;
-        self.assert_available(EMAIL_INDEX, &identity.canonical_email, "email_taken")?;
+        if !identity.canonical_email.is_empty() {
+            self.assert_available(EMAIL_INDEX, &identity.canonical_email, "email_taken")?;
+        }
 
         let result = self.store.execute(ExecuteControlCommand {
             tenant_id: TENANT.into(),
             command_id: "identity.create".into(),
             idempotency_key: format!("identity.create-{}", identity.account_id.as_str()),
             expected_revisions: Default::default(),
-            puts: vec![
-                put(IDENTITY, identity.account_id.as_str(), identity)?,
-                put(
-                    USERNAME_INDEX,
-                    &index_id(&identity.canonical_username),
-                    &IdentityIndex {
-                        account_id: identity.account_id.clone(),
-                    },
-                )?,
-                put(
-                    EMAIL_INDEX,
-                    &index_id(&identity.canonical_email),
-                    &IdentityIndex {
-                        account_id: identity.account_id.clone(),
-                    },
-                )?,
-            ],
+            puts: {
+                let mut puts = vec![
+                    put(IDENTITY, identity.account_id.as_str(), identity)?,
+                    put(
+                        USERNAME_INDEX,
+                        &index_id(&identity.canonical_username),
+                        &IdentityIndex {
+                            account_id: identity.account_id.clone(),
+                        },
+                    )?,
+                ];
+                if !identity.canonical_email.is_empty() {
+                    puts.push(put(
+                        EMAIL_INDEX,
+                        &index_id(&identity.canonical_email),
+                        &IdentityIndex {
+                            account_id: identity.account_id.clone(),
+                        },
+                    )?);
+                }
+                puts
+            },
             deletes: vec![],
             audit: ControlAuditEntry {
                 tenant_id: TENANT.into(),
@@ -131,7 +274,9 @@ impl IdentityPersistence {
                     &identity.canonical_username,
                     "username_taken",
                 )?;
-                self.assert_available(EMAIL_INDEX, &identity.canonical_email, "email_taken")?;
+                if !identity.canonical_email.is_empty() {
+                    self.assert_available(EMAIL_INDEX, &identity.canonical_email, "email_taken")?;
+                }
                 Err(error)
             }
             Err(error) => Err(error),
@@ -151,8 +296,10 @@ impl IdentityPersistence {
             &identity.canonical_username,
             "username_taken",
         )?;
-        self.assert_available(EMAIL_INDEX, &identity.canonical_email, "email_taken")?;
-        Ok(vec![
+        if !identity.canonical_email.is_empty() {
+            self.assert_available(EMAIL_INDEX, &identity.canonical_email, "email_taken")?;
+        }
+        let mut puts = vec![
             put(IDENTITY, identity.account_id.as_str(), identity)?,
             put(
                 USERNAME_INDEX,
@@ -161,14 +308,17 @@ impl IdentityPersistence {
                     account_id: identity.account_id.clone(),
                 },
             )?,
-            put(
+        ];
+        if !identity.canonical_email.is_empty() {
+            puts.push(put(
                 EMAIL_INDEX,
                 &index_id(&identity.canonical_email),
                 &IdentityIndex {
                     account_id: identity.account_id.clone(),
                 },
-            )?,
-        ])
+            )?);
+        }
+        Ok(puts)
     }
 
     fn find(&self, record_type: &str, canonical: &str) -> Result<Option<AccountIdentity>, Problem> {
@@ -224,7 +374,7 @@ fn validate_identity_for_write(identity: &AccountIdentity) -> Result<(), Problem
         || identity.username.trim() != identity.username.as_str()
         || identity.email.trim() != identity.email.as_str()
         || canonical_username(&identity.username)? != identity.canonical_username
-        || canonical_email(&identity.email)? != identity.canonical_email
+        || canonical_identity_email(identity)? != identity.canonical_email
     {
         return Err(Problem::new(
             "account_identity_invalid",
@@ -234,6 +384,15 @@ fn validate_identity_for_write(identity: &AccountIdentity) -> Result<(), Problem
         ));
     }
     Ok(())
+}
+
+fn canonical_identity_email(identity: &AccountIdentity) -> Result<String, Problem> {
+    if identity.email.is_empty() && identity.verification == IdentityVerification::AdminProvisioned
+    {
+        Ok(String::new())
+    } else {
+        canonical_email(&identity.email)
+    }
 }
 
 fn index_id(canonical: &str) -> String {

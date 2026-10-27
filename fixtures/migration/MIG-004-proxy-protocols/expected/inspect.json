@@ -15,7 +15,7 @@
   "runtimeFindings": [],
   "secretScan": {
     "filesWithSecretFields": 2,
-    "secretFieldsPresent": 2
+    "secretFieldsPresent": 4
   },
   "invalidRecords": [],
   "danglingReferences": [],

@@ -1,1 +1,99 @@
-{"organizations":[{"id":"organization-acl","name":"ACL Organization","slug":"acl-organization","status":"active","createdBy":"owner-acl","createdAt":"2025-01-01T00:00:00Z","updatedAt":"2025-01-01T00:00:00Z"}],"workspaces":[{"id":"workspace-acl","organizationId":"organization-acl","name":"ACL Workspace","mode":"team","createdAt":"2025-01-01T00:00:00Z","createdBy":"owner-acl","profileLimit":100,"memberLimit":20,"maxStorageBytes":1073741824,"entitlementState":"active","localEntitlementState":"active"}],"memberships":[{"workspaceId":"workspace-acl","userId":"owner-acl","email":"owner-acl@example.com","role":"owner","resourceAccessMode":"full","customCapabilities":null,"accountState":"active","platformRole":null,"accessSource":"direct","createdAt":"2025-01-01T00:00:00Z"},{"workspaceId":"workspace-acl","userId":"member-acl","email":"member-acl@example.com","role":"member","resourceAccessMode":"restricted","customCapabilities":[],"accountState":"active","platformRole":null,"accessSource":"direct","createdAt":"2025-01-02T00:00:00Z"},{"workspaceId":"workspace-acl","userId":"viewer-acl","email":"viewer-acl@example.com","role":"member","resourceAccessMode":"restricted","customCapabilities":[],"accountState":"active","platformRole":null,"accessSource":"direct","createdAt":"2025-01-03T00:00:00Z"}],"shareGrants":[{"id":"share-acl","workspaceId":"workspace-acl","resourceType":"profile","resourceId":"prf_18000000000040008000000000000018","resourceName":"ACL Profile","recipientEmail":"member-acl@example.com","accessMode":"run_sync_limited","createdAt":"2025-01-04T00:00:00Z","createdBy":"owner-acl","revokedAt":null}]}
+{
+  "organizations": [
+    {
+      "id": "organization-acl",
+      "name": "ACL Organization",
+      "slug": "acl-organization",
+      "status": "active",
+      "createdBy": "owner-acl",
+      "createdAt": "2025-01-01T00:00:00Z",
+      "updatedAt": "2025-01-01T00:00:00Z"
+    }
+  ],
+  "workspaces": [
+    {
+      "id": "workspace-acl",
+      "organizationId": "organization-acl",
+      "name": "ACL Workspace",
+      "mode": "team",
+      "createdAt": "2025-01-01T00:00:00Z",
+      "createdBy": "owner-acl",
+      "profileLimit": 100,
+      "memberLimit": 20,
+      "maxStorageBytes": 1073741824,
+      "entitlementState": "active",
+      "localEntitlementState": "active"
+    }
+  ],
+  "memberships": [
+    {
+      "workspaceId": "workspace-acl",
+      "userId": "owner-acl",
+      "email": "owner-acl@example.com",
+      "role": "owner",
+      "resourceAccessMode": "full",
+      "customCapabilities": null,
+      "accountState": "active",
+      "platformRole": null,
+      "accessSource": "direct",
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "workspaceId": "workspace-acl",
+      "userId": "member-acl",
+      "email": "member-acl@example.com",
+      "role": "member",
+      "resourceAccessMode": "restricted",
+      "customCapabilities": [],
+      "accountState": "active",
+      "platformRole": null,
+      "accessSource": "direct",
+      "createdAt": "2025-01-02T00:00:00Z"
+    },
+    {
+      "workspaceId": "workspace-acl",
+      "userId": "viewer-acl",
+      "email": "viewer-acl@example.com",
+      "role": "member",
+      "resourceAccessMode": "restricted",
+      "customCapabilities": [],
+      "accountState": "active",
+      "platformRole": null,
+      "accessSource": "direct",
+      "createdAt": "2025-01-03T00:00:00Z"
+    }
+  ],
+  "shareGrants": [
+    {
+      "id": "share-acl",
+      "workspaceId": "workspace-acl",
+      "resourceType": "profile",
+      "resourceId": "prf_18000000000040008000000000000018",
+      "resourceName": "ACL Profile",
+      "recipientEmail": "member-acl@example.com",
+      "accessMode": "run_sync_limited",
+      "createdAt": "2025-01-04T00:00:00Z",
+      "createdBy": "owner-acl",
+      "revokedAt": null
+    }
+  ],
+  "profiles": [
+    {
+      "id": "prf_18000000000040008000000000000018",
+      "workspaceId": "workspace-acl",
+      "name": "ACL Profile",
+      "runtime": "wayfern",
+      "runtimeVersion": "154.0.8037.57",
+      "releaseType": "stable",
+      "proxyId": null,
+      "vpnId": null,
+      "groupId": null,
+      "extensionGroupId": null,
+      "ephemeral": false,
+      "createdAt": "2025-01-01T00:00:00Z",
+      "updatedAt": "2025-01-01T00:00:00Z",
+      "tags": [],
+      "note": null
+    }
+  ]
+}

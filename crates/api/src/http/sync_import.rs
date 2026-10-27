@@ -2260,6 +2260,7 @@ mod tests {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -2282,6 +2283,7 @@ mod tests {
                         offline_entitled: false,
                     },
                     created_at: "2026-10-16T00:00:00Z".into(),
+                    default_extension_group_id: None,
                 },
             )
             .unwrap();

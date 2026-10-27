@@ -1,0 +1,6 @@
+{
+  "build": {
+    "devUrl": "http://127.0.0.1:1421",
+    "beforeDevCommand": "pnpm dev --port 1421"
+  }
+}

@@ -4,7 +4,15 @@ import {
   type Account,
   type AccountAdminRecord,
   type AccountCreatePendingInput,
+  type AccountDraftPage,
+  type AccountDraftsInput,
+  type AccountIdentity,
+  type AccountIdentityGetInput,
+  type AccountIdentityUpdateCommandInput,
+  type AccountPasswordChangeInput,
+  type AccountPasswordChangeReceipt,
   type AccountProvisioningReceipt,
+  type AccountSessionRevokeReceipt,
   type AccountStatusUpdateCommandInput,
   type AccountView,
   type ApiToken,
@@ -30,6 +38,8 @@ import {
   type GroupShareGrantList,
   type GroupShareRevokeInput,
   type GroupUpdateInput,
+  type ManagementBatchInput,
+  type ManagementBatchReceipt,
   type Member,
   type MemberIdInput,
   type MemberInvitationCreateInput,
@@ -38,15 +48,20 @@ import {
   type MemberInvitationRedeemInput,
   type MemberInvitationRevocationReceipt,
   type MemberInviteInput,
+  type MemberRemoveInput,
+  type MemberRemoveReceipt,
   type MemberRoleUpdateInput,
   type MigrationProfileDataImportInput,
   type OrganizationAccountCreateInput,
   type OrganizationCreateInput,
+  type OrganizationDeleteCommandInput,
+  type OrganizationDeleteReceipt,
   type OrganizationIdInput,
   type OrganizationMember,
   type OrganizationMemberPage,
   type OrganizationMemberStatusUpdateInput,
   type OrganizationMemberWorkspaceAssignInput,
+  type OrganizationOwnerTransferCommandInput,
   type OrganizationRecord,
   type OrganizationUpdateInput,
   type ProfileDeleteInput,
@@ -79,6 +94,8 @@ import {
   type TeamUpdateInput,
   type WorkspaceAccountCreateInput,
   type WorkspaceCreateInput,
+  type WorkspaceDeleteCommandInput,
+  type WorkspaceDeleteReceipt,
   type WorkspaceIdInput,
   type WorkspaceRecord,
   type WorkspaceUpdateInput,
@@ -161,6 +178,28 @@ export interface DesktopApi {
   }): Promise<{ token: string; tokenRecord: ApiToken }>;
   revokeApiToken(tokenId: string): Promise<void>;
   getAccount(): Promise<AccountView>;
+  getOwnAccountIdentity(): Promise<AccountIdentity>;
+  getAccountIdentity(input: AccountIdentityGetInput): Promise<AccountIdentity>;
+  updateOwnAccountIdentity(
+    input: AccountIdentityUpdateCommandInput,
+  ): Promise<AccountIdentity>;
+  changeOwnAccountPassword(
+    input: AccountPasswordChangeInput,
+  ): Promise<AccountPasswordChangeReceipt>;
+  listAccountSessions(
+    accountId: string,
+  ): Promise<
+    import("../../../frontend/src/generated/command-registry.ts").WebSessionPage
+  >;
+  revokeAccountSession(
+    accountId: string,
+    sessionId: string,
+  ): Promise<AccountSessionRevokeReceipt>;
+  generateAccountDrafts(input: AccountDraftsInput): Promise<AccountDraftPage>;
+  managementBatch(
+    input: ManagementBatchInput & { idempotencyKey?: string },
+    idempotencyKey?: string,
+  ): Promise<ManagementBatchReceipt>;
   listAccounts(): Promise<Page<AccountAdminRecord>>;
   createPendingAccount(
     input: AccountCreatePendingInput,
@@ -214,11 +253,20 @@ export interface DesktopApi {
   ): Promise<Member>;
   createOrganization(input: OrganizationCreateInput): Promise<Organization>;
   updateOrganization(input: OrganizationUpdateInput): Promise<Organization>;
+  deleteOrganization(
+    input: OrganizationDeleteCommandInput,
+  ): Promise<OrganizationDeleteReceipt>;
+  transferOrganizationOwner(
+    input: OrganizationOwnerTransferCommandInput,
+  ): Promise<Organization>;
   listWorkspaces(organizationId: string): Promise<Page<Workspace>>;
   getWorkspace(input: WorkspaceIdInput): Promise<Workspace>;
   getWorkspaceRecord(input: WorkspaceIdInput): Promise<WorkspaceRecord>;
   createWorkspace(input: WorkspaceCreateInput): Promise<Workspace>;
   updateWorkspace(input: WorkspaceUpdateBridgeInput): Promise<Workspace>;
+  deleteWorkspace(
+    input: WorkspaceDeleteCommandInput,
+  ): Promise<WorkspaceDeleteReceipt>;
   listTeams(workspaceId: string): Promise<TeamRecordList>;
   getTeam(input: TeamIdInput): Promise<TeamRecord>;
   createTeam(input: TeamCreateInput): Promise<TeamRecord>;
@@ -262,6 +310,7 @@ export interface DesktopApi {
   ): Promise<MemberInvitationRevocationReceipt>;
   activateMember(input: MemberIdInput): Promise<Member>;
   suspendMember(input: MemberIdInput): Promise<Member>;
+  removeMember(input: MemberRemoveInput): Promise<MemberRemoveReceipt>;
   updateMemberRole(input: MemberRoleUpdateInput): Promise<Member>;
   replaceProfileGroups(
     input: ProfileGroupsReplaceInput,
@@ -339,6 +388,14 @@ const invokeNames = {
   systemHealthGet: contractInvoke("system.health.get"),
   eventsStream: contractInvoke("events.stream"),
   accountGet: contractInvoke("account.get"),
+  accountIdentityOwnGet: contractInvoke("account.identity.own.get"),
+  accountIdentityGet: contractInvoke("account.identity.get"),
+  accountIdentityUpdate: contractInvoke("account.identity.update"),
+  accountPasswordChange: contractInvoke("account.password.change"),
+  accountSessionsList: contractInvoke("account.sessions.list"),
+  accountSessionsRevoke: contractInvoke("account.sessions.revoke"),
+  accountDraftsGenerate: contractInvoke("management.account.drafts.generate"),
+  managementBatch: contractInvoke("management.batch.execute"),
   accountList: contractInvoke("account.list"),
   accountCreate: contractInvoke("account.create"),
   accountCreateScoped: contractInvoke("account.create.scoped"),
@@ -358,11 +415,14 @@ const invokeNames = {
   ),
   organizationCreate: contractInvoke("organization.create"),
   organizationUpdate: contractInvoke("organization.update"),
+  organizationDelete: contractInvoke("organization.delete"),
+  organizationOwnerTransfer: contractInvoke("organization.owner.transfer"),
   workspaceList: contractInvoke("workspace.list"),
   workspaceGet: contractInvoke("workspace.get"),
   workspaceRecordGet: contractInvoke("workspace.record.get"),
   workspaceCreate: contractInvoke("workspace.create"),
   workspaceUpdate: contractInvoke("workspace.update"),
+  workspaceDelete: contractInvoke("workspace.delete"),
   teamList: contractInvoke("team.list"),
   teamGet: contractInvoke("team.get"),
   teamCreate: contractInvoke("team.create"),
@@ -392,6 +452,7 @@ const invokeNames = {
   memberInvitationRevoke: contractInvoke("member.invitation.revoke"),
   memberActivate: contractInvoke("member.activate"),
   memberSuspend: contractInvoke("member.suspend"),
+  memberRemove: contractInvoke("member.remove"),
   memberRoleUpdate: contractInvoke("member.role.update"),
   profileGroupsReplace: contractInvoke("profile.groups.replace"),
   profileUpdate: contractInvoke("profile.update"),
@@ -585,6 +646,39 @@ export function createTauriDesktopApi(
       };
     },
     getAccount: () => call<AccountView>(invokeNames.accountGet, {}),
+    getOwnAccountIdentity: () =>
+      call<AccountIdentity>(invokeNames.accountIdentityOwnGet, {}),
+    getAccountIdentity: (input) =>
+      call<AccountIdentity>(invokeNames.accountIdentityGet, input),
+    updateOwnAccountIdentity: (input) =>
+      call<AccountIdentity>(invokeNames.accountIdentityUpdate, input, true),
+    changeOwnAccountPassword: (input) =>
+      call<AccountPasswordChangeReceipt>(
+        invokeNames.accountPasswordChange,
+        input,
+        true,
+      ),
+    listAccountSessions: (accountId) =>
+      call<
+        import("../../../frontend/src/generated/command-registry.ts").WebSessionPage
+      >(invokeNames.accountSessionsList, { accountId }),
+    revokeAccountSession: (accountId, sessionId) =>
+      call<AccountSessionRevokeReceipt>(
+        invokeNames.accountSessionsRevoke,
+        { accountId, sessionId },
+        true,
+      ),
+    generateAccountDrafts: (input) =>
+      call<AccountDraftPage>(invokeNames.accountDraftsGenerate, input),
+    managementBatch: (input, key) => {
+      const { idempotencyKey, ...body } = input;
+      return call<ManagementBatchReceipt>(
+        invokeNames.managementBatch,
+        body,
+        true,
+        key ?? idempotencyKey,
+      );
+    },
     listAccounts: () =>
       call<Page<AccountAdminRecord>>(invokeNames.accountList, {}),
     createPendingAccount: (input, idempotencyKey) =>
@@ -692,6 +786,14 @@ export function createTauriDesktopApi(
       call<Organization>(invokeNames.organizationCreate, input, true),
     updateOrganization: (input) =>
       call<Organization>(invokeNames.organizationUpdate, input, true),
+    deleteOrganization: (input) =>
+      call<OrganizationDeleteReceipt>(
+        invokeNames.organizationDelete,
+        input,
+        true,
+      ),
+    transferOrganizationOwner: (input) =>
+      call<Organization>(invokeNames.organizationOwnerTransfer, input, true),
     listWorkspaces: (organizationId) =>
       call<Page<Workspace>>(invokeNames.workspaceList, { organizationId }),
     getWorkspace: (input) => call<Workspace>(invokeNames.workspaceGet, input),
@@ -701,6 +803,8 @@ export function createTauriDesktopApi(
       call<Workspace>(invokeNames.workspaceCreate, input, true),
     updateWorkspace: (input) =>
       call<Workspace>(invokeNames.workspaceUpdate, input, true),
+    deleteWorkspace: (input) =>
+      call<WorkspaceDeleteReceipt>(invokeNames.workspaceDelete, input, true),
     listTeams: (workspaceId) =>
       call<TeamRecordList>(invokeNames.teamList, { workspaceId }),
     getTeam: (input) => call<TeamRecord>(invokeNames.teamGet, input),
@@ -782,6 +886,8 @@ export function createTauriDesktopApi(
       call<Member>(invokeNames.memberActivate, input, true),
     suspendMember: (input) =>
       call<Member>(invokeNames.memberSuspend, input, true),
+    removeMember: (input) =>
+      call<MemberRemoveReceipt>(invokeNames.memberRemove, input, true),
     updateMemberRole: (input) =>
       call<Member>(invokeNames.memberRoleUpdate, input, true),
     replaceProfileGroups: (input) =>

@@ -355,9 +355,82 @@ pub struct ExtensionGroup {
     pub id: ExtensionGroupId,
     pub name: String,
     pub extension_ids: Vec<ExtensionId>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extension_sources: std::collections::BTreeMap<ExtensionId, GitExtensionSource>,
     pub sync_mode: Option<SyncMode>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// A portable source owned and authorized by the extension group's workspace.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitExtensionSource {
+    pub repository_url: String,
+    pub reference: String,
+    #[serde(default)]
+    pub subdirectory: String,
+}
+
+impl GitExtensionSource {
+    pub fn extension_id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(self).unwrap_or_default())
+        );
+        format!("ext_git_{}", &digest[..24])
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let url =
+            url::Url::parse(&self.repository_url).map_err(|_| "Invalid Git repository URL")?;
+        let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+        if self.repository_url.len() > 512
+            || url.scheme() != "https"
+            || url.host_str() != Some("github.com")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || parts.len() != 2
+            || parts.iter().any(|part| {
+                part.is_empty()
+                    || *part == "."
+                    || *part == ".."
+                    || !part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            })
+        {
+            return Err("Use an HTTPS GitHub owner/repository URL");
+        }
+        if self.reference.is_empty()
+            || self.reference.len() > 200
+            || self.reference.starts_with('/')
+            || self.reference.contains("..")
+            || !self
+                .reference
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'/' | b'.'))
+        {
+            return Err("Invalid Git branch, tag or commit");
+        }
+        if self.subdirectory.len() > 240
+            || self.subdirectory.starts_with('/')
+            || self.subdirectory.contains('\\')
+            || self.subdirectory.contains(':')
+            || self
+                .subdirectory
+                .split('/')
+                .any(|part| part == ".." || part == ".")
+            || self.subdirectory.chars().any(char::is_control)
+        {
+            return Err("Invalid extension subdirectory");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

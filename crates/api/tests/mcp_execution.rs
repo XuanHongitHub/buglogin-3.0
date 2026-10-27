@@ -315,6 +315,7 @@ fn seed_workspace(
         OrganizationPolicy {
             max_workspaces: 1,
             offline_entitled: false,
+            default_extension_groups_by_workspace: Default::default(),
         },
     )
     .unwrap();
@@ -340,6 +341,7 @@ fn seed_workspace(
                     offline_entitled: false,
                 },
                 created_at: "2026-07-22T00:00:00Z".into(),
+                default_extension_group_id: None,
             },
         )
         .unwrap();
@@ -1585,6 +1587,7 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
     let organization_policy = OrganizationPolicy {
         max_workspaces: 4,
         offline_entitled: false,
+        default_extension_groups_by_workspace: Default::default(),
     };
     let created_organization = dispatcher
         .dispatch(production_request(
@@ -1636,6 +1639,7 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
             offline_entitled: false,
         },
         created_at: created_at.into(),
+        default_extension_group_id: None,
     };
     let created_workspace = dispatcher
         .dispatch(production_request(

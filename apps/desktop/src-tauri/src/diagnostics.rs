@@ -347,6 +347,14 @@ fn safe_problem_failure_context(
     fields: &BTreeMap<String, Value>,
 ) -> serde_json::Map<String, Value> {
     let mut context = serde_json::Map::new();
+    if let Some(Value::String(reason)) = fields.get("cdpFailureReason")
+        && matches!(
+            reason.as_str(),
+            "generation_state_unavailable" | "custom_fingerprint_plan_required"
+        )
+    {
+        context.insert("cdpFailureReason".into(), Value::String(reason.clone()));
+    }
     if let Some(Value::String(class)) = fields.get("cdpErrorClass")
         && matches!(
             class.as_str(),
