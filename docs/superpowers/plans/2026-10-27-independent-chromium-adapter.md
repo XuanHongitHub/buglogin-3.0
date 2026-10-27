@@ -101,10 +101,9 @@ for the current comparison and parity bar. Primary references include:
   and multiple-profile isolation on Windows x64.
 - [x] Verify checksum-pinned install and keep the
   candidate outside the production runtime catalog.
-- [x] Run the native matrix on macOS arm64; Fury and adryfish CI jobs pass on
-  `macos-15-arm64` for commit `1b43358f` (run 40556330808). Windows x64 Fury
-  was separately verified by local native smoke; Windows Actions result is
-  tracked below and must be closed before calling this cross-platform CI green.
+- [x] Run the native matrix on Windows x64 and macOS arm64. Final run
+  `40565072885` on commit `9d6f9c89` passed all four Fury/adryfish jobs, including
+  native lifecycle and process-stop smoke.
 - [x] Compare measured results with the Phase 1 parity bar. The capability-by-
   capability evidence and the explicit gaps are in the design spec's Beta
   parity snapshot; no feature-parity claim is made.
@@ -170,12 +169,21 @@ promotion gate.
   v0.4.16 ships 155.0.8059.39. This beta is for adapter engineering and local
   evaluation only; its engine is not eligible for production/default use until
   rebased to a supported security-current revision and both native matrices rerun.
-- GitHub Actions run 40556330808 on commit `1b43358f` passed both macOS arm64
-  jobs. Fury's uploaded native evidence reports 10/10 checks passing with
-  Chromium 155.0.8059.39, including native config/client-hints readback,
-  worker consistency, canvas, extension, cookie restart, profile isolation,
-  proxy routing, and process-tree stop. Windows adryfish passed, but the Windows
-  Fury job spent 19 minutes in the silent package fetch and was canceled before
-  native smoke. Run 40559937116 reruns the matrix with byte-progress output, a
-  120-second no-data timeout, and a bounded extraction step; no result is
-  inferred until that run completes.
+- Earlier Windows runs exposed two CI defects: Node fetch progress was silent,
+  then Windows `tar` spent 15 minutes extracting the XZ archive. The fetch now
+  reports byte progress with a 120-second no-data timeout; Windows uses 7-Zip
+  with bounded extraction. The Fury artifact downloaded and extracted locally
+  in 3.4 seconds.
+- Native stop smoke then exposed macOS `process_identity_unverified`. The
+  process inspector had compared only the first `lsof` text mapping with the
+  approved executable; Fury can report other text mappings first. The fix scans
+  all text mappings and still requires a canonical-path match. If the browser
+  identity remains unresolvable during stop, the controller kills only the
+  process group owned by its child supervisor, avoiding a stuck lifecycle.
+- Final GitHub Actions run `40565072885` on `9d6f9c89` passed all four jobs:
+  Windows 2022 Fury/adryfish and macOS 15 arm64 Fury/adryfish. Each completed
+  contract/build/fetch/native smoke, including process stop. Fury native smoke
+  reports 10/10 checks per OS.
+- The final local focused Rust run passed 55 tests across the browser library,
+  Fury contract, independent Chromium contract, runtime contract, and lifecycle
+  suites. The native example build and Node fetch-script syntax check passed.
