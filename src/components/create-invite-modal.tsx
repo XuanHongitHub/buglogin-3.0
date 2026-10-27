@@ -14,7 +14,6 @@ import { LoadingButton } from "@/components/loading-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -33,6 +32,7 @@ import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
 import type { MemberRole } from "../../frontend/src/generated/command-registry";
+import { ManagementDrawerContent } from "./ui/management-drawer";
 import { RippleButton } from "./ui/ripple";
 
 interface CreateInviteModalProps {
@@ -242,7 +242,7 @@ export function CreateInviteModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-xl p-6">
+      <ManagementDrawerContent width="lg">
         <DialogHeader className="border-b border-border/50 pb-3">
           <div className="flex items-center gap-3">
             <div className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary shadow-xs">
@@ -524,7 +524,7 @@ export function CreateInviteModal({
             </DialogFooter>
           </div>
         )}
-      </DialogContent>
+      </ManagementDrawerContent>
     </Dialog>
   );
 }

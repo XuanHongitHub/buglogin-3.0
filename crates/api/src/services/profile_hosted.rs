@@ -65,7 +65,82 @@ pub struct HostedProfileDeleteReceipt {
     pub recoverable: bool,
 }
 
+fn has_managed_profile_key(
+    state: &ApiState,
+    profile_id: &ProfileId,
+    binding: &ProfileResource,
+) -> Result<bool, Problem> {
+    let Some(manifest) =
+        state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
+    else {
+        return Ok(false);
+    };
+    let Some(key_version) = manifest
+        .payload_encryption
+        .and_then(|encryption| encryption.key_version)
+    else {
+        return Ok(false);
+    };
+    state.has_managed_profile_key_envelope(
+        profile_id,
+        &binding.workspace_id,
+        &binding.resource_id,
+        &key_version,
+    )
+}
+
 impl HostedProfileService {
+    pub fn apply_workspace_extension_default(
+        state: &ApiState,
+        workspace_id: &WorkspaceId,
+        profile: &mut Profile,
+    ) -> Result<(), Problem> {
+        let workspace = state
+            .workspaces
+            .read()
+            .map_err(|_| {
+                problem(
+                    "workspace_unavailable",
+                    "Workspace service unavailable",
+                    503,
+                )
+            })?
+            .find_workspace_by_id(workspace_id)?;
+        let group_id = match workspace.default_extension_group_id {
+            Some(group_id) => Some(group_id),
+            None => state
+                .workspaces
+                .read()
+                .map_err(|_| {
+                    problem(
+                        "workspace_unavailable",
+                        "Workspace service unavailable",
+                        503,
+                    )
+                })?
+                .organization_policy_for_workspace(workspace_id)?
+                .default_extension_groups_by_workspace
+                .get(workspace_id)
+                .cloned(),
+        };
+        let Some(group_id) = group_id else {
+            return Ok(());
+        };
+        state
+            .extension_groups
+            .read()
+            .map_err(|_| {
+                problem(
+                    "extension_group_unavailable",
+                    "Extension groups unavailable",
+                    503,
+                )
+            })?
+            .get_in_workspace(workspace_id, &group_id)?;
+        profile.extension_group_id = Some(group_id);
+        Ok(())
+    }
+
     pub fn activate_member(
         state: &ApiState,
         principal: &Principal,
@@ -250,7 +325,7 @@ impl HostedProfileService {
         let before = state.control_aggregate()?;
         let result = (|| {
             let updated = state.replace_hosted_profile_groups(input)?;
-            if requires_rotation {
+            if requires_rotation && !has_managed_profile_key(state, &updated.value.id, &binding)? {
                 Self::validate_profile_key_rotation_recipient_bounds(
                     state,
                     &updated.value.id,
@@ -280,6 +355,7 @@ impl HostedProfileService {
         if state
             .current_sync_manifest(workspace_id, resource_id)?
             .is_some_and(|manifest| manifest.payload_encryption.is_some())
+            && !has_managed_profile_key(state, &binding.profile_id, &binding)?
         {
             state.mark_resource_key_rotation_pending(&binding.workspace_id, resource_id)?;
         }
@@ -303,6 +379,7 @@ impl HostedProfileService {
                 || !state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                     .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
             }
@@ -349,6 +426,7 @@ impl HostedProfileService {
                 || !state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                     .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
             }
@@ -388,6 +466,7 @@ impl HostedProfileService {
                 || !state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                     .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
             }
@@ -924,6 +1003,7 @@ impl HostedProfileService {
         );
         if let Some(binding) = binding.as_ref()
             && state.resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)?
+            && !has_managed_profile_key(state, profile_id, binding)?
         {
             if !can_update || !matches!(action, Action::Read | Action::Update) {
                 return Ok(false);
@@ -1090,6 +1170,9 @@ impl HostedProfileService {
                 404,
             ));
         };
+        if has_managed_profile_key(state, profile_id, &binding)? {
+            return Ok(());
+        }
         let shared_members = Self::effective_profile_key_recipients(
             state,
             profile_id,
@@ -1403,6 +1486,7 @@ impl HostedProfileService {
                 &binding.workspace_id,
                 &target_resource_id,
             )?;
+            Self::apply_workspace_extension_default(state, &binding.workspace_id, &mut target)?;
             let plan = Self::prepare_provision(target, binding.workspace_id.clone())?;
             state
                 .resources
@@ -1467,7 +1551,9 @@ impl HostedProfileService {
                 &input.profile_id,
             )?;
             check_revision(current.revision, input.expected_revision)?;
-            if state.resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)? {
+            if state.resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)?
+                && !has_managed_profile_key(state, &input.profile_id, &binding)?
+            {
                 return Err(problem(
                     "sync_key_rotation_pending",
                     "Profile sharing is unavailable until key rotation completes",
@@ -1481,7 +1567,31 @@ impl HostedProfileService {
                 .as_ref()
                 .is_some_and(|manifest| manifest.payload_encryption.is_some())
             {
-                validate_encrypted_profile_share(state, &binding, &input)?;
+                let managed_key_available = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.payload_encryption.as_ref())
+                    .and_then(|encryption| encryption.key_version.as_deref())
+                    .map(|key_version| {
+                        state.has_managed_profile_key_envelope(
+                            &input.profile_id,
+                            &binding.workspace_id,
+                            &binding.resource_id,
+                            key_version,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                if managed_key_available {
+                    if !input.recipient_key_envelopes.is_empty() {
+                        return Err(problem(
+                            "profile_key_envelope_unexpected",
+                            "Service-managed profile keys do not use recipient device envelopes",
+                            400,
+                        ));
+                    }
+                } else {
+                    validate_encrypted_profile_share(state, &binding, &input)?;
+                }
             } else if !input.recipient_key_envelopes.is_empty() {
                 return Err(problem(
                     "profile_key_envelope_unexpected",
@@ -1556,6 +1666,7 @@ impl HostedProfileService {
             if state
                 .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                 .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                && !has_managed_profile_key(state, &input.profile_id, &binding)?
             {
                 state.mark_resource_key_rotation_pending(
                     &binding.workspace_id,
@@ -2011,12 +2122,12 @@ fn profile_key_enrollment_required() -> Problem {
 
 #[cfg(test)]
 mod authorization_tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use buglogin_domain::{
         grant::ResourceGrant,
-        ids::{AccountId, GrantId, OrganizationId},
+        ids::{AccountId, ExtensionGroupId, GrantId, OrganizationId},
         member::{Member, MemberRole, MemberStatus},
         organization::{Organization, OrganizationPolicy},
         permissions::{Effect, Role},
@@ -2029,6 +2140,166 @@ mod authorization_tests {
         assert!(valid_profile_clone_name(&"é".repeat(200)));
         assert!(!valid_profile_clone_name(&"é".repeat(201)));
         assert!(!valid_profile_clone_name("   "));
+    }
+
+    #[test]
+    fn organization_extension_default_is_applied_unless_workspace_overrides_it() {
+        use crate::services::extension_groups::ExtensionGroupCreateInput;
+
+        let organization = Organization {
+            id: OrganizationId::new("org_extension_defaults").unwrap(),
+            account_id: AccountId::new("acct_extension_defaults").unwrap(),
+            name: "Extension defaults".into(),
+            created_at: "2026-10-27T00:00:00Z".into(),
+        };
+        let workspace_id = WorkspaceId::new("ws_extension_defaults").unwrap();
+        let org_group_id = ExtensionGroupId::new("extgrp_org_default").unwrap();
+        let workspace_group_id = ExtensionGroupId::new("extgrp_workspace_default").unwrap();
+        let admin = Principal {
+            roles: BTreeSet::from([Role::PlatformAdmin]),
+            ..Principal::default()
+        };
+        let policy = OrganizationPolicy {
+            max_workspaces: 4,
+            offline_entitled: false,
+            default_extension_groups_by_workspace: BTreeMap::from([(
+                workspace_id.clone(),
+                org_group_id.clone(),
+            )]),
+        };
+        let mut workspaces = crate::services::workspaces::WorkspaceService::new(
+            organization.clone(),
+            policy.clone(),
+        )
+        .unwrap();
+        workspaces
+            .create_workspace(
+                &admin,
+                &[],
+                &organization.id,
+                Workspace {
+                    id: workspace_id.clone(),
+                    organization_id: organization.id.clone(),
+                    name: "Defaults".into(),
+                    policy: WorkspacePolicy {
+                        max_profiles: 10,
+                        max_members: 10,
+                        max_storage_bytes: 1024,
+                        offline_entitled: false,
+                    },
+                    created_at: "2026-10-27T00:00:00Z".into(),
+                    default_extension_group_id: None,
+                },
+            )
+            .unwrap();
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap();
+        *state.workspaces.write().unwrap() = workspaces;
+        for group_id in [&org_group_id, &workspace_group_id] {
+            state
+                .extension_groups
+                .write()
+                .unwrap()
+                .create(
+                    &admin,
+                    &[],
+                    &workspace_id,
+                    ExtensionGroupCreateInput {
+                        workspace_id: workspace_id.clone(),
+                        extension_group_id: group_id.clone(),
+                        name: format!("{group_id:?}"),
+                        extension_ids: Vec::new(),
+                        extension_sources: BTreeMap::new(),
+                        sync_mode: None,
+                    },
+                )
+                .unwrap();
+        }
+        let mut profile = buglogin_domain::entities::Profile {
+            id: ProfileId::new("prf_extension_default").unwrap(),
+            name: "Default extensions".into(),
+            runtime: buglogin_domain::entities::Runtime::Wayfern,
+            runtime_version: None,
+            runtime_config: None,
+            state: ProfileState::Created,
+            archived: false,
+            fingerprint: None,
+            note: None,
+            proxy_id: None,
+            vpn_id: None,
+            group_ids: Vec::new(),
+            tags: Vec::new(),
+            extension_group_id: None,
+            sync_mode: None,
+            created_at: "2026-10-27T00:00:00Z".into(),
+            updated_at: "2026-10-27T00:00:00Z".into(),
+        };
+        HostedProfileService::apply_workspace_extension_default(
+            &state,
+            &workspace_id,
+            &mut profile,
+        )
+        .unwrap();
+        assert_eq!(profile.extension_group_id, Some(org_group_id));
+
+        let organization_record = state
+            .workspaces
+            .read()
+            .unwrap()
+            .get_organization(&admin, &[], &organization.id)
+            .unwrap();
+        state
+            .workspaces
+            .write()
+            .unwrap()
+            .update_organization(
+                &admin,
+                &[],
+                &organization.id,
+                crate::services::workspaces::OrganizationUpdate {
+                    organization: organization.clone(),
+                    policy: OrganizationPolicy {
+                        max_workspaces: 4,
+                        offline_entitled: false,
+                        default_extension_groups_by_workspace: BTreeMap::new(),
+                    },
+                    expected_revision: organization_record.revision,
+                },
+            )
+            .unwrap();
+        let mut workspace = state
+            .workspaces
+            .read()
+            .unwrap()
+            .get_workspace(&admin, &[], &organization.id, &workspace_id)
+            .unwrap();
+        workspace.default_extension_group_id = Some(workspace_group_id.clone());
+        state
+            .workspaces
+            .write()
+            .unwrap()
+            .update_workspace(
+                &admin,
+                &[],
+                &organization.id,
+                &workspace_id,
+                crate::services::workspaces::WorkspaceUpdate {
+                    workspace,
+                    expected_revision: 1,
+                },
+            )
+            .unwrap();
+        profile.extension_group_id = None;
+        HostedProfileService::apply_workspace_extension_default(
+            &state,
+            &workspace_id,
+            &mut profile,
+        )
+        .unwrap();
+        assert_eq!(profile.extension_group_id, Some(workspace_group_id));
     }
 
     #[test]
@@ -2168,6 +2439,7 @@ mod authorization_tests {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -2190,6 +2462,7 @@ mod authorization_tests {
                         offline_entitled: false,
                     },
                     created_at: "2026-10-12T00:00:00Z".into(),
+                    default_extension_group_id: None,
                 },
             )
             .unwrap();
@@ -2244,6 +2517,7 @@ mod authorization_tests {
             OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -2267,6 +2541,7 @@ mod authorization_tests {
                         offline_entitled: false,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
+                    default_extension_group_id: None,
                 },
             )
             .unwrap();

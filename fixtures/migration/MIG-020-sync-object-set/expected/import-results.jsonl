@@ -1,5 +1,5 @@
-{"status":"completed","objectCount":3,"tombstoneCount":1,"blobCount":3,"sourceUnchanged":true}
-{"status":"blocked","case":"tampered_blob","code":"migration_sync_export_invalid","sourceUnchanged":true}
-{"status":"blocked","case":"missing_blob","code":"migration_sync_export_invalid","sourceUnchanged":true}
-{"status":"blocked","case":"extra_blob","code":"migration_sync_export_invalid","sourceUnchanged":true}
-{"status":"blocked","case":"duplicate_blob","code":"migration_sync_export_invalid","sourceUnchanged":true}
+{"blobCount":3,"objectCount":3,"sourceUnchanged":true,"status":"completed","tombstoneCount":1}
+{"case":"tampered_blob","code":"migration_sync_export_invalid","sourceUnchanged":true,"status":"blocked"}
+{"case":"missing_blob","code":"migration_sync_export_invalid","sourceUnchanged":true,"status":"blocked"}
+{"case":"extra_blob","code":"migration_sync_export_invalid","sourceUnchanged":true,"status":"blocked"}
+{"case":"duplicate_blob","code":"migration_sync_export_invalid","sourceUnchanged":true,"status":"blocked"}

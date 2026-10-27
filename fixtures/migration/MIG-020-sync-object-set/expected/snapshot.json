@@ -1,9 +1,17 @@
 {
-  "snapshotId":"sha256:f995f76c773f3132e9e91e506d165701e58c5c149c11ed244526b1f31dddf10c",
-  "sourceTreeSha256":"f995f76c773f3132e9e91e506d165701e58c5c149c11ed244526b1f31dddf10c",
-  "totalBytes":2182,
-  "files":[
-    {"path":"sync-export.json","bytes":2056,"sha256":"40eb1e11bbf5cb960dd6d5afaf95a418ec61d0c77b4063565384068b2cbeca2c"},
-    {"path":"version.json","bytes":126,"sha256":"557b4eb8a96fd3728dfbef3efd41b93175444309845ded7f73baae991ad16d1e"}
+  "snapshotId": "sha256:f995f76c773f3132e9e91e506d165701e58c5c149c11ed244526b1f31dddf10c",
+  "sourceTreeSha256": "f995f76c773f3132e9e91e506d165701e58c5c149c11ed244526b1f31dddf10c",
+  "totalBytes": 2182,
+  "files": [
+    {
+      "path": "sync-export.json",
+      "bytes": 2056,
+      "sha256": "40eb1e11bbf5cb960dd6d5afaf95a418ec61d0c77b4063565384068b2cbeca2c"
+    },
+    {
+      "path": "version.json",
+      "bytes": 126,
+      "sha256": "557b4eb8a96fd3728dfbef3efd41b93175444309845ded7f73baae991ad16d1e"
+    }
   ]
 }

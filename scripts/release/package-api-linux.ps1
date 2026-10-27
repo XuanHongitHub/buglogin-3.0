@@ -13,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $buildRoot = (Resolve-Path $BuildDirectory).Path
 $buildManifestPath = Join-Path $buildRoot "release-manifest.json"
+$buildSignaturePath = Join-Path $buildRoot "release-manifest.sigstore.json"
 $artifactFullPath = [IO.Path]::GetFullPath($ArtifactDirectory)
 if (-not (Test-Path -LiteralPath $artifactFullPath)) {
     New-Item -ItemType Directory -Path $artifactFullPath | Out-Null
@@ -51,16 +52,15 @@ $buildManifest = Get-Content -LiteralPath $buildManifestPath -Raw | ConvertFrom-
 if ($buildManifest.commit -ne $commit -or $buildManifest.target -ne "x86_64-unknown-linux-gnu") {
     throw "Downloaded CI artifacts do not match the current commit and x86-64 Linux target."
 }
-if (-not (Get-Command "gh.exe" -ErrorAction SilentlyContinue)) {
-    throw "GitHub CLI is required to verify native API build provenance."
+if (-not (Test-Path -LiteralPath $buildSignaturePath -PathType Leaf)) {
+    throw "Sigstore signature bundle is missing from the downloaded GitHub artifact."
 }
-
-$repositoryUrl = Get-CommandOutput "git.exe" @("-C", $repoRoot, "remote", "get-url", "origin")
-$repositoryUrl = $repositoryUrl -replace "\.git$", ""
-if ($repositoryUrl -match "github\.com[:/]([^/]+/[^/]+)$") {
-    $repository = $Matches[1]
-} else {
-    throw "Origin must be a GitHub repository so the downloaded build attestation can be verified."
+if (-not (Get-Command "cosign.exe" -ErrorAction SilentlyContinue)) {
+    throw "Cosign is required to verify native API build provenance."
+}
+& cosign.exe verify-blob $buildManifestPath --bundle $buildSignaturePath --certificate-identity-regexp '^https://github\.com/(?:keyduc91/Malvanut-Login|XuanHongitHub/buglogin-3\.0)/\.github/workflows/native-api-artifact\.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Sigstore build provenance verification failed for release-manifest.json."
 }
 
 $inputs = @{
@@ -103,16 +103,10 @@ if ($openApiSourceHash -ne $buildManifest.artifacts.openApiSha256 -or $normalize
     throw "Downloaded OpenAPI contract does not match this checkout."
 }
 
-foreach ($path in @($inputs.bugloginApi, $inputs.adminPasswordReset, $openApiSource, $buildManifestPath)) {
-    & gh.exe attestation verify $path --repo $repository | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "GitHub build provenance verification failed for $([IO.Path]::GetFileName($path))."
-    }
-}
-
 Copy-Item -LiteralPath $inputs.bugloginApi -Destination $apiTarget
 Copy-Item -LiteralPath $inputs.adminPasswordReset -Destination $adminTarget
 $openApiTarget = Join-Path $artifactRoot "openapi-v1.yaml"
 Copy-Item -LiteralPath $openApiSource -Destination $openApiTarget
 Copy-Item -LiteralPath $buildManifestPath -Destination (Join-Path $artifactRoot "release-manifest.json")
+Copy-Item -LiteralPath $buildSignaturePath -Destination (Join-Path $artifactRoot "release-manifest.sigstore.json")
 Get-Content -LiteralPath (Join-Path $artifactRoot "release-manifest.json") -Raw

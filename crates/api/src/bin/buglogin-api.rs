@@ -20,6 +20,7 @@ use buglogin_storage::{
     secrets::SecretValue,
 };
 use buglogin_sync::coordination::{LocalCoordination, RedisCoordination, RedisCoordinationConfig};
+use buglogin_sync::crypto::ClientKey;
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
@@ -70,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let state = with_configured_migration_keys(state)?;
+    let state = with_configured_profile_key_provider(state, production)?;
     let state = with_configured_runtime_catalog(state)?;
     let state = match env::var("BUGLOGIN_DEVICE_VERIFICATION_URI") {
         Ok(uri) if !production || uri.starts_with("https://") => {
@@ -283,6 +285,20 @@ fn with_configured_migration_keys(state: ApiState) -> Result<ApiState, String> {
                 .with_migration_key(MigrationKey::from_bytes(*encryption_key))
                 .with_migration_signing_key(signing_key))
         }
+    }
+}
+
+fn with_configured_profile_key_provider(
+    state: ApiState,
+    production: bool,
+) -> Result<ApiState, String> {
+    let key = migration_key_from_env("BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX")?;
+    match key {
+        Some(key) => Ok(state.with_profile_key_wrapping_key(ClientKey::from_bytes(*key))),
+        None if production => {
+            Err("BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX is required in production".into())
+        }
+        None => Ok(state),
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use buglogin_domain::{
-    entities::{ExtensionGroup, SyncMode},
+    entities::{ExtensionGroup, GitExtensionSource, SyncMode},
     errors::Problem,
     ids::{ExtensionGroupId, ExtensionId, WorkspaceId},
     permissions::{Action, Capability, Grant, Principal, ResourceScope, is_allowed},
@@ -39,6 +39,8 @@ pub struct ExtensionGroupCreateInput {
     pub name: String,
     #[serde(default)]
     pub extension_ids: Vec<ExtensionId>,
+    #[serde(default)]
+    pub extension_sources: BTreeMap<ExtensionId, GitExtensionSource>,
     pub sync_mode: Option<SyncMode>,
 }
 
@@ -51,6 +53,8 @@ pub struct ExtensionGroupUpdateInput {
     pub name: String,
     #[serde(default)]
     pub extension_ids: Vec<ExtensionId>,
+    #[serde(default)]
+    pub extension_sources: Option<BTreeMap<ExtensionId, GitExtensionSource>>,
     pub sync_mode: Option<SyncMode>,
 }
 
@@ -78,6 +82,12 @@ pub struct ExtensionGroupService {
 }
 
 impl ExtensionGroupService {
+    pub(crate) fn has_workspace_records(&self, workspace_id: &WorkspaceId) -> bool {
+        self.groups
+            .values()
+            .any(|record| &record.workspace_id == workspace_id)
+    }
+
     pub fn create(
         &mut self,
         principal: &Principal,
@@ -88,6 +98,7 @@ impl ExtensionGroupService {
         ensure_workspace(workspace_id, &input.workspace_id)?;
         authorize(principal, grants, workspace_id, Action::Create)?;
         validate_fields(&input.name, &input.extension_ids)?;
+        validate_sources(&input.extension_ids, &input.extension_sources)?;
         if self.groups.contains_key(&input.extension_group_id) {
             return Err(problem(
                 "extension_group_exists",
@@ -101,6 +112,7 @@ impl ExtensionGroupService {
                 id: input.extension_group_id.clone(),
                 name: input.name.trim().to_owned(),
                 extension_ids: input.extension_ids,
+                extension_sources: input.extension_sources,
                 sync_mode: input.sync_mode,
                 created_at: now.clone(),
                 updated_at: now,
@@ -178,12 +190,24 @@ impl ExtensionGroupService {
                 )
             })?;
         check_revision(record.revision, input.expected_revision)?;
+        if let Some(sources) = input.extension_sources.as_ref() {
+            validate_sources(&input.extension_ids, sources)?;
+        }
+        let sources = input
+            .extension_sources
+            .unwrap_or_else(|| record.group.extension_sources.clone());
+        let sources: BTreeMap<_, _> = sources
+            .into_iter()
+            .filter(|(id, _)| input.extension_ids.contains(id))
+            .collect();
+        validate_sources(&input.extension_ids, &sources)?;
         record.revision = record
             .revision
             .checked_add(1)
             .ok_or_else(|| problem("revision_exhausted", "Revision exhausted", 409))?;
         record.group.name = input.name.trim().to_owned();
         record.group.extension_ids = input.extension_ids;
+        record.group.extension_sources = sources;
         record.group.sync_mode = input.sync_mode;
         record.group.updated_at = crate::clock::rfc3339("extension-group")?;
         Ok(record.clone())
@@ -267,6 +291,32 @@ fn authorize(
     }
 }
 
+pub fn validate_sources(
+    ids: &[ExtensionId],
+    sources: &BTreeMap<ExtensionId, GitExtensionSource>,
+) -> Result<(), Problem> {
+    if sources.len() > 256 || sources.keys().any(|id| !ids.contains(id)) {
+        return Err(problem(
+            "extension_source_invalid",
+            "Source must belong to an extension in this group",
+            422,
+        ));
+    }
+    for (id, source) in sources {
+        source
+            .validate()
+            .map_err(|reason| problem("extension_source_invalid", reason, 422))?;
+        if id.as_str() != source.extension_id() {
+            return Err(problem(
+                "extension_source_invalid",
+                "Git extension ID does not match its source",
+                422,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_workspace(expected: &WorkspaceId, actual: &WorkspaceId) -> Result<(), Problem> {
     if expected == actual {
         Ok(())
@@ -296,6 +346,72 @@ fn problem(code: &'static str, title: &'static str, status: u16) -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_sources_survive_persistence_and_older_clients_without_cross_workspace_access() {
+        let actor = admin();
+        let ws = workspace("wsp_alpha");
+        let mut input = create_input("wsp_alpha", "extgrp_git", "Git group");
+        let source = GitExtensionSource {
+            repository_url: "https://github.com/BaoNgoThien18/facebook-profile-sync-extension"
+                .into(),
+            reference: "main".into(),
+            subdirectory: String::new(),
+        };
+        let ext = ExtensionId::from_str(&source.extension_id()).unwrap();
+        input.extension_ids = vec![ext.clone()];
+        input.extension_sources.insert(ext.clone(), source.clone());
+        let mut service = ExtensionGroupService::default();
+        let created = service.create(&actor, &[], &ws, input).unwrap();
+        let snapshot = serde_json::to_vec(&service).unwrap();
+        let mut service: ExtensionGroupService = serde_json::from_slice(&snapshot).unwrap();
+        let mut update = ExtensionGroupUpdateInput {
+            workspace_id: ws.clone(),
+            extension_group_id: created.group.id.clone(),
+            expected_revision: 1,
+            name: "Renamed".into(),
+            extension_ids: vec![ext.clone()],
+            extension_sources: None,
+            sync_mode: Some(SyncMode::Managed),
+        };
+        let updated = service.update(&actor, &[], &ws, update.clone()).unwrap();
+        assert_eq!(updated.group.extension_sources[&ext], source);
+        assert!(
+            service
+                .get(&actor, &[], &workspace("wsp_beta"), &created.group.id)
+                .is_err()
+        );
+        update.expected_revision = 2;
+        let mut unsafe_source = source.clone();
+        unsafe_source.repository_url = "https://127.0.0.1/private".into();
+        update.extension_sources = Some([(ext.clone(), unsafe_source)].into());
+        assert_eq!(
+            service
+                .update(&actor, &[], &ws, update.clone())
+                .unwrap_err()
+                .code,
+            "extension_source_invalid"
+        );
+        update.extension_sources =
+            Some([(ExtensionId::from_str("ext_not_in_group").unwrap(), source)].into());
+        assert_eq!(
+            service
+                .update(&actor, &[], &ws, update.clone())
+                .unwrap_err()
+                .code,
+            "extension_source_invalid"
+        );
+        update.extension_sources = None;
+        update.extension_ids.clear();
+        assert!(
+            service
+                .update(&actor, &[], &ws, update)
+                .unwrap()
+                .group
+                .extension_sources
+                .is_empty()
+        );
+    }
     use buglogin_domain::permissions::Role;
 
     fn workspace(id: &str) -> WorkspaceId {
@@ -316,6 +432,7 @@ mod tests {
             extension_group_id: ExtensionGroupId::from_str(id).unwrap(),
             name: name.into(),
             extension_ids: vec![],
+            extension_sources: BTreeMap::new(),
             sync_mode: Some(SyncMode::Local),
         }
     }
@@ -354,6 +471,7 @@ mod tests {
                     expected_revision: 1,
                     name: "Renamed".into(),
                     extension_ids: vec![],
+                    extension_sources: None,
                     sync_mode: Some(SyncMode::Local),
                 },
             )
@@ -371,6 +489,7 @@ mod tests {
                         expected_revision: 1,
                         name: "Stale".into(),
                         extension_ids: vec![],
+                        extension_sources: None,
                         sync_mode: None,
                     }
                 )

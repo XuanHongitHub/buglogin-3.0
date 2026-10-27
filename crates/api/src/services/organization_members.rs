@@ -16,6 +16,25 @@ pub struct OrganizationMemberService {
 }
 
 impl OrganizationMemberService {
+    pub(crate) fn remove_owned_organization_memberships(
+        &mut self,
+        organization_id: &OrganizationId,
+        owner_id: &AccountId,
+    ) -> Result<(), Problem> {
+        if self.members.values().any(|member| {
+            &member.organization_id == organization_id && &member.account_id != owner_id
+        }) {
+            return Err(problem(
+                "organization_has_members",
+                "Remove organization members before deleting the organization",
+                409,
+            ));
+        }
+        self.members
+            .retain(|_, member| &member.organization_id != organization_id);
+        Ok(())
+    }
+
     pub fn get(
         &self,
         organization_id: &OrganizationId,

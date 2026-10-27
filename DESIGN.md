@@ -7,6 +7,8 @@ Applies to: desktop application, public web, account shell, workspace shell, pla
 
 ## Binding visual authority
 
+For organization/workspace management, account provisioning and editing (single/bulk), resource access, Platform Admin and personal account flows, use the [canonical management UI/UX specification (2026-10-26)](docs/superpowers/specs/2026-10-26-management-ui-ux-design.md). It replaces conflicting earlier management ASCII/layout decisions while preserving the shared Donut visual system and backend permission authority.
+
 Desktop visual and interaction behavior starts from the pinned Donut upstream source and its semantic theme mechanism. BugLogin-specific screens extend that language; they do not replace it with an agent-created CSS system. Web shells may change density and responsive composition by mode, but they share the same typography, semantic color roles, control geometry, status taxonomy, icon rules, and accessibility behavior. See [UI authority](docs/design/ui-authority.md).
 
 ## 1. Product design principles

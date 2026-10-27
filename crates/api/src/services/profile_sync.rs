@@ -116,7 +116,22 @@ pub(crate) fn authorize_resource_access(
                 409,
             ));
         }
-        if state.resource_key_rotation_pending(workspace_id, resource_id)? {
+        let managed_key_available = state
+            .current_sync_manifest(workspace_id, resource_id)?
+            .and_then(|manifest| manifest.payload_encryption)
+            .and_then(|encryption| encryption.key_version)
+            .map(|key_version| {
+                state.has_managed_profile_key_envelope(
+                    &binding.profile_id,
+                    workspace_id,
+                    resource_id,
+                    &key_version,
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if state.resource_key_rotation_pending(workspace_id, resource_id)? && !managed_key_available
+        {
             let can_rotate = crate::services::profile_hosted::HostedProfileService::authorized(
                 state,
                 principal,

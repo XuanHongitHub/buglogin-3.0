@@ -472,6 +472,26 @@ pub async fn import_profile_cookies(
     profile_id: String,
     content: String,
 ) -> Result<Value, Problem> {
+    import_profile_cookies_inner(state, app, profile_id, content, None).await
+}
+
+pub async fn import_profile_cookies_replacing_domains(
+    state: State<'_, DesktopState>,
+    app: AppHandle,
+    profile_id: String,
+    content: String,
+    domains: Vec<String>,
+) -> Result<Value, Problem> {
+    import_profile_cookies_inner(state, app, profile_id, content, Some(domains)).await
+}
+
+async fn import_profile_cookies_inner(
+    state: State<'_, DesktopState>,
+    app: AppHandle,
+    profile_id: String,
+    content: String,
+    replace_domains: Option<Vec<String>>,
+) -> Result<Value, Problem> {
     let cookies = parse_raw_cookies(&content);
     if cookies.is_empty() {
         return Err(Problem::new(
@@ -560,7 +580,22 @@ pub async fn import_profile_cookies(
     let now_chrome = now_epoch_us + windows_epoch_diff;
 
     let mut imported = 0;
+    let mut added = 0;
+    let mut replaced = 0;
+    let mut deleted = 0;
     {
+        if let Some(domains) = replace_domains.as_ref() {
+            for domain in domains {
+                deleted += tx
+                    .execute(
+                        "DELETE FROM cookies WHERE host_key = ?1 AND top_frame_site_key = ''",
+                        params![domain],
+                    )
+                    .map_err(|e| {
+                        Problem::new("cookie_delete_error", e.to_string(), 500, "cookie-import")
+                    })?;
+            }
+        }
         let mut insert_stmt = tx
             .prepare_cached(
                 "INSERT OR REPLACE INTO cookies (
@@ -585,7 +620,15 @@ pub async fn import_profile_cookies(
             let source_scheme = if c.is_secure { 2 } else { 1 };
             let source_port = if c.is_secure { 443 } else { 80 };
 
-            if insert_stmt
+            let existed: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM cookies WHERE host_key = ?1 AND top_frame_site_key = '' AND name = ?2 AND path = ?3)",
+                    params![c.domain, c.name, c.path],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            insert_stmt
                 .execute(params![
                     now_chrome,
                     c.domain,
@@ -603,9 +646,14 @@ pub async fn import_profile_cookies(
                     source_port,
                     now_chrome,
                 ])
-                .is_ok()
-            {
-                imported += 1;
+                .map_err(|e| {
+                    Problem::new("cookie_insert_error", e.to_string(), 500, "cookie-import")
+                })?;
+            imported += 1;
+            if existed {
+                replaced += 1;
+            } else {
+                added += 1;
             }
         }
     }
@@ -621,7 +669,9 @@ pub async fn import_profile_cookies(
 
     Ok(json!({
         "cookies_imported": imported,
-        "cookies_replaced": 0,
+        "cookies_added": added,
+        "cookies_replaced": replaced,
+        "cookies_deleted": deleted,
         "errors": []
     }))
 }

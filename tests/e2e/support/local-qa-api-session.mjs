@@ -8,6 +8,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -134,6 +135,25 @@ async function assertBinaries() {
   }
 }
 
+async function latestRustInputMtimeMs(directory) {
+  let latest = 0;
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      latest = Math.max(latest, await latestRustInputMtimeMs(path));
+    } else if (
+      entry.isFile() &&
+      (entry.name === "Cargo.toml" ||
+        entry.name === "build.rs" ||
+        /\.(?:rs|yaml|yml)$/i.test(entry.name))
+    ) {
+      latest = Math.max(latest, (await stat(path)).mtimeMs);
+    }
+  }
+  return latest;
+}
+
 async function stageBinaries() {
   const workspaceManifest = await readFile(workspaceManifestPath, "utf8");
   const workspacePackage = workspaceManifest.match(
@@ -145,7 +165,13 @@ async function stageBinaries() {
   if (!sourceVersion) {
     throw new Error("Could not read the workspace package version.");
   }
-  const manifestStat = await stat(workspaceManifestPath);
+  const [manifestStat, lockStat, crateInputsMtimeMs, controlInputsMtimeMs] =
+    await Promise.all([
+      stat(workspaceManifestPath),
+      stat(join(root, "Cargo.lock")),
+      latestRustInputMtimeMs(join(root, "crates")),
+      latestRustInputMtimeMs(join(root, "apps", "control")),
+    ]);
   const [apiStat, bootstrapStat] = await Promise.all([
     stat(apiBinary),
     stat(bootstrapBinary),
@@ -153,12 +179,18 @@ async function stageBinaries() {
   const apiTime = apiStat.mtime.toISOString();
   const bootstrapTime = bootstrapStat.mtime.toISOString();
   const manifestTime = manifestStat.mtime.toISOString();
+  const latestSourceTime = Math.max(
+    manifestStat.mtimeMs,
+    lockStat.mtimeMs,
+    crateInputsMtimeMs,
+    controlInputsMtimeMs,
+  );
   console.log(
-    `sourceVersion=${sourceVersion}; sourceManifestMtime=${manifestTime}; apiBinaryMtime=${apiTime}; bootstrapBinaryMtime=${bootstrapTime}`,
+    `sourceVersion=${sourceVersion}; sourceManifestMtime=${manifestTime}; latestRustInputMtime=${new Date(latestSourceTime).toISOString()}; apiBinaryMtime=${apiTime}; bootstrapBinaryMtime=${bootstrapTime}`,
   );
   if (
-    apiStat.mtimeMs < manifestStat.mtimeMs ||
-    bootstrapStat.mtimeMs < manifestStat.mtimeMs
+    apiStat.mtimeMs < latestSourceTime ||
+    bootstrapStat.mtimeMs < latestSourceTime
   ) {
     throw new Error(
       `Debug API/bootstrap binaries predate source version ${sourceVersion}; rebuild both with: cargo build -p buglogin-api --bin buglogin-api --bin buglogin-dev-bootstrap`,

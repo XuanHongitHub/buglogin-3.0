@@ -52,6 +52,7 @@ jobs:
           ref: ${{ inputs.source-sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-buglogin
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Create signed updater configuration
         shell: bash
         env:
@@ -106,20 +107,21 @@ jobs:
         run: |
           node scripts/release/generate-spdx.mjs dist-release/dist.spdx.json
           node scripts/release/generate-evidence.mjs dist-release windows-x64 "${{ inputs.source-ref }}" "${{ inputs.source-sha }}" "$TARGET"
+      - name: Sign release checksums with keyless Sigstore
+        shell: bash
+        run: cosign sign-blob dist-release/SHA256SUMS.txt --bundle dist-release/provenance.sigstore.json --yes
       - name: Verify signed release evidence and optional updater metadata
         shell: bash
         env:
           BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64: ${{ vars.BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64 }}
         run: node scripts/release/verify-bundle.mjs dist-release
-      - name: Attest signed Windows evidence
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
-        with:
-          subject-path: dist-release/*
-      - name: Verify Windows provenance attestations
+      - name: Verify Windows Sigstore provenance
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: for artifact in dist-release/*; do gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"; done
+        run: >-
+          cosign verify-blob dist-release/SHA256SUMS.txt
+          --bundle dist-release/provenance.sigstore.json
+          --certificate-identity-regexp '^https://github\.com/(?:keyduc91/Malvanut-Login|XuanHongitHub/buglogin-3\.0)/\.github/workflows/(release|signing)\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: buglogin-${{ inputs.source-ref }}-windows-x64-signed
@@ -171,6 +173,7 @@ jobs:
           ref: ${{ inputs.source-sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-buglogin
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Validate embedded runtime trust keys
         shell: bash
         run: node scripts/release/verify-runtime-trust-keys.mjs
@@ -261,20 +264,21 @@ jobs:
         run: |
           node scripts/release/generate-spdx.mjs dist-release/dist.spdx.json
           node scripts/release/generate-evidence.mjs dist-release "${{ matrix.platform }}" "${{ inputs.source-ref }}" "${{ inputs.source-sha }}" "$TARGET"
+      - name: Sign release checksums with keyless Sigstore
+        shell: bash
+        run: cosign sign-blob dist-release/SHA256SUMS.txt --bundle dist-release/provenance.sigstore.json --yes
       - name: Verify signed release evidence and optional updater metadata
         shell: bash
         env:
           BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64: ${{ vars.BUGLOGIN_UPDATER_PUBLIC_KEY_BASE64 }}
         run: node scripts/release/verify-bundle.mjs dist-release
-      - name: Attest signed macOS evidence
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
-        with:
-          subject-path: dist-release/*
-      - name: Verify macOS provenance attestations
+      - name: Verify macOS Sigstore provenance
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: for artifact in dist-release/*; do gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"; done
+        run: >-
+          cosign verify-blob dist-release/SHA256SUMS.txt
+          --bundle dist-release/provenance.sigstore.json
+          --certificate-identity-regexp '^https://github\.com/(?:keyduc91/Malvanut-Login|XuanHongitHub/buglogin-3\.0)/\.github/workflows/(release|signing)\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: buglogin-${{ inputs.source-ref }}-${{ matrix.platform }}-signed

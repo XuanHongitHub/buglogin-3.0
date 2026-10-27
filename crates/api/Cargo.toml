@@ -9,6 +9,7 @@ version.workspace = true
 [dependencies]
 axum = "0.8"
 futures-util = "0.3"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6.11", features = ["cors"] }
 buglogin-browser = { path = "../browser" }
 buglogin-domain = { path = "../domain" }
@@ -35,7 +36,6 @@ jsonschema = { version = "0.56.0", default-features = false }
 zeroize = { version = "1.8", features = ["derive"] }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
 
 [lints]

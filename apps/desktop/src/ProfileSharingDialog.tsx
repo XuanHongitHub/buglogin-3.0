@@ -4,7 +4,6 @@ import {
   LuCheck,
   LuEye,
   LuFilter,
-  LuLaptop,
   LuPlay,
   LuSearch,
   LuShare2,
@@ -16,7 +15,6 @@ import {
   LuX,
 } from "react-icons/lu";
 import { Button } from "../../../src/components/ui/button.js";
-import { Checkbox } from "../../../src/components/ui/checkbox.js";
 import {
   Dialog,
   DialogContent,
@@ -34,12 +32,9 @@ import {
 } from "../../../src/lib/toast-utils.js";
 import { cn } from "../../../src/lib/utils.js";
 import type { BrowserProfile } from "../../../src/types.js";
-import { type DesktopApi, normalizeProblem } from "./bridge.js";
+import { type DesktopApi } from "./bridge.js";
 import type { ProfileSharePermission } from "./contracts.js";
 
-type RecipientKey = Awaited<
-  ReturnType<DesktopApi["listProfileShareRecipientDeviceKeys"]>
->[number];
 type Grant = Awaited<ReturnType<DesktopApi["listGrants"]>>["items"][number];
 type Member = Awaited<ReturnType<DesktopApi["listMembers"]>>["items"][number];
 function displayMember(member?: Member | null) {
@@ -51,20 +46,6 @@ function displayMember(member?: Member | null) {
   };
 }
 
-type RotationRecipient = Awaited<
-  ReturnType<DesktopApi["listProfileKeyRotationRecipients"]>
->[number];
-type RotationReview = {
-  pending: boolean;
-  recipients: RotationRecipient[];
-  confirmed: boolean;
-  error?: string;
-  operationId?: string;
-  operationStatus?:
-    | "accepted"
-    | Awaited<ReturnType<DesktopApi["getOperation"]>>["status"];
-  operationError?: string;
-};
 type Outcome = {
   profileId: string;
   label: string;
@@ -150,29 +131,20 @@ export function ProfileSharingDialog({
   >([]);
   const [memberId, setMemberId] = useState("");
   const [permission, setPermission] = useState<ProfileSharePermission>("read");
-  const [deviceKeys, setDeviceKeys] = useState<RecipientKey[]>([]);
-  const [keysForMember, setKeysForMember] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [keyError, setKeyError] = useState("");
   const [outcomes, setOutcomes] = useState<Outcome[]>([]);
   const [pendingRevoke, setPendingRevoke] = useState<{
     profile: BrowserProfile;
     grant: Grant;
   } | null>(null);
-  const [rotationReviews, setRotationReviews] = useState<
-    Record<string, RotationReview>
-  >({});
-  const [rotationBusyProfileId, setRotationBusyProfileId] = useState("");
   const [memberSearch, setMemberSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<
     "all" | "owner" | "admin" | "lead" | "operator" | "member"
   >("all");
   const [activeTab, setActiveTab] = useState<"grant" | "existing">("grant");
 
-  const _needsFingerprintReview = true;
   const selectedMember = members.find((member) => member.id === memberId);
   const selectedMemberIsCurrentAccount =
     selectedMember?.accountId === currentAccountId;
@@ -180,9 +152,6 @@ export function ProfileSharingDialog({
     ? displayMember(selectedMember)
     : null;
 
-  const hasPendingRotation = profiles.some(
-    (profile) => rotationReviews[profile.id]?.pending === true,
-  );
   const activeMembers = members.filter((member) => member.status === "active");
 
   const membersWithExistingGrants = useMemo(() => {
@@ -283,9 +252,6 @@ export function ProfileSharingDialog({
           ? current
           : "",
       );
-      setDeviceKeys([]);
-      setKeysForMember("");
-      setConfirmed(false);
     } catch (error) {
       setLoadError(problemText(error));
     } finally {
@@ -297,172 +263,13 @@ export function ProfileSharingDialog({
     void load();
   }, [load]);
 
-  const refreshRotationRecipients = useCallback(async () => {
-    const rows = await Promise.all(
-      profiles.filter(encrypted).map(async (profile) => {
-        try {
-          const recipients = await api.listProfileKeyRotationRecipients(
-            profile.id,
-          );
-          return [
-            profile.id,
-            {
-              pending: true,
-              recipients,
-              confirmed: false,
-            } satisfies RotationReview,
-          ] as const;
-        } catch (error) {
-          const problem = normalizeProblem(error);
-          if (
-            problem.code === "sync_key_rotation_not_pending" ||
-            problem.code === "profile_forbidden" ||
-            problem.status === 404
-          ) {
-            return [profile.id, null] as const;
-          }
-          return [
-            profile.id,
-            {
-              pending: false,
-              recipients: [],
-              confirmed: false,
-              error: problemText(error),
-            } satisfies RotationReview,
-          ] as const;
-        }
-      }),
-    );
-    const next: Record<string, RotationReview> = {};
-    for (const [profileId, review] of rows) {
-      if (review) next[profileId] = review;
-    }
-    return next;
-  }, [api, profiles]);
-
-  useEffect(() => {
-    if (!open || profiles.length === 0) {
-      setRotationReviews({});
-      return;
-    }
-    let current = true;
-    void refreshRotationRecipients().then((next) => {
-      if (!current) return;
-      setRotationReviews(next);
-    });
-    return () => {
-      current = false;
-    };
-  }, [open, profiles, refreshRotationRecipients]);
-
-  const rotationOperationSignature = JSON.stringify(
-    Object.entries(rotationReviews)
-      .filter(
-        ([, review]) =>
-          review.operationId &&
-          (review.operationStatus === "accepted" ||
-            review.operationStatus === "queued" ||
-            review.operationStatus === "running"),
-      )
-      .map(([profileId, review]) => [profileId, review.operationId]),
-  );
-
-  useEffect(() => {
-    if (!open || !rotationOperationSignature) return;
-    let current = true;
-    const timers = new Set<ReturnType<typeof setTimeout>>();
-    const pending = JSON.parse(rotationOperationSignature) as Array<
-      [string, string]
-    >;
-    const poll = async (profileId: string, operationId: string) => {
-      try {
-        const operation = await api.getOperation(operationId);
-        if (!current) return;
-        setRotationReviews((previous) => {
-          const review = previous[profileId];
-          if (!review || review.operationId !== operationId) return previous;
-          return {
-            ...previous,
-            [profileId]: {
-              ...review,
-              operationStatus: operation.status,
-              pending: operation.status !== "completed",
-              operationError: operation.error
-                ? problemText(operation.error)
-                : undefined,
-            },
-          };
-        });
-        if (operation.status === "queued" || operation.status === "running") {
-          const timer = setTimeout(
-            () => void poll(profileId, operationId),
-            1500,
-          );
-          timers.add(timer);
-        }
-      } catch {
-        if (!current) return;
-        const timer = setTimeout(() => void poll(profileId, operationId), 3000);
-        timers.add(timer);
-      }
-    };
-    for (const [profileId, operationId] of pending)
-      void poll(profileId, operationId);
-    return () => {
-      current = false;
-      for (const timer of timers) clearTimeout(timer);
-    };
-  }, [api, open, rotationOperationSignature]);
-
-  useEffect(() => {
-    let current = true;
-    setDeviceKeys([]);
-    setKeysForMember("");
-    setConfirmed(false);
-    setKeyError("");
-    if (open && memberId && profiles[0]) {
-      void api
-        .listProfileShareRecipientDeviceKeys({
-          profileId: profiles[0].id,
-          memberId,
-        })
-        .then((keys) => {
-          if (!current) return;
-          setDeviceKeys(keys);
-          setKeysForMember(memberId);
-          if (keys.length > 0) {
-            setConfirmed(true);
-          }
-        })
-        .catch((error: unknown) => {
-          if (current) setKeyError(problemText(error));
-        });
-    }
-    return () => {
-      current = false;
-    };
-  }, [api, memberId, open, profiles]);
-
   const share = async () => {
     if (
       !selectedMember ||
       busy ||
-      rotationBusyProfileId ||
-      hasPendingRotation ||
-      profiles.some((profile) => {
-        const status = rotationReviews[profile.id]?.operationStatus;
-        return (
-          status === "accepted" || status === "queued" || status === "running"
-        );
-      }) ||
       loading ||
       loadError ||
       profiles.length === 0
-    )
-      return;
-    if (
-      deviceKeys.length > 0 &&
-      (!confirmed || keysForMember !== selectedMember.id || !!keyError)
     )
       return;
     setBusy(true);
@@ -485,13 +292,6 @@ export function ProfileSharingDialog({
           memberId: selectedMember.id,
           permission,
           expectedRevision: currentProfile.revision,
-          ...(deviceKeys.length > 0
-            ? {
-                confirmedDeviceFingerprints: deviceKeys.map(
-                  ({ deviceId, fingerprint }) => ({ deviceId, fingerprint }),
-                ),
-              }
-            : {}),
         });
         next.push({ profileId: profile.id, label: profile.name, ok: true });
       } catch (error) {
@@ -505,7 +305,6 @@ export function ProfileSharingDialog({
     }
     setOutcomes(next);
     setBusy(false);
-    setRotationReviews(await refreshRotationRecipients());
     await load();
     setOutcomes(next);
 
@@ -523,76 +322,9 @@ export function ProfileSharingDialog({
     }
   };
 
-  const rotateKeys = async (profile: BrowserProfile) => {
-    const review = rotationReviews[profile.id];
-    if (!review?.pending || !review.confirmed || busy || rotationBusyProfileId)
-      return;
-    setRotationBusyProfileId(profile.id);
-    setRotationReviews((previous) => ({
-      ...previous,
-      [profile.id]: { ...review, error: undefined, operationError: undefined },
-    }));
-    try {
-      const operation = await api.executeProfileKeyRotation({
-        profileId: profile.id,
-        confirmedRecipients: review.recipients.flatMap((recipient) =>
-          recipient.deviceKeys.map((device) => ({
-            memberId: recipient.memberId,
-            deviceId: device.deviceId,
-            fingerprint: device.fingerprint,
-          })),
-        ),
-      });
-      setRotationReviews((previous) => ({
-        ...previous,
-        [profile.id]: {
-          ...previous[profile.id],
-          operationId: operation.operationId,
-          operationStatus: operation.status,
-        },
-      }));
-    } catch (error) {
-      const message = problemText(error);
-      try {
-        const recipients = await api.listProfileKeyRotationRecipients(
-          profile.id,
-        );
-        setRotationReviews((previous) => ({
-          ...previous,
-          [profile.id]: {
-            pending: true,
-            recipients,
-            confirmed: false,
-            error: message,
-          },
-        }));
-      } catch (refreshError) {
-        const problem = normalizeProblem(refreshError);
-        setRotationReviews((previous) => ({
-          ...previous,
-          [profile.id]: {
-            ...previous[profile.id],
-            pending:
-              problem.code !== "sync_key_rotation_not_pending" &&
-              problem.status !== 404,
-            confirmed: false,
-            error: message,
-          },
-        }));
-      }
-    } finally {
-      setRotationBusyProfileId("");
-    }
-  };
-
   const revoke = async (profile: BrowserProfile, grant: Grant) => {
-    const rotationStatus = rotationReviews[profile.id]?.operationStatus;
     if (
       busy ||
-      rotationBusyProfileId === profile.id ||
-      rotationStatus === "accepted" ||
-      rotationStatus === "queued" ||
-      rotationStatus === "running" ||
       !Number.isSafeInteger(profile.revision) ||
       (profile.revision ?? 0) < 1
     )
@@ -608,7 +340,6 @@ export function ProfileSharingDialog({
       });
       setPendingRevoke(null);
       await load();
-      setRotationReviews(await refreshRotationRecipients());
       showSuccessToast(
         t("profileSharing.revokeSuccess", {
           defaultValue: "Đã thu hồi quyền truy cập thành công",
@@ -965,94 +696,6 @@ export function ProfileSharingDialog({
                 </div>
               </div>
 
-              {/* End-to-End Encryption Device Review */}
-              {memberId && (
-                <div className="space-y-2 rounded-lg border border-primary/25 bg-primary/5 p-2.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <LuShieldCheck className="size-4 text-emerald-500" />
-                      <p className="text-xs font-semibold text-foreground">
-                        {t("profileSharing.deviceReview", {
-                          defaultValue: "Xác thực thiết bị nhận (Mã hóa E2E)",
-                        })}
-                      </p>
-                    </div>
-                    {deviceKeys.length > 0 && (
-                      <span className="text-[10px] text-emerald-600 bg-emerald-500/10 px-2 py-0.5 rounded-full font-medium border border-emerald-500/20">
-                        {deviceKeys.length} thiết bị hợp lệ
-                      </span>
-                    )}
-                  </div>
-                  {keyError ? (
-                    <p role="alert" className="text-xs text-destructive">
-                      {keyError}
-                    </p>
-                  ) : null}
-                  {keysForMember !== memberId && !keyError ? (
-                    <p role="status" className="text-xs text-muted-foreground">
-                      {t("profileSharing.loadingDevices", {
-                        defaultValue: "Đang tải thông tin thiết bị...",
-                      })}
-                    </p>
-                  ) : null}
-                  {keysForMember === memberId &&
-                  deviceKeys.length === 0 &&
-                  !keyError ? (
-                    <p role="status" className="text-xs text-muted-foreground">
-                      Thành viên này sẽ nhận quyền ngay khi đăng nhập thiết bị
-                      mới.
-                    </p>
-                  ) : null}
-                  {deviceKeys.length > 0 && (
-                    <div className="space-y-1.5">
-                      {deviceKeys.map((key, idx) => (
-                        <div
-                          key={key.deviceId}
-                          className="flex flex-col gap-1 rounded-md border border-border/60 bg-background/80 p-2 text-xs"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="flex items-center gap-1.5 font-medium text-foreground">
-                              <LuLaptop className="size-3.5 text-primary" />
-                              <span>Thiết bị nhận #{idx + 1}</span>
-                            </span>
-                            <span className="text-[10px] font-mono text-muted-foreground">
-                              ID: #{key.deviceId.slice(0, 10)}...
-                            </span>
-                          </div>
-                          <code className="block break-all rounded bg-muted/60 px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-                            {key.fingerprint}
-                          </code>
-                        </div>
-                      ))}
-                      <div className="flex items-center gap-2 border-t border-primary/20 pt-2">
-                        <Checkbox
-                          id="profile-share-confirm-devices"
-                          checked={confirmed}
-                          disabled={
-                            deviceKeys.length === 0 ||
-                            keysForMember !== memberId ||
-                            !!keyError ||
-                            busy
-                          }
-                          onCheckedChange={(value) =>
-                            setConfirmed(value === true)
-                          }
-                        />
-                        <Label
-                          htmlFor="profile-share-confirm-devices"
-                          className="cursor-pointer text-xs leading-5 text-foreground font-medium"
-                        >
-                          {t("profileSharing.confirmDevices", {
-                            count: deviceKeys.length,
-                            defaultValue: `Xác nhận khóa thiết bị người nhận (${deviceKeys.length} thiết bị)`,
-                          })}
-                        </Label>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
               {/* Action Button */}
               <div className="flex items-center justify-between pt-2 border-t border-border/40">
                 <span className="text-xs text-muted-foreground truncate max-w-[320px]">
@@ -1074,21 +717,7 @@ export function ProfileSharingDialog({
                 <Button
                   type="button"
                   onClick={() => void share()}
-                  disabled={
-                    busy ||
-                    !!rotationBusyProfileId ||
-                    hasPendingRotation ||
-                    profiles.some((profile) =>
-                      ["accepted", "queued", "running"].includes(
-                        rotationReviews[profile.id]?.operationStatus ?? "",
-                      ),
-                    ) ||
-                    loading ||
-                    !!loadError ||
-                    !selectedMember ||
-                    (deviceKeys.length > 0 &&
-                      (!confirmed || keysForMember !== memberId || !!keyError))
-                  }
+                  disabled={busy || loading || !!loadError || !selectedMember}
                   className="gap-2 bg-primary text-primary-foreground font-semibold shadow-xs cursor-pointer"
                 >
                   <LuUserPlus className="size-4" />
@@ -1138,166 +767,6 @@ export function ProfileSharingDialog({
         {/* TAB 2: Existing Direct Grants */}
         {activeTab === "existing" && (
           <div className="flex flex-col flex-1 min-h-0 space-y-3 overflow-y-auto pr-1 pt-1">
-            {/* Rotation Reviews for Encrypted Profiles */}
-            {profiles.map((profile) => {
-              const review = rotationReviews[profile.id];
-              if (
-                !review ||
-                (!review.pending &&
-                  !review.error &&
-                  review.operationStatus !== "completed")
-              )
-                return null;
-              const deviceCount = review.recipients.reduce(
-                (count, recipient) => count + recipient.deviceKeys.length,
-                0,
-              );
-              const operationInProgress =
-                review.operationStatus === "accepted" ||
-                review.operationStatus === "queued" ||
-                review.operationStatus === "running";
-              return (
-                <section
-                  key={`rotation:${profile.id}`}
-                  className="space-y-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 shadow-2xs"
-                  aria-labelledby={`profile-key-rotation-${profile.id}`}
-                >
-                  <h3
-                    id={`profile-key-rotation-${profile.id}`}
-                    className="text-xs font-semibold uppercase tracking-wider text-amber-500 flex items-center gap-1.5"
-                  >
-                    <LuShieldAlert className="size-4 text-amber-500" />
-                    {t("profileSharing.rotationHeading", {
-                      name: profile.name,
-                    })}
-                  </h3>
-                  {review.pending ? (
-                    <>
-                      <p className="text-xs text-muted-foreground">
-                        {t("profileSharing.rotationDescription")}
-                      </p>
-                      {review.recipients.length === 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          {t("profileSharing.rotationNoRecipients")}
-                        </p>
-                      ) : (
-                        review.recipients.map((recipient) => {
-                          const member = members.find(
-                            (candidate) => candidate.id === recipient.memberId,
-                          );
-                          const resolved = displayMember(member);
-                          return (
-                            <div
-                              key={recipient.memberId}
-                              className="space-y-2 rounded-lg border border-border/60 bg-background/80 p-2.5 text-xs"
-                            >
-                              <div className="flex items-center justify-between">
-                                <p className="font-semibold text-foreground">
-                                  {resolved.displayName}
-                                </p>
-                                {renderRoleBadge(member?.role)}
-                              </div>
-                              {recipient.deviceKeys.map((device, devIdx) => (
-                                <div
-                                  key={device.deviceId}
-                                  className="space-y-0.5 text-xs"
-                                >
-                                  <p className="text-[11px] text-muted-foreground font-medium">
-                                    Thiết bị #{devIdx + 1}
-                                  </p>
-                                  <code className="block break-all rounded bg-muted/60 px-2 py-1 font-mono text-[10px] text-muted-foreground">
-                                    {device.fingerprint}
-                                  </code>
-                                </div>
-                              ))}
-                            </div>
-                          );
-                        })
-                      )}
-                      <div className="flex items-start gap-2 border-t border-border/40 pt-2.5">
-                        <Checkbox
-                          id={`profile-key-rotation-confirm-${profile.id}`}
-                          checked={review.confirmed}
-                          disabled={
-                            operationInProgress ||
-                            !!rotationBusyProfileId ||
-                            busy
-                          }
-                          onCheckedChange={(value) =>
-                            setRotationReviews((previous) => ({
-                              ...previous,
-                              [profile.id]: {
-                                ...previous[profile.id],
-                                confirmed: value === true,
-                              },
-                            }))
-                          }
-                        />
-                        <Label
-                          htmlFor={`profile-key-rotation-confirm-${profile.id}`}
-                          className="cursor-pointer text-xs leading-5 font-medium text-foreground"
-                        >
-                          {deviceCount === 0
-                            ? t("profileSharing.rotationConfirmEmpty")
-                            : t("profileSharing.rotationConfirm", {
-                                count: deviceCount,
-                              })}
-                        </Label>
-                      </div>
-                      {review.error ? (
-                        <p role="alert" className="text-xs text-destructive">
-                          {review.error}
-                        </p>
-                      ) : null}
-                      {review.operationError ? (
-                        <p role="alert" className="text-xs text-destructive">
-                          {t("profileSharing.rotationFailed", {
-                            error: review.operationError,
-                          })}
-                        </p>
-                      ) : null}
-                      {operationInProgress ? (
-                        <p
-                          role="status"
-                          className="text-xs text-muted-foreground"
-                        >
-                          {t("profileSharing.rotationInProgress")}
-                        </p>
-                      ) : null}
-                      <Button
-                        type="button"
-                        onClick={() => void rotateKeys(profile)}
-                        disabled={
-                          !review.confirmed ||
-                          busy ||
-                          !!rotationBusyProfileId ||
-                          operationInProgress ||
-                          review.operationStatus === "completed"
-                        }
-                        size="sm"
-                        className="text-xs font-semibold cursor-pointer"
-                      >
-                        {rotationBusyProfileId === profile.id
-                          ? t("profileSharing.working")
-                          : t("profileSharing.rotate")}
-                      </Button>
-                    </>
-                  ) : review.operationStatus === "completed" ? (
-                    <p
-                      role="status"
-                      className="text-xs text-emerald-500 font-medium"
-                    >
-                      {t("profileSharing.rotationCompleted")}
-                    </p>
-                  ) : (
-                    <p role="alert" className="text-xs text-destructive">
-                      {review.error}
-                    </p>
-                  )}
-                </section>
-              );
-            })}
-
             {/* Existing Grants Section */}
             <section
               className="space-y-2.5"
