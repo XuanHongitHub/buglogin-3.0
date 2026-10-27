@@ -269,6 +269,15 @@ impl CredentialService {
         self.password_reset_put_with_minimum(account_id, password, now, 12)
     }
 
+    pub(crate) fn password_change_put(
+        &self,
+        account_id: &AccountId,
+        password: &str,
+        now: u64,
+    ) -> Result<ControlPut, Problem> {
+        self.password_reset_put_with_minimum(account_id, password, now, 4)
+    }
+
     pub(crate) fn local_dev_admin_password_reset_put(
         &self,
         account_id: &AccountId,
@@ -660,7 +669,7 @@ fn verify_legacy_scrypt(password: &str, legacy: &LegacyScryptVerifier) -> bool {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, ()> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(());
     }
     value
@@ -743,6 +752,31 @@ mod tests {
         );
         assert!(validate_password_with_minimum("admin123", 8).is_ok());
         assert!(validate_password("password1234").is_ok());
+    }
+
+    #[test]
+    fn self_service_password_change_accepts_four_characters_but_resets_keep_twelve() {
+        let (identities, credentials) = service();
+        let account_id = seed(&identities, &credentials);
+        assert!(
+            credentials
+                .password_change_put(&account_id, "abcd", 100)
+                .is_ok()
+        );
+        assert_eq!(
+            credentials
+                .password_change_put(&account_id, "abc", 100)
+                .unwrap_err()
+                .code,
+            "invalid_password"
+        );
+        assert_eq!(
+            credentials
+                .password_reset_put(&account_id, "abcd", 100)
+                .unwrap_err()
+                .code,
+            "invalid_password"
+        );
     }
 
     fn retry_if_password_capacity_is_busy<T>(
@@ -875,10 +909,11 @@ mod tests {
             IdentityVerification::Verified
         );
         assert_eq!(
-            credentials
-                .authenticate("provisioned", "wrong-password-123", 102)
-                .unwrap_err()
-                .code,
+            retry_if_password_capacity_is_busy(|| {
+                credentials.authenticate("provisioned", "wrong-password-123", 102)
+            })
+            .unwrap_err()
+            .code,
             "invalid_credentials"
         );
     }
