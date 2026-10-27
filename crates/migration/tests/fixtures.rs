@@ -1280,7 +1280,21 @@ fn mig_015_rejects_package_traversal_and_source_links_before_extraction() {
         "code":link_error.code,
         "outsideUnchanged":outside_unchanged
     }));
-    fs::remove_dir(&link).expect("remove test directory link");
+    // On Unix a directory symlink is unlinked as a file. Windows requires
+    // RemoveDirectory semantics for a symlink whose target is a directory.
+    #[cfg(windows)]
+    let linked_directory = fs::metadata(&link)
+        .is_ok_and(|metadata| metadata.is_dir());
+    #[cfg(windows)]
+    {
+        if linked_directory {
+            fs::remove_dir(&link).expect("remove test directory link");
+        } else {
+            fs::remove_file(&link).expect("remove test directory link");
+        }
+    }
+    #[cfg(not(windows))]
+    fs::remove_file(&link).expect("remove test directory link");
 
     assert_json_lines_file(&expected.join("import-results.jsonl"), &results);
     assert_eq!(
