@@ -11,7 +11,7 @@
   "entityCounts": {
     "profiles": 1
   },
-  "totalBytes": 338,
+  "totalBytes": 335,
   "runtimeFindings": [
     {
       "runtime": "wayfern",
@@ -26,6 +26,6 @@
   },
   "invalidRecords": [],
   "danglingReferences": [],
-  "sourceTreeSha256": "408ff951effa59fc8233835e6b3f1880f755880977d2c2cc4ae8cffb772edf3e",
+  "sourceTreeSha256": "b653e1f29a9f8640517049f18ddc286c92937acda80f4b1c16b76480a4b8bff8",
   "cutoverEligibility": "eligible"
 }

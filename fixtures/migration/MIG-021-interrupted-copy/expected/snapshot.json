@@ -1,10 +1,22 @@
 {
-  "snapshotId":"sha256:c671f24aff9abcac504889139f1cc849b23070697c10faba1a02553b230f92b1",
-  "sourceTreeSha256":"c671f24aff9abcac504889139f1cc849b23070697c10faba1a02553b230f92b1",
-  "totalBytes":280,
-  "files":[
-    {"path":"profiles/21000000-0000-4000-8000-000000000021/metadata.json","bytes":100,"sha256":"d205efce5d6361f31bb95c2cc9c5e2b3a5d2e5aa802e75a91554dfa9efaec2c7"},
-    {"path":"profiles/21000000-0000-4000-8000-000000000021/profile/Preferences","bytes":53,"sha256":"007723f0e8ec4b3ced591684c6b18da3870289f17a6fb5ff1e07725eaa02bf66"},
-    {"path":"version.json","bytes":127,"sha256":"eae6dac16d900c37acbcf469c01d64f6d2cb48d3103cbf8dcb8643cd2795e52e"}
+  "snapshotId": "sha256:c671f24aff9abcac504889139f1cc849b23070697c10faba1a02553b230f92b1",
+  "sourceTreeSha256": "c671f24aff9abcac504889139f1cc849b23070697c10faba1a02553b230f92b1",
+  "totalBytes": 280,
+  "files": [
+    {
+      "path": "profiles/21000000-0000-4000-8000-000000000021/metadata.json",
+      "bytes": 100,
+      "sha256": "d205efce5d6361f31bb95c2cc9c5e2b3a5d2e5aa802e75a91554dfa9efaec2c7"
+    },
+    {
+      "path": "profiles/21000000-0000-4000-8000-000000000021/profile/Preferences",
+      "bytes": 53,
+      "sha256": "007723f0e8ec4b3ced591684c6b18da3870289f17a6fb5ff1e07725eaa02bf66"
+    },
+    {
+      "path": "version.json",
+      "bytes": 127,
+      "sha256": "eae6dac16d900c37acbcf469c01d64f6d2cb48d3103cbf8dcb8643cd2795e52e"
+    }
   ]
 }

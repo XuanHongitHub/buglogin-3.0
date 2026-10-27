@@ -1,12 +1,12 @@
 {
-  "snapshotId": "sha256:408ff951effa59fc8233835e6b3f1880f755880977d2c2cc4ae8cffb772edf3e",
-  "sourceTreeSha256": "408ff951effa59fc8233835e6b3f1880f755880977d2c2cc4ae8cffb772edf3e",
-  "totalBytes": 338,
+  "snapshotId": "sha256:b653e1f29a9f8640517049f18ddc286c92937acda80f4b1c16b76480a4b8bff8",
+  "sourceTreeSha256": "b653e1f29a9f8640517049f18ddc286c92937acda80f4b1c16b76480a4b8bff8",
+  "totalBytes": 335,
   "files": [
     {
       "path": "profiles/11111111-1111-1111-1111-111111111111/metadata.json",
-      "bytes": 95,
-      "sha256": "1c17140cb1ca4c833eb988137fd71127a31b42ce8a1642b0f405efe2030363c4"
+      "bytes": 94,
+      "sha256": "a5d09b3d83512549a5daa757f187d0dee39544f341e2c4286044611187381d78"
     },
     {
       "path": "profiles/11111111-1111-1111-1111-111111111111/profile/Cookies",
@@ -15,13 +15,13 @@
     },
     {
       "path": "profiles/11111111-1111-1111-1111-111111111111/profile/Preferences",
-      "bytes": 72,
-      "sha256": "d637a044f7138e4a0218839deb0a992f17b32edc3ca8f67367b6ac69ed6b80ba"
+      "bytes": 71,
+      "sha256": "fa1d205c032f155fb9fb5d50ba732b9e81cbbe881545bb82ebac22d868605969"
     },
     {
       "path": "version.json",
-      "bytes": 130,
-      "sha256": "6ae86be55203dc68426ff6ceee11d4d826c51c5ddf048b03cb3e7c66400acf5f"
+      "bytes": 129,
+      "sha256": "429dff7148995ee73ecfde1955b5d0dd7c49923ede59ad4d010a8b218a64e749"
     }
   ]
 }

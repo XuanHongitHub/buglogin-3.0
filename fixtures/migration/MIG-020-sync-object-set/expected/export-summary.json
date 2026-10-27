@@ -1,1 +1,9 @@
-{"status":"completed","objectCount":3,"tombstoneCount":1,"blobCount":3,"manifestSha256":"79c1ded49daf41d17c663e00d7bfae527d4e453fa3640300070b29168b446b65","blobSetSha256":"95ed891b99f80e6dcf5481aa117cc1b3ca065cff691d947f78ab4f5e04b8ede1","sourceUnchanged":true}
+{
+  "blobCount": 3,
+  "blobSetSha256": "95ed891b99f80e6dcf5481aa117cc1b3ca065cff691d947f78ab4f5e04b8ede1",
+  "manifestSha256": "79c1ded49daf41d17c663e00d7bfae527d4e453fa3640300070b29168b446b65",
+  "objectCount": 3,
+  "sourceUnchanged": true,
+  "status": "completed",
+  "tombstoneCount": 1
+}

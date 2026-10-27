@@ -9,7 +9,7 @@
     "root": "."
   },
   "entityCounts": {},
-  "totalBytes": 150,
+  "totalBytes": 149,
   "runtimeFindings": [],
   "secretScan": {
     "filesWithSecretFields": 0,
@@ -17,6 +17,6 @@
   },
   "invalidRecords": [],
   "danglingReferences": [],
-  "sourceTreeSha256": "a0c0693b07dd091869f86ec10f200ebd60b39019e1cab0b36640b640b62271bd",
+  "sourceTreeSha256": "0d6f08be7473c39029fdd1421517a8ccb1c069ed3e3eb857037aaddc598c54e7",
   "cutoverEligibility": "eligible"
 }

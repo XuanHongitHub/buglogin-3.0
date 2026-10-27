@@ -1,12 +1,31 @@
 {
-  "schema":"buglogin.inspect/1",
-  "source":{"system":"buglogin-legacy","version":"1.1.84","instanceId":"sha256:c786556b4024c020fdc79c0d2cf00e044c299d6d13d6bf7e6d54d040137169d2","os":"windows","architecture":"x86_64","root":"."},
-  "entityCounts":{"profiles":1},
-  "totalBytes":263,
-  "runtimeFindings":[{"runtime":"wayfern","class":"direct","reasonCode":"runtime_supported","records":1}],
-  "secretScan":{"filesWithSecretFields":0,"secretFieldsPresent":0},
-  "invalidRecords":[],
-  "danglingReferences":[],
-  "sourceTreeSha256":"08bf81dc1ab89bf77e301a124c2b5ddbfdabc307f2cfb03e2b83960b8a1aa662",
-  "cutoverEligibility":"eligible"
+  "schema": "buglogin.inspect/1",
+  "source": {
+    "system": "buglogin-legacy",
+    "version": "1.1.84",
+    "instanceId": "sha256:c786556b4024c020fdc79c0d2cf00e044c299d6d13d6bf7e6d54d040137169d2",
+    "os": "windows",
+    "architecture": "x86_64",
+    "root": "."
+  },
+  "entityCounts": {
+    "profiles": 1
+  },
+  "totalBytes": 263,
+  "runtimeFindings": [
+    {
+      "runtime": "wayfern",
+      "class": "direct",
+      "reasonCode": "runtime_supported",
+      "records": 1
+    }
+  ],
+  "secretScan": {
+    "filesWithSecretFields": 0,
+    "secretFieldsPresent": 0
+  },
+  "invalidRecords": [],
+  "danglingReferences": [],
+  "sourceTreeSha256": "08bf81dc1ab89bf77e301a124c2b5ddbfdabc307f2cfb03e2b83960b8a1aa662",
+  "cutoverEligibility": "eligible"
 }
