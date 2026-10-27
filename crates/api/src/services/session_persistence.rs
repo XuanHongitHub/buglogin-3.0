@@ -380,6 +380,23 @@ impl SessionPersistence {
         account_revision: Option<u64>,
         deletes: Vec<ControlDelete>,
     ) -> Result<(), Problem> {
+        self.create_device_session_with_account_revision_and_mutations(
+            session,
+            refresh,
+            account_revision,
+            Vec::new(),
+            deletes,
+        )
+    }
+
+    pub fn create_device_session_with_account_revision_and_mutations(
+        &self,
+        session: &SessionRecord,
+        refresh: &DeviceRefreshRecord,
+        account_revision: Option<u64>,
+        mut additional_puts: Vec<ControlPut>,
+        deletes: Vec<ControlDelete>,
+    ) -> Result<(), Problem> {
         validate_device_pair(session, refresh)?;
         let access_id = session_id(&session.token_hash);
         let refresh_id = session_id(&refresh.token_hash);
@@ -438,6 +455,7 @@ impl SessionPersistence {
                 if let Some(account_put) = account_put {
                     puts.push(account_put);
                 }
+                puts.append(&mut additional_puts);
                 puts
             },
             deletes,
@@ -451,6 +469,71 @@ impl SessionPersistence {
             response: success_response(),
         })?;
         Ok(())
+    }
+
+    pub fn device_session_revocation_puts(
+        &self,
+        account_id: &AccountId,
+        device_id: &str,
+        now: u64,
+    ) -> Result<Vec<ControlPut>, Problem> {
+        if DeviceId::new(device_id.to_owned()).is_err() {
+            return Err(corrupt());
+        }
+        let mut active_families = BTreeSet::new();
+        let mut legacy_sessions = Vec::new();
+        for (_, mut session, revision) in self.store.list_versioned_for_account::<SessionRecord>(
+            TENANT,
+            RECORD_TYPE,
+            account_id.as_str(),
+        )? {
+            if &session.account_id != account_id {
+                return Err(corrupt());
+            }
+            if session.device_id.as_deref() != Some(device_id) || session.revoked_at.is_some() {
+                continue;
+            }
+            if let Some(family_id) = session.family_id.as_deref() {
+                if !is_family_id(family_id) {
+                    return Err(corrupt());
+                }
+                active_families.insert(family_id.to_owned());
+            } else {
+                session.revoked_at = Some(now);
+                legacy_sessions.push(ControlPut {
+                    tenant_id: TENANT.into(),
+                    record_type: RECORD_TYPE.into(),
+                    record_id: session_id(&session.token_hash),
+                    expected_revision: Some(revision),
+                    value: serde_json::to_value(session).map_err(|_| corrupt())?,
+                });
+            }
+        }
+
+        let mut puts = legacy_sessions;
+        for (family_id, mut family, revision) in self
+            .store
+            .list_versioned_for_account::<SessionFamilyRecord>(
+                TENANT,
+                FAMILY_RECORD_TYPE,
+                account_id.as_str(),
+            )?
+        {
+            if &family.account_id != account_id || !is_family_id(&family_id) {
+                return Err(corrupt());
+            }
+            if active_families.contains(&family_id) && family.revoked_at.is_none() {
+                family.revoked_at = Some(now);
+                puts.push(ControlPut {
+                    tenant_id: TENANT.into(),
+                    record_type: FAMILY_RECORD_TYPE.into(),
+                    record_id: family_id,
+                    expected_revision: Some(revision),
+                    value: serde_json::to_value(family).map_err(|_| corrupt())?,
+                });
+            }
+        }
+        Ok(puts)
     }
 
     pub fn get_device_refresh(
