@@ -18,6 +18,22 @@ pub struct MemberService {
 }
 
 impl MemberService {
+    /// Remove bootstrap owner memberships only after the caller has checked that
+    /// the workspace has no resources, groups or other dependencies.
+    pub(crate) fn remove_owned_workspace_memberships(
+        &mut self,
+        workspace_id: &WorkspaceId,
+        owner_id: &AccountId,
+    ) -> Result<Vec<MemberId>, Problem> {
+        let scoped: Vec<Member> = self.members.values().filter(|member| &member.workspace_id == workspace_id).cloned().collect();
+        if scoped.iter().any(|member| &member.account_id != owner_id || member.role != MemberRole::Owner || member.team_id.is_some()) {
+            return Err(problem("workspace_has_members", "Remove workspace members before deleting the workspace", 409));
+        }
+        let ids: Vec<MemberId> = scoped.into_iter().map(|member| member.id).collect();
+        for id in &ids { self.members.remove(id); }
+        Ok(ids)
+    }
+
     /// Create an already-active membership as part of administrator-driven account provisioning.
     /// Unlike invitation redemption, this never creates an invitation that the account holder
     /// must accept. The caller must still prove the account identity separately before login.
@@ -514,6 +530,22 @@ impl MemberService {
         Ok(())
     }
 
+    /// Permanently remove one workspace membership after the same role/owner
+    /// safeguards used by suspension. Callers must revoke scoped references
+    /// and persist the enclosing control aggregate in the same transaction.
+    pub fn remove(
+        &mut self,
+        principal: &Principal,
+        grants: &[Grant],
+        workspace_id: &WorkspaceId,
+        id: &MemberId,
+    ) -> Result<Member, Problem> {
+        self.validate_suspend(principal, grants, workspace_id, id)?;
+        self.members
+            .remove(id)
+            .ok_or_else(|| problem("member_not_found", "Member not found", 404))
+    }
+
     pub fn validate_suspend(
         &self,
         principal: &Principal,
@@ -868,6 +900,29 @@ mod tests {
             status: MemberStatus::Invited,
             invite_expires_at: Some(100),
         }
+    }
+
+    #[test]
+    fn removal_is_scoped_authorized_and_keeps_the_last_active_owner() {
+        let workspace = WorkspaceId::new("ws_remove_scope").unwrap();
+        let other = WorkspaceId::new("ws_remove_other").unwrap();
+        let platform = Principal { roles: BTreeSet::from([Role::PlatformAdmin]), ..Principal::default() };
+        let mut service = MemberService::default();
+        let mut target = invited_member(workspace.clone());
+        target.status = MemberStatus::Active;
+        target.invite_expires_at = None;
+        service.provision_active(&platform, &[], target.clone()).unwrap();
+        assert_eq!(service.remove(&Principal::default(), &[], &workspace, &target.id).unwrap_err().status, 403);
+        assert_eq!(service.remove(&platform, &[], &other, &target.id).unwrap_err().code, "member_not_found");
+        assert!(service.active_in_workspace(&target.id, &workspace));
+        assert_eq!(service.remove(&platform, &[], &workspace, &target.id).unwrap(), target);
+        assert!(!service.active_in_workspace(&target.id, &workspace));
+
+        let mut owner = target;
+        owner.role = MemberRole::Owner;
+        service.provision_active(&platform, &[], owner.clone()).unwrap();
+        assert_eq!(service.remove(&platform, &[], &workspace, &owner.id).unwrap_err().code, "last_workspace_owner");
+        assert!(service.active_in_workspace(&owner.id, &workspace));
     }
 
     #[test]

@@ -7,7 +7,7 @@ const KNOWN_ERROR_TRANSLATIONS: Record<string, string> = {
     "Khóa bảo mật của hồ sơ đã thay đổi trên đám mây. Vui lòng làm mới trước khi chia sẻ.",
   profile_key_version_missing: "Hồ sơ chưa có khóa mã hóa hợp lệ.",
   sync_key_recovery_required:
-    "Cần khôi phục khóa mã hóa E2EE trên thiết bị này trước khi chia sẻ.",
+    "Thiết bị này chưa khôi phục được khóa giải mã E2EE của profile. Hãy khôi phục khóa trước khi mở profile.",
   sync_key_vault_unavailable:
     "Không thể truy cập kho khóa mã hóa an toàn trên thiết bị.",
   profile_not_running: "Hồ sơ hiện không trong trạng thái hoạt động.",

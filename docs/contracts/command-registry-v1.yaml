@@ -276,6 +276,13 @@ commands:
     adapters: [tauri, rest]
     input: ProfileIdInput
     output: OptionalRuntimeProjection
+  - id: profile.runtime.status.batch
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [tauri, rest]
+    input: ProfileRuntimeStatusBatchInput
+    output: ProfileRuntimeStatusBatch
   - id: profile.runtime.started
     kind: command
     capability: profile.update
@@ -291,6 +298,15 @@ commands:
     adapters: [rest]
     input: RuntimeProjectionInput
     output: RuntimeProjection
+    idempotency: required
+  - id: profile.runtime.syncing
+    kind: command
+    capability: profile.stop
+    action: execute
+    adapters: [rest]
+    input: RuntimeProjectionInput
+    output: RuntimeProjection
+    audit: required
     idempotency: required
   - id: profile.delete
     kind: command
@@ -742,6 +758,67 @@ commands:
     adapters: [tauri, rest, mcp]
     input: Empty
     output: AccountView
+  - id: account.identity.own.get
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    adapters: [tauri, rest]
+    input: Empty
+    output: AccountIdentity
+  - id: account.identity.get
+    kind: query
+    capability: CAP-ADM-001
+    action: read
+    adapters: [tauri, rest]
+    input: AccountIdentityGetInput
+    output: AccountIdentity
+  - id: account.identity.update
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    adapters: [tauri, rest]
+    input: AccountIdentityUpdateCommandInput
+    output: AccountIdentity
+    idempotency: required
+  - id: account.password.change
+    kind: command
+    capability: CAP-ID-001
+    action: update
+    adapters: [tauri, rest]
+    input: AccountPasswordChangeInput
+    output: AccountPasswordChangeReceipt
+    idempotency: required
+  - id: account.sessions.list
+    kind: query
+    capability: CAP-ID-001
+    action: read
+    adapters: [tauri, rest]
+    input: AccountSessionsListInput
+    output: WebSessionPage
+  - id: account.sessions.revoke
+    kind: command
+    capability: CAP-ID-001
+    action: manage
+    adapters: [tauri, rest]
+    input: AccountSessionRevokeInput
+    output: AccountSessionRevokeReceipt
+    idempotency: required
+  - id: management.account.drafts.generate
+    kind: command
+    capability: CAP-MEM-001
+    action: create
+    adapters: [tauri, rest]
+    input: AccountDraftsInput
+    output: AccountDraftPage
+    idempotency: none
+  - id: management.batch.execute
+    kind: command
+    capability: CAP-MEM-001
+    action: manage
+    adapters: [tauri, rest]
+    input: ManagementBatchInput
+    output: ManagementBatchReceipt
+    idempotency: required
   - id: account.create
     kind: command
     capability: CAP-ADM-001
@@ -814,6 +891,22 @@ commands:
     input: OrganizationUpdateInput
     output: Organization
     idempotency: required
+  - id: organization.delete
+    kind: command
+    capability: CAP-ORG-001
+    action: delete
+    adapters: [tauri, rest]
+    input: OrganizationDeleteCommandInput
+    output: OrganizationDeleteReceipt
+    idempotency: required
+  - id: organization.owner.transfer
+    kind: command
+    capability: CAP-ORG-001
+    action: manage
+    adapters: [tauri, rest]
+    input: OrganizationOwnerTransferCommandInput
+    output: Organization
+    idempotency: required
   - id: organization.members.list
     kind: query
     capability: CAP-ORG-001
@@ -884,6 +977,14 @@ commands:
     adapters: [tauri, rest, mcp]
     input: WorkspaceUpdateInput
     output: Workspace
+    idempotency: required
+  - id: workspace.delete
+    kind: command
+    capability: CAP-WS-001
+    action: delete
+    adapters: [tauri, rest]
+    input: WorkspaceDeleteCommandInput
+    output: WorkspaceDeleteReceipt
     idempotency: required
   - id: group.list
     kind: query
@@ -1114,6 +1215,14 @@ commands:
     adapters: [tauri, rest, mcp]
     input: MemberIdInput
     output: Member
+    idempotency: required
+  - id: member.remove
+    kind: command
+    capability: CAP-MEM-001
+    action: delete
+    adapters: [tauri, rest]
+    input: MemberRemoveInput
+    output: MemberRemoveReceipt
     idempotency: required
   - id: member.role.update
     kind: command

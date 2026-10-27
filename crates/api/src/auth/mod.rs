@@ -1027,33 +1027,47 @@ impl AuthService {
             Some(persistence) => persistence.family_revocations(account_id)?,
             None => self.revoked_families.clone(),
         };
-        let mut sessions: Vec<_> = records
+        let mut sessions_by_family = HashMap::<String, SessionSummary>::new();
+        for stored in records
             .into_iter()
             .filter(|stored| &stored.record.account_id == account_id)
-            .map(|stored| {
-                let family_revoked_at = stored
-                    .record
-                    .family_id
-                    .as_ref()
-                    .and_then(|family_id| family_revocations.get(family_id))
-                    .copied();
-                SessionSummary {
-                    id: hex(&stored.record.token_hash),
-                    kind: if stored.record.device_id.is_some() {
-                        SessionKind::Desktop
-                    } else if stored.record.csrf_hash.is_some() {
-                        SessionKind::Browser
-                    } else {
-                        SessionKind::Api
-                    },
-                    device_id: stored.record.device_id.clone(),
-                    created_at: stored.record.created_at,
-                    expires_at: stored.record.expires_at,
-                    revoked_at: stored.record.revoked_at.or(family_revoked_at),
-                    current: current_hash == Some(stored.record.token_hash),
-                }
-            })
-            .collect();
+        {
+            let family_revoked_at = stored
+                .record
+                .family_id
+                .as_ref()
+                .and_then(|family_id| family_revocations.get(family_id))
+                .copied();
+            let summary = SessionSummary {
+                id: hex(&stored.record.token_hash),
+                kind: if stored.record.device_id.is_some() {
+                    SessionKind::Desktop
+                } else if stored.record.csrf_hash.is_some() {
+                    SessionKind::Browser
+                } else {
+                    SessionKind::Api
+                },
+                device_id: stored.record.device_id.clone(),
+                created_at: stored.record.created_at,
+                expires_at: stored.record.expires_at,
+                revoked_at: stored.record.revoked_at.or(family_revoked_at),
+                current: current_hash == Some(stored.record.token_hash),
+            };
+            // Refresh rotates the access token while keeping one session family.
+            // Expose one row per login session, otherwise long-running clients
+            // accumulate a visible row for every token refresh.
+            let family_key = stored
+                .record
+                .family_id
+                .unwrap_or_else(|| summary.id.clone());
+            let replace = sessions_by_family.get(&family_key).is_none_or(|previous| {
+                (summary.current, summary.expires_at) > (previous.current, previous.expires_at)
+            });
+            if replace {
+                sessions_by_family.insert(family_key, summary);
+            }
+        }
+        let mut sessions: Vec<_> = sessions_by_family.into_values().collect();
         sessions.sort_by_key(|session| (!session.current, std::cmp::Reverse(session.created_at)));
         Ok(sessions)
     }
@@ -1638,8 +1652,8 @@ mod tests {
         let listed = verifier
             .list_sessions(&AccountId::new("acct_refresh_reuse").unwrap(), None)
             .unwrap();
-        assert_eq!(listed.len(), 2);
-        assert!(listed.iter().all(|session| session.revoked_at.is_some()));
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].revoked_at.is_some());
     }
 
     #[test]
@@ -1844,6 +1858,40 @@ mod tests {
         let reopened = AuthService::persistent(persistence).unwrap();
         assert_eq!(
             reopened.authenticate(&desktop, 121).unwrap_err().code,
+            "session_revoked"
+        );
+    }
+
+    #[test]
+    fn session_list_collapses_access_token_rotations_into_one_login_session() {
+        let persistence =
+            SessionPersistence::new(ControlPersistence::new(MemoryControlRecordStore::default()));
+        let account_id = AccountId::new("acct_session_rotation_list").unwrap();
+        let mut auth = AuthService::persistent(persistence).unwrap();
+        let first = auth
+            .issue_device_session(account_id.clone(), 100, 1_000, "device-win".into(), None)
+            .unwrap();
+        let second = auth
+            .refresh_device_session(&first.refresh_token, "device-win", 101, 200)
+            .unwrap();
+        let third = auth
+            .refresh_device_session(&second.refresh_token, "device-win", 201, 300)
+            .unwrap();
+
+        let sessions = auth
+            .list_sessions(&account_id, Some(&third.access_token))
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].current);
+        assert_eq!(sessions[0].kind, SessionKind::Desktop);
+        assert_eq!(sessions[0].device_id.as_deref(), Some("device-win"));
+
+        auth.revoke_session(&account_id, &sessions[0].id, 301)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate(&third.access_token, 302)
+                .unwrap_err()
+                .code,
             "session_revoked"
         );
     }

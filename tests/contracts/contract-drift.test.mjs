@@ -56,7 +56,7 @@ function openApiOperationIds(document) {
       Object.entries(path ?? {})
         .filter(
           ([method, operation]) =>
-            methods.has(method) && operation?.operationId,
+            methods.has(method) && operation?.operationId && !operation["x-buglogin-internal"],
         )
         .map(([, operation]) => operation.operationId),
     )

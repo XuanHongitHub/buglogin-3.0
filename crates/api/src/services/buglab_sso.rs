@@ -52,9 +52,11 @@ impl BugLabSsoConfig {
     pub fn authorization_url(&self, state: &str) -> Result<Url, Problem> {
         let mut url =
             Url::parse(&format!("{IDP_ORIGIN}/sso/login")).map_err(|_| provider_unavailable())?;
+        let mut callback_uri = self.callback_uri.clone();
+        callback_uri.query_pairs_mut().append_pair("state", state);
         url.query_pairs_mut()
             .append_pair("app", &self.app_code)
-            .append_pair("redirect_uri", self.callback_uri.as_str())
+            .append_pair("redirect_uri", callback_uri.as_str())
             .append_pair("state", state);
         Ok(url)
     }
@@ -210,9 +212,13 @@ mod tests {
         assert_eq!(url.host_str(), Some("id.buglab.vn"));
         assert_eq!(url.path(), "/sso/login");
         assert_eq!(pairs.get("app").map(String::as_str), Some("buglogin"));
+        let callback = Url::parse(pairs.get("redirect_uri").unwrap()).unwrap();
+        assert_eq!(callback.scheme(), "buglogin");
+        assert_eq!(callback.host_str(), Some("sso"));
+        assert_eq!(callback.path(), "/callback");
         assert_eq!(
-            pairs.get("redirect_uri").map(String::as_str),
-            Some("buglogin://sso/callback")
+            callback.query_pairs().find(|(key, _)| key == "state").map(|(_, value)| value.into_owned()),
+            Some(expected_state.clone())
         );
         assert_eq!(
             pairs.get("state").map(String::as_str),

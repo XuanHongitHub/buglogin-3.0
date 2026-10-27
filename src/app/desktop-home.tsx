@@ -7,8 +7,6 @@ import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AboutDialog } from "@/components/about-dialog";
-import { AccountManagementPanel } from "@/components/account-management-panel";
-import { AccountPage } from "@/components/account-page";
 import AppUpdateDialog from "@/components/app-update-dialog";
 import { AuditLogView } from "@/components/audit-log-view";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
@@ -29,10 +27,13 @@ import { GroupAssignmentDialog } from "@/components/group-assignment-dialog";
 import HomeHeader from "@/components/home-header";
 import InlineUpdateBanner from "@/components/inline-update-banner";
 import { IntegrationsDialog } from "@/components/integrations-dialog";
-import { MemberManagementDialog } from "@/components/member-management-dialog";
-import { OrgManagementCenter } from "@/components/org-management-view";
+import { AccountDirectory } from "@/components/management/accounts";
+import { WorkspaceMembers } from "@/components/management/members";
+import { OrganizationManagement } from "@/components/management/org-workspaces";
+import { PersonalAccount } from "@/components/management/personal-account";
+import { PlatformManagement } from "@/components/management/platform";
+import { ManagementResources } from "@/components/management/resources";
 import { PendingInvitesDialog } from "@/components/pending-invites-dialog";
-import { PlatformAdminView } from "@/components/platform-admin-view";
 import { ProfilesDataTable } from "@/components/profile-data-table";
 import {
   type PasswordDialogMode,
@@ -49,8 +50,6 @@ import { TableFilterControls } from "@/components/table-controls";
 import { TeamManagerView } from "@/components/team-manager-view";
 import { WayfernConfigDialog } from "@/components/wayfern-config-dialog";
 import { WayfernTermsDialog } from "@/components/wayfern-terms-dialog";
-import { WorkspaceDetailPage } from "@/components/workspace-detail-page";
-import { WorkspaceManagementDialog } from "@/components/workspace-management-dialog";
 import { type WorkspaceItem } from "@/components/workspace-switcher";
 import type { useAppUpdateNotifications } from "@/hooks/use-app-update-notifications";
 import { useBrowserDownload } from "@/hooks/use-browser-download";
@@ -462,7 +461,6 @@ function DesktopHome({
   const _syncUnlocked = crossOsUnlocked;
 
   const [currentPage, setCurrentPage] = useState<AppPage>("profiles");
-  const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   // Tracks which tab inside the shared proxy-management page should be active.
   const [proxyManagementInitialTab, setProxyManagementInitialTab] =
     useState<"proxies">("proxies");
@@ -550,7 +548,6 @@ function DesktopHome({
       setProxyManagementDialogOpen(false);
       setExtensionManagementDialogOpen(false);
       setIntegrationsDialogOpen(false);
-      setAccountDialogOpen(false);
 
       setCurrentPage(page);
       switch (page) {
@@ -572,7 +569,6 @@ function DesktopHome({
           setIntegrationsDialogOpen(true);
           break;
         case "account":
-          setAccountDialogOpen(true);
           break;
         case "shortcuts":
         case "accountManagement":
@@ -1844,22 +1840,7 @@ function DesktopHome({
             />
           )}
 
-          {accountDialogOpen && (
-            <AccountPage
-              isOpen={accountDialogOpen}
-              onClose={() => {
-                setAccountDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              subPage={currentPage === "account"}
-              onOpenSignIn={() => {
-                if (process.env.NEXT_PUBLIC_BUGLOGIN_APP_TARGET !== "desktop") {
-                  setAccountDialogOpen(false);
-                  setCurrentPage("profiles");
-                }
-              }}
-            />
-          )}
+          {currentPage === "account" && <PersonalAccount />}
 
           {currentPage === "members" && (
             <motion.div
@@ -1868,15 +1849,17 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden p-3"
             >
-              <MemberManagementDialog
-                mode="page"
-                isOpen={true}
-                onClose={() => setCurrentPage("profiles")}
-                workspaceId={selectedWorkspaceId}
-                organizationId={activeWorkspace?.organizationId}
-                workspaceName={activeWorkspace?.name}
-                organizationName={activeWorkspace?.organizationName}
-              />
+              {activeWorkspace?.organizationId ? (
+                <WorkspaceMembers
+                  organizationId={activeWorkspace.organizationId}
+                  workspaceId={activeWorkspace.id}
+                  onDataChanged={refreshWorkspaceList}
+                />
+              ) : (
+                <p className="p-4 text-sm text-muted-foreground">
+                  Chưa chọn workspace hợp lệ.
+                </p>
+              )}
             </motion.div>
           )}
 
@@ -1887,13 +1870,9 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <WorkspaceDetailPage
-                organizationId={activeWorkspace.organizationId ?? ""}
-                organizationName={activeWorkspace.organizationName ?? ""}
+              <ManagementResources
                 workspaceId={activeWorkspace.id}
-                workspaceName={activeWorkspace.name}
-                initialTab="groups"
-                onBack={() => setCurrentPage("profiles")}
+                kind="groups"
               />
             </motion.div>
           )}
@@ -1905,7 +1884,7 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <OrgManagementCenter mode="page" />
+              <OrganizationManagement onDataChanged={refreshWorkspaceList} />
             </motion.div>
           )}
 
@@ -1953,9 +1932,8 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <PlatformAdminView
-                onNavigateHome={() => setCurrentPage("profiles")}
-                onOpenAuditLogs={() => handleRailNavigate("auditLogs")}
+              <PlatformManagement
+                onOpenAudit={() => handleRailNavigate("auditLogs")}
               />
             </motion.div>
           )}
@@ -1967,8 +1945,14 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <AccountManagementPanel
-                onCreateScoped={() => setCurrentPage("orgCenter")}
+              <AccountDirectory
+                organizationId={
+                  selectedWorkspaceId
+                    ? undefined
+                    : activeWorkspace?.organizationId
+                }
+                workspaceId={selectedWorkspaceId}
+                onDataChanged={refreshWorkspaceList}
               />
             </motion.div>
           )}
@@ -1980,12 +1964,9 @@ function DesktopHome({
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
-              <WorkspaceManagementDialog
-                activeWorkspaceId={selectedWorkspaceId}
-                onWorkspaceSwitched={(id) => {
-                  handleWorkspaceSelect(id);
-                }}
-                onWorkspaceDataChanged={refreshWorkspaceList}
+              <OrganizationManagement
+                onDataChanged={refreshWorkspaceList}
+                platformView="workspaces"
               />
             </motion.div>
           )}
@@ -1995,6 +1976,7 @@ function DesktopHome({
       <CreateProfileDialog
         isOpen={createProfileDialogOpen}
         workspaceId={selectedWorkspaceId}
+        organizationId={activeWorkspace?.organizationId ?? null}
         onClose={() => {
           setCreateProfileDialogOpen(false);
         }}

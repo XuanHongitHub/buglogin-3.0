@@ -1534,6 +1534,7 @@ fn merge_workspaces(
                 max_members: record.data.policy.max_members,
                 max_storage_bytes: record.data.policy.max_storage_bytes,
                 offline_entitled: record.data.policy.offline_entitled,
+                default_extension_group_id: None,
             },
             created_at,
         });

@@ -37,6 +37,7 @@ fn workspace(id: &str, organization_id: &OrganizationId) -> Workspace {
             max_members: 2,
             max_storage_bytes: 1000,
             offline_entitled: true,
+            default_extension_group_id: None,
         },
         created_at: "2026-07-20T00:00:00Z".into(),
     }

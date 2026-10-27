@@ -56,6 +56,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -82,7 +88,13 @@ type SyncStatus = "disabled" | "syncing" | "synced" | "error" | "waiting";
 
 /** A payload staged in the UI, before it is handed to the backend. */
 type PendingSource =
-  | { kind: "archive"; fileName: string; data: number[] }
+  | {
+      kind: "archive";
+      fileName: string;
+      data: number[];
+      gitSource?: Extension["git_source"];
+      sourceRevision?: string | null;
+    }
   | { kind: "folder"; path: string };
 
 const ARCHIVE_EXTENSIONS = [".crx", ".zip"];
@@ -230,15 +242,13 @@ export function ExtensionManagementDialog({
 
   // Tab — keyed off `initialTab` so remounting the dialog with a new initial
   // tab (e.g. via the Mod+E shortcut toggle) jumps to that tab.
-  const [activeTab, setActiveTab] = useState<"extensions" | "groups">("groups");
+  const [activeTab, setActiveTab] = useState<"extensions" | "groups">(
+    "extensions",
+  );
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
     let groupFailed = false;
-    // Extension package inventory is a separate CAP-EXT-001 API surface. This
-    // screen currently owns the production CAP-EXT-002 group workflow only.
-    setExtensions([]);
-
     try {
       if (!workspaceId)
         throw new Error("Select a workspace to manage extension groups.");
@@ -256,6 +266,14 @@ export function ExtensionManagementDialog({
     }
 
     if (groupFailed) {
+      showErrorToast(t("extensions.listFailed"));
+    }
+    try {
+      const localExtensions = await invoke<Extension[]>("list_extensions");
+      setExtensions(localExtensions ?? []);
+    } catch (error) {
+      console.error("Failed to load extension packages:", error);
+      setExtensions([]);
       showErrorToast(t("extensions.listFailed"));
     }
     setIsLoading(false);
@@ -546,6 +564,8 @@ export function ExtensionManagementDialog({
         data: Array.from(atob(fetched.file_data), (character) =>
           character.charCodeAt(0),
         ),
+        gitSource: fetched.git_source,
+        sourceRevision: fetched.source_revision,
       });
       setExtensionName(identity || fetched.file_name.replace(/\.zip$/i, ""));
       setLinkFolder(false);
@@ -579,6 +599,8 @@ export function ExtensionManagementDialog({
           name: extensionName.trim(),
           fileName: pendingSource.fileName,
           fileData: pendingSource.data,
+          gitSource: pendingSource.gitSource ?? null,
+          sourceRevision: pendingSource.sourceRevision ?? null,
         });
       }
       showSuccessToast(t("extensions.uploadSuccess"));
@@ -858,6 +880,23 @@ export function ExtensionManagementDialog({
    * the store, or a folder loaded in place from the user's disk. */
   const renderSource = useCallback(
     (ext: Extension) => {
+      if (ext.git_source) {
+        return (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="block min-w-0 truncate text-xs text-muted-foreground">
+                GitHub · {ext.git_source.reference}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {t("extensions.gitSourceHint", {
+                url: ext.git_source.repositoryUrl,
+                branch: ext.git_source.reference,
+              })}
+            </TooltipContent>
+          </Tooltip>
+        );
+      }
       if (ext.linked_path) {
         return (
           <Tooltip>
@@ -1419,11 +1458,19 @@ export function ExtensionManagementDialog({
           <div className="@container relative flex min-h-0 w-full flex-1 flex-col">
             <AnimatedTabs
               value={activeTab}
-              onValueChange={() => setActiveTab("groups")}
+              onValueChange={(value) =>
+                setActiveTab(value as "extensions" | "groups")
+              }
               className="flex min-h-0 flex-1 flex-col"
             >
               <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
                 <AnimatedTabsList>
+                  <AnimatedTabsTrigger value="extensions">
+                    <span>{t("extensions.extensionsTab")}</span>
+                    <span className="text-xs tabular-nums">
+                      {extensions.length}
+                    </span>
+                  </AnimatedTabsTrigger>
                   <AnimatedTabsTrigger value="groups">
                     <span>{t("extensions.groupsTab")}</span>
                     <span className="text-xs tabular-nums">
@@ -1433,66 +1480,34 @@ export function ExtensionManagementDialog({
                 </AnimatedTabsList>
                 <div className="flex items-center gap-2">
                   {activeTab === "extensions" && (
-                    <>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <RippleButton
-                            size="sm"
-                            variant="soft"
-                            onClick={() =>
-                              document.getElementById("ext-file-input")?.click()
-                            }
-                            aria-label={t("extensions.upload")}
-                          >
-                            <LuUpload className="size-4" />
-                            <span className="hidden @2xl:inline">
-                              {t("extensions.upload")}
-                            </span>
-                          </RippleButton>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {t("extensions.upload")}
-                        </TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <RippleButton
-                            size="sm"
-                            variant="soft"
-                            onClick={() => void handleLoadUnpacked()}
-                            aria-label={t("extensions.loadUnpacked")}
-                          >
-                            <LuFolderOpen className="size-4" />
-                            <span className="hidden @2xl:inline">
-                              {t("extensions.loadUnpacked")}
-                            </span>
-                          </RippleButton>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {t("extensions.loadUnpackedTooltip")}
-                        </TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <RippleButton
-                            size="sm"
-                            variant="soft"
-                            onClick={() => {
-                              setShowUrlForm((open) => !open);
-                            }}
-                            aria-label={t("extensions.fromUrl")}
-                          >
-                            <LuGlobe className="size-4" />
-                            <span className="hidden @2xl:inline">
-                              {t("extensions.fromUrl")}
-                            </span>
-                          </RippleButton>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {t("extensions.fromUrlTooltip")}
-                        </TooltipContent>
-                      </Tooltip>
-                    </>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="sm">
+                          <GoPlus className="size-4" />
+                          {t("extensions.addExtension")}
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onSelect={() =>
+                            document.getElementById("ext-file-input")?.click()
+                          }
+                        >
+                          <LuUpload />
+                          {t("extensions.importArchive")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={() => void handleLoadUnpacked()}
+                        >
+                          <LuFolderOpen />
+                          {t("extensions.loadUnpacked")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => setShowUrlForm(true)}>
+                          <LuGlobe />
+                          {t("extensions.addFromGit")}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                   {activeTab === "groups" && (
                     <Tooltip>
@@ -1514,11 +1529,6 @@ export function ExtensionManagementDialog({
                     </Tooltip>
                   )}
                 </div>
-              </div>
-
-              {/* Notice */}
-              <div className="mt-4 shrink-0 rounded-md bg-muted/50 p-3 text-sm text-muted-foreground">
-                {t("extensions.catalogUnavailable")}
               </div>
 
               <AnimatedTabsContent

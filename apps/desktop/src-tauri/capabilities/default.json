@@ -12,6 +12,8 @@
     "deep-link:allow-is-registered",
     "dialog:allow-open",
     "dialog:allow-save",
-    "deep-link:allow-get-current"
+    "deep-link:allow-get-current",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }

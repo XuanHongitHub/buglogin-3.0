@@ -10,6 +10,8 @@ This document prevents design drift between the Donut desktop core, the BugLogin
 
 ## Authority order
 
+Management flow decision (2026-10-26): the canonical screen/action specification is [Organization, account and resource management UI/UX](../superpowers/specs/2026-10-26-management-ui-ux-design.md). It supersedes conflicting management layouts in DES-02/DES-03 and older ASCII plans: sidebar context switcher, content-toolbar actions, no archive/offline controls, no profile lifecycle in management inventories, and complete single/bulk account and access workflows. Backend contracts remain authoritative for identity, role, scope, and persistence; the new specification records required implementation rather than claiming capabilities have shipped.
+
 1. Product behavior, permissions, state, and backend contracts.
 2. The pinned Donut upstream source at `.tmp/donutbrowser-upstream` and `docs/architecture/upstream-baseline-manifest.yaml` for desktop shell, component behavior, density, theme mechanics, and interaction patterns.
 3. This document for BugLogin-specific extensions and web/desktop boundaries.

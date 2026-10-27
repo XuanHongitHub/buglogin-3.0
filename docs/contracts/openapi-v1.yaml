@@ -437,13 +437,44 @@ paths:
   /v1/profiles/{profileId}/key-envelope:
     get:
       operationId: profile.share.keyenvelope.get
-      description: Returns only the authenticated device's envelope while a current direct profile read share is active, or while workspace-owner profile read access is active.
+      description: Returns only the authenticated device's envelope while a current direct profile read share is active.
       parameters: [{ $ref: '#/components/parameters/ProfileId' }]
       responses:
         "200": { description: Device-bound encrypted resource key envelope, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileKeyShareEnvelope' } } } }
         "403": { $ref: '#/components/responses/Problem' }
         "404": { $ref: '#/components/responses/Problem' }
         "409": { $ref: '#/components/responses/Problem' }
+  /v1/profiles/{profileId}/managed-key-envelope:
+    parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+    post:
+      operationId: profile.sync.managedkey.enroll
+      x-buglogin-internal: true
+      description: Rust desktop device session only. Wraps the resource data key using the configured service key; requires current profile.update authorization. The submitted key is never returned to application UI.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resourceKey]
+              properties:
+                resourceKey: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+              additionalProperties: false
+      responses:
+        "200": { description: Key envelope enrolled, content: { application/json: { schema: { type: object, required: [enrolled, keyVersion], properties: { enrolled: { type: boolean }, keyVersion: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: profile.sync.managedkey.fetch
+      x-buglogin-internal: true
+      description: Rust desktop device session only. Requires current profile.read authorization; returns the active resource key for OS-vault persistence. Never call from React, web, or MCP clients.
+      responses:
+        "200": { description: Active resource key delivered to the Rust desktop, content: { application/json: { schema: { type: object, required: [resourceKey], properties: { resourceKey: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+        "409": { $ref: '#/components/responses/Problem' }
+        "503": { $ref: '#/components/responses/Problem' }
   /v1/profiles/{profileId}/stop:
     post:
       operationId: profile.stop
@@ -473,6 +504,12 @@ paths:
       parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjectionInput' } } } }
       responses: { "200": { description: Stopped runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/runtime/syncing:
+    put:
+      operationId: profile.runtime.syncing
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjectionInput' } } } }
+      responses: { "200": { description: Syncing runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } }, "409": { $ref: '#/components/responses/Problem' } }
   /v1/profiles/{profileId}/groups:
     put:
       operationId: profile.groups.replace
@@ -840,6 +877,18 @@ paths:
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationUpdate' } } } }
       responses: { "200": { description: Updated organization, content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } } }, "400": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+    delete:
+      operationId: organization.delete
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationDeleteInput' } } } }
+      responses: { "200": { description: Organization deleted, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationDeleteReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/owner:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    post:
+      operationId: organization.owner.transfer
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationOwnerTransferInput' } } } }
+      responses: { "200": { description: Organization owner transferred, content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } } }, "403": { $ref: '#/components/responses/Problem' } }
   /v1/organizations/{organizationId}/record:
     parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
     get:
@@ -902,6 +951,11 @@ paths:
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceUpdate' } } } }
       responses: { "200": { description: Updated workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }, "400": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
+    delete:
+      operationId: workspace.delete
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceDeleteInput' } } } }
+      responses: { "200": { description: Workspace deleted, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceDeleteReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
   /v1/organizations/{organizationId}/workspaces/{workspaceId}/record:
     parameters:
       - { $ref: '#/components/parameters/OrganizationId' }
@@ -1127,6 +1181,10 @@ paths:
     get:
       operationId: member.get
       responses: { "200": { description: Member } }
+    delete:
+      operationId: member.remove
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses: { "200": { description: Membership removed, content: { application/json: { schema: { $ref: '#/components/schemas/MemberRemoveReceipt' } } } }, "403": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' } }
   /v1/workspaces/{workspaceId}/members/{memberId}/activate:
     parameters:
       - { $ref: '#/components/parameters/WorkspaceId' }
@@ -1292,6 +1350,66 @@ paths:
         "403": { $ref: '#/components/responses/Problem' }
         "409": { $ref: '#/components/responses/Problem' }
         "503": { $ref: '#/components/responses/Problem' }
+  /v1/account/identity:
+    get:
+      operationId: account.identity.own.get
+      responses:
+        "200": { description: Current account identity, content: { application/json: { schema: { $ref: '#/components/schemas/AccountIdentity' } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+  /v1/accounts/{accountId}/identity:
+    parameters: [{ $ref: '#/components/parameters/AccountId' }]
+    get:
+      operationId: account.identity.get
+      responses:
+        "200": { description: Account identity, content: { application/json: { schema: { $ref: '#/components/schemas/AccountIdentity' } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+    patch:
+      operationId: account.identity.update
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AccountIdentityUpdateInput' } } } }
+      responses:
+        "200": { description: Identity updated, content: { application/json: { schema: { $ref: '#/components/schemas/AccountIdentity' } } } }
+        "409": { $ref: '#/components/responses/Problem' }
+  /v1/account/password:
+    put:
+      operationId: account.password.change
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AccountPasswordChangeInput' } } } }
+      responses:
+        "200": { description: Password changed and other sessions revoked, content: { application/json: { schema: { type: object, required: [changed], properties: { changed: { const: true } }, additionalProperties: false } } } }
+        "401": { $ref: '#/components/responses/Problem' }
+  /v1/accounts/{accountId}/sessions:
+    parameters: [{ $ref: '#/components/parameters/AccountId' }]
+    get:
+      operationId: account.sessions.list
+      responses:
+        "200": { description: Account sessions, content: { application/json: { schema: { $ref: '#/components/schemas/WebSessionPage' } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+  /v1/accounts/{accountId}/sessions/{sessionId}:
+    parameters:
+      - { $ref: '#/components/parameters/AccountId' }
+      - { $ref: '#/components/parameters/SessionId' }
+    delete:
+      operationId: account.sessions.revoke
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        "200": { description: Session revoked, content: { application/json: { schema: { type: object, required: [revoked], properties: { revoked: { const: true } }, additionalProperties: false } } } }
+        "403": { $ref: '#/components/responses/Problem' }
+  /v1/management/account-drafts:
+    post:
+      operationId: management.account.drafts.generate
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AccountDraftsInput' } } } }
+      responses:
+        "200": { description: Generated account drafts, content: { application/json: { schema: { $ref: '#/components/schemas/AccountDraftPage' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+  /v1/management/batch:
+    post:
+      operationId: management.batch.execute
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ManagementBatchInput' } } } }
+      responses:
+        "200": { description: Resumable per-item outcomes, content: { application/json: { schema: { $ref: '#/components/schemas/ManagementBatchReceipt' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
   /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs:
     parameters:
       - { $ref: '#/components/parameters/WorkspaceId' }
@@ -1474,9 +1592,34 @@ components:
     AccountStatusUpdateCommandInput: { type: object, required: [accountId, status, expectedRevision], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     AccountCreatePendingInput: { type: object, required: [accountId, username, email], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 } }, additionalProperties: false, description: Creates only an account with pending identity verification. Passwords and credentials are not accepted; login remains disabled until a separate verification and credential flow completes. }
     ScopedAccountCreateBody: { type: object, required: [accountId, username, email, role, initialPassword], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 }, role: { $ref: '#/components/schemas/MemberRole' }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Directly creates an active lower-role workspace member with an administrator-provided initial password. This is not an invitation; email verification remains pending. The password is never returned or retained as plaintext. }
-    WorkspaceAccountCreateInput: { type: object, required: [workspaceId, accountId, username, email, role, initialPassword], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 }, role: { $ref: '#/components/schemas/MemberRole' }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Direct provision input. Bulk creation is one request per row with its own initialPassword. }
+    WorkspaceAccountCreateInput: { type: object, required: [workspaceId, accountId, username, email, role, initialPassword], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, displayName: { type: string, maxLength: 120 }, email: { type: string, maxLength: 254 }, role: { $ref: '#/components/schemas/MemberRole' }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Direct provision input. Bulk creation is one request per row with its own initialPassword. }
     AccountIdentityVerification: { type: string, enum: [pending, admin_provisioned, verified] }
-    AccountIdentity: { type: object, required: [accountId, username, canonicalUsername, email, canonicalEmail, verification, revision, createdAt, updatedAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, canonicalUsername: { type: string }, email: { type: string, format: email }, canonicalEmail: { type: string, format: email }, verification: { $ref: '#/components/schemas/AccountIdentityVerification' }, revision: { type: integer, minimum: 1 }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
+    AccountIdentity: { type: object, required: [accountId, username, canonicalUsername, email, canonicalEmail, verification, revision, createdAt, updatedAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, canonicalUsername: { type: string }, email: { type: string }, canonicalEmail: { type: string }, displayName: { type: string }, verification: { $ref: '#/components/schemas/AccountIdentityVerification' }, revision: { type: integer, minimum: 1 }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
+    AccountIdentityUpdateInput: { type: object, required: [username, email, displayName, expectedRevision], properties: { username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, maxLength: 254 }, displayName: { type: string, maxLength: 120 }, expectedRevision: { type: integer, minimum: 1 }, currentPassword: { type: string, minLength: 1, maxLength: 256, writeOnly: true } }, additionalProperties: false }
+    AccountPasswordChangeInput: { type: object, required: [currentPassword, newPassword], properties: { currentPassword: { type: string, minLength: 1, maxLength: 256, writeOnly: true }, newPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
+    AccountDraftsInput: { type: object, required: [count, prefix, start, displayNameTemplate], properties: { count: { type: integer, minimum: 1, maximum: 100 }, prefix: { type: string, maxLength: 48 }, start: { type: integer, minimum: 0, maximum: 2147483647 }, displayNameTemplate: { type: string, maxLength: 100 } }, additionalProperties: false }
+    AccountDraft: { type: object, required: [accountId, username, displayName, initialPassword], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, displayName: { type: string }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
+    AccountDraftPage: { type: object, required: [items], properties: { items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/AccountDraft' } } }, additionalProperties: false }
+    AccountIdentityGetInput: { type: object, required: [accountId], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    AccountIdentityUpdateCommandInput: { type: object, required: [accountId, username, email, displayName, expectedRevision], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, maxLength: 254 }, displayName: { type: string, maxLength: 120 }, expectedRevision: { type: integer, minimum: 1 }, currentPassword: { type: string, minLength: 1, maxLength: 256, writeOnly: true } }, additionalProperties: false }
+    AccountPasswordChangeReceipt: { type: object, required: [changed], properties: { changed: { const: true } }, additionalProperties: false }
+    AccountSessionsListInput: { type: object, required: [accountId], properties: { accountId: { oneOf: [{ $ref: '#/components/schemas/CanonicalId' }, { const: me, type: string }] } }, additionalProperties: false }
+    AccountSessionRevokeInput: { type: object, required: [accountId, sessionId], properties: { accountId: { oneOf: [{ $ref: '#/components/schemas/CanonicalId' }, { const: me, type: string }] }, sessionId: { type: string, minLength: 1, maxLength: 128 } }, additionalProperties: false }
+    AccountSessionRevokeReceipt: { type: object, required: [revoked], properties: { revoked: { const: true } }, additionalProperties: false }
+    ManagementBatchItem: { type: object, required: [key, commandId, input], properties: { key: { type: string, minLength: 1, maxLength: 128 }, commandId: { type: string, minLength: 1, maxLength: 128 }, input: { type: object, additionalProperties: true } }, additionalProperties: false }
+    ManagementBatchInput: { type: object, required: [items], properties: { items: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/ManagementBatchItem' } } }, additionalProperties: false }
+    ManagementBatchItemResult: { type: object, required: [key, status], properties: { key: { type: string }, status: { type: string, enum: [succeeded, failed] }, data: {}, error: { $ref: '#/components/schemas/Problem' } }, additionalProperties: false }
+    ManagementBatchReceipt: { type: object, required: [items, replayed], properties: { items: { type: array, items: { $ref: '#/components/schemas/ManagementBatchItemResult' } }, replayed: { type: boolean } }, additionalProperties: false }
+    OrganizationDeleteInput: { type: object, required: [expectedRevision], properties: { expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OrganizationDeleteCommandInput: { type: object, required: [organizationId, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OrganizationDeleteReceipt: { type: object, required: [organizationId, deleted], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, deleted: { const: true } }, additionalProperties: false }
+    OrganizationOwnerTransferInput: { type: object, required: [accountId, expectedRevision], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OrganizationOwnerTransferCommandInput: { type: object, required: [organizationId, accountId, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WorkspaceDeleteInput: { type: object, required: [organizationId, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WorkspaceDeleteCommandInput: { type: object, required: [organizationId, workspaceId, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WorkspaceDeleteReceipt: { type: object, required: [workspaceId, deleted], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, deleted: { const: true } }, additionalProperties: false }
+    MemberRemoveInput: { type: object, required: [workspaceId, memberId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    MemberRemoveReceipt: { type: object, required: [workspaceId, memberId, removed], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, removed: { const: true } }, additionalProperties: false }
     AccountProvisioningReceipt: { type: object, required: [account, identity, replayed, onboardingStatus, loginEnabled], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { $ref: '#/components/schemas/AccountIdentity' }, member: { $ref: '#/components/schemas/Member', description: Present for scoped account creation after an active workspace membership and role are assigned. }, organizationMember: { $ref: '#/components/schemas/OrganizationMemberView', description: Present for organization account creation without workspace membership or role assignment. }, replayed: { type: boolean }, onboardingStatus: { type: string, enum: [pending_verification, admin_provisioned] }, loginEnabled: { type: boolean } }, additionalProperties: false, description: Global pending account creation returns pending_verification/loginEnabled false. Scoped direct creation returns admin_provisioned/loginEnabled true while email remains unverified. Organization direct creation creates a login-enabled identity and parent membership but no child workspace membership. }
     OrganizationSnapshot: { type: object, required: [organization, policy, workspaceIds], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, workspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
     WorkspaceUsage: { type: object, required: [profiles, members, storageBytes], properties: { profiles: { type: integer, minimum: 0 }, members: { type: integer, minimum: 0 }, storageBytes: { type: integer, minimum: 0 } }, additionalProperties: false }
@@ -1496,7 +1639,7 @@ components:
     OrganizationMember: { type: object, required: [id, organizationId, accountId, status, revision], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     OrganizationMemberView: { type: object, required: [id, organizationId, accountId, status, revision, username, email], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, revision: { type: integer, minimum: 1 }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 } }, additionalProperties: false, description: Organization identity fields are disclosed only to callers authorized to manage or read organization membership. }
     OrganizationMemberPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/OrganizationMemberView' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
-    OrganizationAccountCreateInput: { type: object, required: [organizationId, accountId, username, email, initialPassword], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Directly creates a login-enabled account and active organization membership. This is distinct from invitation and does not assign a workspace role or access. Email verification remains pending. The password is never returned or retained as plaintext. }
+    OrganizationAccountCreateInput: { type: object, required: [organizationId, accountId, username, email, initialPassword], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, displayName: { type: string, maxLength: 120 }, email: { type: string, maxLength: 254 }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Directly creates a login-enabled account and active organization membership. This is distinct from invitation and does not assign a workspace role or access. Email verification remains pending. The password is never returned or retained as plaintext. }
     OrganizationMemberStatusUpdateInput: { type: object, required: [organizationId, accountId, status, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     OrganizationMemberWorkspaceAssignInput: { type: object, required: [organizationId, workspaceId, organizationMemberId, organizationMemberRevision, role], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberRevision: { type: integer, minimum: 1 }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false }
     OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
@@ -1507,7 +1650,7 @@ components:
     OrganizationListInput: { type: object, properties: {}, additionalProperties: false }
     OrganizationUpdateInput: { type: object, required: [organizationId, update], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, update: { $ref: '#/components/schemas/OrganizationUpdate' } }, additionalProperties: false }
     OrganizationUpdate: { type: object, required: [organization, policy, expectedRevision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
-    WorkspacePolicy: { type: object, required: [maxProfiles, maxMembers, maxStorageBytes, offlineEntitled], properties: { maxProfiles: { type: integer, minimum: 0 }, maxMembers: { type: integer, minimum: 0 }, maxStorageBytes: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
+    WorkspacePolicy: { type: object, required: [maxProfiles, maxMembers, maxStorageBytes, offlineEntitled], properties: { maxProfiles: { type: integer, minimum: 0 }, maxMembers: { type: integer, minimum: 0 }, maxStorageBytes: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean }, defaultExtensionGroupId: { type: [string, 'null'], maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }, additionalProperties: false }
     Workspace: { type: object, required: [id, organizationId, name, policy, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, policy: { $ref: '#/components/schemas/WorkspacePolicy' }, createdAt: { type: string, format: date-time } }, additionalProperties: false }
     WorkspaceCreateInput: { type: object, required: [organizationId, workspace], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspace: { $ref: '#/components/schemas/Workspace' } }, additionalProperties: false }
     WorkspaceIdInput: { type: object, required: [organizationId, workspaceId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
@@ -1560,13 +1703,15 @@ components:
     Group: { type: object, required: [id, name, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, appearance: { type: [object, "null"], additionalProperties: true }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
     GroupRecord: { type: object, required: [group, workspaceId, revision], properties: { group: { $ref: '#/components/schemas/Group' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     GroupRecordList: { type: array, items: { $ref: '#/components/schemas/GroupRecord' } }
-    ExtensionGroup: { type: object, required: [id, name, extensionIds, syncMode, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
+    GitExtensionSource: { type: object, required: [repositoryUrl, reference], properties: { repositoryUrl: { type: string, format: uri, maxLength: 512 }, reference: { type: string, minLength: 1, maxLength: 200 }, subdirectory: { type: string, maxLength: 240, default: "" } }, additionalProperties: false }
+    GitExtensionSourceMap: { type: object, maxProperties: 256, additionalProperties: { $ref: '#/components/schemas/GitExtensionSource' } }
+    ExtensionGroup: { type: object, required: [id, name, extensionIds, syncMode, createdAt, updatedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, extensionSources: { $ref: '#/components/schemas/GitExtensionSourceMap' }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
     ExtensionGroupRecord: { type: object, required: [group, workspaceId, revision], properties: { group: { $ref: '#/components/schemas/ExtensionGroup' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     ExtensionGroupRecordList: { type: array, items: { $ref: '#/components/schemas/ExtensionGroupRecord' } }
     ExtensionGroupListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     ExtensionGroupIdInput: { type: object, required: [workspaceId, extensionGroupId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
-    ExtensionGroupCreateInput: { type: object, required: [workspaceId, extensionGroupId, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] } }, additionalProperties: false }
-    ExtensionGroupUpdateInput: { type: object, required: [workspaceId, extensionGroupId, expectedRevision, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] } }, additionalProperties: false }
+    ExtensionGroupCreateInput: { type: object, required: [workspaceId, extensionGroupId, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, extensionSources: { $ref: '#/components/schemas/GitExtensionSourceMap' }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] } }, additionalProperties: false }
+    ExtensionGroupUpdateInput: { type: object, required: [workspaceId, extensionGroupId, expectedRevision, name], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, name: { type: string, minLength: 1, maxLength: 120 }, extensionIds: { type: array, uniqueItems: true, maxItems: 256, items: { $ref: '#/components/schemas/CanonicalId' } }, extensionSources: { $ref: '#/components/schemas/GitExtensionSourceMap' }, syncMode: { anyOf: [{ $ref: '#/components/schemas/SyncMode' }, { type: "null" }] } }, additionalProperties: false }
     ExtensionGroupDeleteInput: { type: object, required: [workspaceId, extensionGroupId, expectedRevision], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, extensionGroupId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     ProfileExtensionGroupSetInput: { type: object, required: [workspaceId, profileId, expectedRevision, extensionGroupId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { $ref: '#/components/schemas/CanonicalId' }, expectedRevision: { type: integer, minimum: 1 }, extensionGroupId: { anyOf: [{ $ref: '#/components/schemas/CanonicalId' }, { type: "null" }] } }, additionalProperties: false }
     GroupShareGrant: { type: object, required: [id, workspaceId, groupId, memberId, action, effect, revision, createdAt, revokedAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, groupId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, action: { type: string, enum: [read, update, execute, share] }, effect: { type: string, enum: [allow, deny] }, revision: { type: integer, minimum: 1 }, createdAt: { type: string }, revokedAt: { type: [string, "null"] } }, additionalProperties: false }
@@ -1699,7 +1844,7 @@ components:
     ProfileShareRevocationReceipt: { type: object, required: [profileId, memberId, revision, revoked], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, revoked: { const: true } }, additionalProperties: false }
     ProfileLaunchInput: { type: object, required: [profilesRoot, extraArgs], properties: { profilesRoot: { type: string, minLength: 1 }, extraArgs: { type: array, items: { type: string } } }, additionalProperties: false }
     RuntimeProjectionInput: { type: object, required: [deviceId, generation, rootChecksum], properties: { deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }, additionalProperties: false }
-    RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, ownerId: { $ref: '#/components/schemas/CoordinationOwnerIdentifier' }, ownerEmail: { type: [string, "null"] }, state: { enum: [running, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
+    RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, ownerId: { $ref: '#/components/schemas/CoordinationOwnerIdentifier' }, ownerEmail: { type: [string, "null"] }, state: { enum: [running, syncing, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
     OptionalRuntimeProjection: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] }
     SyncManifest: { type: object, required: [schemaVersion, workspaceId, resourceId, fencingToken, generation, parentGeneration, rootChecksum, objects, tombstones], properties: { schemaVersion: { enum: [2, 3] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, fencingToken: { type: integer, minimum: 1 }, generation: { type: integer, minimum: 1 }, parentGeneration: { type: [integer, "null"], minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-f]{64}$' }, objects: { type: array, items: { $ref: '#/components/schemas/ManifestObject' } }, tombstones: { type: array, items: { $ref: '#/components/schemas/ManifestTombstone' } }, dependencies: { type: array, items: { $ref: '#/components/schemas/ManifestDependency' } }, payloadEncryption: { oneOf: [{ $ref: '#/components/schemas/ManifestPayloadEncryption' }, { type: "null" }] }, fileChunks: { type: array, items: { $ref: '#/components/schemas/ManifestFileChunks' } } }, additionalProperties: false }
     ResourceManifestKeyRotationInput: { type: object, required: [manifest], properties: { manifest: { $ref: '#/components/schemas/SyncManifest' }, keyShareEnvelopeUpdates: { type: array, maxItems: 256, items: { $ref: '#/components/schemas/ProfileKeyRotationEnvelopeUpdate' } } }, additionalProperties: false }

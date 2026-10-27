@@ -3543,6 +3543,13 @@ impl McpExecutor for ProductionMcpExecutor {
                 let update: crate::services::workspaces::WorkspaceUpdate =
                     serde_json::from_value(input.get("update").cloned().unwrap_or(Value::Null))
                         .map_err(serialization_problem)?;
+                if let Some(extension_group_id) = &update.workspace.policy.default_extension_group_id {
+                    state
+                        .extension_groups
+                        .read()
+                        .map_err(|_| problem("extension_group_unavailable", "Extension group service unavailable", 503))?
+                        .get(&principal, &grants, &ws_id, extension_group_id)?;
+                }
                 let record = state
                     .workspaces
                     .write()

@@ -319,9 +319,17 @@ interface TableMeta {
   // Sync
   syncStatuses: Record<
     string,
-    { status: string; error?: string; generation?: number; checkedAt?: number }
+    {
+      status: string;
+      error?: string;
+      generation?: number;
+      can_open?: boolean;
+      can_open_error?: string;
+      checkedAt?: number;
+      source?: "api";
+    }
   >;
-  refreshProfileSyncStatus?: (profileId: string) => void;
+  refreshProfileSyncStatus?: (profileId: string, force?: boolean) => void;
   crossOsUnlocked?: boolean;
   syncUnlocked?: boolean;
 
@@ -374,7 +382,9 @@ function getProfileSyncStatusDot(
   const encrypted =
     profile.sync_mode === "managed" || profile.sync_mode === "Encrypted";
   const managed =
-    profile.sync_mode === "managed" || profile.sync_mode === "Encrypted";
+    profile.sync_mode === "managed" ||
+    profile.sync_mode === "Encrypted" ||
+    profile.sync_mode === "Regular";
 
   if (!profile.last_sync && !liveStatus) {
     if (profile.sync_mode === "Disabled" || profile.sync_mode === "disabled") {
@@ -1932,10 +1942,17 @@ export function ProfilesDataTable({
         status: string;
         error?: string;
         generation?: number;
+        can_open?: boolean;
+        can_open_error?: string;
         checkedAt?: number;
+        source?: "api";
       }
     >
   >({});
+  const syncStatusesRef = React.useRef(syncStatuses);
+  syncStatusesRef.current = syncStatuses;
+  const syncStatusRequests = React.useRef(new Set<string>());
+  const syncStatusRevisions = React.useRef(new Map<string, number>());
 
   // Country proxy creation state (for inline proxy creation in dropdown)
   const [countries, setCountries] = React.useState<LocationItem[]>([]);
@@ -2101,7 +2118,7 @@ export function ProfilesDataTable({
   );
 
   const refreshProfileSyncStatus = React.useCallback(
-    async (profileId: string) => {
+    async (profileId: string, force = false) => {
       const profile = profiles.find((item) => item.id === profileId);
       if (!profile) return;
       const managed =
@@ -2109,14 +2126,21 @@ export function ProfilesDataTable({
         profile.sync_mode === "Encrypted" ||
         profile.sync_mode === "Regular";
       if (!managed) return;
-      const current = syncStatuses[profileId];
+      const current = syncStatusesRef.current[profileId];
       if (
-        current?.status === "syncing" ||
-        (current?.checkedAt && Date.now() - current.checkedAt < 30_000)
+        syncStatusRequests.current.has(profileId) ||
+        (!force &&
+          current?.status === "syncing" &&
+          runningProfiles.has(profileId)) ||
+        (!force &&
+          current?.source === "api" &&
+          current.checkedAt &&
+          Date.now() - current.checkedAt < 30_000)
       ) {
         return;
       }
-      if (runningProfiles.has(profileId)) {
+      if (!force && runningProfiles.has(profileId)) {
+        if (current?.status === "waiting") return;
         setSyncStatuses((previous) => ({
           ...previous,
           [profileId]: {
@@ -2126,27 +2150,98 @@ export function ProfilesDataTable({
         }));
         return;
       }
+      syncStatusRequests.current.add(profileId);
+      const revision = syncStatusRevisions.current.get(profileId) ?? 0;
       try {
         const remote = await invoke<{
           status: string;
           generation?: number | null;
+          can_open: boolean;
+          can_open_error?: string | null;
         }>("profile_sync_status_get", { profileId });
+        if ((syncStatusRevisions.current.get(profileId) ?? 0) !== revision)
+          return;
         setSyncStatuses((previous) => ({
           ...previous,
           [profileId]: {
             status: remote.status,
+            error: remote.can_open_error
+              ? formatError(remote.can_open_error)
+              : undefined,
             generation: remote.generation ?? undefined,
+            can_open: remote.can_open,
+            can_open_error: remote.can_open_error ?? undefined,
             checkedAt: Date.now(),
+            source: "api",
           },
         }));
       } catch (error) {
+        if ((syncStatusRevisions.current.get(profileId) ?? 0) !== revision)
+          return;
         console.error("Failed to refresh profile sync status:", error);
+        setSyncStatuses((previous) => ({
+          ...previous,
+          [profileId]: {
+            status: "error",
+            error: formatError(error),
+            checkedAt: Date.now(),
+            source: "api",
+          },
+        }));
+      } finally {
+        syncStatusRequests.current.delete(profileId);
       }
     },
-    [profiles, runningProfiles, syncStatuses],
+    [profiles, runningProfiles],
   );
 
+  React.useEffect(() => {
+    if (!browserState.isClient) return;
+    const refresh = () => {
+      for (const profile of profiles) {
+        if (
+          profile.sync_mode === "managed" ||
+          profile.sync_mode === "Encrypted" ||
+          profile.sync_mode === "Regular"
+        ) {
+          void refreshProfileSyncStatus(profile.id);
+        }
+      }
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 10_000);
+    return () => window.clearInterval(interval);
+  }, [browserState.isClient, profiles, refreshProfileSyncStatus]);
+
   // Listen for sync status events
+  React.useEffect(() => {
+    if (!browserState.isClient) return;
+    const unlisten = listen("profile-fingerprint-warning", () => {
+      showErrorToast(t("profileTable.nativeFingerprintWarning"));
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [browserState.isClient, t]);
+
+  React.useEffect(() => {
+    if (!browserState.isClient) return;
+    const unlisten = listen<{ profileId: string; warnings: string[] }>(
+      "profile-extension-warning",
+      ({ payload }) => {
+        showErrorToast(
+          t("extensions.launchUpdateWarning", {
+            count: payload.warnings.length,
+          }),
+          { description: payload.warnings.join("\n") },
+        );
+      },
+    );
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [browserState.isClient, t]);
+
   React.useEffect(() => {
     if (!browserState.isClient) return;
     let unlisten: (() => void) | undefined;
@@ -2158,10 +2253,17 @@ export function ProfilesDataTable({
           error?: string;
         }>("profile-sync-status", (event) => {
           const { profile_id, status, error } = event.payload;
+          syncStatusRevisions.current.set(
+            profile_id,
+            (syncStatusRevisions.current.get(profile_id) ?? 0) + 1,
+          );
           setSyncStatuses((prev) => ({
             ...prev,
             [profile_id]: { status, error, checkedAt: Date.now() },
           }));
+          if (status !== "syncing") {
+            void refreshProfileSyncStatus(profile_id, true);
+          }
         });
       } catch (error) {
         console.error("Failed to listen for sync status events:", error);
@@ -2170,7 +2272,7 @@ export function ProfilesDataTable({
     return () => {
       if (unlisten) unlisten();
     };
-  }, [browserState.isClient]);
+  }, [browserState.isClient, refreshProfileSyncStatus]);
 
   // Fetch traffic snapshots for running profiles (lightweight, real-time data)
   // Convert Set to sorted array to avoid Set reference comparison issues in dependencies
@@ -2789,12 +2891,17 @@ export function ProfilesDataTable({
           const isLockedByAnother = meta.isProfileLockedByAnother(profile.id);
           const isLockUnknown = meta.isProfileLockUnknown(profile.id);
           const isSyncing = meta.syncStatuses[profile.id]?.status === "syncing";
+          const syncEntry = meta.syncStatuses[profile.id];
+          const requiresSyncKey =
+            profile.sync_mode === "managed" ||
+            profile.sync_mode === "Encrypted" ||
+            profile.sync_mode === "Regular";
+          const canOpenHere = !requiresSyncKey || syncEntry?.can_open !== false;
           const canLaunch = isRunningRemotely
             ? false
             : meta.browserState.canLaunchProfile(profile) &&
               !isPendingRemotePull &&
               !isLockedByAnother &&
-              !isLockUnknown &&
               !isSyncing;
           const lockEmail = meta.getProfileLockEmail(profile.id);
           const lockInfo = meta.getProfileLockInfo(profile.id);
@@ -2804,21 +2911,34 @@ export function ProfilesDataTable({
               })
             : "";
           const lockOwnerLabel = `${lockEmail ?? ""}${expiryLabel}`;
-          const tooltipContent = isRunningRemotely
-            ? lockEmail
-              ? meta.t("profiles.remote.runningTooltipOwner", {
-                  owner: lockEmail,
+          const tooltipContent =
+            lockInfo?.activity === "syncing"
+              ? meta.t("sync.team.remoteSyncing", {
+                  owner: lockEmail || meta.t("sync.team.anotherDevice"),
                 })
-              : meta.t("profiles.remote.runningTooltip")
-            : isPendingRemotePull
-              ? meta.t("profiles.remote.pendingSyncTooltip")
-              : isLockedByAnother
-                ? meta.t("sync.team.cannotLaunchLocked", {
-                    owner: lockOwnerLabel,
-                  })
-                : isLockUnknown
-                  ? meta.t("sync.team.leaseUnknown")
-                  : meta.browserState.getLaunchTooltipContent(profile);
+              : isRunningRemotely
+                ? lockEmail
+                  ? meta.t("profiles.remote.runningTooltipOwner", {
+                      owner: lockEmail,
+                    })
+                  : meta.t("profiles.remote.runningTooltip")
+                : isPendingRemotePull
+                  ? meta.t("profiles.remote.pendingSyncTooltip")
+                  : isLockedByAnother
+                    ? meta.t("sync.team.cannotLaunchLocked", {
+                        owner: lockOwnerLabel,
+                      })
+                    : isLockUnknown
+                      ? meta.t("sync.team.leaseUnknown")
+                      : meta.browserState.getLaunchTooltipContent(profile);
+          const openTooltipContent =
+            syncEntry?.can_open === false
+              ? formatError(
+                  syncEntry.can_open_error ?? "sync_key_recovery_required",
+                )
+              : syncEntry?.status === "error"
+                ? (syncEntry.error ?? tooltipContent)
+                : tooltipContent;
 
           const handleProfileStop = async (profile: BrowserProfile) => {
             meta.setStoppingProfiles((prev: Set<string>) =>
@@ -2905,70 +3025,60 @@ export function ProfilesDataTable({
                   </TooltipContent>
                 </Tooltip>
               )}
-              <LaunchControlTooltip
-                profileId={profile.id}
-                launching={isLaunching}
-                content={isRunning ? stopTooltip : tooltipContent}
-              >
-                <span className="inline-flex">
-                  <RippleButton
-                    variant="soft"
-                    size="sm"
-                    data-running={isRunning ? "true" : undefined}
-                    disabled={!canLaunch || isLaunching || isStopping}
-                    aria-label={
-                      isRunningRemotely
-                        ? tooltipContent
-                        : isRunning
-                          ? meta.t("profiles.actions.stop")
-                          : isLockedByAnother || isLockUnknown
-                            ? tooltipContent
-                            : meta.t("profiles.actions.launch")
-                    }
-                    className={cn(
-                      "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",
-                      !canLaunch && "cursor-not-allowed opacity-50",
-                      canLaunch && "cursor-pointer",
-                      !isRunning &&
-                        "hover:bg-primary hover:text-primary-foreground",
-                      isRunning &&
-                        !isFollower &&
-                        "bg-destructive/12 text-destructive hover:bg-destructive/20",
-                    )}
-                    onClick={() =>
-                      isRunning
-                        ? void handleStop()
-                        : void handleProfileLaunch(profile)
-                    }
-                  >
-                    <span className="grid place-items-center">
-                      {isLaunching || isStopping ? (
-                        <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
-                      ) : isRunningRemotely ||
-                        isLockedByAnother ||
-                        isLockUnknown ? (
-                        <LuLock
-                          className={cn(
-                            "size-3.5",
-                            isLockUnknown && "text-warning",
-                          )}
-                        />
-                      ) : isRunning ? (
-                        <LuSquare className="size-3 fill-current" />
-                      ) : isLockedByAnother || isLockUnknown ? (
-                        <LuLock
-                          className={cn(
-                            "size-3.5",
-                            isLockUnknown && "text-warning",
-                          )}
-                        />
-                      ) : (
-                        <LuPlay className="size-3 translate-x-px fill-current" />
+              {(isRunning || canOpenHere) && (
+                <LaunchControlTooltip
+                  profileId={profile.id}
+                  launching={isLaunching}
+                  content={isRunning ? stopTooltip : openTooltipContent}
+                >
+                  <span className="inline-flex">
+                    <RippleButton
+                      variant="soft"
+                      size="sm"
+                      data-running={isRunning ? "true" : undefined}
+                      disabled={!canLaunch || isLaunching || isStopping}
+                      aria-label={
+                        isRunningRemotely
+                          ? tooltipContent
+                          : isRunning
+                            ? meta.t("profiles.actions.stop")
+                            : isLockedByAnother
+                              ? tooltipContent
+                              : meta.t("profiles.actions.launch")
+                      }
+                      className={cn(
+                        "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",
+                        !canLaunch && "cursor-not-allowed opacity-50",
+                        canLaunch && "cursor-pointer",
+                        !isRunning &&
+                          "hover:bg-primary hover:text-primary-foreground",
+                        isRunning &&
+                          !isFollower &&
+                          "bg-destructive/12 text-destructive hover:bg-destructive/20",
                       )}
-                    </span>
-                  </RippleButton>
-                </span>
-              </LaunchControlTooltip>
+                      onClick={() =>
+                        isRunning
+                          ? void handleStop()
+                          : void handleProfileLaunch(profile)
+                      }
+                    >
+                      <span className="grid place-items-center">
+                        {isLaunching || isStopping ? (
+                          <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
+                        ) : isRunningRemotely || isLockedByAnother ? (
+                          <LuLock className={cn("size-3.5")} />
+                        ) : isRunning ? (
+                          <LuSquare className="size-3 fill-current" />
+                        ) : isLockedByAnother ? (
+                          <LuLock className="size-3.5" />
+                        ) : (
+                          <LuPlay className="size-3 translate-x-px fill-current" />
+                        )}
+                      </span>
+                    </RippleButton>
+                  </span>
+                </LaunchControlTooltip>
+              )}
             </div>
           );
         },

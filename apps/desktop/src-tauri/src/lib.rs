@@ -19,6 +19,7 @@ mod network_features;
 mod profile_cookie_manager;
 mod profile_lifecycle;
 mod profile_password;
+mod extension_packages;
 mod profile_projection;
 pub mod profile_runtime;
 mod proxy_bridge;
@@ -199,6 +200,14 @@ pub fn run() {
             account_create,
             account_create_scoped,
             account_status_update,
+            account_identity_own_get,
+            account_identity_get,
+            account_identity_update,
+            account_password_change,
+            account_sessions_list,
+            account_sessions_revoke,
+            management_account_drafts_generate,
+            management_batch_execute,
             events_stream,
             events_stream_stop,
             organization_list,
@@ -206,6 +215,8 @@ pub fn run() {
             organization_record_get,
             organization_create,
             organization_update,
+            organization_delete,
+            organization_owner_transfer,
             organization_members_list,
             organization_account_create,
             organization_member_status_update,
@@ -215,6 +226,7 @@ pub fn run() {
             workspace_record_get,
             workspace_create,
             workspace_update,
+            workspace_delete,
             team_list,
             team_get,
             team_create,
@@ -223,6 +235,7 @@ pub fn run() {
             resource_get,
             resource_lease_get,
             profile_runtime_get,
+            profile_runtime_status_batch,
             get_runtime_device_id,
             resource_register,
             group_list,
@@ -254,6 +267,7 @@ pub fn run() {
             member_invitation_revoke,
             member_activate,
             member_suspend,
+            member_remove,
             member_role_update,
             profile_groups_replace,
             operation_get,
@@ -1340,6 +1354,48 @@ async fn account_get(
         .await
 }
 
+macro_rules! remote_read_command {
+    ($function:ident, $command:literal) => {
+        #[tauri::command]
+        async fn $function(
+            state: State<'_, DesktopState>,
+            correlation_id: String,
+            payload: Value,
+        ) -> Result<CommandResult<Value>, Problem> {
+            state.invoke($command, &correlation_id, None, payload).await
+        }
+    };
+}
+
+macro_rules! remote_mutation_command {
+    ($function:ident, $command:literal) => {
+        #[tauri::command]
+        async fn $function(
+            state: State<'_, DesktopState>,
+            correlation_id: String,
+            idempotency_key: Option<String>,
+            payload: Value,
+        ) -> Result<CommandResult<Value>, Problem> {
+            state
+                .invoke($command, &correlation_id, idempotency_key.as_deref(), payload)
+                .await
+        }
+    };
+}
+
+remote_read_command!(account_identity_own_get, "account_identity_own_get");
+remote_read_command!(account_identity_get, "account_identity_get");
+remote_read_command!(account_sessions_list, "account_sessions_list");
+remote_read_command!(management_account_drafts_generate, "management_account_drafts_generate");
+remote_mutation_command!(account_identity_update, "account_identity_update");
+remote_mutation_command!(account_password_change, "account_password_change");
+remote_mutation_command!(account_sessions_revoke, "account_sessions_revoke");
+remote_mutation_command!(management_batch_execute, "management_batch_execute");
+remote_mutation_command!(organization_delete, "organization_delete");
+remote_mutation_command!(organization_owner_transfer, "organization_owner_transfer");
+remote_mutation_command!(workspace_delete, "workspace_delete");
+remote_mutation_command!(member_remove, "member_remove");
+
 #[tauri::command]
 async fn account_list(
     state: State<'_, DesktopState>,
@@ -1699,6 +1755,17 @@ async fn profile_runtime_get(
 }
 
 #[tauri::command]
+async fn profile_runtime_status_batch(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke("profile_runtime_status_batch", &correlation_id, None, payload)
+        .await
+}
+
+#[tauri::command]
 fn get_runtime_device_id(state: State<'_, DesktopState>) -> Option<String> {
     state.runtime_device_id()
 }
@@ -1925,6 +1992,10 @@ async fn list_extension_groups(
         )
         .await?;
     let rows = result.data.as_array().cloned().unwrap_or_default();
+    for row in &rows {
+        extension_features::remember_group_sources(&row["group"]).map_err(|message|
+            Problem::new("extension_source_invalid", "Cannot load extension sources", 422, "extension-group-list").with_detail(message))?;
+    }
     Ok(rows
         .into_iter()
         .filter_map(|row| row.get("group").cloned())
@@ -1978,10 +2049,12 @@ async fn update_extension_group(
             .unwrap_or_else(|| json!([]))
     });
     let sync_mode = group.get("syncMode").cloned().unwrap_or(json!("local"));
+    let extension_sources = extension_features::group_git_sources(&extension_ids, &group["extensionSources"])
+        .map_err(|message| Problem::new("extension_source_invalid", "Invalid extension source", 422, "extension-group-update").with_detail(message))?;
     let result = state.invoke(
         "extension_group_update", &extension_command_id("extension-group-update")?,
         Some(&extension_command_id("extension-group-update-key")?),
-        json!({ "workspaceId": workspace_id, "extensionGroupId": group_id, "expectedRevision": revision, "name": name, "extensionIds": extension_ids, "syncMode": sync_mode }),
+        json!({ "workspaceId": workspace_id, "extensionGroupId": group_id, "expectedRevision": revision, "name": name, "extensionIds": extension_ids, "extensionSources": extension_sources, "syncMode": sync_mode }),
     ).await?;
     Ok(extension_group_ui_value(
         result.data.get("group").cloned().unwrap_or(Value::Null),

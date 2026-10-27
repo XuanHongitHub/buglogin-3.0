@@ -347,6 +347,18 @@ fn safe_problem_failure_context(
     fields: &BTreeMap<String, Value>,
 ) -> serde_json::Map<String, Value> {
     let mut context = serde_json::Map::new();
+    if let Some(Value::String(route)) = fields.get("apiRoute")
+        && route.starts_with("/v1/")
+        && route
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_:-".contains(&byte))
+    {
+        context.insert("apiRoute".into(), Value::String(route.clone()));
+    }
+    if let Some(Value::String(reason)) = fields.get("cdpFailureReason")
+        && matches!(reason.as_str(), "generation_state_unavailable" | "custom_fingerprint_plan_required") {
+        context.insert("cdpFailureReason".into(), Value::String(reason.clone()));
+    }
     if let Some(Value::String(class)) = fields.get("cdpErrorClass")
         && matches!(
             class.as_str(),
@@ -633,6 +645,25 @@ mod tests {
             .unwrap()
             .clone()
         );
+    }
+
+    #[test]
+    fn api_route_context_keeps_only_redacted_route_templates() {
+        let safe = BTreeMap::from([(
+            "apiRoute".to_owned(),
+            json!("/v1/workspaces/:id/resources/:id/lease"),
+        )]);
+        assert_eq!(
+            safe_problem_failure_context(&safe),
+            json!({"apiRoute": "/v1/workspaces/:id/resources/:id/lease"})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+
+        let unsafe_routes =
+            BTreeMap::from([("apiRoute".to_owned(), json!("/v1/profiles/prf_secret"))]);
+        assert!(safe_problem_failure_context(&unsafe_routes).is_empty());
     }
 
     fn queued_diagnostic(index: usize) -> QueuedDiagnostic {

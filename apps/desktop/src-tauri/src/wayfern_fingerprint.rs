@@ -143,7 +143,7 @@ pub async fn apply_or_generate(
     runtime_version: &str,
     cdp_port: u16,
     correlation_id: &str,
-) -> Result<(), Problem> {
+) -> Result<Option<Problem>, Problem> {
     ensure_profile_directory(profile_path, correlation_id)?;
     let fingerprint_path = profile_path.join(FINGERPRINT_PATH);
     let stored = match fs::read(&fingerprint_path) {
@@ -181,7 +181,20 @@ pub async fn apply_or_generate(
                 correlation_id,
             ));
         }
-        None => generate(target, runtime_version, cdp_port, correlation_id).await?,
+        None => match generate(target, runtime_version, cdp_port, correlation_id).await {
+            Ok(generated) => generated,
+            Err(error) if can_use_native_default(target, &error) => {
+                // A fresh native-OS profile can use the browser's ordinary default
+                // identity without the optional paid custom-fingerprint API. Never
+                // take this path for a stored identity or a cross-OS/version claim.
+                // Do not probe navigator through Runtime.evaluate here: that is a
+                // paid automation capability in Wayfern. The native runtime/OS
+                // selection is already validated before this optional fallback.
+                return Ok(Some(problem("wayfern_native_fingerprint_fallback", "Profile opened with the browser default fingerprint; custom identity is unavailable", 200, correlation_id)
+                    .with_field("cdpFailureReason", error.fields.get("cdpFailureReason").cloned().unwrap_or(Value::Null))));
+            }
+            Err(error) => return Err(error),
+        },
     };
     if identity_id.is_none() {
         validate_generated_target(&fingerprint, target, correlation_id)?;
@@ -257,7 +270,17 @@ pub async fn apply_or_generate(
             correlation_id,
         )?;
     }
-    Ok(())
+    Ok(None)
+}
+
+fn can_use_native_default(target: &ProfileFingerprintTarget, error: &Problem) -> bool {
+    let native_os = if cfg!(target_os = "windows") { FingerprintOperatingSystem::Windows }
+        else if cfg!(target_os = "macos") { FingerprintOperatingSystem::Macos }
+        else { FingerprintOperatingSystem::Linux };
+    target.operating_system == native_os && target.operating_system_version.is_none()
+        && error.code == "wayfern_fingerprint_provider_unavailable"
+        && matches!(error.fields.get("cdpFailureReason").and_then(Value::as_str),
+            Some("generation_state_unavailable" | "custom_fingerprint_plan_required"))
 }
 
 async fn generate(
@@ -360,7 +383,7 @@ enum CdpCommandError {
     ConnectTransport,
     Transport,
     InvalidResponse,
-    Protocol(Option<i64>),
+    Protocol(Option<i64>, Option<&'static str>),
 }
 
 impl CdpCommandError {
@@ -370,7 +393,7 @@ impl CdpCommandError {
             Self::ConnectTransport => "transport",
             Self::Transport => "transport",
             Self::InvalidResponse => "invalid_response",
-            Self::Protocol(_) => "protocol_error",
+            Self::Protocol(_, _) => "protocol_error",
         }
     }
 }
@@ -384,8 +407,9 @@ fn cdp_problem(
 ) -> Problem {
     let mut issue =
         problem(code, title, status, correlation_id).with_field("cdpErrorClass", error.class());
-    if let CdpCommandError::Protocol(Some(protocol_code)) = error {
-        issue = issue.with_field("cdpProtocolCode", protocol_code);
+    if let CdpCommandError::Protocol(protocol_code, reason) = error {
+        if let Some(protocol_code) = protocol_code { issue = issue.with_field("cdpProtocolCode", protocol_code); }
+        if let Some(reason) = reason { issue = issue.with_field("cdpFailureReason", reason); }
     }
     issue
 }
@@ -632,6 +656,7 @@ async fn cdp_command(url: &str, method: &str, params: Value) -> Result<Value, Cd
                 if let Some(error) = value.get("error") {
                     return Err(CdpCommandError::Protocol(
                         error.get("code").and_then(Value::as_i64),
+                        error.get("message").and_then(Value::as_str).and_then(classify_provider_failure),
                     ));
                 }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
@@ -644,6 +669,12 @@ async fn cdp_command(url: &str, method: &str, params: Value) -> Result<Value, Cd
             _ => {}
         }
     }
+}
+
+fn classify_provider_failure(message: &str) -> Option<&'static str> {
+    if message.contains("Fingerprint generation state is unavailable") { Some("generation_state_unavailable") }
+    else if message.contains("Custom fingerprints require") { Some("custom_fingerprint_plan_required") }
+    else { None }
 }
 
 fn validate_generated_target(
@@ -844,7 +875,7 @@ mod tests {
     #[test]
     fn cdp_problem_preserves_safe_protocol_classification() {
         let issue = cdp_problem(
-            CdpCommandError::Protocol(Some(-32602)),
+            CdpCommandError::Protocol(Some(-32602), None),
             "wayfern_fingerprint_provider_unavailable",
             "Wayfern could not create a reproducible profile identity",
             409,
@@ -854,6 +885,26 @@ mod tests {
         assert_eq!(issue.fields["cdpErrorClass"], "protocol_error");
         assert_eq!(issue.fields["cdpProtocolCode"], -32602);
         assert_eq!(issue.detail, None);
+    }
+
+    #[test]
+    fn native_default_fallback_requires_verified_provider_reason_and_native_os_without_version_claim() {
+        let native = if cfg!(target_os = "windows") { FingerprintOperatingSystem::Windows }
+            else if cfg!(target_os = "macos") { FingerprintOperatingSystem::Macos }
+            else { FingerprintOperatingSystem::Linux };
+        let target = ProfileFingerprintTarget { operating_system: native, operating_system_version: None };
+        let error = cdp_problem(CdpCommandError::Protocol(Some(-32000), Some("generation_state_unavailable")),
+            "wayfern_fingerprint_provider_unavailable", "Unavailable", 409, "test");
+        assert!(can_use_native_default(&target, &error));
+        let mut versioned = target.clone();
+        versioned.operating_system_version = Some("11".into());
+        assert!(!can_use_native_default(&versioned, &error));
+        let mut cross_os = target.clone();
+        cross_os.operating_system = FingerprintOperatingSystem::Android;
+        assert!(!can_use_native_default(&cross_os, &error));
+        let unrelated = problem("wayfern_fingerprint_provider_unavailable", "Unknown error", 409, "test");
+        assert!(!can_use_native_default(&target, &unrelated));
+        assert_eq!(classify_provider_failure("Custom fingerprints require a Donut Browser plan that includes them."), Some("custom_fingerprint_plan_required"));
     }
 
     #[test]

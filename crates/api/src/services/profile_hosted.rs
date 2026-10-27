@@ -65,6 +65,28 @@ pub struct HostedProfileDeleteReceipt {
     pub recoverable: bool,
 }
 
+fn has_managed_profile_key(
+    state: &ApiState,
+    profile_id: &ProfileId,
+    binding: &ProfileResource,
+) -> Result<bool, Problem> {
+    let Some(manifest) = state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)? else {
+        return Ok(false);
+    };
+    let Some(key_version) = manifest
+        .payload_encryption
+        .and_then(|encryption| encryption.key_version)
+    else {
+        return Ok(false);
+    };
+    state.has_managed_profile_key_envelope(
+        profile_id,
+        &binding.workspace_id,
+        &binding.resource_id,
+        &key_version,
+    )
+}
+
 impl HostedProfileService {
     pub fn activate_member(
         state: &ApiState,
@@ -250,7 +272,7 @@ impl HostedProfileService {
         let before = state.control_aggregate()?;
         let result = (|| {
             let updated = state.replace_hosted_profile_groups(input)?;
-            if requires_rotation {
+            if requires_rotation && !has_managed_profile_key(state, &updated.value.id, &binding)? {
                 Self::validate_profile_key_rotation_recipient_bounds(
                     state,
                     &updated.value.id,
@@ -280,6 +302,7 @@ impl HostedProfileService {
         if state
             .current_sync_manifest(workspace_id, resource_id)?
             .is_some_and(|manifest| manifest.payload_encryption.is_some())
+            && !has_managed_profile_key(state, &binding.profile_id, &binding)?
         {
             state.mark_resource_key_rotation_pending(&binding.workspace_id, resource_id)?;
         }
@@ -303,6 +326,7 @@ impl HostedProfileService {
                 || !state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                     .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
             }
@@ -349,6 +373,7 @@ impl HostedProfileService {
                 || !state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                     .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
             }
@@ -388,6 +413,7 @@ impl HostedProfileService {
                 || !state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                     .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
             }
@@ -924,6 +950,7 @@ impl HostedProfileService {
         );
         if let Some(binding) = binding.as_ref()
             && state.resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)?
+            && !has_managed_profile_key(state, profile_id, binding)?
         {
             if !can_update || !matches!(action, Action::Read | Action::Update) {
                 return Ok(false);
@@ -1090,6 +1117,9 @@ impl HostedProfileService {
                 404,
             ));
         };
+        if has_managed_profile_key(state, profile_id, &binding)? {
+            return Ok(());
+        }
         let shared_members = Self::effective_profile_key_recipients(
             state,
             profile_id,
@@ -1467,7 +1497,9 @@ impl HostedProfileService {
                 &input.profile_id,
             )?;
             check_revision(current.revision, input.expected_revision)?;
-            if state.resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)? {
+            if state.resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)?
+                && !has_managed_profile_key(state, &input.profile_id, &binding)?
+            {
                 return Err(problem(
                     "sync_key_rotation_pending",
                     "Profile sharing is unavailable until key rotation completes",
@@ -1481,7 +1513,31 @@ impl HostedProfileService {
                 .as_ref()
                 .is_some_and(|manifest| manifest.payload_encryption.is_some())
             {
-                validate_encrypted_profile_share(state, &binding, &input)?;
+                let managed_key_available = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.payload_encryption.as_ref())
+                    .and_then(|encryption| encryption.key_version.as_deref())
+                    .map(|key_version| {
+                        state.has_managed_profile_key_envelope(
+                            &input.profile_id,
+                            &binding.workspace_id,
+                            &binding.resource_id,
+                            key_version,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                if managed_key_available {
+                    if !input.recipient_key_envelopes.is_empty() {
+                        return Err(problem(
+                            "profile_key_envelope_unexpected",
+                            "Service-managed profile keys do not use recipient device envelopes",
+                            400,
+                        ));
+                    }
+                } else {
+                    validate_encrypted_profile_share(state, &binding, &input)?;
+                }
             } else if !input.recipient_key_envelopes.is_empty() {
                 return Err(problem(
                     "profile_key_envelope_unexpected",
@@ -1556,6 +1612,7 @@ impl HostedProfileService {
             if state
                 .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
                 .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                && !has_managed_profile_key(state, &input.profile_id, &binding)?
             {
                 state.mark_resource_key_rotation_pending(
                     &binding.workspace_id,
@@ -2188,6 +2245,7 @@ mod authorization_tests {
                         max_members: 10,
                         max_storage_bytes: 1024,
                         offline_entitled: false,
+                        default_extension_group_id: None,
                     },
                     created_at: "2026-10-12T00:00:00Z".into(),
                 },
@@ -2265,6 +2323,7 @@ mod authorization_tests {
                         max_members: 10,
                         max_storage_bytes: 1024,
                         offline_entitled: false,
+                        default_extension_group_id: None,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
                 },

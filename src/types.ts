@@ -75,7 +75,15 @@ export interface Extension {
   homepage_url?: string;
   manifest_name?: string;
   linked_path?: string | null;
+  git_source?: GitExtensionSource | null;
+  source_revision?: string | null;
   source_kind: "archive" | "unpacked";
+}
+
+export interface GitExtensionSource {
+  repositoryUrl: string;
+  reference: string;
+  subdirectory: string;
 }
 
 export interface FetchedExtension {
@@ -87,6 +95,8 @@ export interface FetchedExtension {
   file_data: string | null;
   path: string | null;
   source_url: string | null;
+  git_source?: GitExtensionSource | null;
+  source_revision?: string | null;
 }
 
 export interface ExtensionGroup {
@@ -166,6 +176,7 @@ export interface ProfileLockInfo {
   ownerLabel?: string;
   lockedAt: string;
   expiresAt?: string;
+  activity?: "running" | "syncing" | "locked";
 }
 
 export interface CloudAuthState {

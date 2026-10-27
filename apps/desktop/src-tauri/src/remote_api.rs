@@ -89,6 +89,25 @@ pub struct IntegrationApiStatus {
     pub mcp_enabled: Option<bool>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProfileKeyEnrollment {
+    pub enrolled: bool,
+    pub key_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProfileKey {
+    pub resource_key: String,
+}
+
+impl Drop for ManagedProfileKey {
+    fn drop(&mut self) {
+        self.resource_key.zeroize();
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiTokenSummary {
@@ -637,7 +656,31 @@ impl RemoteApiClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().await.map_err(|error| {
+        let mut attempt = 0;
+        let response = loop {
+            let next = request
+                .try_clone()
+                .ok_or_else(|| client_problem("api_request_invalid", 400))?;
+            match next.send().await {
+                Ok(response)
+                    if retry_safe
+                        && attempt == 0
+                        && matches!(response.status().as_u16(), 502 | 503 | 504) =>
+                {
+                    attempt += 1;
+                    drop(response);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(error)
+                    if retry_safe && attempt == 0 && (error.is_connect() || error.is_timeout()) =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                outcome => break outcome,
+            }
+        }
+        .map_err(|error| {
             Problem::new(
                 "api_unavailable",
                 "BugLogin API is unavailable",
@@ -648,7 +691,11 @@ impl RemoteApiClient {
         })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(read_problem(response, correlation, retry_safe).await);
+            let mut problem = read_problem(response, correlation, retry_safe).await;
+            if status == StatusCode::NOT_FOUND {
+                problem = problem.with_field("apiRoute", api_route_template(path));
+            }
+            return Err(problem);
         }
         if status == StatusCode::NO_CONTENT {
             return serde_json::from_value(Value::Null)
@@ -701,8 +748,13 @@ impl RemoteApiClient {
             )
             .retryable(error.is_connect() || error.is_timeout())
         })?;
-        if !response.status().is_success() {
-            return Err(read_problem(response, correlation, true).await);
+        let status = response.status();
+        if !status.is_success() {
+            let mut problem = read_problem(response, correlation, true).await;
+            if status == StatusCode::NOT_FOUND {
+                problem = problem.with_field("apiRoute", api_route_template(path));
+            }
+            return Err(problem);
         }
         response.json().await.map_err(|_| {
             Problem::new(
@@ -794,8 +846,13 @@ impl RemoteApiClient {
                 )
                 .retryable(error.is_connect() || error.is_timeout())
             })?;
-        if !response.status().is_success() {
-            return Err(read_problem(response, correlation, true).await);
+        let status = response.status();
+        if !status.is_success() {
+            let mut problem = read_problem(response, correlation, true).await;
+            if status == StatusCode::NOT_FOUND {
+                problem = problem.with_field("apiRoute", api_route_template(path));
+            }
+            return Err(problem);
         }
         if response
             .content_length()
@@ -1564,6 +1621,38 @@ impl RemoteApiClient {
         .await
     }
 
+    pub async fn enroll_profile_managed_key(
+        &self,
+        id: &ProfileId,
+        resource_key: &str,
+        correlation: &str,
+    ) -> Result<ManagedProfileKeyEnrollment, Problem> {
+        let key_version = format!("{:x}", Sha256::digest(resource_key.as_bytes()));
+        let idempotency_key = format!("profile-managed-key-enroll-{}-{key_version}", id.as_str());
+        self.send(
+            Method::POST,
+            &format!("/v1/profiles/{}/managed-key-envelope", id.as_str()),
+            Some(json!({ "resourceKey": resource_key })),
+            correlation,
+            Some(&idempotency_key),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn fetch_profile_managed_key(
+        &self,
+        id: &ProfileId,
+        correlation: &str,
+    ) -> Result<ManagedProfileKey, Problem> {
+        self.get(
+            &format!("/v1/profiles/{}/managed-key-envelope", id.as_str()),
+            correlation,
+        )
+        .await
+    }
+
     pub async fn profile_share_recipient_device_keys(
         &self,
         profile_id: &ProfileId,
@@ -1951,6 +2040,28 @@ impl RemoteApiClient {
         )
         .await
     }
+    pub async fn runtime_syncing(
+        &self,
+        profile: &ProfileId,
+        device_id: &str,
+        generation: u64,
+        checksum: &str,
+        lease: &LeaseGrant,
+        idem: &str,
+        correlation: &str,
+    ) -> Result<(), Problem> {
+        self.runtime_projection(
+            "syncing",
+            profile,
+            device_id,
+            generation,
+            checksum,
+            lease,
+            idem,
+            correlation,
+        )
+        .await
+    }
     async fn runtime_projection(
         &self,
         state: &str,
@@ -1992,6 +2103,14 @@ impl RemoteApiClient {
         let result = match name {
             "system_health_get" => self.get::<Value>("/v1/health",correlation).await?,
             "account_get" => self.get::<Value>("/v1/account",correlation).await?,
+            "account_identity_own_get" => self.get::<Value>("/v1/account/identity",correlation).await?,
+            "account_identity_get" => { let id=path_arg(&payload,"accountId",correlation)?; self.get::<Value>(&format!("/v1/accounts/{id}/identity"),correlation).await? },
+            "account_identity_update" => { let id=path_arg(&payload,"accountId",correlation)?; let mut body=payload; if let Some(object)=body.as_object_mut(){object.remove("accountId");} self.send::<Value>(Method::PATCH,&format!("/v1/accounts/{id}/identity"),Some(body),correlation,idem,None,&[]).await? },
+            "account_password_change" => self.send::<Value>(Method::PUT,"/v1/account/password",Some(payload),correlation,idem,None,&[]).await?,
+            "account_sessions_list" => { let id=path_arg(&payload,"accountId",correlation)?; self.get::<Value>(&format!("/v1/accounts/{id}/sessions"),correlation).await? },
+            "account_sessions_revoke" => { let account=path_arg(&payload,"accountId",correlation)?; let session=path_arg(&payload,"sessionId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/accounts/{account}/sessions/{session}"),None,correlation,idem,None,&[]).await? },
+            "management_account_drafts_generate" => self.send::<Value>(Method::POST,"/v1/management/account-drafts",Some(payload),correlation,None,None,&[]).await?,
+            "management_batch_execute" => self.send::<Value>(Method::POST,"/v1/management/batch",Some(payload),correlation,idem,None,&[]).await?,
             "account_list" => self.get::<Value>("/v1/accounts",correlation).await?,
             "account_create" => self.send::<Value>(Method::POST,"/v1/accounts",Some(payload),correlation,idem,None,&[]).await?,
             "account_create_scoped" => {
@@ -1999,8 +2118,10 @@ impl RemoteApiClient {
                 let body = json!({
                     "accountId": payload.get("accountId").cloned().ok_or_else(|| bad_input("accountId", correlation))?,
                     "username": payload.get("username").cloned().ok_or_else(|| bad_input("username", correlation))?,
+                    "displayName": payload.get("displayName").cloned().unwrap_or_else(|| json!("")),
                     "email": payload.get("email").cloned().ok_or_else(|| bad_input("email", correlation))?,
                     "role": payload.get("role").cloned().ok_or_else(|| bad_input("role", correlation))?,
+                    "initialPassword": payload.get("initialPassword").cloned().ok_or_else(|| bad_input("initialPassword", correlation))?,
                 });
                 self.send::<Value>(Method::POST,&format!("/v1/workspaces/{workspace_id}/accounts"),Some(body),correlation,idem,None,&[]).await?
             },
@@ -2018,6 +2139,8 @@ impl RemoteApiClient {
             "organization_record_get" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/record"),correlation).await? },
             "organization_create" => self.send::<Value>(Method::POST,"/v1/organizations",Some(payload),correlation,idem,None,&[]).await?,
             "organization_update" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=payload.get("update").cloned().ok_or_else(||bad_input("update",correlation))?; self.send::<Value>(Method::PATCH,&format!("/v1/organizations/{id}"),Some(body),correlation,idem,None,&[]).await? },
+            "organization_delete" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::DELETE,&format!("/v1/organizations/{id}"),Some(body),correlation,idem,None,&[]).await? },
+            "organization_owner_transfer" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=json!({"accountId":payload.get("accountId").cloned().ok_or_else(||bad_input("accountId",correlation))?,"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::POST,&format!("/v1/organizations/{id}/owner"),Some(body),correlation,idem,None,&[]).await? },
             "organization_members_list" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/members"),correlation).await? },
             "organization_member_workspace_assign" => {
                 let organization_id = path_arg(&payload, "organizationId", correlation)?;
@@ -2068,6 +2191,7 @@ impl RemoteApiClient {
                 )
                 .await?
             },
+            "workspace_delete" => { let org=path_arg(&payload,"organizationId",correlation)?; let id=path_arg(&payload,"workspaceId",correlation)?; let body=json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::DELETE,&format!("/v1/organizations/{org}/workspaces/{id}"),Some(body),correlation,idem,None,&[]).await? },
             "group_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; json!(self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/groups"),correlation).await?) },
             "group_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/groups/{id}"),correlation).await? },
             "group_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/groups"),Some(payload),correlation,idem,None,&[]).await? },
@@ -2216,6 +2340,7 @@ impl RemoteApiClient {
             "member_invitation_redeem" => { let id=path_arg(&payload,"invitationId",correlation)?; let body=json!({"code":payload.get("code").and_then(Value::as_str).ok_or_else(||bad_input("code",correlation))?}); self.send::<Value>(Method::POST,&format!("/v1/workspace-invitations/{id}/redeem"),Some(body),correlation,idem,None,&[]).await? },
             "member_invitation_revoke" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"invitationId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/invitations/{id}"),None,correlation,idem,None,&[]).await? },
             "member_activate" | "member_suspend" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; let action=if name=="member_activate" {"activate"} else {"suspend"}; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/members/{id}/{action}"),None,correlation,idem,None,&[]).await? },
+            "member_remove" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/members/{id}"),None,correlation,idem,None,&[]).await? },
             "member_role_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; let body=json!({"role":payload.get("role").cloned().ok_or_else(||bad_input("role",correlation))?}); self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/members/{id}/role"),Some(body),correlation,idem,None,&[]).await? },
             "resource_list" => {
                 let ws = path_arg(&payload, "workspaceId", correlation)?;
@@ -2267,6 +2392,27 @@ impl RemoteApiClient {
                     correlation,
                 )
                 .await?
+            }
+            "profile_runtime_status_batch" => {
+                let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
+                let profile_ids = payload
+                    .get("profileIds")
+                    .and_then(Value::as_array)
+                    .filter(|ids| !ids.is_empty() && ids.len() <= 250)
+                    .ok_or_else(|| bad_input("profileIds", correlation))?;
+                let mut path = format!("/v1/workspaces/{workspace_id}/profile-runtime-status?");
+                for (index, profile_id) in profile_ids.iter().enumerate() {
+                    let profile_id = profile_id
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| bad_input("profileIds", correlation))?;
+                    if index > 0 {
+                        path.push('&');
+                    }
+                    path.push_str("profileId=");
+                    path.push_str(&urlencoding(profile_id));
+                }
+                self.get::<Value>(&path, correlation).await?
             }
             "resource_register" => { let resource=payload.get("resource").cloned().ok_or_else(||bad_input("resource",correlation))?; let ws=resource.get("workspaceId").and_then(Value::as_str).filter(|value|!value.is_empty()).ok_or_else(||bad_input("resource.workspaceId",correlation))?; let ws=path_arg(&json!({"workspaceId":ws}),"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/resources"),Some(resource),correlation,idem,None,&[]).await? },
             "cookie_list" => { let id=path_arg(&payload,"profileId",correlation)?; let ws=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/profiles/{id}/cookies?workspaceId={ws}"),correlation).await? },
@@ -2764,6 +2910,26 @@ fn request_retry_safe(method: &Method, path: &str, has_idempotency_key: bool) ->
         || matches!(path, "/v1/auth/device/token" | "/v1/proxies/parse")
 }
 
+fn api_route_template(path: &str) -> String {
+    let path = path.split('?').next().unwrap_or_default();
+    let mut redact_next = false;
+    path.split('/')
+        .map(|segment| {
+            if redact_next {
+                redact_next = false;
+                return ":id";
+            }
+            redact_next = matches!(
+                segment,
+                "accounts" | "workspaces" | "profiles" | "resources" | "members"
+                    | "groups" | "extensions" | "proxies" | "devices" | "sessions"
+            );
+            segment
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 async fn parse_response(response: reqwest::Response, correlation: &str) -> Result<Value, Problem> {
     let status = response.status();
     if !status.is_success() {
@@ -2927,6 +3093,7 @@ fn legacy_workspace_update(
                 }
                 "maxStorageBytes" => value.as_u64().is_some(),
                 "offlineEntitled" => value.is_boolean(),
+                "defaultExtensionGroupId" => value.is_null() || value.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 128),
                 _ => false,
             };
             if !valid {
@@ -2994,6 +3161,14 @@ fn command_id(name: &str) -> &str {
     match name {
         "system_health_get" => "system.health.get",
         "account_get" => "account.get",
+        "account_identity_own_get" => "account.identity.own.get",
+        "account_identity_get" => "account.identity.get",
+        "account_identity_update" => "account.identity.update",
+        "account_password_change" => "account.password.change",
+        "account_sessions_list" => "account.sessions.list",
+        "account_sessions_revoke" => "account.sessions.revoke",
+        "management_account_drafts_generate" => "management.account.drafts.generate",
+        "management_batch_execute" => "management.batch.execute",
         "account_list" => "account.list",
         "account_create" => "account.create",
         "account_create_scoped" => "account.create.scoped",
@@ -3003,6 +3178,8 @@ fn command_id(name: &str) -> &str {
         "organization_record_get" => "organization.record.get",
         "organization_create" => "organization.create",
         "organization_update" => "organization.update",
+        "organization_delete" => "organization.delete",
+        "organization_owner_transfer" => "organization.owner.transfer",
         "organization_members_list" => "organization.members.list",
         "organization_account_create" => "organization.account.create",
         "organization_member_status_update" => "organization.member.status.update",
@@ -3012,6 +3189,7 @@ fn command_id(name: &str) -> &str {
         "workspace_record_get" => "workspace.record.get",
         "workspace_create" => "workspace.create",
         "workspace_update" => "workspace.update",
+        "workspace_delete" => "workspace.delete",
         "group_list" => "group.list",
         "group_get" => "group.get",
         "group_create" => "group.create",
@@ -3065,11 +3243,13 @@ fn command_id(name: &str) -> &str {
         "member_invite" => "member.invite",
         "member_activate" => "member.activate",
         "member_suspend" => "member.suspend",
+        "member_remove" => "member.remove",
         "member_role_update" => "member.role.update",
         "resource_list" => "resource.list",
         "resource_get" => "resource.get",
         "resource_lease_get" => "resource.lease.get",
         "profile_runtime_get" => "profile.runtime.get",
+        "profile_runtime_status_batch" => "profile.runtime.status.batch",
         "resource_register" => "resource.register",
         "grant_list" => "grant.list.legacy",
         "grant_list_page" => "grant.list.page",
@@ -3100,8 +3280,8 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::{
         FeedbackSubmission, MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, canonical_workspace_update,
-        legacy_workspace_update, manifest_commit_idempotency_key, optional_bool, optional_cursor,
-        optional_page_limit, request_retry_safe,
+        api_route_template, legacy_workspace_update, manifest_commit_idempotency_key, optional_bool,
+        optional_cursor, optional_page_limit, request_retry_safe,
     };
     use crate::clock::unix_time_seconds_at;
     use crate::profile_runtime::DesktopSyncBackend;
@@ -3118,6 +3298,16 @@ mod tests {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn api_route_template_redacts_resource_ids_and_query_values() {
+        assert_eq!(
+            api_route_template(
+                "/v1/workspaces/ws_sensitive/resources/res_sensitive/manifest?repairStaleProxy=true"
+            ),
+            "/v1/workspaces/:id/resources/:id/manifest"
+        );
+    }
 
     #[test]
     fn legacy_workspace_patch_is_merged_with_scoped_record_revision() {
@@ -3501,6 +3691,56 @@ mod tests {
             "/v1/auth/device/refresh",
             false
         ));
+    }
+
+    #[tokio::test]
+    async fn transport_retries_transient_safe_requests_without_replaying_unsafe_posts() {
+        for (method, key, expected_requests) in [
+            (reqwest::Method::GET, None, 2),
+            (reqwest::Method::POST, None, 1),
+            (reqwest::Method::POST, Some("transport-retry-test"), 2),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for attempt in 0..expected_requests {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let _ = read_http_request(&mut stream).await;
+                    let (status, body) = if attempt == 0 {
+                        ("502 Bad Gateway", "upstream temporarily unavailable")
+                    } else {
+                        ("200 OK", r#"{"ok":true}"#)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            let client =
+                RemoteApiClient::new_unauthenticated(&format!("http://{address}")).unwrap();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.send::<Value>(
+                    method,
+                    "/v1/profiles",
+                    None,
+                    "cor_transport_retry",
+                    key,
+                    None,
+                    &[],
+                ),
+            )
+            .await
+            .unwrap();
+            if expected_requests == 2 {
+                assert_eq!(result.unwrap(), json!({"ok": true}));
+            } else {
+                assert_eq!(result.unwrap_err().status, 502);
+            }
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

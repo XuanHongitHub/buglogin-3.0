@@ -22,6 +22,10 @@ const BUGLOGIN_NEW_TAB_SHORTCUT: &str = "https://buglogin.com/";
 const LEGACY_DONUT_TOP_SITES: &[&str] =
     &["https://donutbrowser.com/", "https://www.donutbrowser.com/"];
 
+fn top_site_blacklist_key(url: &str) -> String {
+    format!("{:x}", md5::compute(url.as_bytes()))
+}
+
 /// Repair the BugLogin NTP state. Wayfern 155 can crash on a generated string
 /// shortcut, so remove that legacy entry and blacklist the former Donut home.
 pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
@@ -64,8 +68,12 @@ pub fn configure_new_tab_shortcuts(profile_path: &Path) -> Result<(), Problem> {
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         if let Some(blacklist) = blacklist.as_object_mut() {
             for url in LEGACY_DONUT_TOP_SITES {
-                if !blacklist.contains_key(*url) {
-                    blacklist.insert((*url).to_owned(), serde_json::Value::Null);
+                let key = top_site_blacklist_key(url);
+                if blacklist.remove(*url).is_some() {
+                    changed = true;
+                }
+                if !blacklist.contains_key(&key) {
+                    blacklist.insert(key, serde_json::Value::Null);
                     changed = true;
                 }
             }
@@ -254,6 +262,7 @@ impl RuntimeAdapter for WayfernAdapter {
             chromium_compatible_user_data_dir(profile_path)
         )];
         args.extend(extra_args.iter().cloned());
+        args.push("--disable-background-mode".to_owned());
         Ok(LaunchSpecification {
             runtime: Runtime::Wayfern,
             version: binary.version.clone(),
@@ -318,6 +327,7 @@ mod tests {
             vec![
                 format!("--user-data-dir={}", profile_path.to_string_lossy()),
                 "--disable-sync".to_owned(),
+                "--disable-background-mode".to_owned(),
             ]
         );
     }
@@ -397,9 +407,10 @@ mod tests {
         );
         for url in LEGACY_DONUT_TOP_SITES {
             assert_eq!(
-                preferences["ntp"]["most_visited_blacklist"][*url],
+                preferences["ntp"]["most_visited_blacklist"][top_site_blacklist_key(url)],
                 serde_json::Value::Null
             );
+            assert!(preferences["ntp"]["most_visited_blacklist"].get(*url).is_none());
         }
         assert_eq!(
             preferences["custom_links"]["list"],
@@ -481,10 +492,18 @@ mod tests {
         );
         for url in LEGACY_DONUT_TOP_SITES {
             assert_eq!(
-                preferences["ntp"]["most_visited_blacklist"][*url],
+                preferences["ntp"]["most_visited_blacklist"][top_site_blacklist_key(url)],
                 serde_json::Value::Null
             );
         }
         fs::remove_dir_all(profile_path).unwrap();
+    }
+
+    #[test]
+    fn top_site_blacklist_uses_chromium_md5_url_key() {
+        assert_eq!(
+            top_site_blacklist_key("https://example.com/"),
+            "182ccedb33a9e03fbf1079b209da1a31"
+        );
     }
 }
