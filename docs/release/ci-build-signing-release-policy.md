@@ -72,7 +72,7 @@ Every release includes SHA-256, SBOM, provenance/attestation, license notices, v
 - Lockfiles mandatory; frozen installs.
 - Clean checkout; generated/untracked product files fail.
 - Runtime/sidecar assets pinned with checksums.
-- Provenance binds commit, toolchains, workflow, locks, and artifact hashes. Keyless Sigstore bundles are signed with GitHub OIDC and verified against the exact repository/workflow identity; this works for the private user-owned product repository where GitHub's stored artifact-attestation feature is unavailable.
+- Provenance binds commit, toolchains, workflow, locks, and artifact hashes. Keyless Sigstore bundles are signed with GitHub OIDC and verified against the exact release workflow identity in `XuanHongitHub/buglogin-3.0`; the original `keyduc91/Malvanut-Login` repository is not the 3.0 release publisher.
 - Registry immutable; no same-version replacement.
 
 ## Channels

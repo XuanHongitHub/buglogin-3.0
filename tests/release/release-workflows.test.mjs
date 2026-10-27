@@ -17,6 +17,19 @@ test("release workflows satisfy fail-closed static policy", async () => {
   assert.match(release, /workflow_dispatch:/);
   assert.match(signing, /Create Windows updater build configuration/);
   assert.equal(
+    (signing.match(/https:\/\/github\\\.com\/XuanHongitHub\/buglogin-3\\\.0\/\\.github\/workflows\/signing\\\.yml@refs\/heads\/main/g) ?? [])
+      .length,
+    2,
+  );
+  assert.match(
+    promotion,
+    /https:\/\/github\\\.com\/XuanHongitHub\/buglogin-3\\\.0\/\\.github\/workflows\/signing\\\.yml@refs\/heads\/main/,
+  );
+  assert.doesNotMatch(
+    `${signing}\n${promotion}`,
+    /keyduc91\/Malvanut-Login/,
+  );
+  assert.equal(
     (signing.match(/node scripts\/release\/verify-tauri-signature\.mjs/g) ?? [])
       .length,
     2,
