@@ -516,12 +516,6 @@ impl WorkspaceService {
         ) {
             return Err(problem("forbidden", "Organization access denied", 403));
         }
-        if principal
-            .roles
-            .contains(&buglogin_domain::permissions::Role::PlatformAdmin)
-        {
-            return Ok(record.organization.clone());
-        }
         let scope = ResourceScope {
             account_id: Some(record.organization.account_id.clone()),
             organization_id: Some(record.organization.id.clone()),
@@ -541,15 +535,23 @@ impl WorkspaceService {
                     .as_ref()
                     .is_none_or(|id| principal.member_id.as_ref() == Some(id))
         });
-        if !explicit_deny
-            && (principal.account_id.as_ref() == Some(&record.organization.account_id)
-                || is_allowed(
-                    principal,
-                    &Capability::new("CAP-ORG-001").expect("constant capability is valid"),
-                    action,
-                    &scope,
-                    grants,
-                ))
+        if explicit_deny {
+            return Err(problem("forbidden", "Organization access denied", 403));
+        }
+        if principal
+            .roles
+            .contains(&buglogin_domain::permissions::Role::PlatformAdmin)
+        {
+            return Ok(record.organization.clone());
+        }
+        if principal.account_id.as_ref() == Some(&record.organization.account_id)
+            || is_allowed(
+                principal,
+                &Capability::new("CAP-ORG-001").expect("constant capability is valid"),
+                action,
+                &scope,
+                grants,
+            )
         {
             return Ok(record.organization.clone());
         }
@@ -1196,7 +1198,7 @@ mod tests {
             service
                 .authorize_organization_management(
                     &owner,
-                    &[deny],
+                    &[deny.clone()],
                     &organization.id,
                     Action::Create,
                 )
@@ -1218,6 +1220,21 @@ mod tests {
                     Action::Create,
                 )
                 .is_ok()
+        );
+        assert_eq!(
+            service
+                .authorize_organization_management(
+                    &restricted_platform_admin,
+                    &[Grant {
+                        account_id: None,
+                        ..deny
+                    }],
+                    &organization.id,
+                    Action::Create,
+                )
+                .unwrap_err()
+                .status,
+            403
         );
         let scoped_platform_admin = Principal {
             token_scopes: Some(BTreeSet::from(["CAP-ADM-001:create".to_owned()])),
