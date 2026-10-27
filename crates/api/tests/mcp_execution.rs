@@ -1349,21 +1349,24 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
             .unwrap(),
     )
     .unwrap();
-    let restricted_token = restricted_key_body["token"].as_str().unwrap();
-    let scope_denied = production_dispatcher(&state)
+    let scoped_admin_token = restricted_key_body["token"].as_str().unwrap();
+    let scoped_admin_created_account = production_dispatcher(&state)
         .dispatch(production_request(
             "account_create",
-            "cor_mcp_platform_account_create_scope_denied",
-            Some(restricted_token),
-            Some("mcp-platform-account-create-denied-01"),
+            "cor_mcp_platform_account_create_scoped_admin",
+            Some(scoped_admin_token),
+            Some("mcp-platform-account-create-scoped-admin-01"),
             json!({
                 "accountId": "acct_mcp_scope_denied",
                 "username": "mcp-scope-denied",
                 "email": "mcp-scope-denied@example.test"
             }),
         ))
-        .unwrap_err();
-    assert_eq!(scope_denied.status, 403);
+        .unwrap();
+    assert_eq!(
+        scoped_admin_created_account["account"]["id"],
+        "acct_mcp_scope_denied"
+    );
 
     let accounts = dispatcher
         .dispatch(production_request(
@@ -1375,7 +1378,7 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
         ))
         .unwrap();
 
-    assert_eq!(accounts["items"].as_array().unwrap().len(), 2);
+    assert_eq!(accounts["items"].as_array().unwrap().len(), 3);
     assert!(
         accounts["items"]
             .as_array()
@@ -1399,8 +1402,8 @@ async fn platform_admin_mcp_api_key_can_manage_accounts_and_basic_role_is_denied
         .as_u64()
         .unwrap();
 
-    // A platform-admin API key carries the platform role, but every MCP
-    // operation is still constrained by the key's explicit capability scopes.
+    // Platform-admin authority comes from the account role. API-token scopes
+    // restrict regular principals, while explicit DENY grants still apply.
     let mut policy = buglogin_api::mcp::ProductionMcpPolicy::new(state.clone());
     let platform_principal = policy
         .authenticate(Some(&token), true, "cor_mcp_platform_authz")
@@ -3079,6 +3082,7 @@ fn production_extension_group_mcp_commands_enforce_workspace_acl_and_revisions()
     let account_id = "acct_mcp_extension_group";
     let workspace_id = "ws_mcp_extension_group";
     let group_id = "extgrp_mcp_extension_group";
+    seed_workspace(&state, account_id, workspace_id, 50);
     let token = mcp_token(&state, account_id);
     for action in [Action::Read, Action::Create, Action::Update, Action::Delete] {
         grant_workspace_capability(&state, account_id, workspace_id, "CAP-EXT-002", action);
