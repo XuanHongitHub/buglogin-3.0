@@ -448,6 +448,12 @@ mod tests {
                 correlation_id,
             )
             .unwrap();
+        assert!(
+            vault
+                .load(&workspace, &resource, correlation_id)
+                .unwrap()
+                .is_some()
+        );
         let expected = key_version(&recovered.client);
         vault
             .replace_recovered_for_manifest(

@@ -5,11 +5,11 @@
 3. [ ] Add list/import/copy contracts and ACL
 4. [ ] Wire REST/Tauri/MCP with redaction
 5. [ ] Add desktop cookie workflow states
-6. [ ] Verify sync and migration cohorts
+6. [ ] Verify cross-device sync cohort
 
 ## Gate
 
-Do not mark `CAP-COOK-001` complete from registry/routes alone. Required evidence: restart persistence, batch rollback, stopped-profile enforcement, Wayfern launch session, Windows Credential Manager, macOS Keychain, sync interruption/recovery, migration `MIG-003`, and zero-secret diagnostics scan.
+Do not mark `CAP-COOK-001` complete from registry/routes alone. Required evidence: restart persistence, batch rollback, stopped-profile enforcement, Wayfern launch session, Windows Credential Manager, macOS Keychain, cross-device sync interruption/recovery, and zero-secret diagnostics scan.
 
 ## Persistence evidence — 2026-07-23
 

@@ -35,12 +35,9 @@ Event names use `<domain>.<subject>.<past-tense>`; payloads use camelCase.
 - Key format: opaque ASCII, 16-128 characters. Scope: authenticated actor + workspace + command ID.
 - Same key plus same normalized input returns the original result/operation. Same key plus different input returns `409 idempotency_conflict`.
 - REST aggregate-control commands derive a fixed-length storage key from actor, workspace, command ID, and client key; the raw key is never concatenated into the bounded control-store key. Replay lookup checks the legacy scoped key first so existing receipts continue to replay across this representation change.
-- Claim keys atomically before side effects. Persist terminal result for 24 hours minimum; migration/import keys persist for the rollback window.
 - MCP releases its owned pending claim after authentication/permission denials or the explicit serialized stale-authorization preflight. Other retryable failures may have uncertain side effects and remain pending/replayable for recovery; claims are never released after receipt/audit persistence failures.
 - Failed validation/auth does not consume a key. Unknown execution state returns the existing operation ID, never starts a duplicate.
 
 ## Deterministic identifiers
 
-- Migration UUIDv5 namespace: `f5d2d691-b715-48b1-bc16-2855ef99586b` (`buglogin.migration.v1`).
 - Name input: `source_system:source_instance_id:entity_type:source_id`.
-- Canonical IDs are lowercase UUID strings in migration packages; collisions with different provenance stop the import.

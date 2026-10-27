@@ -126,7 +126,6 @@ test("desktop and web UI authority is represented by production code", async (su
         "/recover",
         "/account",
         "/operations",
-        "/migration",
         "/workspaces",
       ]) {
         assert.match(

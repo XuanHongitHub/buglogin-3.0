@@ -35,6 +35,18 @@ impl ResourceService {
                 .any(|grant| &grant.workspace_id == workspace_id)
     }
 
+    pub(crate) fn workspace_record_count(&self, workspace_id: &WorkspaceId) -> usize {
+        self.resources
+            .values()
+            .filter(|record| &record.workspace_id == workspace_id)
+            .count()
+            + self
+                .grants
+                .values()
+                .filter(|grant| &grant.workspace_id == workspace_id)
+                .count()
+    }
+
     pub(crate) fn reconcile_managed_profile_registration(
         &mut self,
         resource: Resource,
@@ -127,6 +139,10 @@ impl ResourceService {
         self.list_page_filtered(principal, grants, workspace, after, limit, None, None, None)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit filters preserve the resource listing query contract"
+    )]
     pub fn list_page_filtered(
         &self,
         principal: &Principal,
@@ -236,6 +252,10 @@ impl ResourceService {
             .collect())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit filters preserve the grant listing query contract"
+    )]
     pub fn list_grants_page(
         &self,
         principal: &Principal,
@@ -354,10 +374,10 @@ impl ResourceService {
         member: &MemberId,
         action: Action,
     ) -> bool {
-        if !self
+        if self
             .resources
             .get(resource)
-            .is_some_and(|value| &value.workspace_id == workspace)
+            .is_none_or(|value| &value.workspace_id != workspace)
         {
             return false;
         }
@@ -471,6 +491,32 @@ mod tests {
 
     fn member(value: &str) -> MemberId {
         MemberId::new(value).unwrap()
+    }
+
+    #[test]
+    fn workspace_record_count_counts_resources_and_access_records_only_in_scope() {
+        let workspace_a = workspace("wsp_count_a");
+        let workspace_b = workspace("wsp_count_b");
+        let mut service = ResourceService::default();
+        for (id, workspace_id) in [
+            ("res_count_a", &workspace_a),
+            ("res_count_b", &workspace_a),
+            ("res_other", &workspace_b),
+        ] {
+            service.resources.insert(
+                resource(id),
+                Resource {
+                    id: resource(id),
+                    workspace_id: workspace_id.clone(),
+                    kind: ResourceKind::Runtime,
+                    state: ResourceState::Active,
+                    display_name: id.to_owned(),
+                },
+            );
+        }
+
+        assert_eq!(service.workspace_record_count(&workspace_a), 2);
+        assert_eq!(service.workspace_record_count(&workspace_b), 1);
     }
 
     fn principal(account_id: &str, workspace_id: &WorkspaceId) -> Principal {

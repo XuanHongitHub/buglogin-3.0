@@ -266,33 +266,6 @@ test("REST query ID parameters reuse canonical domain ID components", () => {
   assert.deepEqual(canonicalOpenApi, runtimeOpenApi, "runtime OpenAPI must mirror its contract copy");
 });
 
-test("migration package IDs share the exact Rust validation contract", () => {
-  const schemas = runtimeOpenApi.components.schemas;
-  assert.deepEqual(schemas.MigrationPackageId, {
-    type: "string",
-    minLength: 1,
-    maxLength: 128,
-    pattern: "^[A-Za-z0-9._:-]+$",
-  });
-  assert.equal(
-    runtimeOpenApi.components.parameters.MigrationPackageId.schema.$ref,
-    "#/components/schemas/MigrationPackageId",
-  );
-  for (const schemaName of [
-    "ControlImportInput", "ControlRollbackInput", "ControlImportPlan",
-    "ControlImportReceipt", "MigrationPackageFileReceipt",
-    "MigrationPackageVerifyReceipt", "MigrationPackageActivationInput",
-    "MigrationPackageActivationReceipt",
-  ]) {
-    assert.equal(
-      schemas[schemaName]?.properties?.packageId?.$ref,
-      "#/components/schemas/MigrationPackageId",
-      `${schemaName}.packageId must use MigrationPackageId`,
-    );
-  }
-  assert.deepEqual(canonicalOpenApi, runtimeOpenApi, "runtime OpenAPI must mirror its contract copy");
-});
-
 test("operation identifiers share the Rust operation-service validation contract", () => {
   const schemas = runtimeOpenApi.components.schemas;
   assert.deepEqual(schemas.OperationIdentifier, {
@@ -311,7 +284,6 @@ test("operation identifiers share the Rust operation-service validation contract
     ["Operation", ["operationId", "commandId"]],
     ["ConnectedCookieReceipt", ["operationId"]],
     ["ConnectedCookieJob", ["operationId"]],
-    ["SyncImportReceipt", ["operationId"]],
   ]) {
     for (const field of fields) {
       assert.equal(
@@ -458,31 +430,6 @@ test("Profile REST schemas describe the real paginated API and Rust entity", () 
   );
 });
 
-test("control migration records reject unknown fields outside extensions", () => {
-  const schemas = canonicalOpenApi.components.schemas;
-  const records = [
-    "MigrationNeutralSourceRef",
-    "MigrationNeutralAccountRecord",
-    "MigrationNeutralOrganizationRecord",
-    "MigrationNeutralWorkspaceRecord",
-    "MigrationNeutralTeamRecord",
-    "MigrationNeutralMemberRecord",
-    "MigrationNeutralResourceRecord",
-    "MigrationNeutralProfileResourceRecord",
-    "MigrationNeutralGrantRecord",
-    "MigrationNeutralProfileRecord",
-  ];
-  for (const name of records) {
-    assert.equal(schemas[name].additionalProperties, false, `${name} accepts ignored fields`);
-    assert.deepEqual(schemas[name], runtimeOpenApi.components.schemas[name]);
-  }
-  for (const name of records.slice(1)) {
-    const extensions = schemas[name].properties.extensions;
-    assert.equal(extensions.type, "object", `${name}.extensions must remain explicit`);
-    assert.ok(extensions.additionalProperties, `${name}.extensions must retain arbitrary extension values`);
-  }
-});
-
 test("operation and problem responses stay aligned with their serialized Rust fields", () => {
   const schemas = canonicalOpenApi.components.schemas;
   assert.deepEqual(
@@ -554,9 +501,6 @@ test("profile lifecycle and local migration routes document their strict Rust bo
   assert.equal(schemas.ProfileDeleteBody.properties.confirmation.const, "QUARANTINE_PROFILE_DATA");
   assert.equal(schemas.ProfileDeleteBody.additionalProperties, false);
 
-  for (const name of ["MigrationInspectInput", "MigrationImportInput"]) {
-    assert.equal(schemas[name].additionalProperties, false, `${name} accepts unknown fields`);
-  }
   assert.deepEqual(canonicalOpenApi, runtimeOpenApi, "runtime OpenAPI must mirror its contract copy");
 });
 
@@ -709,101 +653,6 @@ test("connected cookie job HTTP schemas exclude server authority and cover devic
   assert.equal(paths["/v1/cookie-jobs/{jobId}/complete"].post.requestBody.content["application/json"].schema.$ref, "#/components/schemas/ConnectedCookieReceipt");
   assert.equal(schemas.ConnectedCookieJobState.enum.includes("expired"), true);
   assert.equal(schemas.ConnectedCookieReceipt.properties.metadataChecksum.pattern, "^[0-9a-fA-F]{64}$");
-  assert.deepEqual(canonicalOpenApi, runtimeOpenApi, "runtime OpenAPI must mirror its contract copy");
-});
-
-test("control migration REST contracts match the protected Rust import and rollback DTOs", () => {
-  const paths = runtimeOpenApi.paths;
-  const schemas = runtimeOpenApi.components.schemas;
-  const importOperation = paths["/v1/migrations/control/import"].post;
-  const rollbackOperation = paths["/v1/migrations/control/rollback"].post;
-  assert.equal(importOperation.operationId, "migration.control.import");
-  assert.equal(importOperation.requestBody.content["application/json"].schema.$ref, "#/components/schemas/ControlImportInput");
-  assert.equal(importOperation.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/ControlImportResult");
-  assert.equal(schemas.ControlImportResult.oneOf.length, 2);
-  assert.ok(importOperation.parameters.some(parameter => parameter.$ref === "#/components/parameters/IdempotencyKey"));
-  assert.equal(schemas.ControlImportInput.additionalProperties, false);
-  assert.deepEqual(
-    Object.keys(schemas.ControlImportInput.properties).sort(),
-    ["accounts", "dryRun", "grants", "members", "organizations", "packageId", "profiles", "profileResources", "resources", "teams", "workspaces"].sort(),
-  );
-  assert.ok(schemas.ControlImportInput.properties.profiles.items.$ref.endsWith("MigrationNeutralProfileRecord"));
-  assert.ok(schemas.ControlImportInput.properties.profileResources.items.$ref.endsWith("MigrationNeutralProfileResourceRecord"));
-  assert.ok(schemas.MigrationNeutralProfileRecord.properties.data.required.includes("tags"));
-  assert.equal(schemas.MigrationNeutralProfileRecord.properties.data.additionalProperties, false, "neutral v1 profile data rejects unknown fields");
-  assert.equal(rollbackOperation.operationId, "migration.control.rollback");
-  assert.equal(rollbackOperation.requestBody.content["application/json"].schema.$ref, "#/components/schemas/ControlRollbackInput");
-  assert.equal(schemas.ControlRollbackInput.properties.confirmation.const, "ROLLBACK_CONTROL_MIGRATION");
-  assert.ok(rollbackOperation.parameters.some(parameter => parameter.$ref === "#/components/parameters/IdempotencyKey"));
-  assert.equal(rollbackOperation.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/ControlImportReceipt");
-  assert.deepEqual(canonicalOpenApi, runtimeOpenApi, "runtime OpenAPI must mirror its contract copy");
-});
-
-test("sync migration REST contract matches the strict Rust import payload and receipt", () => {
-  const operation = runtimeOpenApi.paths["/v1/migrations/sync/import"].post;
-  const schemas = runtimeOpenApi.components.schemas;
-  assert.equal(operation.operationId, "migration.sync.import");
-  assert.equal(operation.requestBody.required, true);
-  assert.match(operation.requestBody.description, /limited to 320 MiB/i);
-  assert.match(operation.requestBody.description, /one import admitted per API process/i);
-  assert.equal(operation.requestBody.content["application/json"].schema.$ref, "#/components/schemas/SyncImportInput");
-  assert.ok(operation.parameters.some(parameter => parameter.$ref === "#/components/parameters/IdempotencyKey"));
-  assert.equal(operation.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/SyncImportReceipt");
-  assert.ok(operation.responses["413"] && operation.responses["415"] && operation.responses["422"]);
-  assert.equal(schemas.SyncImportInput.additionalProperties, false);
-  assert.deepEqual(schemas.SyncImportInput.required, ["export"]);
-  assert.deepEqual(schemas.NonBlankText, {
-    type: "string",
-    minLength: 1,
-    pattern: "^[\\s\\S]*\\S[\\s\\S]*$",
-  });
-  assert.deepEqual(schemas.SyncObjectKey, {
-    type: "string",
-    minLength: 1,
-    maxLength: 1024,
-    pattern: "^(?!/)(?!.*\\\\)(?!.*:)(?!.*[\\x00-\\x1F\\x7F])(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$)).{1,1024}$",
-    description: "Confined slash-separated relative storage key; server enforces a 1024-byte UTF-8 limit.",
-  });
-  assert.deepEqual(schemas.ProfileFilePath, {
-    type: "string",
-    minLength: 1,
-    maxLength: 512,
-    description: "The API additionally enforces a maximum UTF-8 encoded size of 512 bytes; OpenAPI maxLength counts Unicode characters.",
-    pattern: "^(?!/)(?!\\.buglogin/)(?![\\s\\S]*(?:^|/)\\.{1,2}(?:/|$))(?![\\s\\S]*[\\\\:])[^/]+(?:/[^/]+)*$",
-  });
-  assert.equal(
-    schemas.ManifestFileChunks.properties.path.$ref,
-    "#/components/schemas/ProfileFilePath",
-  );
-  for (const schemaName of ["SyncExportBlob", "ManifestObject", "ManifestTombstone", "ManifestObjectReference"]) {
-    assert.equal(
-      schemas[schemaName].properties.key.$ref,
-      "#/components/schemas/SyncObjectKey",
-      `${schemaName}.key must match Rust's sync object-key validator`,
-    );
-  }
-  assert.equal(schemas.SyncExport.additionalProperties, false);
-  for (const [schemaName, field] of [
-    ["SyncExport", "exportId"],
-    ["SyncExport", "sourceInstanceId"],
-    ["SyncExport", "toolVersion"],
-    ["SyncImportReceipt", "exportId"],
-  ]) {
-    assert.equal(
-      schemas[schemaName].properties[field].$ref,
-      "#/components/schemas/NonBlankText",
-      `${schemaName}.${field} must reject whitespace-only values like the Rust validator`,
-    );
-  }
-  assert.equal(schemas.SyncExport.properties.manifest.$ref, "#/components/schemas/SyncManifest");
-  assert.equal(schemas.SyncExport.properties.revisions.minItems, 1);
-  assert.equal(schemas.SyncExport.properties.createdAtUnixMs.minimum, 1);
-  assert.equal(schemas.SyncExportBlob.properties.data.items.maximum, 255);
-  assert.equal(schemas.SyncExportBlob.properties.size.maximum, 67108864);
-  for (const schema of ["SyncRevision", "SyncExportBlob", "SyncManifest", "ManifestObject", "ManifestTombstone", "ManifestDependency", "ManifestPayloadEncryption", "ManifestObjectReference", "SyncImportReceipt"]) {
-    const variants = schemas[schema].oneOf ?? [schemas[schema]];
-    assert.ok(variants.every(variant => variant.additionalProperties === false), `${schema} accepts unknown fields`);
-  }
   assert.deepEqual(canonicalOpenApi, runtimeOpenApi, "runtime OpenAPI must mirror its contract copy");
 });
 

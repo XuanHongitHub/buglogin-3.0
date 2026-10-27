@@ -194,7 +194,9 @@ export type BackendErrorCode =
   // rendered as the raw machine identifier.
   | "COOKIE_BOT_REQUIRES_PROXY"
   | "COOKIE_BOT_TOUCH_FINGERPRINT_UNSUPPORTED"
+  | "COOKIE_BOT_WORKER_UNAVAILABLE"
   | "RECIPES_NOT_ENTITLED"
+  | "AGENT_SERVICE_UNAVAILABLE"
   | "AGENT_RECIPE_INVALID"
   | "AGENT_RECIPE_NOT_FOUND"
   | "AGENT_REQUEST_NOT_FOUND"
@@ -781,6 +783,10 @@ export function translateBackendError(t: TFunction, err: unknown): string {
       });
     case "COOKIE_BOT_TOUCH_FINGERPRINT_UNSUPPORTED":
       return t("backendErrors.cookieBotTouchFingerprintUnsupported");
+    case "COOKIE_BOT_WORKER_UNAVAILABLE":
+      return t("backendErrors.cookieBotWorkerUnavailable");
+    case "AGENT_SERVICE_UNAVAILABLE":
+      return t("backendErrors.agentServiceUnavailable");
     case "RECIPES_NOT_ENTITLED":
       return t("backendErrors.recipesNotEntitled");
     case "AGENT_RECIPE_INVALID":

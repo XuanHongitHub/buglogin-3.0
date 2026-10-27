@@ -2,8 +2,8 @@
 version: "1.0"
 name: buglogin-adapters-v1
 sourceOfTruth: docs/contracts/command-registry-v1.yaml
-sourceSha256: f2175c8683008579f0d2c951696ec942888069e09a479f57569d15bd3cdb0c10
-projectionCount: 161
+sourceSha256: 6ce4088cff428573927fbf21b9642097b27537498eb05fab9aefcb658025a027
+projectionCount: 154
 projections:
   - commandId: runtime.catalog.get
     kind: query
@@ -379,10 +379,10 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 120000
-    events: &a47
+    events: &a42
       - operation.updated
       - profile.runtime.updated
-    preconditions: &a48
+    preconditions: &a43
       - profile-update-authorized
       - rotation-pending
       - exact-recipient-device-fingerprint-confirmation
@@ -525,7 +525,7 @@ projections:
     audit: metadata-only
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a49
+    preconditions: &a44
       - active-profile-binding
       - local-profile-key-present
     adapters:
@@ -542,7 +542,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a50
+    preconditions: &a45
       - active-profile-binding
       - recovery-code-valid
       - local-vault-write
@@ -743,7 +743,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a51
+    preconditions: &a46
       - profile-not-running
       - destination-lease
       - expected-generation-current
@@ -762,7 +762,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a52
+    preconditions: &a47
       - source-profile-not-running
       - destination-profile-not-running
       - destination-lease
@@ -799,7 +799,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 120000
-    preconditions: &a53
+    preconditions: &a48
       - workspace-authorized
       - credential-stored-in-device-vault
     adapters:
@@ -910,166 +910,6 @@ projections:
       tauri: proxy_delete
       rest: proxy.delete
       mcp: proxy_delete
-  - commandId: migration.inspect
-    kind: operation
-    capability: migration.read
-    action: read
-    inputSchema: MigrationInspectInput
-    outputSchema: OperationAccepted
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 300000
-    events: &a22
-      - operation.updated
-    adapters:
-      - tauri
-      - rest
-    names:
-      tauri: migration_inspect
-      rest: migration.inspect
-  - commandId: migration.import
-    kind: operation
-    capability: migration.write
-    action: execute
-    inputSchema: MigrationImportInput
-    outputSchema: OperationAccepted
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 0
-    events: &a23
-      - operation.updated
-      - migration.item.updated
-    preconditions: &a24
-      - source-read-only
-      - snapshot-present
-      - dry-run-approved
-    adapters:
-      - tauri
-      - rest
-    names:
-      tauri: migration_import
-      rest: migration.import
-  - commandId: migration.profile.data.import
-    kind: operation
-    capability: profile.update
-    action: update
-    inputSchema: MigrationProfileDataImportInput
-    outputSchema: OperationAccepted
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 0
-    events: &a54
-      - operation.updated
-      - migration.item.updated
-    preconditions: &a55
-      - profile-update-authorized
-      - active-profile-resource-binding
-      - empty-genesis-manifest
-      - local-profile-source-verified
-    adapters:
-      - tauri
-    names:
-      tauri: migration_profile_data_import
-  - commandId: migration.control.import
-    kind: command
-    capability: migration.write
-    action: execute
-    inputSchema: ControlImportInput
-    outputSchema: ControlImportResult
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 30000
-    preconditions: &a25
-      - verified-control-graph
-      - package-identity-bound
-      - dry-run-before-activation
-    adapters:
-      - rest
-    names:
-      rest: migration.control.import
-  - commandId: migration.control.rollback
-    kind: command
-    capability: migration.write
-    action: execute
-    inputSchema: ControlRollbackInput
-    outputSchema: ControlImportReceipt
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 30000
-    preconditions: &a26
-      - exact-rollback-confirmation
-      - imported-graph-unchanged
-    adapters:
-      - rest
-    names:
-      rest: migration.control.rollback
-  - commandId: migration.sync.import
-    kind: operation
-    capability: migration.write
-    action: execute
-    inputSchema: SyncImportInput
-    outputSchema: SyncImportReceipt
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 0
-    preconditions: &a27
-      - active-profile-resource-binding
-      - destination-lease
-      - verified-sync-export
-    adapters:
-      - rest
-    names:
-      rest: migration.sync.import
-  - commandId: migration.package.file.put
-    kind: command
-    capability: migration.write
-    action: execute
-    inputSchema: MigrationPackageFileInput
-    outputSchema: MigrationPackageFileReceipt
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 30000
-    adapters:
-      - rest
-    names:
-      rest: migration.package.file.put
-  - commandId: migration.package.verify
-    kind: command
-    capability: migration.write
-    action: execute
-    inputSchema: Empty
-    outputSchema: MigrationPackageVerifyReceipt
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 30000
-    adapters:
-      - rest
-    names:
-      rest: migration.package.verify
-  - commandId: migration.package.activate
-    kind: command
-    capability: migration.write
-    action: execute
-    inputSchema: MigrationPackageActivationInput
-    outputSchema: MigrationPackageActivationReceipt
-    auth: required
-    audit: required
-    idempotency: required
-    timeoutMs: 30000
-    adapters:
-      - rest
-      - mcp
-    names:
-      rest: migration.package.activate
-      mcp: migration_package_activate
   - commandId: auth.device.start
     kind: command
     capability: CAP-ID-001
@@ -1080,7 +920,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a28
+    preconditions: &a22
       - cryptographic-device-code-issuance
     adapters:
       - rest
@@ -1096,7 +936,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a29
+    preconditions: &a23
       - configured-provider
       - device-bound-state
       - system-browser
@@ -1114,7 +954,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a30
+    preconditions: &a24
       - single-use-state
       - device-bound-session
       - server-side-token-exchange
@@ -1132,7 +972,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a31
+    preconditions: &a25
       - same-origin-https
       - argon2id-credential-verification
     adapters:
@@ -1149,7 +989,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a32
+    preconditions: &a26
       - argon2id-credential-verification
       - device-bound-session
     adapters:
@@ -1166,7 +1006,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a33
+    preconditions: &a27
       - browser-session
     adapters:
       - rest
@@ -1182,7 +1022,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a34
+    preconditions: &a28
       - browser-session
       - raw-token-one-time
     adapters:
@@ -1199,7 +1039,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a35
+    preconditions: &a29
       - browser-session
       - owner-scoped
     adapters:
@@ -1216,7 +1056,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a36
+    preconditions: &a30
       - same-origin-https
       - generic-enumeration-response
       - configured-recovery-delivery
@@ -1234,7 +1074,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a37
+    preconditions: &a31
       - same-origin-https
       - single-use-recovery-token
       - atomic-password-reset
@@ -1253,7 +1093,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a38
+    preconditions: &a32
       - http-only-session-cookie
     adapters:
       - rest
@@ -1269,7 +1109,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a39
+    preconditions: &a33
       - http-only-session-cookie
     adapters:
       - rest
@@ -1285,7 +1125,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a40
+    preconditions: &a34
       - session-owner
       - csrf-token
     adapters:
@@ -1344,7 +1184,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a41
+    preconditions: &a35
       - authenticated-account
     adapters:
       - rest
@@ -1360,7 +1200,7 @@ projections:
     audit: required
     idempotency: required-for-command-and-long-running-operation
     timeoutMs: 30000
-    preconditions: &a42
+    preconditions: &a36
       - single-use-device-authorization
     adapters:
       - rest
@@ -1376,7 +1216,7 @@ projections:
     audit: required
     idempotency: none
     timeoutMs: 30000
-    preconditions: &a43
+    preconditions: &a37
       - single-use-device-refresh-credential
       - device-bound-session
     adapters:
@@ -1393,7 +1233,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a44
+    preconditions: &a38
       - device-bound-session
       - immutable-device-key
     adapters:
@@ -1410,7 +1250,7 @@ projections:
     audit: required
     idempotency: none
     timeoutMs: 30000
-    preconditions: &a45
+    preconditions: &a39
       - single-use-session-rotation
     adapters:
       - rest
@@ -1426,7 +1266,7 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
-    preconditions: &a46
+    preconditions: &a40
       - session-revocation
     adapters:
       - rest
@@ -1508,6 +1348,11 @@ projections:
     audit: required
     idempotency: required
     timeoutMs: 30000
+    preconditions: &a41
+      - self-change-requires-current-password
+      - target-account-change-requires-platform-admin
+      - password-meets-policy
+      - revokes-target-sessions-and-api-tokens
     adapters:
       - tauri
       - rest
@@ -1704,6 +1549,22 @@ projections:
       tauri: organization_record_get
       rest: organization.record.get
       mcp: organization_record_get
+  - commandId: organization.delete.preflight
+    kind: query
+    capability: CAP-ORG-001
+    action: delete
+    inputSchema: OrganizationIdInput
+    outputSchema: OrganizationDeletePreflight
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: organization_delete_preflight
+      rest: organization.delete.preflight
   - commandId: organization.create
     kind: command
     capability: CAP-ORG-001
@@ -1914,6 +1775,22 @@ projections:
       tauri: workspace_record_get
       rest: workspace.record.get
       mcp: workspace_record_get
+  - commandId: workspace.delete.preflight
+    kind: query
+    capability: CAP-WS-001
+    action: delete
+    inputSchema: WorkspaceIdInput
+    outputSchema: WorkspaceDeletePreflight
+    auth: required
+    audit: required
+    idempotency: required-for-command-and-long-running-operation
+    timeoutMs: 30000
+    adapters:
+      - tauri
+      - rest
+    names:
+      tauri: workspace_delete_preflight
+      rest: workspace.delete.preflight
   - commandId: workspace.create
     kind: command
     capability: CAP-WS-001
@@ -3241,24 +3118,6 @@ mcp:
       action: delete
       inputSchema: ProxyDeleteInput
       outputSchema: ProxyRecord
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      security:
-        authentication: bearer-token
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        secrets: never-returned
-      requires:
-        - Idempotency-Key
-    - name: migration_package_activate
-      commandId: migration.package.activate
-      kind: command
-      capability: migration.write
-      action: execute
-      inputSchema: MigrationPackageActivationInput
-      outputSchema: MigrationPackageActivationReceipt
       auth: required
       audit: required
       idempotency: required
@@ -4947,156 +4806,6 @@ rest:
         errors: Problem
       requires:
         - Idempotency-Key
-    - operationId: migration.inspect
-      commandId: migration.inspect
-      kind: operation
-      capability: migration.read
-      action: read
-      inputSchema: MigrationInspectInput
-      outputSchema: OperationAccepted
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 300000
-      events: *a22
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: migration.import
-      commandId: migration.import
-      kind: operation
-      capability: migration.write
-      action: execute
-      inputSchema: MigrationImportInput
-      outputSchema: OperationAccepted
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 0
-      events: *a23
-      preconditions: *a24
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: migration.control.import
-      commandId: migration.control.import
-      kind: command
-      capability: migration.write
-      action: execute
-      inputSchema: ControlImportInput
-      outputSchema: ControlImportResult
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      preconditions: *a25
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: migration.control.rollback
-      commandId: migration.control.rollback
-      kind: command
-      capability: migration.write
-      action: execute
-      inputSchema: ControlRollbackInput
-      outputSchema: ControlImportReceipt
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      preconditions: *a26
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: migration.sync.import
-      commandId: migration.sync.import
-      kind: operation
-      capability: migration.write
-      action: execute
-      inputSchema: SyncImportInput
-      outputSchema: SyncImportReceipt
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 0
-      preconditions: *a27
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: migration.package.file.put
-      commandId: migration.package.file.put
-      kind: command
-      capability: migration.write
-      action: execute
-      inputSchema: MigrationPackageFileInput
-      outputSchema: MigrationPackageFileReceipt
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: migration.package.verify
-      commandId: migration.package.verify
-      kind: command
-      capability: migration.write
-      action: execute
-      inputSchema: Empty
-      outputSchema: MigrationPackageVerifyReceipt
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
-    - operationId: migration.package.activate
-      commandId: migration.package.activate
-      kind: command
-      capability: migration.write
-      action: execute
-      inputSchema: MigrationPackageActivationInput
-      outputSchema: MigrationPackageActivationReceipt
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 30000
-      security:
-        authentication: bearer-token-or-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        errors: Problem
-      requires:
-        - Idempotency-Key
     - operationId: auth.device.start
       commandId: auth.device.start
       kind: command
@@ -5108,7 +4817,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a28
+      preconditions: *a22
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5125,7 +4834,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a29
+      preconditions: *a23
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5144,7 +4853,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a30
+      preconditions: *a24
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5163,7 +4872,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a31
+      preconditions: *a25
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5180,7 +4889,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a32
+      preconditions: *a26
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5197,7 +4906,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a33
+      preconditions: *a27
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5214,7 +4923,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a34
+      preconditions: *a28
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5231,7 +4940,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a35
+      preconditions: *a29
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5250,7 +4959,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a36
+      preconditions: *a30
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5267,7 +4976,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a37
+      preconditions: *a31
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5286,7 +4995,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a38
+      preconditions: *a32
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5303,7 +5012,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a39
+      preconditions: *a33
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5320,7 +5029,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a40
+      preconditions: *a34
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5339,7 +5048,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a41
+      preconditions: *a35
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5356,7 +5065,7 @@ rest:
       audit: required
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a42
+      preconditions: *a36
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5373,7 +5082,7 @@ rest:
       audit: required
       idempotency: none
       timeoutMs: 30000
-      preconditions: *a43
+      preconditions: *a37
       security:
         authentication: optional-local-auth
         authorization: canonical-capability-acl
@@ -5390,7 +5099,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a44
+      preconditions: *a38
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5409,7 +5118,7 @@ rest:
       audit: required
       idempotency: none
       timeoutMs: 30000
-      preconditions: *a45
+      preconditions: *a39
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5426,7 +5135,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a46
+      preconditions: *a40
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5511,6 +5220,7 @@ rest:
       audit: required
       idempotency: required
       timeoutMs: 30000
+      preconditions: *a41
       security:
         authentication: bearer-token-or-session
         authorization: canonical-capability-acl
@@ -5704,6 +5414,22 @@ rest:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         errors: Problem
+    - operationId: organization.delete.preflight
+      commandId: organization.delete.preflight
+      kind: query
+      capability: CAP-ORG-001
+      action: delete
+      inputSchema: OrganizationIdInput
+      outputSchema: OrganizationDeletePreflight
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
     - operationId: organization.create
       commandId: organization.create
       kind: command
@@ -5888,6 +5614,22 @@ rest:
       action: read
       inputSchema: WorkspaceIdInput
       outputSchema: WorkspaceRecord
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: bearer-token-or-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        errors: Problem
+    - operationId: workspace.delete.preflight
+      commandId: workspace.delete.preflight
+      kind: query
+      capability: CAP-WS-001
+      action: delete
+      inputSchema: WorkspaceIdInput
+      outputSchema: WorkspaceDeletePreflight
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation
@@ -7036,8 +6778,8 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 120000
-      events: *a47
-      preconditions: *a48
+      events: *a42
+      preconditions: *a43
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7091,7 +6833,7 @@ tauri:
       audit: metadata-only
       idempotency: required-for-command-and-long-running-operation
       timeoutMs: 30000
-      preconditions: *a49
+      preconditions: *a44
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7108,7 +6850,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a50
+      preconditions: *a45
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7245,7 +6987,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a51
+      preconditions: *a46
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7263,7 +7005,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      preconditions: *a52
+      preconditions: *a47
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7297,7 +7039,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 120000
-      preconditions: *a53
+      preconditions: *a48
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7397,62 +7139,6 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
-      security:
-        authentication: canonical-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        filesystem: rust-only
-      retry: use-idempotency-key
-    - invoke: migration_inspect
-      commandId: migration.inspect
-      kind: operation
-      capability: migration.read
-      action: read
-      inputSchema: MigrationInspectInput
-      outputSchema: OperationAccepted
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 300000
-      events: *a22
-      security:
-        authentication: canonical-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        filesystem: rust-only
-      retry: use-idempotency-key
-    - invoke: migration_import
-      commandId: migration.import
-      kind: operation
-      capability: migration.write
-      action: execute
-      inputSchema: MigrationImportInput
-      outputSchema: OperationAccepted
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 0
-      events: *a23
-      preconditions: *a24
-      security:
-        authentication: canonical-session
-        authorization: canonical-capability-acl
-        scope: canonical-resource-scope
-        filesystem: rust-only
-      retry: use-idempotency-key
-    - invoke: migration_profile_data_import
-      commandId: migration.profile.data.import
-      kind: operation
-      capability: profile.update
-      action: update
-      inputSchema: MigrationProfileDataImportInput
-      outputSchema: OperationAccepted
-      auth: required
-      audit: required
-      idempotency: required
-      timeoutMs: 0
-      events: *a54
-      preconditions: *a55
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7583,6 +7269,7 @@ tauri:
       audit: required
       idempotency: required
       timeoutMs: 30000
+      preconditions: *a41
       security:
         authentication: canonical-session
         authorization: canonical-capability-acl
@@ -7770,6 +7457,22 @@ tauri:
         authorization: canonical-capability-acl
         scope: canonical-resource-scope
         filesystem: rust-only
+    - invoke: organization_delete_preflight
+      commandId: organization.delete.preflight
+      kind: query
+      capability: CAP-ORG-001
+      action: delete
+      inputSchema: OrganizationIdInput
+      outputSchema: OrganizationDeletePreflight
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
     - invoke: organization_create
       commandId: organization.create
       kind: command
@@ -7947,6 +7650,22 @@ tauri:
       action: read
       inputSchema: WorkspaceIdInput
       outputSchema: WorkspaceRecord
+      auth: required
+      audit: required
+      idempotency: required-for-command-and-long-running-operation
+      timeoutMs: 30000
+      security:
+        authentication: canonical-session
+        authorization: canonical-capability-acl
+        scope: canonical-resource-scope
+        filesystem: rust-only
+    - invoke: workspace_delete_preflight
+      commandId: workspace.delete.preflight
+      kind: query
+      capability: CAP-WS-001
+      action: delete
+      inputSchema: WorkspaceIdInput
+      outputSchema: WorkspaceDeletePreflight
       auth: required
       audit: required
       idempotency: required-for-command-and-long-running-operation

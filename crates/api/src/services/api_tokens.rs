@@ -91,6 +91,10 @@ impl ApiTokenService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve API token issuance policy inputs"
+    )]
     pub fn issue_with_account_revision(
         &self,
         account_id: AccountId,
@@ -570,8 +574,7 @@ mod tests {
         );
         let error = service
             .issue(account, 1, &"é".repeat(65), scopes, 500, 100)
-            .err()
-            .expect("65-character token name must be rejected");
+            .expect_err("65-character token name must be rejected");
         assert_eq!(error.code, "api_token_name_invalid");
     }
 

@@ -258,16 +258,26 @@ impl ProfileRuntimeHandle {
         response.await.map_err(|_| unavailable())?
     }
 
+    async fn release_stopped_for_retry(&self, profile_id: ProfileId) -> Result<(), Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::ReleaseStoppedForRetry { profile_id, reply })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
     pub async fn finish_sync_result<T>(
         &self,
         profile_id: ProfileId,
         result: Result<T, Problem>,
     ) -> Result<T, Problem> {
         if result.is_err() {
-            // Keep the stopped profile in the reconcile queue. The local commit
-            // marker is durable, so dropping this state here stranded valid
-            // local changes until the user manually closed/retried the profile.
-            self.queue_sync_retry(profile_id).await;
+            // Preserve retry intent and local files, but release the stopped
+            // runtime entry and lease so a failed cloud sync cannot block the
+            // profile lifecycle.
+            self.queue_sync_retry(profile_id.clone()).await;
+            let _ = self.release_stopped_for_retry(profile_id.clone()).await;
         }
         result
     }
@@ -377,6 +387,10 @@ enum RuntimeCommand {
         profile_id: ProfileId,
         reply: oneshot::Sender<Result<(), Problem>>,
     },
+    ReleaseStoppedForRetry {
+        profile_id: ProfileId,
+        reply: oneshot::Sender<Result<(), Problem>>,
+    },
     Authority {
         profile_id: ProfileId,
         reply: oneshot::Sender<Option<WriteAuthority>>,
@@ -475,6 +489,9 @@ where
                 Some(RuntimeCommand::CompleteStop { profile_id, reply }) => {
                     let _ = reply.send(runtime.complete_stop(&profile_id).await);
                 }
+                Some(RuntimeCommand::ReleaseStoppedForRetry { profile_id, reply }) => {
+                    let _ = reply.send(runtime.release_stopped_for_retry(&profile_id).await);
+                }
                 Some(RuntimeCommand::Authority { profile_id, reply }) => {
                     let _ = reply.send(runtime.authority(&profile_id));
                 }
@@ -532,7 +549,7 @@ where
                     let _ = reply.send(runtime.unexpectedly_stopped.iter().cloned().collect());
                 }
                 Some(RuntimeCommand::QueueSyncRetry { profile_id, reply }) => {
-                    if runtime.running.get_mut(&profile_id).is_some_and(|running| {
+                    if runtime.running.get(&profile_id).is_none_or(|running| {
                         running.process_stopped && running.sync_pending
                     }) {
                         runtime.unexpectedly_stopped.insert(profile_id);
@@ -544,6 +561,7 @@ where
                     if result.is_ok() {
                         interval = tokio::time::interval(runtime.heartbeat_interval());
                         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        interval.reset();
                     }
                     let _ = reply.send(result);
                 }
@@ -812,6 +830,28 @@ impl<C: ProcessController> ProfileRuntime<C> {
         Ok(())
     }
 
+    async fn release_stopped_for_retry(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
+        if self
+            .running
+            .get(profile_id)
+            .is_some_and(|running| !running.process_stopped || !running.sync_pending)
+        {
+            return Ok(());
+        }
+        let running = self.running.remove(profile_id);
+        if let Some(lease) = running.and_then(|running| running.lease)
+            && let Err(error) = release(self.coordination.clone(), &lease).await
+            && !lease_ownership_lost(&error)
+        {
+            // Local runtime state is cleared even when the API cannot confirm
+            // release. The remote lease expires; durable retry intent remains.
+            self.unexpectedly_stopped.insert(profile_id.clone());
+            return Err(error);
+        }
+        self.unexpectedly_stopped.insert(profile_id.clone());
+        Ok(())
+    }
+
     fn authority(&self, profile_id: &ProfileId) -> Option<WriteAuthority> {
         self.running
             .get(profile_id)
@@ -871,27 +911,35 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 "lease-renew-{}",
                 crate::remote_api::sha256_hex(renewal_identity.as_bytes())
             );
+            let renewal_timeout = lease_renewal_timeout(&lease, self.heartbeat_interval());
+            let renewal_deadline = tokio::time::Instant::now() + renewal_timeout;
             let mut renewal_attempt = 0;
-            let renewed = loop {
-                match coordination
-                    .backend
-                    .renew_lease_idempotent(
-                        CoordinationScope {
-                            workspace_id: &lease.workspace_id,
-                            auth: &coordination.auth,
-                        },
-                        &lease.resource_id,
-                        &lease.owner_token,
-                        coordination.lease_ttl,
-                        &renewal_key,
+            let renewed = if renewal_timeout.is_zero() {
+                Err(lease_renewal_deadline_elapsed())
+            } else {
+                loop {
+                    match tokio::time::timeout_at(
+                        renewal_deadline,
+                        coordination.backend.renew_lease_idempotent(
+                            CoordinationScope {
+                                workspace_id: &lease.workspace_id,
+                                auth: &coordination.auth,
+                            },
+                            &lease.resource_id,
+                            &lease.owner_token,
+                            coordination.lease_ttl,
+                            &renewal_key,
+                        ),
                     )
                     .await
-                {
-                    Err(error) if error.retryable && renewal_attempt == 0 => {
-                        renewal_attempt += 1;
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    {
+                        Err(_) => break Err(lease_renewal_deadline_elapsed()),
+                        Ok(Err(error)) if error.retryable && renewal_attempt == 0 => {
+                            renewal_attempt += 1;
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
+                        Ok(result) => break result,
                     }
-                    result => break result,
                 }
             };
             let process_stopped = self
@@ -906,7 +954,9 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 }
                 // A network blip, sleep or API restart: the lease is still ours
                 // until it expires, so keep the browser open and retry next tick.
-                Err(error) if !lease_ownership_lost(&error) && lease_still_valid(&lease) => {}
+                Err(error)
+                    if !lease_ownership_lost(&error)
+                        && lease_has_renewal_safety_window(&lease, self.heartbeat_interval()) => {}
                 // Another device now owns the profile: this stopped session can
                 // never upload, so stop holding it (the local copy stays on disk).
                 Err(error) if process_stopped && lease_ownership_lost(&error) => {
@@ -952,8 +1002,26 @@ fn lease_ownership_lost(error: &Problem) -> bool {
     )
 }
 
-fn lease_still_valid(lease: &LeaseGrant) -> bool {
-    unix_time_millis("lease_renewal").is_ok_and(|now_ms| now_ms < lease.expires_at_ms)
+fn lease_has_renewal_safety_window(lease: &LeaseGrant, heartbeat_interval: Duration) -> bool {
+    let margin = heartbeat_interval.max(Duration::from_secs(5));
+    unix_time_millis("lease_renewal")
+        .is_ok_and(|now_ms| now_ms.saturating_add(margin.as_millis() as u64) < lease.expires_at_ms)
+}
+
+fn lease_renewal_timeout(lease: &LeaseGrant, heartbeat_interval: Duration) -> Duration {
+    let now_ms = unix_time_millis("lease_renewal").unwrap_or(lease.expires_at_ms);
+    let remaining = Duration::from_millis(lease.expires_at_ms.saturating_sub(now_ms));
+    remaining.saturating_sub(heartbeat_interval.max(Duration::from_secs(5)))
+}
+
+fn lease_renewal_deadline_elapsed() -> Problem {
+    Problem::new(
+        "lease_renewal_deadline_elapsed",
+        "The profile lease could not be renewed before its safety deadline",
+        409,
+        "lease_renewal",
+    )
+    .retryable(true)
 }
 
 fn validate_preacquired(
@@ -1287,7 +1355,7 @@ mod tests {
                 owner_token: owner_token.into(),
                 fencing_token: 7,
                 issued_at_ms: 1,
-                expires_at_ms: 60_002,
+                expires_at_ms: lease_valid_for(Duration::from_secs(60)),
             })
         }
 
@@ -1500,7 +1568,7 @@ mod tests {
             backend,
             auth: CoordinationAuth::new("actor-runtime", bearer).unwrap(),
             lease_ttl: Duration::from_secs(60),
-            heartbeat_interval: Duration::from_secs(3_600),
+            heartbeat_interval: Duration::from_secs(15),
         }
     }
 
@@ -1644,6 +1712,11 @@ mod tests {
         let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
         handle.launch(request(&path, true)).await.unwrap();
         handle.stop_for_sync(profile_id.clone()).await.unwrap();
+        assert!(handle.active_profiles().await.unwrap().is_empty());
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
 
         let injected = Problem::new(
             "injected_sync_failure",
@@ -1655,10 +1728,8 @@ mod tests {
             .finish_sync_result(profile_id.clone(), Err(injected))
             .await;
         assert_eq!(result.unwrap_err().code, "injected_sync_failure");
-        assert_eq!(
-            handle.running_profiles().await.unwrap(),
-            vec![profile_id.clone()]
-        );
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert!(handle.active_profiles().await.unwrap().is_empty());
         assert_eq!(
             handle.unexpectedly_stopped_profiles().await.unwrap(),
             vec![profile_id.clone()]
@@ -1667,17 +1738,7 @@ mod tests {
             fs::read(path.join("Default/Cookies")).unwrap(),
             b"dirty cookie data"
         );
-        assert!(!log.lock().unwrap().contains(&"release"));
-
-        handle.complete_stop(profile_id.clone()).await.unwrap();
-        assert!(handle.running_profiles().await.unwrap().is_empty());
-        assert!(
-            handle
-                .unexpectedly_stopped_profiles()
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(log.lock().unwrap().contains(&"release"));
 
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
@@ -1858,6 +1919,9 @@ mod tests {
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(60)), Ordering::SeqCst);
         let renewals = Arc::clone(&backend.renewals);
         let coordination = ManagedCoordination {
             backend: backend.clone(),
@@ -1874,7 +1938,13 @@ mod tests {
             handle.running_profiles().await.unwrap(),
             vec![profile_id.clone()]
         );
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while renewals.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sync-pending lease should renew at least twice");
         let during_sync = log.lock().unwrap().clone();
         assert!(renewals.load(Ordering::SeqCst) >= 2);
         assert!(!during_sync.contains(&"release"));
@@ -1891,6 +1961,9 @@ mod tests {
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(60)), Ordering::SeqCst);
         let renewals = Arc::clone(&backend.renewals);
         let coordination = ManagedCoordination {
             backend: backend.clone(),
@@ -1935,7 +2008,7 @@ mod tests {
             handle.running_profiles().await.unwrap(),
             vec![profile_id.clone()]
         );
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
             while renewals.load(Ordering::SeqCst) < 2 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -2035,17 +2108,29 @@ mod tests {
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(20)), Ordering::SeqCst);
         backend.fail_renew.store(true, Ordering::SeqCst);
-        let mut runtime = runtime(controller, managed_coordination(backend));
+        let mut runtime = runtime(controller, managed_coordination(backend.clone()));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
         runtime.launch(request(&path, true)).await.unwrap();
 
         runtime.renew().await;
 
-        assert!(
-            runtime
-                .authority(&ProfileId::from_str("prf_runtime_1").unwrap())
-                .is_some()
-        );
+        assert!(runtime.authority(&profile_id).is_some());
+        assert!(!runtime.running[&profile_id].process_stopped);
+        runtime
+            .running
+            .get_mut(&profile_id)
+            .unwrap()
+            .lease
+            .as_mut()
+            .unwrap()
+            .expires_at_ms = lease_valid_for(Duration::from_secs(10));
+        runtime.renew().await;
+
+        assert!(runtime.running[&profile_id].process_stopped);
         assert_eq!(
             *log.lock().unwrap(),
             vec!["acquire", "launch", "renew", "renew", "stop"]
@@ -2093,11 +2178,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renewal_failure_stops_before_lease_enters_the_expiry_safety_window() {
+        let path = profile_path("renewal-safety-window");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(10)), Ordering::SeqCst);
+        backend.fail_renew.store(true, Ordering::SeqCst);
+        let mut runtime = runtime(controller, managed_coordination(backend));
+        runtime.launch(request(&path, true)).await.unwrap();
+
+        runtime.renew().await;
+
+        assert!(log.lock().unwrap().contains(&"stop"));
+        assert!(runtime.running[&ProfileId::from_str("prf_runtime_1").unwrap()].process_stopped);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn expired_lease_stops_the_browser_but_keeps_the_sync_pending() {
         let path = profile_path("renewal-expired");
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(10)), Ordering::SeqCst);
         backend.fail_renew.store(true, Ordering::SeqCst);
         let mut runtime = runtime(controller, managed_coordination(backend));
         runtime.launch(request(&path, true)).await.unwrap();
@@ -2145,10 +2253,14 @@ mod tests {
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(60)), Ordering::SeqCst);
         backend.fail_renew.store(true, Ordering::SeqCst);
         let mut runtime = runtime(controller, managed_coordination(backend.clone()));
         runtime.launch(request(&path, true)).await.unwrap();
         let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        runtime.stop_for_sync(&profile_id).await.unwrap();
         runtime.renew().await;
         assert!(runtime.running.contains_key(&profile_id));
 

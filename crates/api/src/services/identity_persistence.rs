@@ -68,6 +68,10 @@ impl IdentityPersistence {
 
     /// Atomically update the identity and its unique login indexes. The HTTP authority
     /// must authorize the actor and enforce email-verification policy before calling.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve identity mutation audit and revision inputs"
+    )]
     pub fn update(
         &self,
         account_id: &AccountId,

@@ -591,6 +591,10 @@ impl SessionPersistence {
         Ok(devices.into_iter().flatten().collect())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit records preserve the atomic device session rotation contract"
+    )]
     pub fn rotate_device_session(
         &self,
         old_session: &SessionRecord,
@@ -1190,51 +1194,6 @@ impl SessionPersistence {
             .map(|record| record.revision)
             .ok_or_else(unavailable)?;
         Ok((revoked_revision, replacement_revision))
-    }
-
-    fn persist(
-        &self,
-        record: &SessionRecord,
-        expected_revision: u64,
-        command_id: &str,
-        state: &str,
-    ) -> Result<u64, Problem> {
-        let record_id = session_id(&record.token_hash);
-        let value = serde_json::to_value(record).map_err(|_| corrupt())?;
-        let result = self.store.execute(ExecuteControlCommand {
-            tenant_id: TENANT.into(),
-            command_id: command_id.into(),
-            idempotency_key: format!(
-                "{command_id}-{record_id}-{}",
-                record.revoked_at.unwrap_or(0)
-            ),
-            expected_revisions: Default::default(),
-            puts: vec![ControlPut {
-                tenant_id: TENANT.into(),
-                record_type: RECORD_TYPE.into(),
-                record_id: record_id.clone(),
-                expected_revision: Some(expected_revision),
-                value,
-            }],
-            deletes: vec![],
-            audit: ControlAuditEntry {
-                tenant_id: TENANT.into(),
-                command_id: command_id.into(),
-                actor_id: record.account_id.as_str().into(),
-                allowed: true,
-                detail: json!({ "sessionId": record_id, "state": state }),
-            },
-            response: HttpResponse {
-                status: 200,
-                headers: Default::default(),
-                body: Value::Null,
-            },
-        })?;
-        result
-            .records
-            .first()
-            .map(|stored| stored.revision)
-            .ok_or_else(unavailable)
     }
 }
 

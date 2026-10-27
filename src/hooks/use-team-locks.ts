@@ -81,7 +81,10 @@ export function useTeamLocks(
           for (const profileId of targetIds) {
             const snapshot = snapshots.get(profileId);
             if (!snapshot) {
-              unconfirmed.add(profileId);
+              // The API deliberately omits profiles that are no longer bound
+              // to this workspace or are not readable. A successful response
+              // with an omitted ID is not a failed status request. Launch still
+              // relies on the server's atomic lease acquisition.
               continue;
             }
             if (!snapshot.lease) continue;
@@ -221,7 +224,9 @@ export function useTeamLocks(
   useEffect(() => {
     void fetchLocks();
     if (BUGLOGIN_DESKTOP) {
-      const interval = window.setInterval(() => void fetchLocks(), 5_000);
+      const interval = window.setInterval(() => {
+        if (document.visibilityState === "visible") void fetchLocks();
+      }, 5_000);
       const refreshWhenActive = () => {
         if (document.visibilityState === "visible") {
           void fetchLocks(undefined, true);

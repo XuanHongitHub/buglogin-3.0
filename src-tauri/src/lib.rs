@@ -72,7 +72,7 @@ use profile::manager::{
   check_browser_status, clone_profile, create_browser_profile_new, delete_profile,
   list_browser_profiles, rename_profile, update_profile_clear_on_close,
   update_profile_dns_blocklist, update_profile_launch_hook, update_profile_note,
-  update_profile_proxy, update_profile_proxy_bypass_rules, update_profile_tags, update_profile_vpn,
+  update_profile_proxy, update_profile_proxy_bypass_rules, update_profile_tags,
   update_profile_window_color, update_wayfern_config,
 };
 
@@ -81,38 +81,21 @@ use profile::password::{
   set_profile_password, unlock_profile, verify_profile_password,
 };
 
-use browser_version_manager::{
-  fetch_browser_versions_cached_first, fetch_browser_versions_with_count,
-  fetch_browser_versions_with_count_cached_first, get_supported_browsers,
-  is_browser_supported_on_platform,
-};
+use browser_version_manager::fetch_browser_versions_with_count;
 
-use downloaded_browsers_registry::{
-  check_missing_binaries, ensure_active_browsers_downloaded, ensure_all_binaries_exist,
-  get_downloaded_browser_versions,
-};
-
-use downloader::{cancel_download, download_browser};
+use downloader::download_browser;
 
 use settings_manager::{
-  complete_onboarding, dismiss_window_resize_warning, get_app_settings, get_onboarding_completed,
-  get_sync_settings, get_system_info, get_system_language, get_table_sorting_settings,
-  get_window_resize_warning_dismissed, open_log_directory, read_log_files, save_app_settings,
-  save_sync_settings, save_table_sorting_settings,
+  dismiss_window_resize_warning, get_app_settings, get_sync_settings, get_system_info,
+  get_system_language, open_log_directory, read_log_files, save_app_settings, save_sync_settings,
 };
 
 use sync::{
   cancel_profile_sync, check_has_e2e_password, delete_e2e_password, enable_sync_for_all_entities,
-  get_unsynced_entity_counts, is_group_in_use_by_synced_profile, is_proxy_in_use_by_synced_profile,
-  is_vpn_in_use_by_synced_profile, request_profile_sync, rollover_encryption_for_all_entities,
-  set_e2e_password, set_extension_group_sync_enabled, set_extension_sync_enabled,
-  set_group_sync_enabled, set_profile_sync_mode, set_proxy_sync_enabled, set_vpn_sync_enabled,
-  verify_e2e_password,
+  get_unsynced_entity_counts, is_vpn_in_use_by_synced_profile, request_profile_sync,
+  rollover_encryption_for_all_entities, set_e2e_password, set_extension_sync_enabled,
+  set_profile_sync_mode, set_vpn_sync_enabled, verify_e2e_password,
 };
-
-use tag_manager::get_all_tags;
-
-use default_browser::{is_default_browser, set_as_default_browser};
 
 use version_updater::{
   clear_all_version_cache_and_refetch, get_version_update_status, get_version_updater,
@@ -124,32 +107,21 @@ use auto_updater::{
 };
 
 use app_auto_updater::{
-  check_for_app_updates, check_for_app_updates_manual, download_and_prepare_app_update,
-  restart_application,
-};
-
-use profile_importer::{
-  cleanup_profile_import_scratch, detect_existing_profiles, import_browser_profiles,
-  scan_folder_for_profiles, scan_profile_archive,
+  check_for_app_updates_manual, download_and_prepare_app_update, restart_application,
 };
 
 use extension_manager::{
-  add_extension, add_extension_to_group, assign_extension_group_to_profile, create_extension_group,
-  delete_extension, delete_extension_group, get_extension_group_for_profile, get_extension_icon,
-  list_extension_groups, list_extensions, remove_extension_from_group, update_extension,
-  update_extension_group,
+  add_extension, assign_extension_group_to_profile, create_extension_group, delete_extension,
+  delete_extension_group, get_extension_group_for_profile, get_extension_icon,
+  list_extension_groups, list_extensions, update_extension, update_extension_group,
 };
 
 use group_manager::{
-  assign_profiles_to_group, create_profile_group, delete_profile_group, delete_selected_profiles,
-  get_groups_with_profile_counts, get_profile_groups, update_profile_group,
+  assign_profiles_to_group, create_profile_group, delete_selected_profiles,
+  get_groups_with_profile_counts, get_profile_groups,
 };
 
-use geoip_downloader::{check_missing_geoip_database, GeoIPDownloader};
-
-use browser_version_manager::get_browser_release_types;
-
-use api_server::{get_api_server_status, start_api_server, stop_api_server};
+use geoip_downloader::GeoIPDownloader;
 
 // Trait to extend WebviewWindow with transparent titlebar functionality
 pub trait WindowExt {
@@ -2238,23 +2210,10 @@ pub fn run() {
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
-      buglogin_v2::system_health_get,
-      buglogin_v2::profile_list,
-      buglogin_v2::profile_get,
-      buglogin_v2::profile_create,
-      buglogin_v2::profile_archive,
-      buglogin_v2::profile_restore,
-      buglogin_v2::profile_delete,
-      buglogin_v2::proxy_parse,
-      buglogin_v2::migration_inspect,
-      buglogin_v2::migration_import,
       confirm_quit,
       hide_to_tray,
       update_tray_menu,
-      get_supported_browsers,
-      is_browser_supported_on_platform,
       download_browser,
-      cancel_download,
       delete_profile,
       clone_profile,
       check_browser_exists,
@@ -2262,13 +2221,7 @@ pub fn run() {
       list_browser_profiles,
       launch_browser_profile,
       fetch_browser_versions_with_count,
-      fetch_browser_versions_cached_first,
-      fetch_browser_versions_with_count_cached_first,
-      get_downloaded_browser_versions,
-      get_all_tags,
-      get_browser_release_types,
       update_profile_proxy,
-      update_profile_vpn,
       update_profile_tags,
       update_profile_note,
       update_profile_clear_on_close,
@@ -2283,36 +2236,19 @@ pub fn run() {
       save_app_settings,
       read_log_files,
       open_log_directory,
-      get_table_sorting_settings,
-      save_table_sorting_settings,
       get_system_language,
       get_system_info,
       dismiss_window_resize_warning,
-      get_window_resize_warning_dismissed,
-      get_onboarding_completed,
-      complete_onboarding,
       clear_all_version_cache_and_refetch,
-      is_default_browser,
       open_url_with_profile,
-      set_as_default_browser,
       trigger_manual_version_update,
       get_version_update_status,
       check_for_browser_updates,
       dismiss_update_notification,
       complete_browser_update_with_auto_update,
-      check_for_app_updates,
       check_for_app_updates_manual,
       download_and_prepare_app_update,
       restart_application,
-      detect_existing_profiles,
-      import_browser_profiles,
-      scan_folder_for_profiles,
-      scan_profile_archive,
-      cleanup_profile_import_scratch,
-      check_missing_binaries,
-      check_missing_geoip_database,
-      ensure_all_binaries_exist,
-      ensure_active_browsers_downloaded,
       create_stored_proxy,
       get_stored_proxies,
       update_stored_proxy,
@@ -2328,8 +2264,6 @@ pub fn run() {
       get_profile_groups,
       get_groups_with_profile_counts,
       create_profile_group,
-      update_profile_group,
-      delete_profile_group,
       assign_profiles_to_group,
       delete_selected_profiles,
       list_extensions,
@@ -2341,15 +2275,8 @@ pub fn run() {
       create_extension_group,
       update_extension_group,
       delete_extension_group,
-      add_extension_to_group,
-      remove_extension_from_group,
       assign_extension_group_to_profile,
       get_extension_group_for_profile,
-      is_geoip_database_available,
-      download_geoip_database,
-      start_api_server,
-      stop_api_server,
-      get_api_server_status,
       get_all_traffic_snapshots,
       get_profile_traffic_snapshot,
       clear_all_traffic_stats,
@@ -2362,14 +2289,9 @@ pub fn run() {
       set_profile_sync_mode,
       cancel_profile_sync,
       request_profile_sync,
-      set_proxy_sync_enabled,
-      set_group_sync_enabled,
-      is_proxy_in_use_by_synced_profile,
-      is_group_in_use_by_synced_profile,
       set_vpn_sync_enabled,
       is_vpn_in_use_by_synced_profile,
       set_extension_sync_enabled,
-      set_extension_group_sync_enabled,
       get_unsynced_entity_counts,
       enable_sync_for_all_entities,
       set_e2e_password,
@@ -2380,24 +2302,13 @@ pub fn run() {
       read_profile_cookies,
       get_profile_cookie_stats,
       copy_profile_cookies,
-      import_cookies_from_file,
       export_profile_cookies,
       check_wayfern_terms_accepted,
-      check_wayfern_downloaded,
       accept_wayfern_terms,
       get_commercial_trial_status,
-      acknowledge_trial_expiration,
       has_acknowledged_trial_expiration,
-      start_mcp_server,
-      stop_mcp_server,
-      get_mcp_server_status,
-      get_mcp_config,
-      list_mcp_agents,
-      add_mcp_to_agent,
-      remove_mcp_from_agent,
       // VPN commands
       import_vpn_config,
-      list_vpn_configs,
       get_vpn_config,
       delete_vpn_config,
       create_vpn_config_manual,
@@ -2428,7 +2339,6 @@ pub fn run() {
       synchronizer::start_sync_session,
       synchronizer::stop_sync_session,
       synchronizer::remove_sync_follower,
-      synchronizer::get_sync_sessions,
       // DNS blocklist commands
       dns_blocklist::get_dns_blocklist_cache_status,
       dns_blocklist::refresh_dns_blocklists,

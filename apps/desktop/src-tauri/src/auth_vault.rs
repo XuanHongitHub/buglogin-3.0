@@ -5,7 +5,7 @@ use buglogin_storage::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const NAMESPACE: &str = "buglogin-auth";
 
@@ -31,6 +31,19 @@ struct AuthSessionValue {
     expires_at: u64,
     #[serde(default)]
     refresh_pending: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PendingSsoValue {
+    state: String,
+    expires_at: u64,
+}
+
+impl Drop for PendingSsoValue {
+    fn drop(&mut self) {
+        self.state.zeroize();
+    }
 }
 
 impl Drop for AuthSessionValue {
@@ -409,6 +422,118 @@ impl<V: OsVault> AuthVault<V> {
             .remove(&key, expected_version)
             .map_err(|error| vault_problem(error, "Unable to remove bearer", correlation_id))
     }
+
+    pub fn load_pending_sso(
+        &self,
+        device_id: &str,
+        correlation_id: &str,
+    ) -> Result<Option<(Zeroizing<String>, u64)>, Problem> {
+        let key = pending_sso_key(device_id, correlation_id)?;
+        let (value, _) = match self.vault.read(&key) {
+            Ok(stored) => stored,
+            Err(SecretError::NotFound) => return Ok(None),
+            Err(error) => {
+                return Err(vault_problem(
+                    error,
+                    "Unable to load pending sign-in",
+                    correlation_id,
+                ));
+            }
+        };
+        let mut pending: PendingSsoValue =
+            serde_json::from_slice(value.as_bytes()).map_err(|_| {
+                vault_problem(
+                    SecretError::OperationFailed,
+                    "Pending sign-in is invalid",
+                    correlation_id,
+                )
+            })?;
+        if pending.state.is_empty() || pending.expires_at == 0 {
+            return Err(vault_problem(
+                SecretError::OperationFailed,
+                "Pending sign-in is invalid",
+                correlation_id,
+            ));
+        }
+        Ok(Some((
+            Zeroizing::new(std::mem::take(&mut pending.state)),
+            pending.expires_at,
+        )))
+    }
+
+    pub fn store_pending_sso(
+        &mut self,
+        device_id: &str,
+        state: &str,
+        expires_at: u64,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        if state.is_empty() || state.len() > 512 || expires_at == 0 {
+            return Err(Problem::new(
+                "invalid_sso_state",
+                "Pending sign-in is invalid",
+                400,
+                correlation_id,
+            ));
+        }
+        let key = pending_sso_key(device_id, correlation_id)?;
+        let mut pending = PendingSsoValue {
+            state: state.to_owned(),
+            expires_at,
+        };
+        let mut bytes = serde_json::to_vec(&pending).map_err(|_| {
+            Problem::new(
+                "sso_state_store_failed",
+                "Unable to save pending sign-in",
+                500,
+                correlation_id,
+            )
+        })?;
+        let value = SecretValue::new(bytes.clone()).map_err(|error| {
+            vault_problem(error, "Unable to save pending sign-in", correlation_id)
+        })?;
+        bytes.zeroize();
+        pending.state.zeroize();
+        match self.vault.read(&key) {
+            Ok((_, version)) => {
+                self.vault
+                    .rotate(&key, version, value)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        vault_problem(error, "Unable to save pending sign-in", correlation_id)
+                    })
+            }
+            Err(SecretError::NotFound) => {
+                self.vault.create(&key, value).map(|_| ()).map_err(|error| {
+                    vault_problem(error, "Unable to save pending sign-in", correlation_id)
+                })
+            }
+            Err(error) => Err(vault_problem(
+                error,
+                "Unable to save pending sign-in",
+                correlation_id,
+            )),
+        }
+    }
+
+    pub fn remove_pending_sso(
+        &mut self,
+        device_id: &str,
+        correlation_id: &str,
+    ) -> Result<(), Problem> {
+        let key = pending_sso_key(device_id, correlation_id)?;
+        match self.vault.read(&key) {
+            Ok((_, version)) => self.vault.remove(&key, version).map_err(|error| {
+                vault_problem(error, "Unable to clear pending sign-in", correlation_id)
+            }),
+            Err(SecretError::NotFound) => Ok(()),
+            Err(error) => Err(vault_problem(
+                error,
+                "Unable to clear pending sign-in",
+                correlation_id,
+            )),
+        }
+    }
 }
 
 fn session_key(device_id: &str, correlation_id: &str) -> Result<SecretKey, Problem> {
@@ -423,6 +548,30 @@ fn session_key(device_id: &str, correlation_id: &str) -> Result<SecretKey, Probl
     let digest = Sha256::digest(device_id.as_bytes());
     SecretKey::new(NAMESPACE, format!("device-{:x}", digest))
         .map_err(|error| vault_problem(error, "Unable to build session key", correlation_id))
+}
+
+fn pending_sso_key(device_id: &str, correlation_id: &str) -> Result<SecretKey, Problem> {
+    DeviceId::new(device_id).map_err(|_| {
+        Problem::new(
+            "device_id_invalid",
+            "Device ID is invalid",
+            400,
+            correlation_id,
+        )
+    })?;
+    let digest = Sha256::digest(device_id.as_bytes());
+    SecretKey::new(NAMESPACE, format!("sso-device-{:x}", digest)).map_err(|error| {
+        vault_problem(error, "Unable to build pending sign-in key", correlation_id)
+    })
+}
+
+pub(crate) fn pending_sso_matches(
+    expected_state: &str,
+    expires_at: u64,
+    callback_state: &str,
+    now: u64,
+) -> bool {
+    !expected_state.is_empty() && expires_at > now && expected_state == callback_state
 }
 
 fn secret_value(bearer: &str, correlation_id: &str) -> Result<SecretValue, Problem> {
@@ -668,6 +817,61 @@ mod tests {
         assert!(!loaded.refresh_pending());
         assert_eq!(loaded.access_token(), "access-two");
         assert_eq!(loaded.refresh_token(), Some("refresh-two"));
+    }
+
+    #[test]
+    fn pending_sso_survives_a_new_auth_vault_instance_and_expires_by_timestamp() {
+        let shared_vault = FakeVault::default();
+        let mut first_process = AuthVault::new(shared_vault);
+        first_process
+            .store_pending_sso("device-a1", "one-time-state", 2_000, "cor-sso-start")
+            .unwrap();
+
+        // A separately constructed AuthVault models the app process that receives
+        // the OS deep link after Windows launches another process.
+        let shared_vault = first_process.vault;
+        let second_process = AuthVault::new(shared_vault);
+        let (state, expires_at) = second_process
+            .load_pending_sso("device-a1", "cor-sso-callback")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.as_str(), "one-time-state");
+        assert_eq!(expires_at, 2_000);
+        assert!(pending_sso_matches(
+            state.as_str(),
+            expires_at,
+            "one-time-state",
+            1_999
+        ));
+        assert!(!pending_sso_matches(
+            state.as_str(),
+            expires_at,
+            "one-time-state",
+            2_000
+        ));
+        assert!(!pending_sso_matches(
+            state.as_str(),
+            expires_at,
+            "different-state",
+            1_999
+        ));
+        assert!(
+            second_process
+                .load_pending_sso("device-b1", "cor-other-device")
+                .unwrap()
+                .is_none()
+        );
+
+        let mut second_process = second_process;
+        second_process
+            .remove_pending_sso("device-a1", "cor-sso-complete")
+            .unwrap();
+        assert!(
+            second_process
+                .load_pending_sso("device-a1", "cor-sso-after-complete")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

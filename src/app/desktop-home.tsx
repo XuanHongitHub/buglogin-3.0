@@ -1617,7 +1617,7 @@ function DesktopHome({
           : currentPage === "auditLogs"
             ? "Nhật Ký Hoạt Động & Kiểm Toán An Toàn (Audit Trail)"
             : currentPage === "platformAdmin"
-              ? "Bàn Điều Hành Quản Trị Nền Tảng (Super Admin)"
+              ? undefined
               : currentPage === "workspaces"
                 ? "Quản Lý Không Gian Làm Việc (Workspace Center)"
                 : t(`pageTitle.${currentPage}`);
@@ -1880,6 +1880,8 @@ function DesktopHome({
               className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
               <ManagementResources
+                organizationName={activeWorkspace.organizationName ?? ""}
+                workspaceName={activeWorkspace.name}
                 workspaceId={activeWorkspace.id}
                 kind="groups"
               />

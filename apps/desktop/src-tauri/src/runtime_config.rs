@@ -311,28 +311,6 @@ pub(crate) fn runtime_install_root() -> Result<PathBuf, Problem> {
         })
 }
 
-pub fn migration_executable() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("BUGLOGIN_MIGRATION_BINARY").map(PathBuf::from) {
-        return Some(path);
-    }
-    let target = option_env!("BUGLOGIN_TARGET_TRIPLE").filter(|value| !value.is_empty())?;
-    let suffix = if cfg!(target_os = "windows") {
-        ".exe"
-    } else {
-        ""
-    };
-    let name = format!("buglogin-migrate-{target}{suffix}");
-    let executable = std::env::current_exe().ok()?;
-    let parent = executable.parent()?;
-    [
-        parent.join(&name),
-        parent.join("resources").join(&name),
-        parent.join("../Resources").join(&name),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file())
-}
-
 fn runtime_environment_overrides_allowed(
     mode: DeploymentMode,
     api_base_url: Option<&str>,

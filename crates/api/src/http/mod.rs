@@ -47,15 +47,6 @@ use buglogin_domain::{
     },
     workspace::{Workspace, WorkspacePolicy},
 };
-use buglogin_migration::{
-    MigrationKey, activate_package,
-    cutover::{confirm_cutover, promote_staged},
-    inspect::inspect_source,
-    package::{NeutralPackage, PackageMetadata},
-    rollback::{confirm_rollback, rollback_activation, rollback_cutover},
-    signature::{SignatureMetadata, sign_package, verify_signed_package},
-    transform::stage_package,
-};
 use buglogin_network::proxy::{
     ParseReport, ProxyRepository, ProxyRepositorySnapshot, RepositoryError, parse_lines,
 };
@@ -72,6 +63,11 @@ use buglogin_sync::coordination::{
     CoordinationOperation, CoordinationScope,
 };
 use buglogin_sync::crypto::{ClientKey, ManagedResourceKeyEnvelope};
+
+type ProfileResourceIndex =
+    Arc<RwLock<BTreeMap<(WorkspaceId, buglogin_domain::ids::ResourceId), BTreeSet<ProfileId>>>>;
+type ControlSnapshotRefresh =
+    Arc<tokio::sync::Mutex<Option<(tokio::time::Instant, Result<(), Problem>)>>>;
 use buglogin_sync::manifest::SyncManifest;
 use futures_util::{Stream, stream};
 use serde::{Deserialize, Serialize};
@@ -131,10 +127,8 @@ tokio::task_local! {
 #[cfg(test)]
 mod auth_workspace_profile_e2e;
 mod control;
-mod control_import;
-pub(crate) mod package_upload;
+mod member_permissions;
 mod sso;
-mod sync_import;
 
 const CONTROL_TENANT: &str = "control";
 const CONNECTED_COOKIE_JOB_TTL_SECONDS: u64 = 600;
@@ -451,8 +445,7 @@ pub struct ApiState {
     hosted_profiles: Arc<RwLock<BTreeMap<ProfileId, Versioned<Profile>>>>,
     profile_quarantine: Arc<RwLock<BTreeMap<ProfileId, ProfileQuarantineRecord>>>,
     profile_resources: Arc<RwLock<BTreeMap<ProfileId, ProfileResource>>>,
-    profile_resource_index:
-        Arc<RwLock<BTreeMap<(WorkspaceId, buglogin_domain::ids::ResourceId), BTreeSet<ProfileId>>>>,
+    profile_resource_index: ProfileResourceIndex,
     sync_manifests: Arc<RwLock<BTreeMap<String, SyncManifest>>>,
     sync_gc_claims: Arc<RwLock<BTreeMap<String, BTreeSet<String>>>>,
     resource_key_rotation_pending: Arc<RwLock<BTreeSet<String>>>,
@@ -476,8 +469,7 @@ pub struct ApiState {
     control_revision: Arc<RwLock<u64>>,
     control_mutation: Arc<Mutex<()>>,
     pub(crate) control_snapshot_gate: Arc<tokio::sync::RwLock<()>>,
-    control_snapshot_refresh:
-        Arc<tokio::sync::Mutex<Option<(tokio::time::Instant, Result<(), Problem>)>>>,
+    control_snapshot_refresh: ControlSnapshotRefresh,
     materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
     platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
     local_account_provisioning: bool,
@@ -486,8 +478,6 @@ pub struct ApiState {
     pub lifecycles: Arc<RwLock<HashMap<String, Lifecycle>>>,
     pub runtime_binaries: Arc<RwLock<HashMap<String, RuntimeBinary>>>,
     runtime_catalog: Option<Arc<PublishedRuntimeCatalog>>,
-    migration_key: Arc<RwLock<Option<MigrationKey>>>,
-    migration_signing_key: Arc<RwLock<Option<buglogin_storage::secrets::SecretValue>>>,
     coordination: Arc<RwLock<Option<Arc<dyn CoordinationBackend>>>>,
     remote_chunks: Arc<dyn ConcurrentRemoteChunkStore>,
     profile_key_wrapping_key: Arc<RwLock<Option<ClientKey>>>,
@@ -756,8 +746,6 @@ impl ApiState {
             lifecycles: Arc::new(RwLock::new(HashMap::new())),
             runtime_binaries: Arc::new(RwLock::new(HashMap::new())),
             runtime_catalog: None,
-            migration_key: Arc::new(RwLock::new(None)),
-            migration_signing_key: Arc::new(RwLock::new(None)),
             coordination: Arc::new(RwLock::new(None)),
             remote_chunks: Arc::new(MemoryRemoteChunkStore::default()),
             profile_key_wrapping_key: Arc::new(RwLock::new(None)),
@@ -2138,61 +2126,6 @@ impl ApiState {
         Ok(values)
     }
 
-    pub(crate) fn has_running_profile_using_proxy(
-        &self,
-        workspace_id: &WorkspaceId,
-        proxy_id: &buglogin_domain::ids::ProxyId,
-    ) -> Result<bool, Problem> {
-        if self.local_authority_enabled() {
-            for profile in self.list_profile_records()? {
-                if profile.value.proxy_id.as_ref() == Some(proxy_id)
-                    && profile.value.state == ProfileState::Running
-                    && self
-                        .profile_resource_record(&profile.value.id)?
-                        .is_some_and(|binding| binding.workspace_id == *workspace_id)
-                {
-                    return Ok(true);
-                }
-            }
-            return Ok(false);
-        }
-
-        let profile_ids = self
-            .profile_resources
-            .read()
-            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?
-            .values()
-            .filter(|binding| &binding.workspace_id == workspace_id)
-            .map(|binding| binding.profile_id.clone())
-            .collect::<Vec<_>>();
-        let profiles = self
-            .hosted_profiles
-            .read()
-            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
-        let projections = self
-            .runtime_projections
-            .read()
-            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
-
-        for profile_id in profile_ids {
-            let Some(profile) = profiles.get(&profile_id) else {
-                continue;
-            };
-            if profile.value.proxy_id.as_ref() != Some(proxy_id) {
-                continue;
-            }
-            let profile_state = projections
-                .get(&profile_id)
-                .map(|projection| projected_profile_state(&projection.state))
-                .transpose()?
-                .unwrap_or_else(|| profile.value.state.clone());
-            if profile_state == ProfileState::Running {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     pub(crate) fn list_profile_records_after(
         &self,
         cursor: Option<&ProfileId>,
@@ -2516,6 +2449,7 @@ impl ApiState {
             .cloned())
     }
 
+    #[cfg(test)]
     pub(crate) fn current_sync_manifest_fresh(
         &self,
         workspace_id: &buglogin_domain::ids::WorkspaceId,
@@ -2879,12 +2813,12 @@ impl ApiState {
         if let Some(previous) = profile_resources.get(&binding.profile_id) {
             let previous_key = (previous.workspace_id.clone(), previous.resource_id.clone());
             let next_key = (binding.workspace_id.clone(), binding.resource_id.clone());
-            if previous_key != next_key {
-                if let Some(profile_ids) = index.get_mut(&previous_key) {
-                    profile_ids.remove(&binding.profile_id);
-                    if profile_ids.is_empty() {
-                        index.remove(&previous_key);
-                    }
+            if previous_key != next_key
+                && let Some(profile_ids) = index.get_mut(&previous_key)
+            {
+                profile_ids.remove(&binding.profile_id);
+                if profile_ids.is_empty() {
+                    index.remove(&previous_key);
                 }
             }
         }
@@ -2920,6 +2854,10 @@ impl ApiState {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit upload reservation inputs are part of the sync contract"
+    )]
     pub(crate) fn reserve_sync_blob_upload(
         &self,
         workspace_id: &WorkspaceId,
@@ -2985,18 +2923,17 @@ impl ApiState {
             if committed_keys.contains(&object.storage_key) {
                 continue;
             }
-            if let Some(existing) = aggregate.sync_blob_reservations.get(&object.storage_key) {
-                if existing.workspace_id != workspace_id.as_str()
+            if let Some(existing) = aggregate.sync_blob_reservations.get(&object.storage_key)
+                && (existing.workspace_id != workspace_id.as_str()
                     || existing.resource_id != resource_id.as_str()
                     || existing.checksum != object.checksum
-                    || existing.size != object.size
-                {
-                    return Err(problem(
-                        "sync_blob_reservation_conflict",
-                        "Sync blob reservation conflicts with the requested object",
-                        409,
-                    ));
-                }
+                    || existing.size != object.size)
+            {
+                return Err(problem(
+                    "sync_blob_reservation_conflict",
+                    "Sync blob reservation conflicts with the requested object",
+                    409,
+                ));
             }
             requested.insert(object.storage_key.clone(), object.clone());
         }
@@ -3188,6 +3125,7 @@ impl ApiState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn release_sync_blob_reservations_for_import(
         &self,
         journal_id: &str,
@@ -3361,6 +3299,10 @@ impl ApiState {
                 operation_id: operation_id.into(),
             })
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "idempotency completion persists explicit audit and response data"
+    )]
     pub(crate) fn complete_mcp_idempotency(
         &self,
         claim: buglogin_storage::control::ControlIdempotencyClaimToken,
@@ -3474,47 +3416,6 @@ impl ApiState {
     ) -> Result<(), Problem> {
         self.control_persistence
             .release_shared_advisory_lock(sync_gc_advisory_lock_id(workspace_id, resource_id))
-    }
-
-    pub(crate) fn validate_sync_stage_write(
-        &self,
-        journal_id: &str,
-        expected_revision: u64,
-        storage_key: &str,
-    ) -> Result<(), Problem> {
-        let _mutation = self
-            .control_mutation
-            .lock()
-            .map_err(|_| problem("control_unavailable", "Control state unavailable", 503))?;
-        self.refresh_control_aggregate_locked()?;
-        let Some((journal, revision)) = self.load_sync_migration_journal(journal_id)? else {
-            return Err(problem(
-                "sync_import_journal_missing",
-                "Sync import recovery journal is missing",
-                409,
-            ));
-        };
-        if revision != expected_revision || journal.state != SyncMigrationJournalState::Staging {
-            return Err(problem(
-                "sync_import_staging_fenced",
-                "Sync import staging was superseded by recovery",
-                409,
-            )
-            .retryable(true));
-        }
-        if self
-            .control_aggregate()?
-            .sync_gc_claims
-            .contains_key(storage_key)
-        {
-            return Err(problem(
-                "sync_object_cleanup_claimed",
-                "Sync object is currently claimed for cleanup",
-                409,
-            )
-            .retryable(true));
-        }
-        Ok(())
     }
 
     fn claim_sync_gc_objects(
@@ -4211,6 +4112,7 @@ impl ApiState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn finalize_sync_import(
         &self,
         claim: buglogin_storage::control::ControlIdempotencyClaimToken,
@@ -4308,10 +4210,10 @@ impl ApiState {
             return Ok(());
         }
         let mut last_refresh = self.control_snapshot_refresh.lock().await;
-        if let Some((refreshed_at, result)) = last_refresh.as_ref() {
-            if refreshed_at.elapsed() < Duration::from_millis(100) {
-                return result.clone();
-            }
+        if let Some((refreshed_at, result)) = last_refresh.as_ref()
+            && refreshed_at.elapsed() < Duration::from_millis(100)
+        {
+            return result.clone();
         }
         let state = self.clone();
         let result = tokio::task::spawn_blocking(move || state.refresh_control_aggregate_sync())
@@ -4357,6 +4259,10 @@ impl ApiState {
         self.reload_control_aggregate()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "control persistence keeps audit and response data explicit"
+    )]
     pub(crate) fn persist_control_aggregate(
         &self,
         command: &str,
@@ -4381,6 +4287,10 @@ impl ApiState {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "control persistence keeps audit and response data explicit"
+    )]
     pub(crate) fn persist_control_aggregate_with_puts(
         &self,
         command: &str,
@@ -4514,7 +4424,7 @@ impl ApiState {
                     503,
                 )
             })?;
-            mutate(&mut *operations)
+            mutate(&mut operations)
         };
         if let Err(error) = mutation_result {
             *self.operations.write().map_err(|_| {
@@ -4592,11 +4502,6 @@ impl ApiState {
         }
         Ok(operation)
     }
-    pub fn with_migration_key(self, key: MigrationKey) -> Self {
-        *self.migration_key.write().expect("migration key lock") = Some(key);
-        self
-    }
-
     pub fn with_runtime_catalog(mut self, catalog: PublishedRuntimeCatalog) -> Self {
         self.runtime_catalog = Some(Arc::new(catalog));
         self
@@ -5105,90 +5010,6 @@ impl ApiState {
             created_account,
             created_organization,
             created_workspace,
-        })
-    }
-
-    pub fn with_migration_signing_key(self, key: buglogin_storage::secrets::SecretValue) -> Self {
-        *self
-            .migration_signing_key
-            .write()
-            .expect("migration signing key lock") = Some(key);
-        self
-    }
-
-    pub fn import_initial_signed_migration_package(
-        &self,
-        package: &NeutralPackage,
-    ) -> Result<serde_json::Value, Problem> {
-        if package.file("sync/export.json").is_some() {
-            return Err(problem(
-                "migration_initial_package_invalid",
-                "Initial import accepts only the signed control-data package",
-                422,
-            ));
-        }
-        let total_bytes = package
-            .files()
-            .values()
-            .try_fold(0_u64, |total, bytes| total.checked_add(bytes.len() as u64));
-        if total_bytes.is_none_or(|bytes| bytes > 32 * 1024 * 1024) {
-            return Err(problem(
-                "migration_initial_package_too_large",
-                "Initial control-data package exceeds the 32 MiB limit",
-                413,
-            ));
-        }
-        let index_path = buglogin_migration::encrypted_data::index_path();
-        let index: buglogin_migration::encrypted_data::EncryptedProfileDataIndex =
-            serde_json::from_slice(package.file(index_path).ok_or_else(|| {
-                problem(
-                    "migration_initial_profile_index_missing",
-                    "Initial package profile-data index is missing",
-                    422,
-                )
-            })?)
-            .map_err(|_| {
-                problem(
-                    "migration_initial_profile_index_invalid",
-                    "Initial package profile-data index is invalid",
-                    422,
-                )
-            })?;
-        if index.schema != "buglogin.encrypted-profile-data/2"
-            || !index.files.is_empty()
-            || package
-                .files()
-                .keys()
-                .any(|path| path.starts_with("encrypted/profile-data/") && path != index_path)
-        {
-            return Err(problem(
-                "migration_initial_profile_data_present",
-                "Initial package must leave browser profile files for authenticated desktop sync",
-                422,
-            ));
-        }
-        let signing_key = self.migration_signing_key.read().map_err(|_| {
-            problem(
-                "migration_signing_key_unavailable",
-                "Migration signing key unavailable",
-                503,
-            )
-        })?;
-        let signing_key = signing_key.as_ref().ok_or_else(|| {
-            problem(
-                "migration_signing_key_unavailable",
-                "Migration signing key unavailable",
-                503,
-            )
-        })?;
-        verify_signed_package(package, signing_key.as_bytes())?;
-        let receipt = control_import::import_initial_operator_package(self, package)?;
-        serde_json::to_value(receipt).map_err(|_| {
-            problem(
-                "migration_initial_receipt_invalid",
-                "Migration import receipt could not be serialized",
-                500,
-            )
         })
     }
 
@@ -5781,7 +5602,7 @@ impl ApiAuthorizationAuthority {
                 let workspace_scope = ResourceScope::workspace(member.workspace_id.clone());
                 let mut aliases = Vec::new();
                 for (source, source_action, target, target_action) in
-                    control_import::PROFILE_PERMISSION_ALIASES
+                    member_permissions::PROFILE_PERMISSION_ALIASES
                 {
                     for grant in grants.iter().filter(|grant| {
                         grant.account_id.as_ref() == Some(&member.account_id)
@@ -5812,7 +5633,7 @@ impl ApiAuthorizationAuthority {
                 grants.extend(aliases);
                 continue;
             }
-            for (capability_name, action) in control_import::role_default_pairs(&member.role) {
+            for (capability_name, action) in member_permissions::role_default_pairs(&member.role) {
                 let capability = Capability::new(capability_name.clone()).map_err(|_| {
                     Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
                 })?;
@@ -6084,12 +5905,9 @@ mod profile_page_query_tests {
             "cursor=prf_1&limit=50&workspaceId=ws_1&includeArchived=true",
         ))
         .unwrap();
-        assert_eq!(parsed.cursor.as_ref().map(|id| id.as_str()), Some("prf_1"));
+        assert_eq!(parsed.cursor.as_deref(), Some("prf_1"));
         assert_eq!(parsed.limit, Some(50));
-        assert_eq!(
-            parsed.workspace_id.as_ref().map(|id| id.as_str()),
-            Some("ws_1")
-        );
+        assert_eq!(parsed.workspace_id.as_deref(), Some("ws_1"));
         assert!(parsed.include_archived);
     }
 
@@ -6165,7 +5983,7 @@ pub fn router(state: ApiState) -> Router {
         .expect("configured web origin must be a valid HTTP header value");
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin, _| {
-            origin == &allowed_web_origin
+            origin == allowed_web_origin
         }))
         .allow_credentials(true)
         .allow_methods([
@@ -6323,37 +6141,36 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/cookie-jobs/{id}/complete", post(complete_cookie_job))
         .route("/v1/operations/{id}", get(get_operation))
         .route("/v1/events", get(read_events))
-        .route("/v1/migrations/inspect", post(inspect_migration))
-        .route("/v1/migrations/import", post(import_migration))
-        .route(
-            "/v1/migrations/control/import",
-            post(control_import::import_control),
-        )
-        .route("/v1/migrations/sync/import", post(sync_import::import_sync))
-        .route(
-            "/v1/migrations/packages/{package_id}/files",
-            put(package_upload::put_package_file),
-        )
-        .route(
-            "/v1/migrations/packages/{package_id}/verify",
-            post(package_upload::verify_package_upload),
-        )
-        .route(
-            "/v1/migrations/packages/{package_id}/activate",
-            post(package_upload::activate_package_upload),
-        )
-        .route(
-            "/v1/migrations/control/rollback",
-            post(control_import::rollback_control),
-        )
         .merge(control::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             control::refresh_hosted_snapshot,
         ))
+        .layer(middleware::from_fn(log_slow_requests))
         .layer(middleware::from_fn(require_correlation))
         .layer(cors)
         .with_state(state)
+}
+
+async fn log_slow_requests(request: axum::extract::Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(axum::extract::MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = started.elapsed();
+    if elapsed >= Duration::from_millis(250) || response.status().is_server_error() {
+        eprintln!(
+            "http_request method={method} route={route} status={} duration_ms={}",
+            response.status().as_u16(),
+            elapsed.as_millis()
+        );
+    }
+    response
 }
 
 static LARGE_TRANSFER_BODY_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -6361,14 +6178,17 @@ static LARGE_TRANSFER_BODY_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLo
 pub(crate) async fn large_transfer_body_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Problem>
 {
     let semaphore = Arc::clone(
-        LARGE_TRANSFER_BODY_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))),
+        LARGE_TRANSFER_BODY_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4))),
     );
-    tokio::time::timeout(Duration::from_secs(30), semaphore.acquire_owned())
+    // A desktop may upload two encrypted chunks at once. Four process-wide
+    // slots accommodate the two supported desktop sessions without allowing
+    // unbounded buffering (the per-request body limit remains 64 MiB).
+    tokio::time::timeout(Duration::from_secs(10), semaphore.acquire_owned())
         .await
         .map_err(|_| {
             Problem::new(
                 "large_transfer_capacity_exhausted",
-                "Large transfer capacity remained busy for 30 seconds; retry the request",
+                "Large transfer capacity remained busy for 10 seconds; retry the request",
                 503,
                 "api",
             )
@@ -6823,13 +6643,14 @@ async fn desktop_login(
         ))
     })?;
     let mut tokens = auth
-        .issue_device_session_with_account_revision(
+        .issue_device_session_with_account_revision_at(
             account_id,
             expires_at,
             refresh_expires_at,
             device_id.as_str().to_owned(),
             Some(credential_version),
             Some(account_revision),
+            current,
         )
         .map_err(|error| {
             if error.code == "storage_revision_conflict" {
@@ -7116,15 +6937,17 @@ async fn exchange_device_authorization(
                 .map_err(response)?;
             // Authorization consumption and durable session issuance share one
             // control-store transaction, so failures cannot strand a consumed code.
-            let mut tokens = match auth.issue_device_session_with_account_revision_and_consumption(
-                account_id.clone(),
-                expires_at,
-                refresh_expires_at,
-                device_id.clone(),
-                credential_version,
-                Some(account_revision),
-                authorization_consumption,
-            ) {
+            let mut tokens = match auth
+                .issue_device_session_with_account_revision_and_consumption_at(
+                    account_id.clone(),
+                    expires_at,
+                    refresh_expires_at,
+                    device_id.clone(),
+                    credential_version,
+                    Some(account_revision),
+                    authorization_consumption,
+                    current,
+                ) {
                 Ok(tokens) => tokens,
                 Err(error) if error.code == "storage_revision_conflict" => {
                     return Err(response(problem(
@@ -7649,13 +7472,14 @@ async fn enqueue_cookie_job(
         now: created_at,
         expires_at,
     };
+    let operation_state = state.clone();
     let job = control::with_authorization_snapshot(
         &state,
         &headers,
         &principal,
         &current_grants,
-        |current_principal, latest_grants, control_revision| {
-            let binding = state
+        move |current_principal, latest_grants, control_revision| {
+            let binding = operation_state
                 .profile_resource_record(&profile_id)
                 .map_err(response)?
                 .ok_or_else(|| {
@@ -7665,7 +7489,7 @@ async fn enqueue_cookie_job(
                         404,
                     ))
                 })?;
-            let profile = state
+            let profile = operation_state
                 .get_profile_record(&profile_id)
                 .map_err(response)?
                 .ok_or_else(|| response(problem("profile_not_found", "Profile not found", 404)))?;
@@ -7680,7 +7504,7 @@ async fn enqueue_cookie_job(
                 )));
             }
             if !authorized(
-                &state,
+                &operation_state,
                 current_principal,
                 latest_grants,
                 &profile_id,
@@ -7712,7 +7536,7 @@ async fn enqueue_cookie_job(
                                 400,
                             ))
                         })?;
-                let source_binding = state
+                let source_binding = operation_state
                     .profile_resource_record(&source_profile_id)
                     .map_err(response)?
                     .ok_or_else(|| {
@@ -7731,9 +7555,14 @@ async fn enqueue_cookie_job(
                         409,
                     )));
                 }
-                authorize_profile(&state, current_principal, latest_grants, &source_profile_id)?;
+                authorize_profile(
+                    &operation_state,
+                    current_principal,
+                    latest_grants,
+                    &source_profile_id,
+                )?;
             }
-            state
+            operation_state
                 .connected_cookie_jobs
                 .enqueue_with_control_revision(input, Some(control_revision))
                 .map_err(response)
@@ -8109,13 +7938,16 @@ async fn claim_cookie_job(
         })?
         .authenticate_device(token, request_now(&headers)?)
         .map_err(response)?;
+    let operation_state = state.clone();
+    let operation_headers = headers.clone();
+    let operation_token = token.to_owned();
     let job = control::with_authorization_snapshot(
         &state,
         &headers,
         &principal,
         &expected_grants,
-        |current_principal, current_grants, control_revision| {
-            let (current_account, current_device) = state
+        move |current_principal, current_grants, control_revision| {
+            let (current_account, current_device) = operation_state
                 .auth
                 .read()
                 .map_err(|_| {
@@ -8125,7 +7957,7 @@ async fn claim_cookie_job(
                         503,
                     ))
                 })?
-                .authenticate_device(token, request_now(&headers)?)
+                .authenticate_device(&operation_token, request_now(&operation_headers)?)
                 .map_err(response)?;
             if current_account != account_id || current_device != device_id {
                 return Err(response(problem(
@@ -8134,7 +7966,7 @@ async fn claim_cookie_job(
                     403,
                 )));
             }
-            let queued = state
+            let queued = operation_state
                 .connected_cookie_jobs
                 .get_for_device(&query.workspace_id, &id, &device_id)
                 .map_err(response)?
@@ -8142,22 +7974,22 @@ async fn claim_cookie_job(
                     response(problem("cookie_job_not_found", "Cookie job not found", 404))
                 })?;
             authorize_cookie_job_executor(
-                &headers,
-                &state,
-                token,
+                &operation_headers,
+                &operation_state,
+                &operation_token,
                 &device_id,
                 &queued,
                 current_principal,
                 current_grants,
             )?;
-            state
+            operation_state
                 .connected_cookie_jobs
                 .claim_with_control_revision(
                     &query.workspace_id,
                     &id,
                     account_id.as_str(),
                     &device_id,
-                    request_now(&headers)?,
+                    request_now(&operation_headers)?,
                     Some(control_revision),
                 )
                 .map_err(response)
@@ -8225,13 +8057,16 @@ async fn ack_cookie_job(
         &expected_grants,
     )?;
     validate_cookie_job_lease(&state, &headers, &query.workspace_id, &queued).await?;
+    let operation_state = state.clone();
+    let operation_headers = headers.clone();
+    let operation_token = token.to_owned();
     let job = control::with_authorization_snapshot(
         &state,
         &headers,
         &principal,
         &expected_grants,
-        |current_principal, current_grants, control_revision| {
-            let (current_account, current_device) = state
+        move |current_principal, current_grants, control_revision| {
+            let (current_account, current_device) = operation_state
                 .auth
                 .read()
                 .map_err(|_| {
@@ -8241,7 +8076,7 @@ async fn ack_cookie_job(
                         503,
                     ))
                 })?
-                .authenticate_device(token, request_now(&headers)?)
+                .authenticate_device(&operation_token, request_now(&operation_headers)?)
                 .map_err(response)?;
             if current_account != account_id || current_device != device_id {
                 return Err(response(problem(
@@ -8250,7 +8085,7 @@ async fn ack_cookie_job(
                     403,
                 )));
             }
-            let queued = state
+            let queued = operation_state
                 .connected_cookie_jobs
                 .get_for_device(&query.workspace_id, &id, &device_id)
                 .map_err(response)?
@@ -8258,22 +8093,22 @@ async fn ack_cookie_job(
                     response(problem("cookie_job_not_found", "Cookie job not found", 404))
                 })?;
             authorize_cookie_job_executor(
-                &headers,
-                &state,
-                token,
+                &operation_headers,
+                &operation_state,
+                &operation_token,
                 &device_id,
                 &queued,
                 current_principal,
                 current_grants,
             )?;
-            state
+            operation_state
                 .connected_cookie_jobs
                 .acknowledge_with_control_revision(
                     &query.workspace_id,
                     &id,
                     account_id.as_str(),
                     &device_id,
-                    request_now(&headers)?,
+                    request_now(&operation_headers)?,
                     Some(control_revision),
                 )
                 .map_err(response)
@@ -8383,13 +8218,17 @@ async fn complete_cookie_job(
         )));
     }
     let expected_grants = grants(&state)?;
+    let operation_state = state.clone();
+    let operation_headers = headers.clone();
+    let operation_token = token.to_owned();
+    let operation_principal = principal.clone();
     let job = control::with_authorization_snapshot(
         &state,
         &headers,
         &principal,
         &expected_grants,
-        |current_principal, _, control_revision| {
-            let (current_account, current_device) = state
+        move |current_principal, _, control_revision| {
+            let (current_account, current_device) = operation_state
                 .auth
                 .read()
                 .map_err(|_| {
@@ -8399,11 +8238,11 @@ async fn complete_cookie_job(
                         503,
                     ))
                 })?
-                .authenticate_device(token, request_now(&headers)?)
+                .authenticate_device(&operation_token, request_now(&operation_headers)?)
                 .map_err(response)?;
             if current_account != account_id
                 || current_device != device_id
-                || current_principal != &principal
+                || current_principal != &operation_principal
             {
                 return Err(response(problem(
                     "cookie_job_executor_mismatch",
@@ -8411,7 +8250,7 @@ async fn complete_cookie_job(
                     403,
                 )));
             }
-            let job = state
+            let job = operation_state
                 .connected_cookie_jobs
                 .get_for_device(&query.workspace_id, &id, &device_id)
                 .map_err(response)?
@@ -8419,14 +8258,14 @@ async fn complete_cookie_job(
                     response(problem("cookie_job_not_found", "Cookie job not found", 404))
                 })?;
             if job.state == ConnectedCookieJobState::Completed {
-                return state
+                return operation_state
                     .connected_cookie_jobs
                     .complete_with_control_revision(
                         &query.workspace_id,
                         &id,
                         account_id.as_str(),
                         &device_id,
-                        request_now(&headers)?,
+                        request_now(&operation_headers)?,
                         receipt,
                         Some(control_revision),
                     )
@@ -8449,7 +8288,7 @@ async fn complete_cookie_job(
             let profile_id = ProfileId::from_str(&job.profile_id).map_err(|_| {
                 response(problem("profile_id_invalid", "Profile ID is invalid", 400))
             })?;
-            let binding = state
+            let binding = operation_state
                 .profile_resource_record(&profile_id)
                 .map_err(response)?
                 .filter(|binding| binding.workspace_id == workspace_id)
@@ -8460,7 +8299,7 @@ async fn complete_cookie_job(
                         404,
                     ))
                 })?;
-            let manifest = state
+            let manifest = operation_state
                 .current_sync_manifest(&workspace_id, &binding.resource_id)
                 .map_err(response)?;
             let committed_generation =
@@ -8475,14 +8314,14 @@ async fn complete_cookie_job(
                     .retryable(true),
                 ));
             }
-            state
+            operation_state
                 .connected_cookie_jobs
                 .complete_with_control_revision(
                     &query.workspace_id,
                     &id,
                     account_id.as_str(),
                     &device_id,
-                    request_now(&headers)?,
+                    request_now(&operation_headers)?,
                     receipt,
                     Some(control_revision),
                 )
@@ -8617,13 +8456,15 @@ async fn cancel_cookie_job(
         Action::Create,
         capability,
     )?;
+    let operation_state = state.clone();
+    let operation_headers = headers.clone();
     let job = control::with_authorization_snapshot(
         &state,
         &headers,
         &principal,
         &current_grants,
-        |current_principal, latest_grants, control_revision| {
-            let current_job = state
+        move |current_principal, latest_grants, control_revision| {
+            let current_job = operation_state
                 .connected_cookie_jobs
                 .get(&query.workspace_id, &id, account_id.as_str())
                 .map_err(response)?
@@ -8635,7 +8476,7 @@ async fn cancel_cookie_job(
                     response(problem("profile_id_invalid", "Profile ID is invalid", 500))
                 })?;
             authorize_action(
-                &state,
+                &operation_state,
                 current_principal,
                 latest_grants,
                 &current_profile_id,
@@ -8652,13 +8493,13 @@ async fn cancel_cookie_job(
                     }
                 },
             )?;
-            state
+            operation_state
                 .connected_cookie_jobs
                 .cancel_with_control_revision(
                     &query.workspace_id,
                     &id,
                     account_id.as_str(),
-                    request_now(&headers)?,
+                    request_now(&operation_headers)?,
                     Some(control_revision),
                 )
                 .map_err(response)
@@ -8837,23 +8678,23 @@ async fn create_profile(
         profile.tags = legacy.tags;
         profile.extension_group_id = legacy.extension_group_id;
     }
-    if profile.extension_group_id.is_none() {
-        if let Some(workspace_id) = workspace_id.as_ref() {
-            profile.extension_group_id = state
-                .workspaces
-                .read()
-                .map_err(|_| {
-                    response(problem(
-                        "workspace_unavailable",
-                        "Workspace service unavailable",
-                        503,
-                    ))
-                })?
-                .workspace_for_policy(workspace_id)
-                .map_err(response)?
-                .policy
-                .default_extension_group_id;
-        }
+    if profile.extension_group_id.is_none()
+        && let Some(workspace_id) = workspace_id.as_ref()
+    {
+        profile.extension_group_id = state
+            .workspaces
+            .read()
+            .map_err(|_| {
+                response(problem(
+                    "workspace_unavailable",
+                    "Workspace service unavailable",
+                    503,
+                ))
+            })?
+            .workspace_for_policy(workspace_id)
+            .map_err(response)?
+            .policy
+            .default_extension_group_id;
     }
     if managed {
         let capability = Capability::new("profile.create")
@@ -10047,232 +9888,6 @@ async fn read_events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MigrationInspectInput {
-    source_root: PathBuf,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MigrationImportInput {
-    source_root: PathBuf,
-    staging_parent: PathBuf,
-    destination_root: PathBuf,
-    run_id: String,
-    confirmation: String,
-}
-
-#[derive(Serialize)]
-struct MigrationInspectResult {
-    report: buglogin_migration::inspect::InspectReport,
-    snapshot: buglogin_migration::snapshot::SourceSnapshot,
-}
-
-async fn inspect_migration(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(input): Json<MigrationInspectInput>,
-) -> Result<(StatusCode, Json<Operation>), Response> {
-    if !state.local_authority_enabled() {
-        return Err(response(problem(
-            "production_local_migration_forbidden",
-            "Production cannot run local filesystem migration",
-            409,
-        )));
-    }
-    let principal = authenticate(&state, &headers)?;
-    let grants = grants(&state)?;
-    authorize_capability(&principal, &grants, "migration.read", Action::Read)?;
-    let actor_id = principal
-        .account_id
-        .as_ref()
-        .map_or("local", AccountId::as_str);
-    let source_scope = input.source_root.to_string_lossy();
-    let operation_id = operation_id(
-        &headers,
-        "migration.inspect",
-        actor_id,
-        source_scope.as_ref(),
-    )?;
-    if let Some(operation) = existing_operation(&state, &operation_id).await? {
-        return Ok((StatusCode::ACCEPTED, Json(operation)));
-    }
-    begin_operation(&state, &operation_id, "migration.inspect", actor_id)?;
-    let result = inspect_source(&input.source_root).and_then(|(report, snapshot)| {
-        serde_json::to_value(MigrationInspectResult { report, snapshot })
-            .map_err(|_| problem("migration_result_invalid", "Migration result invalid", 500))
-    });
-    match result {
-        Ok(value) => finish_operation(&state, &operation_id, actor_id, value),
-        Err(error) => fail_operation(&state, &operation_id, actor_id, error),
-    }
-}
-
-async fn import_migration(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(input): Json<MigrationImportInput>,
-) -> Result<(StatusCode, Json<Operation>), Response> {
-    if !state.local_authority_enabled() {
-        return Err(response(problem(
-            "production_local_migration_forbidden",
-            "Production cannot run local filesystem migration",
-            409,
-        )));
-    }
-    let principal = authenticate(&state, &headers)?;
-    let grants = grants(&state)?;
-    authorize_capability(&principal, &grants, "migration.write", Action::Execute)?;
-    let destination = input.destination_root.canonicalize().map_err(|_| {
-        response(problem(
-            "migration_destination_invalid",
-            "Migration destination is invalid",
-            400,
-        ))
-    })?;
-    let repository_root = state
-        .profiles
-        .repository_root()
-        .map_err(response)?
-        .canonicalize()
-        .map_err(|_| {
-            response(problem(
-                "migration_destination_invalid",
-                "Profile repository destination is invalid",
-                500,
-            ))
-        })?;
-    if destination != repository_root {
-        return Err(response(problem(
-            "migration_destination_mismatch",
-            "Migration destination must match the active profile repository",
-            409,
-        )));
-    }
-    let actor_id = principal
-        .account_id
-        .as_ref()
-        .map_or("local", AccountId::as_str);
-    let source_scope = input.source_root.to_string_lossy().into_owned();
-    let destination_scope = destination.to_string_lossy().into_owned();
-    let migration_scope = sha256_parts(&[&source_scope, &destination_scope]);
-    let operation_id = operation_id(&headers, "migration.import", actor_id, &migration_scope)?;
-    if let Some(operation) = existing_operation(&state, &operation_id).await? {
-        return Ok((StatusCode::ACCEPTED, Json(operation)));
-    }
-    begin_operation(&state, &operation_id, "migration.import", actor_id)?;
-    let result = (|| {
-        let (report, snapshot) = inspect_source(&input.source_root)?;
-        let key = state
-            .migration_key
-            .read()
-            .map_err(|_| {
-                problem(
-                    "migration_key_unavailable",
-                    "Migration key unavailable",
-                    503,
-                )
-            })?
-            .clone();
-        let metadata = PackageMetadata {
-            created_at: migration_timestamp()?,
-            tool_version: env!("CARGO_PKG_VERSION").to_owned(),
-            tool_commit: option_env!("GIT_COMMIT").unwrap_or("unknown").to_owned(),
-        };
-        let key = key.ok_or_else(|| {
-            problem(
-                "migration_key_unavailable",
-                "Migration key unavailable",
-                503,
-            )
-        })?;
-        let package = buglogin_migration::package::build_encrypted_profile_package(
-            &input.source_root,
-            &report,
-            &snapshot,
-            &metadata,
-            &key,
-        )?;
-        let signing_key = state.migration_signing_key.read().map_err(|_| {
-            problem(
-                "migration_signing_key_unavailable",
-                "Migration signing key unavailable",
-                503,
-            )
-        })?;
-        let signing_key = signing_key.as_ref().ok_or_else(|| {
-            problem(
-                "migration_signing_key_unavailable",
-                "Migration signing key unavailable",
-                503,
-            )
-        })?;
-        let package = sign_package(
-            &package,
-            signing_key.as_bytes(),
-            SignatureMetadata {
-                key_id: "api-migration-signing-v1".to_owned(),
-                signer: "buglogin-api".to_owned(),
-                signed_at: metadata.created_at.clone(),
-            },
-        )?;
-        verify_signed_package(&package, signing_key.as_bytes())?;
-        let staged = stage_package(&package, &input.staging_parent, &input.run_id)?;
-        let receipt = promote_staged(
-            &staged,
-            &input.destination_root,
-            confirm_cutover(&input.confirmation)?,
-        )?;
-        let activation =
-            match activate_package(&input.destination_root, &input.run_id, &package, Some(&key)) {
-                Ok(value) => value,
-                Err(error) => {
-                    let confirmation = confirm_rollback("ROLLBACK_MIGRATION_RUN")?;
-                    let _ = rollback_activation(
-                        &input.destination_root,
-                        &input.run_id,
-                        confirmation.clone(),
-                    );
-                    let _ = rollback_cutover(&input.destination_root, &input.run_id, confirmation);
-                    return Err(error);
-                }
-            };
-        let control_import = match control_import::import_package(
-            &state,
-            &principal,
-            &package,
-            &format!("{operation_id}-control"),
-        ) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                let confirmation = confirm_rollback("ROLLBACK_MIGRATION_RUN")?;
-                let _ = rollback_activation(
-                    &input.destination_root,
-                    &input.run_id,
-                    confirmation.clone(),
-                );
-                let _ = rollback_cutover(&input.destination_root, &input.run_id, confirmation);
-                return Err(error);
-            }
-        };
-        Ok::<_, Problem>(serde_json::json!({
-            "runId": receipt.run_id,
-            "packageId": receipt.package_id,
-            "destinationRoot": receipt.destination_root,
-            "runRoot": receipt.run_root,
-            "artifacts": receipt.artifacts,
-            "createdProfiles": activation.created_profiles,
-            "reusedProfiles": activation.reused_profiles,
-            "controlImport": control_import
-        }))
-    })();
-    match result {
-        Ok(value) => finish_operation(&state, &operation_id, actor_id, value),
-        Err(error) => fail_operation(&state, &operation_id, actor_id, error),
-    }
-}
-
 async fn existing_operation(
     state: &ApiState,
     operation_id: &str,
@@ -10400,31 +10015,6 @@ fn fail_operation(
         .map_err(response)?;
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     Ok((status, Json(operation)))
-}
-
-fn authorize_capability(
-    principal: &Principal,
-    grants: &[Grant],
-    capability: &'static str,
-    action: Action,
-) -> Result<(), Response> {
-    let capability = Capability::new(capability)
-        .map_err(|_| response(problem("invalid_capability", "Invalid capability", 500)))?;
-    if is_allowed(
-        principal,
-        &capability,
-        action,
-        &ResourceScope::global(),
-        grants,
-    ) {
-        Ok(())
-    } else {
-        Err(response(problem(
-            "migration_forbidden",
-            "Migration access denied",
-            403,
-        )))
-    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<&str, Response> {
@@ -10557,9 +10147,9 @@ fn authorize_cookie(
         profile_id: Some(scope.profile_id.clone()),
         ..ResourceScope::default()
     };
-    if is_allowed(principal, &capability, action, &resource_scope, grants) {
-        Ok(())
-    } else if state.local_authority_enabled() && principal.roles.contains(&Role::LocalOwner) {
+    if is_allowed(principal, &capability, action, &resource_scope, grants)
+        || (state.local_authority_enabled() && principal.roles.contains(&Role::LocalOwner))
+    {
         Ok(())
     } else {
         Err(Problem::new(
@@ -10750,32 +10340,6 @@ fn profile_viewer_cookie_name(profile_id: &ProfileId) -> String {
             output
         });
     format!("__Secure-buglogin_viewer_{suffix}")
-}
-
-fn authenticated_browser_account_for_mutation(
-    state: &ApiState,
-    headers: &HeaderMap,
-) -> Result<AccountId, Response> {
-    require_web_origin(state, headers)?;
-    let raw_session = cookie(headers, WEB_SESSION_COOKIE)?;
-    let raw_csrf = headers
-        .get("x-csrf-token")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| response(problem("csrf_required", "CSRF validation is required", 403)))?;
-    let account_id = state
-        .auth
-        .read()
-        .map_err(|_| {
-            response(problem(
-                "auth_unavailable",
-                "Authentication unavailable",
-                503,
-            ))
-        })?
-        .authenticate_browser(raw_session, raw_csrf, request_now(headers)?)
-        .map_err(response)?;
-    require_active_account(state, account_id)
 }
 
 fn require_active_account(state: &ApiState, account_id: AccountId) -> Result<AccountId, Response> {
@@ -11301,6 +10865,7 @@ fn sync_manifest_object_storage_key(
     )
 }
 
+#[cfg(test)]
 fn release_promoted_sync_blob_reservations(
     aggregate: &mut ControlAggregate,
     journal: &SyncMigrationJournal,
@@ -11437,31 +11002,46 @@ fn sync_migration_journal_advisory_lock_id(journal_id: &str) -> i64 {
     i64::from_be_bytes(lock_bytes)
 }
 
-pub(super) struct SyncMigrationJournalLock<'a> {
-    state: &'a ApiState,
+pub(super) struct SyncMigrationJournalLock {
+    persistence: crate::services::control_persistence::ControlPersistence,
     lock_id: i64,
 }
 
-impl<'a> SyncMigrationJournalLock<'a> {
-    pub(super) fn acquire(state: &'a ApiState, journal_id: &str) -> Result<Self, Problem> {
+impl SyncMigrationJournalLock {
+    pub(super) fn acquire(state: &ApiState, journal_id: &str) -> Result<Self, Problem> {
+        Self::acquire_with_persistence(state.control_persistence.clone(), journal_id)
+    }
+
+    fn acquire_with_persistence(
+        persistence: crate::services::control_persistence::ControlPersistence,
+        journal_id: &str,
+    ) -> Result<Self, Problem> {
         let lock_id = sync_migration_journal_advisory_lock_id(journal_id);
-        if !state.control_persistence.try_advisory_lock(lock_id)? {
+        if !persistence.try_advisory_lock(lock_id)? {
             return Err(problem(
                 "migration_sync_import_in_progress",
                 "Sync migration import is already in progress",
                 409,
             ));
         }
-        Ok(Self { state, lock_id })
+        Ok(Self {
+            persistence,
+            lock_id,
+        })
     }
 }
 
-impl Drop for SyncMigrationJournalLock<'_> {
+impl Drop for SyncMigrationJournalLock {
     fn drop(&mut self) {
-        let _ = self
-            .state
-            .control_persistence
-            .release_advisory_lock(self.lock_id);
+        let persistence = self.persistence.clone();
+        let lock_id = self.lock_id;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || {
+                let _ = persistence.release_advisory_lock(lock_id);
+            });
+        } else {
+            let _ = persistence.release_advisory_lock(lock_id);
+        }
     }
 }
 
@@ -13177,24 +12757,6 @@ mod persistence_tests {
             }))
             .is_err()
         );
-        assert!(
-            serde_json::from_value::<MigrationInspectInput>(serde_json::json!({
-                "sourceRoot": "C:/source",
-                "unexpected": true
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<MigrationImportInput>(serde_json::json!({
-                "sourceRoot": "C:/source",
-                "stagingParent": "C:/staging",
-                "destinationRoot": "C:/destination",
-                "runId": "run-1",
-                "confirmation": "CUTOVER_AND_PROMOTE",
-                "unexpected": true
-            }))
-            .is_err()
-        );
     }
 
     #[test]
@@ -13346,10 +12908,11 @@ mod persistence_tests {
                         .write()
                         .unwrap()
                         .insert(member_id);
-                    let legacy = control_import::role_default_pairs(&role)
+                    let legacy = member_permissions::role_default_pairs(&role)
                         .into_iter()
                         .filter(|(capability, _)| {
-                            control_import::MEMBERSHIP_CAPABILITIES.contains(&capability.as_str())
+                            member_permissions::MEMBERSHIP_CAPABILITIES
+                                .contains(&capability.as_str())
                         })
                         .enumerate()
                         .map(|(index, (capability, action))| Grant {
@@ -14436,46 +13999,6 @@ mod persistence_tests {
         assert!(second.profiles.list().unwrap().is_empty());
         let _ = fs::remove_dir_all(first_root);
         let _ = fs::remove_dir_all(second_root);
-    }
-
-    #[tokio::test]
-    async fn hosted_state_rejects_local_filesystem_migration() {
-        let profile_root = test_root("hosted-local-migration-guard");
-        let _ = fs::remove_dir_all(&profile_root);
-        fs::create_dir_all(&profile_root).unwrap();
-        let state = ApiState::try_with_account_store(
-            ProfileService::new(LocalRepository::open(&profile_root).unwrap()),
-            MemoryControlRecordStore::default(),
-            false,
-        )
-        .unwrap();
-
-        let inspect_error = inspect_migration(
-            State(state.clone()),
-            HeaderMap::new(),
-            Json(MigrationInspectInput {
-                source_root: profile_root.clone(),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(inspect_error.status(), StatusCode::CONFLICT);
-
-        let import_error = import_migration(
-            State(state),
-            HeaderMap::new(),
-            Json(MigrationImportInput {
-                source_root: profile_root.clone(),
-                staging_parent: profile_root.clone(),
-                destination_root: profile_root.clone(),
-                run_id: "run_hosted_guard".into(),
-                confirmation: "MIGRATE_COPY_ONLY".into(),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(import_error.status(), StatusCode::CONFLICT);
-        let _ = fs::remove_dir_all(profile_root);
     }
 
     #[derive(Clone)]

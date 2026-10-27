@@ -374,6 +374,10 @@ impl ConnectedCookieJobService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve cookie job transition and revision fencing"
+    )]
     pub fn complete_with_control_revision(
         &self,
         tenant_id: &str,
@@ -450,6 +454,10 @@ impl ConnectedCookieJobService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve cookie job transition and revision fencing"
+    )]
     pub fn fail_with_control_revision(
         &self,
         tenant_id: &str,
@@ -543,6 +551,10 @@ impl ConnectedCookieJobService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve cookie job transition invariants"
+    )]
     fn transition(
         &self,
         tenant_id: &str,

@@ -16,9 +16,9 @@ pub(crate) fn ensure_proxy_update_allowed(
 ) -> Result<(), Problem> {
     for profile in state.list_profile_records()? {
         if profile.value.proxy_id.as_ref() != Some(proxy_id)
-            || !state
+            || state
                 .profile_resource_record(&profile.value.id)?
-                .is_some_and(|binding| binding.workspace_id == *workspace_id)
+                .is_none_or(|binding| binding.workspace_id != *workspace_id)
         {
             continue;
         }
@@ -299,6 +299,10 @@ pub(crate) fn reconcile_managed_profile_resource_registration(
     Ok(true)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit fields preserve sync authorization and proxy revision checks"
+)]
 pub(crate) fn validate_proxy_dependency(
     state: &ApiState,
     principal: &Principal,

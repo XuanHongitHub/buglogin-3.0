@@ -8,7 +8,6 @@ use buglogin_domain::permissions::Action;
 
 #[test]
 fn tools_are_derived_from_mcp_enabled_registry_commands() {
-    assert!(!mcp::ENABLED_BY_DEFAULT);
     let expected: HashSet<_> = CommandRegistry::all()
         .iter()
         .filter(|command| command.adapters.contains(&Adapter::Mcp))
@@ -97,7 +96,7 @@ fn dispatch_rejects_unknown_and_non_mcp_commands() {
         Err(DispatchError::UnknownTool)
     );
     assert_eq!(
-        mcp::dispatch_metadata("migration_import"),
+        mcp::dispatch_metadata("cookie_stage"),
         Err(DispatchError::AdapterNotEnabled)
     );
 }

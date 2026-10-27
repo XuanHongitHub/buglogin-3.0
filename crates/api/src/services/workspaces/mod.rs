@@ -124,6 +124,64 @@ impl WorkspaceService {
         Ok(workspace)
     }
 
+    pub fn workspace_delete_preflight(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization_id: &OrganizationId,
+        workspace_id: &WorkspaceId,
+    ) -> Result<WorkspaceRecord, Problem> {
+        if self
+            .authorize_organization_management(principal, grants, organization_id, Action::Delete)
+            .is_err()
+        {
+            authorize(principal, grants, workspace_id, Action::Delete)?;
+        }
+        let record = self
+            .organizations
+            .get(organization_id)
+            .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        let workspace = record
+            .workspaces
+            .get(workspace_id)
+            .ok_or_else(|| problem("workspace_not_found", "Workspace not found", 404))?
+            .clone();
+        Ok(WorkspaceRecord {
+            workspace,
+            revision: record
+                .workspace_revisions
+                .get(workspace_id)
+                .copied()
+                .unwrap_or_else(initial_revision),
+        })
+    }
+
+    pub fn organization_delete_preflight(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+        organization_id: &OrganizationId,
+    ) -> Result<(OrganizationRecord, usize), Problem> {
+        let organization = self.authorize_organization_management(
+            principal,
+            grants,
+            organization_id,
+            Action::Delete,
+        )?;
+        let record = self
+            .organizations
+            .get(organization_id)
+            .ok_or_else(|| problem("organization_not_found", "Organization not found", 404))?;
+        Ok((
+            OrganizationRecord {
+                organization,
+                policy: record.policy.clone(),
+                revision: record.revision,
+            },
+            record.workspaces.len(),
+        ))
+    }
+
     pub fn transfer_organization_owner(
         &mut self,
         principal: &Principal,
@@ -579,6 +637,48 @@ impl WorkspaceService {
                     .is_ok()
             })
             .flat_map(|record| record.workspaces.keys().cloned())
+            .collect()
+    }
+
+    pub fn manageable_organization_ids(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+    ) -> Vec<OrganizationId> {
+        self.organizations
+            .values()
+            .filter(|record| {
+                [
+                    Action::Create,
+                    Action::Update,
+                    Action::Delete,
+                    Action::Manage,
+                ]
+                .into_iter()
+                .any(|action| {
+                    self.authorize_organization_management(
+                        principal,
+                        grants,
+                        &record.organization.id,
+                        action,
+                    )
+                    .is_ok()
+                })
+            })
+            .map(|record| record.organization.id.clone())
+            .collect()
+    }
+
+    pub fn manageable_workspace_ids(
+        &self,
+        principal: &Principal,
+        grants: &[Grant],
+    ) -> Vec<WorkspaceId> {
+        self.organizations
+            .values()
+            .flat_map(|record| record.workspaces.values())
+            .filter(|workspace| authorize(principal, grants, &workspace.id, Action::Manage).is_ok())
+            .map(|workspace| workspace.id.clone())
             .collect()
     }
 
@@ -1198,7 +1298,7 @@ mod tests {
             service
                 .authorize_organization_management(
                     &owner,
-                    &[deny.clone()],
+                    std::slice::from_ref(&deny),
                     &organization.id,
                     Action::Create,
                 )

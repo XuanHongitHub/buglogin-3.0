@@ -52,6 +52,7 @@ pub struct EncryptedCookieInput {
 }
 
 impl EncryptedCookieInput {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         domain: String,
@@ -213,7 +214,7 @@ fn encrypt_cookie_value(
     plaintext.resize(original_len + 16, 0);
     let encryption_result =
         cbc::Encryptor::<Aes128>::new(&(*aes_key).into(), &COOKIE_KEY_IV.into())
-            .encrypt_padded_mut::<Pkcs7>(&mut *plaintext, original_len);
+            .encrypt_padded_mut::<Pkcs7>(&mut plaintext, original_len);
     let ciphertext = encryption_result.map_err(|_| WayfernCookieError::InvalidValue)?;
     let mut output = Vec::with_capacity(3 + ciphertext.len());
     output.extend_from_slice(b"v10");
@@ -400,7 +401,7 @@ fn decrypt_cookie_value(
         || host_key.is_empty()
         || ciphertext.len() <= 3
         || !matches!(&ciphertext[..3], b"v10" | b"v11")
-        || (ciphertext.len() - 3) % 16 != 0
+        || !(ciphertext.len() - 3).is_multiple_of(16)
     {
         return Err(WayfernCookieError::InvalidCiphertext);
     }
@@ -415,7 +416,7 @@ fn decrypt_cookie_value(
     );
     let mut plaintext = Zeroizing::new(ciphertext[3..].to_vec());
     let decrypted = cbc::Decryptor::<Aes128>::new(&(*aes_key).into(), &COOKIE_KEY_IV.into())
-        .decrypt_padded_mut::<Pkcs7>(&mut *plaintext)
+        .decrypt_padded_mut::<Pkcs7>(&mut plaintext)
         .map_err(|_| WayfernCookieError::InvalidCiphertext)?;
     if decrypted.len() <= COOKIE_HOST_HASH_BYTES
         || decrypted[..COOKIE_HOST_HASH_BYTES] != Sha256::digest(host_key.as_bytes())[..]

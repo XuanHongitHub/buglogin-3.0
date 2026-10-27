@@ -82,6 +82,10 @@ fn lifecycle_request(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the test drops its setup guard before the first request"
+)]
 async fn profile_http_flow_enforces_auth_scope_and_revision() {
     let root = root("profiles");
     let _ = fs::remove_dir_all(&root);
@@ -729,6 +733,10 @@ async fn profile_clone_and_share_routes_validate_path_identity() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the test drops its setup guard before the first request"
+)]
 async fn managed_profile_create_provisions_binding_and_initial_manifest() {
     let account = AccountId::from_str("acct_managed_provision").unwrap();
     let mut store = MemoryControlRecordStore::default();
@@ -881,8 +889,7 @@ async fn managed_profile_create_provisions_binding_and_initial_manifest() {
         &provision_grants,
         &stale_plan,
     )
-    .err()
-    .expect("provision must reject a proxy removed after request planning");
+    .expect_err("provision must reject a proxy removed after request planning");
     assert_eq!(stale_proxy.code, "proxy_not_found");
     let mut missing_create = lifecycle_request(
         "POST",

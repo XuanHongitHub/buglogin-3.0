@@ -37,6 +37,16 @@ pub enum OfflineEntitlement {
     Disabled,
 }
 
+impl OfflineEntitlement {
+    pub fn from_flag(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WorkspacePolicy;
@@ -57,14 +67,5 @@ mod tests {
                 .get("defaultExtensionGroupId")
                 .is_none()
         );
-    }
-}
-impl OfflineEntitlement {
-    pub fn from_flag(enabled: bool) -> Self {
-        if enabled {
-            Self::Enabled
-        } else {
-            Self::Disabled
-        }
     }
 }

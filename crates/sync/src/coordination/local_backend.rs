@@ -81,7 +81,7 @@ impl CoordinationBackend for LocalCoordination {
         validate_idempotency_key(idempotency_key)?;
         let ttl_ms = validate_ttl(ttl)?;
         let now = now_ms()?;
-        let expires_at_ms = now.checked_add(ttl_ms).ok_or_else(|| invalid_ttl())?;
+        let expires_at_ms = now.checked_add(ttl_ms).ok_or_else(invalid_ttl)?;
         let key = scope_key(scope.workspace_id, resource_id);
         let replay_key = (
             scope.workspace_id.as_str().to_owned(),
@@ -127,7 +127,7 @@ impl CoordinationBackend for LocalCoordination {
         }
 
         let fence = state.fencing_counters.entry(key.clone()).or_default();
-        *fence = fence.checked_add(1).ok_or_else(|| invalid_fence())?;
+        *fence = fence.checked_add(1).ok_or_else(invalid_fence)?;
         let grant = LeaseGrant {
             resource_id: resource_id.clone(),
             workspace_id: scope.workspace_id.clone(),
@@ -232,12 +232,11 @@ impl CoordinationBackend for LocalCoordination {
                 Err(idempotency_conflict())
             };
         }
-        if let Some(current) = state.leases.get(&key) {
-            if current.expires_at_ms > now
-                && (current.owner_id != scope.auth.actor_id() || current.owner_token != owner_token)
-            {
-                return Err(lease_not_owner());
-            }
+        if let Some(current) = state.leases.get(&key)
+            && current.expires_at_ms > now
+            && (current.owner_id != scope.auth.actor_id() || current.owner_token != owner_token)
+        {
+            return Err(lease_not_owner());
         }
         state.leases.remove(&key);
         state.release_replays.insert(
@@ -427,15 +426,15 @@ impl CoordinationBackend for LocalCoordination {
         let Some(events) = state.events.get(scope.workspace_id.as_str()) else {
             return Ok(Vec::new());
         };
-        if let (Some(cursor), Some(first)) = (cursor, events.front()) {
-            if parse_stream_id(&first.stream_id)? > cursor {
-                return Err(Problem::new(
-                    "sync_history_gap_resnapshot_required",
-                    "Event stream history gap detected. Resnapshot required.",
-                    409,
-                    "sync-coordination",
-                ));
-            }
+        if let (Some(cursor), Some(first)) = (cursor, events.front())
+            && parse_stream_id(&first.stream_id)? > cursor
+        {
+            return Err(Problem::new(
+                "sync_history_gap_resnapshot_required",
+                "Event stream history gap detected. Resnapshot required.",
+                409,
+                "sync-coordination",
+            ));
         }
         Ok(events
             .iter()

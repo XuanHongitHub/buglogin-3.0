@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::future::Future;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::{
@@ -866,39 +866,49 @@ fn newest_update_version<'a>(versions: &'a [String], installed: &[String]) -> Op
 // -------------------------------------------------------------
 
 #[tauri::command]
-pub async fn read_log_files() -> Result<String, String> {
-    let log_dir = get_app_data_dir().join("logs");
+pub async fn read_log_files(app: AppHandle) -> Result<String, String> {
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| error.to_string())?;
     if !log_dir.exists() {
-        return Ok("No log files present.".to_string());
+        return Ok("No log files have been written yet.".to_string());
     }
     let mut logs = String::new();
-    if let Ok(entries) = fs::read_dir(log_dir) {
-        for entry in entries.flatten() {
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                logs.push_str(&content);
-                logs.push('\n');
-            }
+    let mut entries = fs::read_dir(&log_dir)
+        .map_err(|error| format!("Could not list app log directory: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if let Ok(content) = fs::read_to_string(entry.path()) {
+            logs.push_str(&content);
+            logs.push('\n');
         }
     }
     Ok(if logs.is_empty() {
-        "Log records empty.".to_string()
+        format!("No readable log records in {}.", log_dir.display())
     } else {
         logs
     })
 }
 
 #[tauri::command]
-pub async fn open_log_directory() -> Result<(), String> {
-    let log_dir = get_app_data_dir().join("logs");
-    let _ = fs::create_dir_all(&log_dir);
+pub async fn open_log_directory(app: AppHandle) -> Result<(), String> {
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
     Ok(())
 }
 
 #[tauri::command]
-pub async fn preview_feedback_logs() -> Result<String, String> {
-    let logs = read_log_files().await?;
+pub async fn preview_feedback_logs(app: AppHandle) -> Result<String, String> {
+    let logs = read_log_files(app).await?;
     const MAX_FEEDBACK_LOG_BYTES: usize = 128 * 1024;
     if logs.len() <= MAX_FEEDBACK_LOG_BYTES {
         return Ok(logs);
@@ -912,6 +922,7 @@ pub async fn preview_feedback_logs() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn send_feedback(
+    app: AppHandle,
     state: tauri::State<'_, DesktopState>,
     kind: String,
     message: String,
@@ -938,7 +949,7 @@ pub async fn send_feedback(
         ));
     }
     let logs = if include_logs {
-        Some(preview_feedback_logs().await.map_err(|_| {
+        Some(preview_feedback_logs(app).await.map_err(|_| {
             buglogin_domain::errors::Problem::new(
                 "feedback_logs_unreadable",
                 "Recent logs could not be read",

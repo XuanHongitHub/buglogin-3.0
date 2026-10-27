@@ -510,6 +510,7 @@ fn credential_idempotency_key(
 }
 
 impl CredentialService {
+    #[cfg(test)]
     pub(crate) fn prepare_legacy_scrypt_put(
         &self,
         account_id: &AccountId,
@@ -1012,7 +1013,7 @@ mod tests {
         // matching the 1.0 control-plane implementation.
         let hash = "7608d2f3bd3ac7a04908f236fa2fc691443ab546284b4989e65f2941124bcb9bcd8da5efba4e322495a59f5397af72b19b5cad7bcfae76b36aa786984fc9fd7e";
         let imported = credentials
-            .prepare_legacy_scrypt_put(&account_id, salt, &hash, 100)
+            .prepare_legacy_scrypt_put(&account_id, salt, hash, 100)
             .unwrap();
         credentials
             .persist(

@@ -764,15 +764,14 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
             return Vec::new();
         };
         let rows = value.as_array().cloned().unwrap_or_else(|| vec![value]);
-        return rows
-            .into_iter()
+        rows.into_iter()
             .filter_map(|row| {
                 Some((
                     u32::try_from(row.get("ProcessId")?.as_u64()?).ok()?,
                     row.get("CommandLine")?.as_str()?.to_owned(),
                 ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
     }
 
     #[cfg(not(windows))]

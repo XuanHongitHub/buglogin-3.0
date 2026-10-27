@@ -941,14 +941,13 @@ dependencies = [
 
 [[package]]
 name = "buglogin-api"
-version = "3.0.16"
+version = "3.0.21"
 dependencies = [
  "argon2",
  "async-trait",
  "axum",
  "buglogin-browser",
  "buglogin-domain",
- "buglogin-migration",
  "buglogin-network",
  "buglogin-storage",
  "buglogin-sync",
@@ -974,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-browser"
-version = "3.0.16"
+version = "3.0.21"
 dependencies = [
  "aes 0.8.4",
  "buglogin-domain",
@@ -996,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-domain"
-version = "3.0.16"
+version = "3.0.21"
 dependencies = [
  "getrandom 0.3.4",
  "serde",
@@ -1009,32 +1008,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "buglogin-migration"
-version = "3.0.16"
-dependencies = [
- "blake3",
- "buglogin-domain",
- "buglogin-storage",
- "buglogin-sync",
- "fs2",
- "getrandom 0.3.4",
- "hex",
- "percent-encoding",
- "postgres",
- "rust-s3",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "time",
- "unicode-normalization",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "buglogin-network"
-version = "3.0.16"
+version = "3.0.21"
 dependencies = [
  "buglogin-domain",
  "serde",
@@ -1044,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-storage"
-version = "3.0.16"
+version = "3.0.21"
 dependencies = [
  "buglogin-domain",
  "http",
@@ -1063,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "buglogin-sync"
-version = "3.0.16"
+version = "3.0.21"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -2142,7 +2117,6 @@ dependencies = [
  "buglogin-api",
  "buglogin-browser",
  "buglogin-domain",
- "buglogin-migration",
  "buglogin-network",
  "buglogin-storage",
  "bzip2",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuBuilding2,
@@ -9,10 +9,12 @@ import {
   LuUsers,
 } from "react-icons/lu";
 import { Button } from "@/components/ui/button";
+import { createTauriDesktopApi } from "../../../apps/desktop/src/bridge";
 import { AccountDirectory } from "./accounts";
 import { OrganizationManagement } from "./org-workspaces";
 
 type View = "organizations" | "workspaces" | "quotas" | "accounts";
+const api = createTauriDesktopApi();
 
 export function PlatformManagement({
   onOpenAudit,
@@ -21,6 +23,21 @@ export function PlatformManagement({
 }) {
   const { t } = useTranslation("managementOrg");
   const [view, setView] = useState<View>("organizations");
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState<boolean | null>(null);
+  useEffect(() => {
+    let active = true;
+    void api
+      .getAccount()
+      .then((account) => {
+        if (active) setIsPlatformAdmin(account.platformAdmin);
+      })
+      .catch((error: unknown) => {
+        console.warn("Failed to determine management scope:", error);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   const options: { id: View; icon: React.ReactNode; label: string }[] = [
     { id: "organizations", icon: <LuBuilding2 />, label: t("organizations") },
     { id: "workspaces", icon: <LuHardDrive />, label: t("workspaces") },
@@ -30,7 +47,11 @@ export function PlatformManagement({
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-2.5">
-        <h1 className="text-base font-semibold">{t("platform")}</h1>
+        <h1 className="text-base font-semibold">
+          {isPlatformAdmin === null
+            ? t("management")
+            : t(isPlatformAdmin ? "platform" : "organizationManagement")}
+        </h1>
         <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
           {options.map((item) => (
             <Button

@@ -134,6 +134,7 @@ export function CookieManagementDialog({
   const [exportCookieData, setExportCookieData] =
     useState<CookieReadResult | null>(null);
   const [isLoadingExportCookies, setIsLoadingExportCookies] = useState(false);
+  const [exportLoadError, setExportLoadError] = useState<string | null>(null);
   const [exportSelection, setExportSelection] = useState<SelectionState>({});
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(
     new Set(),
@@ -160,6 +161,7 @@ export function CookieManagementDialog({
     async (profileId: string) => {
       if (exportCookieData) return;
       setIsLoadingExportCookies(true);
+      setExportLoadError(null);
       try {
         const result = await invoke<CookieReadResult>("read_profile_cookies", {
           profileId,
@@ -167,7 +169,7 @@ export function CookieManagementDialog({
         setExportCookieData(result);
         setExportSelection(initSelectionFromCookieData(result));
       } catch (err) {
-        toast.error(
+        setExportLoadError(
           t("cookies.management.loadFailed", {
             error: translateBackendError(t, err),
           }),
@@ -201,6 +203,7 @@ export function CookieManagementDialog({
     setFormat("json");
     setIsExporting(false);
     setExportCookieData(null);
+    setExportLoadError(null);
     setExportSelection({});
     setExpandedDomains(new Set());
   }, []);
@@ -608,6 +611,22 @@ export function CookieManagementDialog({
                 <div className="flex h-24 items-center justify-center">
                   <div className="size-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                 </div>
+              ) : exportLoadError ? (
+                <Alert variant="destructive" role="alert">
+                  <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+                    <span>{exportLoadError}</span>
+                    {profile ? (
+                      <RippleButton
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void loadExportCookies(profile.id)}
+                      >
+                        {t("common.buttons.retry")}
+                      </RippleButton>
+                    ) : null}
+                  </AlertDescription>
+                </Alert>
               ) : !exportCookieData || exportCookieData.domains.length === 0 ? (
                 <div className="rounded-md border p-4 text-center text-sm text-muted-foreground">
                   {t("cookies.management.noCookies")}

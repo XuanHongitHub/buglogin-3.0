@@ -204,7 +204,7 @@ fn hpke_profile_key_share_round_trips_only_for_bound_device_and_key_version() {
     )
     .unwrap();
     let encoded = serde_json::to_vec(&envelope).unwrap();
-    assert!(!encoded.windows(8).any(|window| window == &[0x6d; 8]));
+    assert!(!encoded.windows(8).any(|window| window == [0x6d; 8]));
 
     let decoded: ProfileKeyShareEnvelope = serde_json::from_slice(&encoded).unwrap();
     let opened = open_profile_key_share(

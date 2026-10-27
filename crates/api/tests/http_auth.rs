@@ -172,6 +172,37 @@ fn auth_cookies(response: &axum::response::Response) -> (String, String) {
     )
 }
 
+async fn web_login_when_password_capacity_is_busy(
+    app: &Router,
+    body: Value,
+) -> axum::response::Response {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let response = app
+            .clone()
+            .oneshot(web_json_request("POST", "/v1/auth/login", body.clone()))
+            .await
+            .expect("web login request should complete");
+        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+            return response;
+        }
+
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("capacity error body should be readable");
+        let problem: Value = serde_json::from_slice(&bytes).expect("capacity error should be JSON");
+        assert_eq!(
+            problem["code"], "credential_capacity_exhausted",
+            "unexpected service unavailable response: {problem}"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "password hashing capacity remained busy for five seconds"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn refresh_rotates_bearer_and_logout_revokes_replacement() {
     let root = root("rotate");
@@ -301,18 +332,14 @@ async fn web_login_uses_secure_cookies_session_projection_and_csrf_logout() {
     );
     let app: Router = router(state);
 
-    let login = app
-        .clone()
-        .oneshot(web_json_request(
-            "POST",
-            "/v1/auth/login",
-            json!({
-                "identifier": "WEB.OWNER",
-                "password": "correct horse battery staple"
-            }),
-        ))
-        .await
-        .unwrap();
+    let login = web_login_when_password_capacity_is_busy(
+        &app,
+        json!({
+            "identifier": "WEB.OWNER",
+            "password": "correct horse battery staple"
+        }),
+    )
+    .await;
     assert_eq!(login.status(), StatusCode::OK);
     assert_eq!(login.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(login.headers()[header::PRAGMA], "no-cache");
@@ -612,21 +639,9 @@ async fn web_session_list_and_revoke_are_owner_scoped_csrf_bound_and_durable() {
         "identifier": "session.owner",
         "password": "correct horse battery staple"
     });
-    let first = app
-        .clone()
-        .oneshot(web_json_request(
-            "POST",
-            "/v1/auth/login",
-            login_body.clone(),
-        ))
-        .await
-        .unwrap();
+    let first = web_login_when_password_capacity_is_busy(&app, login_body.clone()).await;
     let (first_cookies, first_csrf) = auth_cookies(&first);
-    let second = app
-        .clone()
-        .oneshot(web_json_request("POST", "/v1/auth/login", login_body))
-        .await
-        .unwrap();
+    let second = web_login_when_password_capacity_is_busy(&app, login_body).await;
     let (second_cookies, _) = auth_cookies(&second);
 
     let listed = app
@@ -1188,18 +1203,14 @@ async fn web_recovery_is_generic_single_use_and_revokes_sessions() {
     )
     .with_recovery_delivery(delivery.clone());
     let app: Router = router(state);
-    let login = app
-        .clone()
-        .oneshot(web_json_request(
-            "POST",
-            "/v1/auth/login",
-            json!({
-                "identifier": "recovery.owner",
-                "password": "old correct horse battery staple"
-            }),
-        ))
-        .await
-        .unwrap();
+    let login = web_login_when_password_capacity_is_busy(
+        &app,
+        json!({
+            "identifier": "recovery.owner",
+            "password": "old correct horse battery staple"
+        }),
+    )
+    .await;
     assert_eq!(login.status(), StatusCode::OK);
     let (cookies, _) = auth_cookies(&login);
 
@@ -1290,17 +1301,14 @@ async fn web_recovery_is_generic_single_use_and_revokes_sessions() {
         .await
         .unwrap();
     assert_eq!(old_login.status(), StatusCode::UNAUTHORIZED);
-    let new_login = app
-        .oneshot(web_json_request(
-            "POST",
-            "/v1/auth/login",
-            json!({
-                "identifier": "recovery.owner",
-                "password": "new correct horse battery staple"
-            }),
-        ))
-        .await
-        .unwrap();
+    let new_login = web_login_when_password_capacity_is_busy(
+        &app,
+        json!({
+            "identifier": "recovery.owner",
+            "password": "new correct horse battery staple"
+        }),
+    )
+    .await;
     assert_eq!(new_login.status(), StatusCode::OK);
 }
 
@@ -1317,18 +1325,14 @@ async fn web_api_tokens_are_one_time_scoped_listable_and_revocable() {
     );
     let probe = state.clone();
     let app: Router = router(state);
-    let login = app
-        .clone()
-        .oneshot(web_json_request(
-            "POST",
-            "/v1/auth/login",
-            json!({
-                "identifier": "token.owner",
-                "password": "correct horse battery staple"
-            }),
-        ))
-        .await
-        .unwrap();
+    let login = web_login_when_password_capacity_is_busy(
+        &app,
+        json!({
+            "identifier": "token.owner",
+            "password": "correct horse battery staple"
+        }),
+    )
+    .await;
     let (cookies, csrf) = auth_cookies(&login);
     let expires_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

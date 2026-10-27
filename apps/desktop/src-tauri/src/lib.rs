@@ -15,7 +15,6 @@ mod extension_features;
 mod extension_packages;
 mod legacy_compat;
 mod local_preferences;
-mod migration_commands;
 mod network_features;
 mod profile_cookie_manager;
 mod profile_lifecycle;
@@ -42,6 +41,7 @@ use serde_json::{Value, json};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
+use url::Url;
 use zeroize::Zeroizing;
 
 use legacy_compat::{
@@ -82,7 +82,16 @@ pub fn run() {
     let mut builder = tauri::Builder::default();
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     if app_instance.uses_single_instance_guard() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            for argument in &argv {
+                if is_buglogin_deep_link_argument(argument) {
+                    // The OS starts a short-lived second process for a protocol
+                    // callback. Forward the URL to the authenticated app before
+                    // focusing it; otherwise the SSO state stays in the first
+                    // process and the callback is silently discarded.
+                    let _ = app.emit("buglogin://deep-link", argument.clone());
+                }
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
             }
@@ -91,6 +100,14 @@ pub fn run() {
     builder = builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(tauri_plugin_log::log::LevelFilter::Info)
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init());
     let updater_configured = option_env!("BUGLOGIN_TAURI_UPDATER_PUBLIC_KEY")
         .is_some_and(|public_key| !public_key.trim().is_empty());
@@ -117,6 +134,7 @@ pub fn run() {
 
     builder
         .setup(move |app| {
+            tauri_plugin_log::log::info!("BugLogin desktop startup");
             let state = build_state().unwrap_or_else(DesktopState::unavailable);
             state.start_background_auth_refresh();
             diagnostics::start_background_flush(state.clone());
@@ -222,6 +240,7 @@ pub fn run() {
             organization_list,
             organization_get,
             organization_record_get,
+            organization_delete_preflight,
             organization_create,
             organization_update,
             organization_delete,
@@ -233,6 +252,7 @@ pub fn run() {
             workspace_list,
             workspace_get,
             workspace_record_get,
+            workspace_delete_preflight,
             workspace_create,
             workspace_update,
             workspace_delete,
@@ -280,9 +300,6 @@ pub fn run() {
             member_role_update,
             profile_groups_replace,
             operation_get,
-            migration_inspect,
-            migration_import,
-            migration_profile_data_import,
             profile_list,
             profile_get,
             profile_binding_get,
@@ -583,6 +600,25 @@ pub fn run() {
                 }
             }
         });
+}
+
+fn is_buglogin_deep_link_argument(argument: &str) -> bool {
+    Url::parse(argument).is_ok_and(|url| url.scheme() == "buglogin")
+}
+
+#[cfg(test)]
+mod single_instance_deep_link_tests {
+    use super::is_buglogin_deep_link_argument;
+
+    #[test]
+    fn single_instance_forwards_only_buglogin_protocol_arguments() {
+        assert!(is_buglogin_deep_link_argument(
+            "buglogin://sso/callback?state=one-time&token=secret"
+        ));
+        assert!(is_buglogin_deep_link_argument("buglogin://invite/abc"));
+        assert!(!is_buglogin_deep_link_argument("https://example.com/"));
+        assert!(!is_buglogin_deep_link_argument("not a url"));
+    }
 }
 
 #[tauri::command]
@@ -1228,14 +1264,11 @@ fn build_state() -> Result<DesktopState, Problem> {
                     "desktop-bootstrap",
                 )
             })?;
-            Ok(DesktopState::local(
-                AdapterState::open_with_targets_and_migration(
-                    repository_root,
-                    config.profiles_root,
-                    config.runtime_targets,
-                    runtime_config::migration_executable(),
-                )?,
-            ))
+            Ok(DesktopState::local(AdapterState::open_with_targets(
+                repository_root,
+                config.profiles_root,
+                config.runtime_targets,
+            )?))
         }
         runtime_config::DeploymentMode::Production => Ok(DesktopState::production(
             config.api_base_url.as_deref().ok_or_else(|| {
@@ -1510,6 +1543,22 @@ async fn organization_record_get(
 }
 
 #[tauri::command]
+async fn organization_delete_preflight(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "organization_delete_preflight",
+            &correlation_id,
+            None,
+            payload,
+        )
+        .await
+}
+
+#[tauri::command]
 async fn organization_create(
     state: State<'_, DesktopState>,
     correlation_id: String,
@@ -1635,6 +1684,17 @@ async fn workspace_record_get(
 ) -> Result<CommandResult<Value>, Problem> {
     state
         .invoke("workspace_record_get", &correlation_id, None, payload)
+        .await
+}
+
+#[tauri::command]
+async fn workspace_delete_preflight(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke("workspace_delete_preflight", &correlation_id, None, payload)
         .await
 }
 
@@ -2448,57 +2508,6 @@ async fn operation_get(
 ) -> Result<CommandResult<Value>, Problem> {
     state
         .invoke("operation_get", &correlation_id, None, payload)
-        .await
-}
-
-#[tauri::command]
-async fn migration_inspect(
-    state: State<'_, DesktopState>,
-    correlation_id: String,
-    idempotency_key: Option<String>,
-    payload: Value,
-) -> Result<CommandResult<Value>, Problem> {
-    state
-        .invoke(
-            "migration_inspect",
-            &correlation_id,
-            idempotency_key.as_deref(),
-            payload,
-        )
-        .await
-}
-
-#[tauri::command]
-async fn migration_import(
-    state: State<'_, DesktopState>,
-    correlation_id: String,
-    idempotency_key: Option<String>,
-    payload: Value,
-) -> Result<CommandResult<Value>, Problem> {
-    state
-        .invoke(
-            "migration_import",
-            &correlation_id,
-            idempotency_key.as_deref(),
-            payload,
-        )
-        .await
-}
-
-#[tauri::command]
-async fn migration_profile_data_import(
-    state: State<'_, DesktopState>,
-    correlation_id: String,
-    idempotency_key: Option<String>,
-    payload: Value,
-) -> Result<CommandResult<Value>, Problem> {
-    state
-        .invoke(
-            "migration_profile_data_import",
-            &correlation_id,
-            idempotency_key.as_deref(),
-            payload,
-        )
         .await
 }
 

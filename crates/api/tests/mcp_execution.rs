@@ -153,88 +153,6 @@ fn request(tool_name: &str, idempotency_key: Option<&str>) -> McpRequest {
     }
 }
 
-#[tokio::test]
-async fn signed_migration_package_activation_is_exposed_to_mcp_with_package_id_input() {
-    let audits = Rc::new(RefCell::new(Vec::new()));
-    let calls = Rc::new(RefCell::new(Vec::new()));
-    let policy = FakePolicy {
-        authenticated: true,
-        authorized: true,
-        calls: calls.clone(),
-        audits: audits.clone(),
-        ..FakePolicy::default()
-    };
-    let executor = FakeExecutor {
-        calls: 0,
-        result: Ok(json!({
-            "packageId": "pkg_rehearsal_01",
-            "state": "active",
-            "replayed": false,
-            "controlImport": null,
-            "syncImport": null
-        })),
-    };
-    let mut dispatcher = McpDispatcher::new(policy, executor, true);
-    let result = dispatcher
-        .dispatch_async(McpRequest {
-            tool_name: "migration_package_activate".into(),
-            correlation_id: "cor_mcp_package_activation".into(),
-            bearer_token: Some("test-token".into()),
-            idempotency_key: Some("mcp-package-activate-01".into()),
-            input: json!({"packageId": "pkg_rehearsal_01"}),
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(result["packageId"], "pkg_rehearsal_01");
-    assert!(calls.borrow().contains(&"authenticate"));
-    assert!(calls.borrow().contains(&"authorize"));
-    assert!(calls.borrow().contains(&"idempotency"));
-    assert_eq!(audits.borrow().len(), 1);
-    assert_eq!(audits.borrow()[0].outcome, AuditOutcome::Succeeded);
-}
-
-#[tokio::test]
-async fn signed_migration_package_activation_replays_before_running_activation() {
-    let replay = json!({
-        "packageId": "pkg_rehearsal_02",
-        "state": "active",
-        "replayed": true,
-        "controlImport": null,
-        "syncImport": null
-    });
-    let policy = FakePolicy {
-        authenticated: true,
-        authorized: true,
-        replay: Some(replay.clone()),
-        ..FakePolicy::default()
-    };
-    let executor = FakeExecutor {
-        calls: 0,
-        result: Ok(Value::Null),
-    };
-    let mut dispatcher = McpDispatcher::new(policy, executor, true);
-    let result = dispatcher
-        .dispatch_async(McpRequest {
-            tool_name: "migration_package_activate".into(),
-            correlation_id: "cor_mcp_package_replay".into(),
-            bearer_token: Some("test-token".into()),
-            idempotency_key: Some("mcp-package-activate-02".into()),
-            input: json!({"packageId": "pkg_rehearsal_02"}),
-        })
-        .await
-        .unwrap();
-    let (policy, executor) = dispatcher.into_parts();
-
-    assert_eq!(result, replay);
-    assert_eq!(executor.calls, 0);
-    assert!(policy.calls.borrow().contains(&"idempotency"));
-    assert_eq!(
-        policy.audits.borrow()[0].metadata.get("idempotency"),
-        Some(&"replay".to_owned())
-    );
-}
-
 fn problem(code: &str, title: &str, status: u16) -> Problem {
     Problem::new(code, title, status, "test")
 }
@@ -712,7 +630,7 @@ fn execution_requires_idempotency_replays_without_execution_and_rejects_secret_r
 }
 
 #[test]
-fn execution_is_opt_in_and_non_mcp_tools_are_denied() {
+fn execution_is_opt_in_and_unknown_tools_are_denied() {
     let mut dispatcher = McpDispatcher::new(
         FakePolicy::default(),
         FakeExecutor {
@@ -742,9 +660,9 @@ fn execution_is_opt_in_and_non_mcp_tools_are_denied() {
         true,
     );
     let error = dispatcher
-        .dispatch(request("migration_import", Some("key-123456789012")))
+        .dispatch(request("unknown_tool", Some("key-123456789012")))
         .unwrap_err();
-    assert_eq!(error.code, "mcp_tool_unavailable");
+    assert_eq!(error.code, "mcp_tool_not_found");
 }
 
 #[test]

@@ -81,6 +81,10 @@ impl AccountProvisioningService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve the account provisioning contract"
+    )]
     pub fn create_pending_scoped(
         &self,
         account_id: AccountId,

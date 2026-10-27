@@ -1,43 +1,76 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuArrowLeft,
   LuBuilding2,
+  LuDatabase,
   LuFolderKanban,
   LuLayoutDashboard,
   LuPanelsTopLeft,
   LuUsers,
 } from "react-icons/lu";
 import { Button } from "@/components/ui/button";
+import { ResourceInventoryPanel } from "../resource-inventory-panel";
 import { WorkspaceMembers } from "./members";
 import { ManagementResources } from "./resources";
 
-type Tab = "overview" | "members" | "groups" | "profiles";
+type Tab = "overview" | "members" | "groups" | "profiles" | "resources";
+export type ManagementWorkspaceTab = Tab;
 
 export function ManagementWorkspace({
   organizationId,
   organizationName,
   workspaceId,
   workspaceName,
+  initialTab = "overview",
   onBack,
+  onTabChange,
   onDataChanged,
 }: {
   organizationId: string;
   organizationName: string;
   workspaceId: string;
   workspaceName: string;
+  initialTab?: Tab;
   onBack: () => void;
+  onTabChange?: (tab: Tab) => void;
   onDataChanged?: () => void;
 }) {
   const { t } = useTranslation("managementOrg");
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tabSelection, setTabSelection] = useState<{
+    workspaceId: string;
+    tab: Tab;
+  } | null>(null);
+  const tab =
+    tabSelection?.workspaceId === workspaceId
+      ? tabSelection.tab
+      : initialTab !== "overview"
+        ? initialTab
+        : readWorkspaceTab(workspaceId);
+  useEffect(() => {
+    setTabSelection({
+      workspaceId,
+      tab:
+        initialTab !== "overview" ? initialTab : readWorkspaceTab(workspaceId),
+    });
+  }, [initialTab, workspaceId]);
+  const setTab = (next: Tab) => {
+    setTabSelection({ workspaceId, tab: next });
+    onTabChange?.(next);
+    try {
+      window.sessionStorage.setItem(workspaceTabKey(workspaceId), next);
+    } catch {
+      // Tab navigation remains available if desktop storage is unavailable.
+    }
+  };
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: "overview", label: t("overview"), icon: <LuLayoutDashboard /> },
     { id: "members", label: t("members"), icon: <LuUsers /> },
     { id: "groups", label: t("groups"), icon: <LuFolderKanban /> },
     { id: "profiles", label: t("profiles"), icon: <LuPanelsTopLeft /> },
+    { id: "resources", label: t("resources"), icon: <LuDatabase /> },
   ];
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -59,7 +92,7 @@ export function ManagementWorkspace({
         </div>
         <nav
           className="flex shrink-0 items-center gap-1"
-          aria-label={workspaceName}
+          aria-label={`${organizationName} / ${workspaceName}`}
         >
           {tabs.map((item) => (
             <Button
@@ -67,6 +100,7 @@ export function ManagementWorkspace({
               size="sm"
               variant={tab === item.id ? "secondary" : "ghost"}
               onClick={() => setTab(item.id)}
+              aria-pressed={tab === item.id}
             >
               {item.icon}
               <span className="hidden sm:inline">{item.label}</span>
@@ -129,6 +163,24 @@ export function ManagementWorkspace({
                 </span>
               </span>
             </button>
+            <button
+              type="button"
+              onClick={() => setTab("resources")}
+              className="flex items-start gap-3 rounded-md border border-border p-4 text-left transition-colors hover:bg-muted/40"
+            >
+              <LuDatabase className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <span>
+                <span className="block text-sm font-medium">
+                  {t("resources")}
+                </span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  {t("resourceIntro", {
+                    defaultValue:
+                      "Review workspace resources and their direct access grants.",
+                  })}
+                </span>
+              </span>
+            </button>
           </div>
         ) : null}
         {tab === "members" ? (
@@ -139,12 +191,49 @@ export function ManagementWorkspace({
           />
         ) : null}
         {tab === "groups" ? (
-          <ManagementResources workspaceId={workspaceId} kind="groups" />
+          <ManagementResources
+            organizationName={organizationName}
+            workspaceName={workspaceName}
+            workspaceId={workspaceId}
+            kind="groups"
+          />
         ) : null}
         {tab === "profiles" ? (
-          <ManagementResources workspaceId={workspaceId} kind="profiles" />
+          <ManagementResources
+            organizationName={organizationName}
+            workspaceName={workspaceName}
+            workspaceId={workspaceId}
+            kind="profiles"
+          />
+        ) : null}
+        {tab === "resources" ? (
+          <ResourceInventoryPanel
+            initialOrganizationId={organizationId}
+            initialWorkspaceId={workspaceId}
+            initialWorkspaceName={workspaceName}
+            showWorkspaceSelector={false}
+          />
         ) : null}
       </div>
     </section>
   );
+}
+
+function workspaceTabKey(workspaceId: string) {
+  return `buglogin:management:workspace-tab:${workspaceId}:v1`;
+}
+
+function readWorkspaceTab(workspaceId: string): Tab {
+  if (typeof window === "undefined") return "overview";
+  try {
+    const saved = window.sessionStorage.getItem(workspaceTabKey(workspaceId));
+    return saved === "members" ||
+      saved === "groups" ||
+      saved === "profiles" ||
+      saved === "resources"
+      ? saved
+      : "overview";
+  } catch {
+    return "overview";
+  }
 }

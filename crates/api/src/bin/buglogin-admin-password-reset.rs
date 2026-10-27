@@ -95,7 +95,7 @@ fn parse_options(
         }
         if argument == "--list-platform-admins" {
             if !options.is_empty() || args.peek().is_some() {
-                return Err("list_mode_cannot_be_combined".into());
+                return Err("list_mode_cannot_be_combined");
             }
             options.insert("list-platform-admins".to_owned(), "true".to_owned());
             continue;

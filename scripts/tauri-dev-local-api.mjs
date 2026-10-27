@@ -2,11 +2,10 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, cp, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
-import { resolveBuildTargetDir } from "./build-target.mjs";
 import {
   findMissingTauriDevOperations,
   hasDurableTauriDevPersistence,
@@ -16,12 +15,9 @@ import {
 } from "./tauri-dev-local-api-contract.mjs";
 import {
   forwardTerminationSignals,
-  recoverTauriSidecarDirectory,
-  stageTauriSidecarDirectory,
 } from "./tauri-sidecar-staging.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const desktopRoot = resolve(repositoryRoot, "apps/desktop");
 const localEnv = new Map();
 try {
   const contents = await readFile(resolve(repositoryRoot, ".env.local"), "utf8");
@@ -138,58 +134,6 @@ console.log(`BugLogin desktop will use local API ${apiBaseUrl}.`);
 
 if (process.argv.includes("--check")) process.exit(0);
 
-const targetTriple =
-  process.env.TAURI_ENV_TARGET_TRIPLE ??
-  execFileSync("rustc", ["-vV"], { encoding: "utf8" }).match(/^host: (.+)$/m)?.[1];
-if (!targetTriple) throw new Error("Rust target triple unavailable");
-const sidecarSuffix = process.platform === "win32" ? ".exe" : "";
-const sidecarName = `buglogin-migrate-${targetTriple}${sidecarSuffix}`;
-const sidecarSource = resolve(
-  cargoTargetDir,
-  ...(process.env.TAURI_ENV_TARGET_TRIPLE ? [targetTriple] : []),
-  "debug",
-  `buglogin-migrate${sidecarSuffix}`,
-);
-const sidecarStage = resolve(cargoTargetDir, "tauri-sidecars", "dev");
-const sourceBinaries = resolve(desktopRoot, "src-tauri/binaries");
-let restoreStagedBinaries;
-
-async function restoreBinariesDirectory() {
-  await restoreStagedBinaries?.();
-  restoreStagedBinaries = undefined;
-}
-
-async function stageMigrationSidecar() {
-  const sidecarEnv = { ...process.env, CARGO_TARGET_DIR: cargoTargetDir };
-  try {
-    await access(sidecarSource);
-  } catch {
-    const cargoArgs = [
-      "build",
-      "--locked",
-      "-p",
-      "buglogin-migration",
-      "--bin",
-      "buglogin-migrate",
-    ];
-    if (process.env.TAURI_ENV_TARGET_TRIPLE) cargoArgs.push("--target", targetTriple);
-    execFileSync(process.platform === "win32" ? "cargo.exe" : "cargo", cargoArgs, {
-      cwd: repositoryRoot,
-      env: sidecarEnv,
-      stdio: "inherit",
-    });
-    await access(sidecarSource);
-  }
-  await mkdir(sidecarStage, { recursive: true });
-  await cp(sidecarSource, resolve(sidecarStage, sidecarName), { force: true });
-
-  restoreStagedBinaries = await stageTauriSidecarDirectory({
-    sourceBinaries,
-    sidecarStage,
-    sidecarName,
-  });
-}
-
 const childEnv = { ...process.env };
 childEnv.BUGLOGIN_DEPLOYMENT_MODE = "production";
 childEnv.BUGLOGIN_API_BASE_URL = apiBaseUrl;
@@ -223,8 +167,6 @@ delete childEnv.BUGLOGIN_API_TOKEN;
 delete childEnv.BUGLOGIN_DATA_ROOT;
 delete childEnv.BUGLOGIN_PROFILE_CACHE_ROOT;
 
-await recoverTauriSidecarDirectory({ sourceBinaries, sidecarName });
-await stageMigrationSidecar();
 
 const isWindows = process.platform === "win32";
 const child = spawn(

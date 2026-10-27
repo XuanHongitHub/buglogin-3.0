@@ -270,7 +270,7 @@ fn architecture_name(architecture: &RuntimeArchitecture) -> String {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, ()> {
-    if value.len() % 2 != 0 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(());
     }
     value

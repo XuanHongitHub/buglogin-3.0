@@ -2101,18 +2101,102 @@ impl RemoteApiClient {
         payload: Value,
     ) -> Result<buglogin_api::commands::CommandResult<Value>, Problem> {
         let result = match name {
-            "system_health_get" => self.get::<Value>("/v1/health",correlation).await?,
-            "account_get" => self.get::<Value>("/v1/account",correlation).await?,
-            "account_identity_own_get" => self.get::<Value>("/v1/account/identity",correlation).await?,
-            "account_identity_get" => { let id=path_arg(&payload,"accountId",correlation)?; self.get::<Value>(&format!("/v1/accounts/{id}/identity"),correlation).await? },
-            "account_identity_update" => { let id=path_arg(&payload,"accountId",correlation)?; let mut body=payload; if let Some(object)=body.as_object_mut(){object.remove("accountId");} self.send::<Value>(Method::PATCH,&format!("/v1/accounts/{id}/identity"),Some(body),correlation,idem,None,&[]).await? },
-            "account_password_change" => self.send::<Value>(Method::PUT,"/v1/account/password",Some(payload),correlation,idem,None,&[]).await?,
-            "account_sessions_list" => { let id=path_arg(&payload,"accountId",correlation)?; self.get::<Value>(&format!("/v1/accounts/{id}/sessions"),correlation).await? },
-            "account_sessions_revoke" => { let account=path_arg(&payload,"accountId",correlation)?; let session=path_arg(&payload,"sessionId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/accounts/{account}/sessions/{session}"),None,correlation,idem,None,&[]).await? },
-            "management_account_drafts_generate" => self.send::<Value>(Method::POST,"/v1/management/account-drafts",Some(payload),correlation,None,None,&[]).await?,
-            "management_batch_execute" => self.send::<Value>(Method::POST,"/v1/management/batch",Some(payload),correlation,idem,None,&[]).await?,
-            "account_list" => self.get::<Value>("/v1/accounts",correlation).await?,
-            "account_create" => self.send::<Value>(Method::POST,"/v1/accounts",Some(payload),correlation,idem,None,&[]).await?,
+            "system_health_get" => self.get::<Value>("/v1/health", correlation).await?,
+            "account_get" => self.get::<Value>("/v1/account", correlation).await?,
+            "account_identity_own_get" => {
+                self.get::<Value>("/v1/account/identity", correlation)
+                    .await?
+            }
+            "account_identity_get" => {
+                let id = path_arg(&payload, "accountId", correlation)?;
+                self.get::<Value>(&format!("/v1/accounts/{id}/identity"), correlation)
+                    .await?
+            }
+            "account_identity_update" => {
+                let id = path_arg(&payload, "accountId", correlation)?;
+                let mut body = payload;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("accountId");
+                }
+                self.send::<Value>(
+                    Method::PATCH,
+                    &format!("/v1/accounts/{id}/identity"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "account_password_change" => {
+                self.send::<Value>(
+                    Method::PUT,
+                    "/v1/account/password",
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "account_sessions_list" => {
+                let id = path_arg(&payload, "accountId", correlation)?;
+                self.get::<Value>(&format!("/v1/accounts/{id}/sessions"), correlation)
+                    .await?
+            }
+            "account_sessions_revoke" => {
+                let account = path_arg(&payload, "accountId", correlation)?;
+                let session = path_arg(&payload, "sessionId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/accounts/{account}/sessions/{session}"),
+                    None,
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "management_account_drafts_generate" => {
+                self.send::<Value>(
+                    Method::POST,
+                    "/v1/management/account-drafts",
+                    Some(payload),
+                    correlation,
+                    None,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "management_batch_execute" => {
+                self.send::<Value>(
+                    Method::POST,
+                    "/v1/management/batch",
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "account_list" => self.get::<Value>("/v1/accounts", correlation).await?,
+            "account_create" => {
+                self.send::<Value>(
+                    Method::POST,
+                    "/v1/accounts",
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "account_create_scoped" => {
                 let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
                 let body = json!({
@@ -2123,44 +2207,211 @@ impl RemoteApiClient {
                     "role": payload.get("role").cloned().ok_or_else(|| bad_input("role", correlation))?,
                     "initialPassword": payload.get("initialPassword").cloned().ok_or_else(|| bad_input("initialPassword", correlation))?,
                 });
-                self.send::<Value>(Method::POST,&format!("/v1/workspaces/{workspace_id}/accounts"),Some(body),correlation,idem,None,&[]).await?
-            },
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{workspace_id}/accounts"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "account_status_update" => {
-                let account_id = AccountId::from_str(&path_arg(&payload, "accountId", correlation)?)
-                    .map_err(|_| bad_input("accountId", correlation))?;
+                let account_id =
+                    AccountId::from_str(&path_arg(&payload, "accountId", correlation)?)
+                        .map_err(|_| bad_input("accountId", correlation))?;
                 let body = json!({
                     "status": payload.get("status").cloned().ok_or_else(|| bad_input("status", correlation))?,
                     "expectedRevision": payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(|| bad_input("expectedRevision", correlation))?,
                 });
-                self.send::<Value>(Method::PUT, &format!("/v1/accounts/{}/status", account_id.as_str()), Some(body), correlation, idem, None, &[]).await?
-            },
-            "organization_list" => json!({"items":self.get::<Vec<Value>>("/v1/organizations",correlation).await?,"nextCursor":Value::Null}),
-            "organization_get" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}"),correlation).await? },
-            "organization_record_get" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/record"),correlation).await? },
-            "organization_create" => self.send::<Value>(Method::POST,"/v1/organizations",Some(payload),correlation,idem,None,&[]).await?,
-            "organization_update" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=payload.get("update").cloned().ok_or_else(||bad_input("update",correlation))?; self.send::<Value>(Method::PATCH,&format!("/v1/organizations/{id}"),Some(body),correlation,idem,None,&[]).await? },
-            "organization_delete" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::DELETE,&format!("/v1/organizations/{id}"),Some(body),correlation,idem,None,&[]).await? },
-            "organization_owner_transfer" => { let id=path_arg(&payload,"organizationId",correlation)?; let body=json!({"accountId":payload.get("accountId").cloned().ok_or_else(||bad_input("accountId",correlation))?,"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::POST,&format!("/v1/organizations/{id}/owner"),Some(body),correlation,idem,None,&[]).await? },
-            "organization_members_list" => { let id=path_arg(&payload,"organizationId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{id}/members"),correlation).await? },
-            "organization_member_workspace_assign" => {
-                let organization_id = path_arg(&payload, "organizationId", correlation)?;
-                let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/accounts/{}/status", account_id.as_str()),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "organization_list" => {
+                json!({"items":self.get::<Vec<Value>>("/v1/organizations",correlation).await?,"nextCursor":Value::Null})
+            }
+            "organization_get" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                self.get::<Value>(&format!("/v1/organizations/{id}"), correlation)
+                    .await?
+            }
+            "organization_record_get" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                self.get::<Value>(&format!("/v1/organizations/{id}/record"), correlation)
+                    .await?
+            }
+            "organization_delete_preflight" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/organizations/{id}/delete-preflight"),
+                    correlation,
+                )
+                .await?
+            }
+            "organization_create" => {
                 self.send::<Value>(
                     Method::POST,
-                    &format!("/v1/organizations/{organization_id}/workspaces/{workspace_id}/members"),
+                    "/v1/organizations",
                     Some(payload),
                     correlation,
                     idem,
                     None,
                     &[],
-                ).await?
-            },
-            "organization_account_create" => { let id=path_arg(&payload,"organizationId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/organizations/{id}/accounts"),Some(payload),correlation,idem,None,&[]).await? },
-            "organization_member_status_update" => { let org=path_arg(&payload,"organizationId",correlation)?; let account=path_arg(&payload,"accountId",correlation)?; let body=json!({"organizationId":org,"accountId":account,"status":payload.get("status").cloned().ok_or_else(||bad_input("status",correlation))?,"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::PATCH,&format!("/v1/organizations/{org}/members/{account}"),Some(body),correlation,idem,None,&[]).await? },
-            "workspace_list" => { let org=path_arg(&payload,"organizationId",correlation)?; json!({"items":self.get::<Vec<Value>>(&format!("/v1/organizations/{org}/workspaces"),correlation).await?,"nextCursor":Value::Null}) },
-            "workspace_get" => { let org=path_arg(&payload,"organizationId",correlation)?; let id=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{org}/workspaces/{id}"),correlation).await? },
-            "workspace_record_get" => { let org=path_arg(&payload,"organizationId",correlation)?; let id=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/organizations/{org}/workspaces/{id}/record"),correlation).await? },
-            "workspace_create" => { let org=path_arg(&payload,"organizationId",correlation)?; let body=payload.get("workspace").cloned().ok_or_else(||bad_input("workspace",correlation))?; self.send::<Value>(Method::POST,&format!("/v1/organizations/{org}/workspaces"),Some(body),correlation,idem,None,&[]).await? },
+                )
+                .await?
+            }
+            "organization_update" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                let body = payload
+                    .get("update")
+                    .cloned()
+                    .ok_or_else(|| bad_input("update", correlation))?;
+                self.send::<Value>(
+                    Method::PATCH,
+                    &format!("/v1/organizations/{id}"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "organization_delete" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                let body = json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?});
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/organizations/{id}"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "organization_owner_transfer" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                let body = json!({"accountId":payload.get("accountId").cloned().ok_or_else(||bad_input("accountId",correlation))?,"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?});
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/organizations/{id}/owner"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "organization_members_list" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                self.get::<Value>(&format!("/v1/organizations/{id}/members"), correlation)
+                    .await?
+            }
+            "organization_member_workspace_assign" => {
+                let organization_id = path_arg(&payload, "organizationId", correlation)?;
+                let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!(
+                        "/v1/organizations/{organization_id}/workspaces/{workspace_id}/members"
+                    ),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "organization_account_create" => {
+                let id = path_arg(&payload, "organizationId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/organizations/{id}/accounts"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "organization_member_status_update" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                let account = path_arg(&payload, "accountId", correlation)?;
+                let body = json!({"organizationId":org,"accountId":account,"status":payload.get("status").cloned().ok_or_else(||bad_input("status",correlation))?,"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?});
+                self.send::<Value>(
+                    Method::PATCH,
+                    &format!("/v1/organizations/{org}/members/{account}"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "workspace_list" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                json!({"items":self.get::<Vec<Value>>(&format!("/v1/organizations/{org}/workspaces"),correlation).await?,"nextCursor":Value::Null})
+            }
+            "workspace_get" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                let id = path_arg(&payload, "workspaceId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/organizations/{org}/workspaces/{id}"),
+                    correlation,
+                )
+                .await?
+            }
+            "workspace_record_get" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                let id = path_arg(&payload, "workspaceId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/organizations/{org}/workspaces/{id}/record"),
+                    correlation,
+                )
+                .await?
+            }
+            "workspace_delete_preflight" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                let id = path_arg(&payload, "workspaceId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/organizations/{org}/workspaces/{id}/delete-preflight"),
+                    correlation,
+                )
+                .await?
+            }
+            "workspace_create" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                let body = payload
+                    .get("workspace")
+                    .cloned()
+                    .ok_or_else(|| bad_input("workspace", correlation))?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/organizations/{org}/workspaces"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "workspace_update" => {
                 let org = path_arg(&payload, "organizationId", correlation)?;
                 let id = path_arg(&payload, "workspaceId", correlation)?;
@@ -2190,29 +2441,236 @@ impl RemoteApiClient {
                     &[],
                 )
                 .await?
-            },
-            "workspace_delete" => { let org=path_arg(&payload,"organizationId",correlation)?; let id=path_arg(&payload,"workspaceId",correlation)?; let body=json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::DELETE,&format!("/v1/organizations/{org}/workspaces/{id}"),Some(body),correlation,idem,None,&[]).await? },
-            "group_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; json!(self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/groups"),correlation).await?) },
-            "group_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/groups/{id}"),correlation).await? },
-            "group_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/groups"),Some(payload),correlation,idem,None,&[]).await? },
-            "group_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/groups/{id}"),Some(payload),correlation,idem,None,&[]).await? },
-            "group_delete" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/groups/{id}"),Some(payload),correlation,idem,None,&[]).await? },
-            "extension_group_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; json!(self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/extension-groups"),correlation).await?) },
-            "extension_group_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"extensionGroupId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/extension-groups/{id}"),correlation).await? },
-            "extension_group_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/extension-groups"),Some(payload),correlation,idem,None,&[]).await? },
-            "extension_group_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"extensionGroupId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/extension-groups/{id}"),Some(payload),correlation,idem,None,&[]).await? },
-            "extension_group_delete" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"extensionGroupId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/extension-groups/{id}"),Some(payload),correlation,idem,None,&[]).await? },
-            "profile_extension_group_set" => { let id=path_arg(&payload,"profileId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/profiles/{id}/extension-group"),Some(payload),correlation,idem,None,&[]).await? },
-            "group_share_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/groups/{id}/shares"),correlation).await? },
-            "group_share_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/groups/{id}/shares"),Some(payload),correlation,idem,None,&[]).await? },
-            "group_share_revoke" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"groupId",correlation)?; let grant=path_arg(&payload,"grantId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/groups/{id}/shares/{grant}"),Some(payload),correlation,idem,None,&[]).await? },
-            "profile_groups_replace" => { let id=path_arg(&payload,"profileId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/profiles/{id}/groups"),Some(payload),correlation,idem,None,&[]).await? },
-            "operation_get" => { let id=path_arg(&payload,"operationId",correlation)?; self.get::<Value>(&format!("/v1/operations/{id}"),correlation).await? },
-            "profile_binding_get" => { let id=path_arg(&payload,"profileId",correlation)?; self.get::<Value>(&format!("/v1/profiles/{id}/binding"),correlation).await? },
-            "profile_proxy_assignment_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"profileId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/profiles/{id}/proxy-assignment"),correlation).await? },
-            "profile_proxy_assignment_set" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"profileId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/profiles/{id}/proxy-assignment"),Some(payload),correlation,idem,None,&[]).await? },
+            }
+            "workspace_delete" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                let id = path_arg(&payload, "workspaceId", correlation)?;
+                let body = json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?});
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/organizations/{org}/workspaces/{id}"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "group_list" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                json!(
+                    self.get::<Vec<Value>>(&format!("/v1/workspaces/{ws}/groups"), correlation)
+                        .await?
+                )
+            }
+            "group_get" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "groupId", correlation)?;
+                self.get::<Value>(&format!("/v1/workspaces/{ws}/groups/{id}"), correlation)
+                    .await?
+            }
+            "group_create" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/groups"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "group_update" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "groupId", correlation)?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/workspaces/{ws}/groups/{id}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "group_delete" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "groupId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/groups/{id}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "extension_group_list" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                json!(
+                    self.get::<Vec<Value>>(
+                        &format!("/v1/workspaces/{ws}/extension-groups"),
+                        correlation
+                    )
+                    .await?
+                )
+            }
+            "extension_group_get" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "extensionGroupId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/workspaces/{ws}/extension-groups/{id}"),
+                    correlation,
+                )
+                .await?
+            }
+            "extension_group_create" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/extension-groups"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "extension_group_update" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "extensionGroupId", correlation)?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/workspaces/{ws}/extension-groups/{id}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "extension_group_delete" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "extensionGroupId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/extension-groups/{id}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "profile_extension_group_set" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/profiles/{id}/extension-group"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "group_share_list" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "groupId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/workspaces/{ws}/groups/{id}/shares"),
+                    correlation,
+                )
+                .await?
+            }
+            "group_share_create" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "groupId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/groups/{id}/shares"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "group_share_revoke" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "groupId", correlation)?;
+                let grant = path_arg(&payload, "grantId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/groups/{id}/shares/{grant}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "profile_groups_replace" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/profiles/{id}/groups"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "operation_get" => {
+                let id = path_arg(&payload, "operationId", correlation)?;
+                self.get::<Value>(&format!("/v1/operations/{id}"), correlation)
+                    .await?
+            }
+            "profile_binding_get" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                self.get::<Value>(&format!("/v1/profiles/{id}/binding"), correlation)
+                    .await?
+            }
+            "profile_proxy_assignment_get" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "profileId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/workspaces/{ws}/profiles/{id}/proxy-assignment"),
+                    correlation,
+                )
+                .await?
+            }
+            "profile_proxy_assignment_set" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "profileId", correlation)?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/workspaces/{ws}/profiles/{id}/proxy-assignment"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "profile_list" => {
-                let include_archived = optional_bool(&payload, "includeArchived", false, correlation)?;
+                let include_archived =
+                    optional_bool(&payload, "includeArchived", false, correlation)?;
                 let limit = optional_page_limit(&payload, correlation)? as usize;
                 let workspace_id = payload
                     .get("workspaceId")
@@ -2235,7 +2693,9 @@ impl RemoteApiClient {
                 let mut profiles = Vec::with_capacity(limit + 1);
                 loop {
                     let mut path = match scan_cursor.as_deref() {
-                        Some(cursor) => format!("/v1/profiles?limit=100&cursor={}", urlencoding(cursor)),
+                        Some(cursor) => {
+                            format!("/v1/profiles?limit=100&cursor={}", urlencoding(cursor))
+                        }
                         None => "/v1/profiles?limit=100".to_owned(),
                     };
                     if let Some(workspace_id) = workspace_id.as_deref() {
@@ -2257,9 +2717,7 @@ impl RemoteApiClient {
                         break;
                     }
                     match next_scan_cursor {
-                        Some(next)
-                            if next.len() <= 512 && seen_cursors.insert(next.clone()) =>
-                        {
+                        Some(next) if next.len() <= 512 && seen_cursors.insert(next.clone()) => {
                             scan_cursor = Some(next)
                         }
                         Some(_) => return Err(client_problem("api_profile_cursor_invalid", 502)),
@@ -2269,17 +2727,42 @@ impl RemoteApiClient {
                 let has_more = profiles.len() > limit;
                 profiles.truncate(limit);
                 let next_cursor = has_more
-                    .then(|| profiles.last().map(|profile| profile.value.id.as_str().to_owned()))
+                    .then(|| {
+                        profiles
+                            .last()
+                            .map(|profile| profile.value.id.as_str().to_owned())
+                    })
                     .flatten();
                 let items = profiles
                     .into_iter()
                     .map(profile_record_value)
                     .collect::<Result<Vec<_>, Problem>>()?;
                 json!({"items":items,"nextCursor":next_cursor})
-            },
-            "profile_get" => { let id=path_arg(&payload,"profileId",correlation)?; let record:Versioned<Profile>=self.get(&format!("/v1/profiles/{id}"),correlation).await?; profile_record_value(record)? },
-            "profile_create" => self.create_managed_profile(payload,correlation,idem).await?,
-            "profile_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"profileId",correlation)?; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/profiles/{id}"),Some(payload),correlation,idem,None,&[]).await? },
+            }
+            "profile_get" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                let record: Versioned<Profile> =
+                    self.get(&format!("/v1/profiles/{id}"), correlation).await?;
+                profile_record_value(record)?
+            }
+            "profile_create" => {
+                self.create_managed_profile(payload, correlation, idem)
+                    .await?
+            }
+            "profile_update" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "profileId", correlation)?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/workspaces/{ws}/profiles/{id}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "profile_delete" => {
                 let id = path_arg(&payload, "profileId", correlation)?;
                 let revision = payload
@@ -2305,24 +2788,210 @@ impl RemoteApiClient {
                     &[],
                 )
                 .await?
-            },
-            "profile_archive" | "profile_restore" => { let id=path_arg(&payload,"profileId",correlation)?; let action=if name=="profile_archive" {"archive"} else {"restore"}; let body=json!({"revision":payload.get("revision").and_then(Value::as_u64).ok_or_else(||bad_input("revision",correlation))?}); let updated:Versioned<Profile>=self.send(Method::PUT,&format!("/v1/profiles/{id}/{action}"),Some(body),correlation,idem,None,&[]).await?; profile_record_value(updated)? },
-            "profile_clone" => { let id=path_arg(&payload,"sourceProfileId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/profiles/{id}/clone"),Some(payload),correlation,idem,None,&[]).await? },
-            "profile_share" => { let id=path_arg(&payload,"profileId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/profiles/{id}/shares"),Some(payload),correlation,idem,None,&[]).await? },
-            "profile_share_revoke" => { let id=path_arg(&payload,"profileId",correlation)?; let member=path_arg(&payload,"memberId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/profiles/{id}/shares/{member}"),Some(payload),correlation,idem,None,&[]).await? },
-            "profile_share_recipientdevicekeys_list" => { let id=path_arg(&payload,"profileId",correlation)?; let member=path_arg(&payload,"memberId",correlation)?; json!(self.get::<Vec<DeviceEncryptionKey>>(&format!("/v1/profiles/{id}/shares/{member}/device-keys"),correlation).await?) },
-            "profile_keyrotation_recipients_list" => { let id=path_arg(&payload,"profileId",correlation)?; json!(self.get::<Vec<ProfileKeyRotationRecipientDevices>>(&format!("/v1/profiles/{id}/key-rotation-recipients"),correlation).await?) },
-            "proxy_parse" => { let text=payload.get("text").and_then(Value::as_str).ok_or_else(||bad_input("text",correlation))?; self.send_text("/v1/proxies/parse",text.to_owned(),correlation).await? },
-            "proxy_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/proxies"),correlation).await? },
-            "proxy_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"proxyId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/proxies/{id}"),correlation).await? },
-            "proxy_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/proxies"),Some(payload),correlation,idem,None,&[]).await? },
-            "proxy_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"proxyId",correlation)?; self.send::<Value>(Method::PATCH,&format!("/v1/workspaces/{ws}/proxies/{id}"),Some(payload),correlation,idem,None,&[]).await? },
-            "proxy_delete" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"proxyId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/proxies/{id}"),Some(payload),correlation,idem,None,&[]).await? },
-            "team_list" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/teams"),correlation).await? },
-            "team_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"teamId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/teams/{id}"),correlation).await? },
-            "team_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let body=payload.get("team").cloned().ok_or_else(||bad_input("team",correlation))?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/teams"),Some(body),correlation,idem,None,&[]).await? },
-            "team_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"teamId",correlation)?; let body=payload.get("update").cloned().ok_or_else(||bad_input("update",correlation))?; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/teams/{id}"),Some(body),correlation,idem,None,&[]).await? },
-            "team_delete" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"teamId",correlation)?; let body=json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?}); self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/teams/{id}"),Some(body),correlation,idem,None,&[]).await? },
+            }
+            "profile_archive" | "profile_restore" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                let action = if name == "profile_archive" {
+                    "archive"
+                } else {
+                    "restore"
+                };
+                let body = json!({"revision":payload.get("revision").and_then(Value::as_u64).ok_or_else(||bad_input("revision",correlation))?});
+                let updated: Versioned<Profile> = self
+                    .send(
+                        Method::PUT,
+                        &format!("/v1/profiles/{id}/{action}"),
+                        Some(body),
+                        correlation,
+                        idem,
+                        None,
+                        &[],
+                    )
+                    .await?;
+                profile_record_value(updated)?
+            }
+            "profile_clone" => {
+                let id = path_arg(&payload, "sourceProfileId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/profiles/{id}/clone"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "profile_share" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/profiles/{id}/shares"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "profile_share_revoke" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                let member = path_arg(&payload, "memberId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/profiles/{id}/shares/{member}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "profile_share_recipientdevicekeys_list" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                let member = path_arg(&payload, "memberId", correlation)?;
+                json!(
+                    self.get::<Vec<DeviceEncryptionKey>>(
+                        &format!("/v1/profiles/{id}/shares/{member}/device-keys"),
+                        correlation
+                    )
+                    .await?
+                )
+            }
+            "profile_keyrotation_recipients_list" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                json!(
+                    self.get::<Vec<ProfileKeyRotationRecipientDevices>>(
+                        &format!("/v1/profiles/{id}/key-rotation-recipients"),
+                        correlation
+                    )
+                    .await?
+                )
+            }
+            "proxy_parse" => {
+                let text = payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| bad_input("text", correlation))?;
+                self.send_text("/v1/proxies/parse", text.to_owned(), correlation)
+                    .await?
+            }
+            "proxy_list" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                self.get::<Value>(&format!("/v1/workspaces/{ws}/proxies"), correlation)
+                    .await?
+            }
+            "proxy_get" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "proxyId", correlation)?;
+                self.get::<Value>(&format!("/v1/workspaces/{ws}/proxies/{id}"), correlation)
+                    .await?
+            }
+            "proxy_create" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/proxies"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "proxy_update" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "proxyId", correlation)?;
+                self.send::<Value>(
+                    Method::PATCH,
+                    &format!("/v1/workspaces/{ws}/proxies/{id}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "proxy_delete" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "proxyId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/proxies/{id}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "team_list" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                self.get::<Value>(&format!("/v1/workspaces/{ws}/teams"), correlation)
+                    .await?
+            }
+            "team_get" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "teamId", correlation)?;
+                self.get::<Value>(&format!("/v1/workspaces/{ws}/teams/{id}"), correlation)
+                    .await?
+            }
+            "team_create" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let body = payload
+                    .get("team")
+                    .cloned()
+                    .ok_or_else(|| bad_input("team", correlation))?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/teams"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "team_update" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "teamId", correlation)?;
+                let body = payload
+                    .get("update")
+                    .cloned()
+                    .ok_or_else(|| bad_input("update", correlation))?;
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/workspaces/{ws}/teams/{id}"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "team_delete" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "teamId", correlation)?;
+                let body = json!({"expectedRevision":payload.get("expectedRevision").and_then(Value::as_u64).ok_or_else(||bad_input("expectedRevision",correlation))?});
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/teams/{id}"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "member_list" => {
                 let ws = path_arg(&payload, "workspaceId", correlation)?;
                 let limit = optional_page_limit(&payload, correlation)?;
@@ -2333,15 +3002,120 @@ impl RemoteApiClient {
                     path.push_str(&urlencoding(&cursor));
                 }
                 self.get::<Value>(&path, correlation).await?
-            },
-            "member_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/members/{id}"),correlation).await? },
-            "member_invite" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let body=payload.get("member").cloned().ok_or_else(||bad_input("member",correlation))?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/members"),Some(body),correlation,idem,None,&[]).await? },
-            "member_invitation_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let body=json!({"email":payload.get("email").and_then(Value::as_str).ok_or_else(||bad_input("email",correlation))?,"role":payload.get("role").cloned().ok_or_else(||bad_input("role",correlation))?,"expiresAt":payload.get("expiresAt").and_then(Value::as_u64).ok_or_else(||bad_input("expiresAt",correlation))?}); self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/invitations"),Some(body),correlation,idem,None,&[]).await? },
-            "member_invitation_redeem" => { let id=path_arg(&payload,"invitationId",correlation)?; let body=json!({"code":payload.get("code").and_then(Value::as_str).ok_or_else(||bad_input("code",correlation))?}); self.send::<Value>(Method::POST,&format!("/v1/workspace-invitations/{id}/redeem"),Some(body),correlation,idem,None,&[]).await? },
-            "member_invitation_revoke" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"invitationId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/invitations/{id}"),None,correlation,idem,None,&[]).await? },
-            "member_activate" | "member_suspend" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; let action=if name=="member_activate" {"activate"} else {"suspend"}; self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/members/{id}/{action}"),None,correlation,idem,None,&[]).await? },
-            "member_remove" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; self.send::<Value>(Method::DELETE,&format!("/v1/workspaces/{ws}/members/{id}"),None,correlation,idem,None,&[]).await? },
-            "member_role_update" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"memberId",correlation)?; let body=json!({"role":payload.get("role").cloned().ok_or_else(||bad_input("role",correlation))?}); self.send::<Value>(Method::PUT,&format!("/v1/workspaces/{ws}/members/{id}/role"),Some(body),correlation,idem,None,&[]).await? },
+            }
+            "member_get" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "memberId", correlation)?;
+                self.get::<Value>(&format!("/v1/workspaces/{ws}/members/{id}"), correlation)
+                    .await?
+            }
+            "member_invite" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let body = payload
+                    .get("member")
+                    .cloned()
+                    .ok_or_else(|| bad_input("member", correlation))?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/members"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "member_invitation_create" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let body = json!({"email":payload.get("email").and_then(Value::as_str).ok_or_else(||bad_input("email",correlation))?,"role":payload.get("role").cloned().ok_or_else(||bad_input("role",correlation))?,"expiresAt":payload.get("expiresAt").and_then(Value::as_u64).ok_or_else(||bad_input("expiresAt",correlation))?});
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/invitations"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "member_invitation_redeem" => {
+                let id = path_arg(&payload, "invitationId", correlation)?;
+                let body = json!({"code":payload.get("code").and_then(Value::as_str).ok_or_else(||bad_input("code",correlation))?});
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspace-invitations/{id}/redeem"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "member_invitation_revoke" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "invitationId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/invitations/{id}"),
+                    None,
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "member_activate" | "member_suspend" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "memberId", correlation)?;
+                let action = if name == "member_activate" {
+                    "activate"
+                } else {
+                    "suspend"
+                };
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/workspaces/{ws}/members/{id}/{action}"),
+                    None,
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "member_remove" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "memberId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/members/{id}"),
+                    None,
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "member_role_update" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "memberId", correlation)?;
+                let body = json!({"role":payload.get("role").cloned().ok_or_else(||bad_input("role",correlation))?});
+                self.send::<Value>(
+                    Method::PUT,
+                    &format!("/v1/workspaces/{ws}/members/{id}/role"),
+                    Some(body),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "resource_list" => {
                 let ws = path_arg(&payload, "workspaceId", correlation)?;
                 let limit = optional_page_limit(&payload, correlation)?;
@@ -2360,8 +3134,13 @@ impl RemoteApiClient {
                     }
                 }
                 self.get::<Value>(&path, correlation).await?
-            },
-            "resource_get" => { let ws=path_arg(&payload,"workspaceId",correlation)?; let id=path_arg(&payload,"resourceId",correlation)?; self.get::<Value>(&format!("/v1/workspaces/{ws}/resources/{id}"),correlation).await? },
+            }
+            "resource_get" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "resourceId", correlation)?;
+                self.get::<Value>(&format!("/v1/workspaces/{ws}/resources/{id}"), correlation)
+                    .await?
+            }
             "resource_lease_get" => {
                 let ws = path_arg(&payload, "workspaceId", correlation)?;
                 let id = path_arg(&payload, "resourceId", correlation)?;
@@ -2387,11 +3166,8 @@ impl RemoteApiClient {
             }
             "profile_runtime_get" => {
                 let profile_id = path_arg(&payload, "profileId", correlation)?;
-                self.get::<Value>(
-                    &format!("/v1/profiles/{profile_id}/runtime"),
-                    correlation,
-                )
-                .await?
+                self.get::<Value>(&format!("/v1/profiles/{profile_id}/runtime"), correlation)
+                    .await?
             }
             "profile_runtime_status_batch" => {
                 let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
@@ -2414,15 +3190,45 @@ impl RemoteApiClient {
                 }
                 self.get::<Value>(&path, correlation).await?
             }
-            "resource_register" => { let resource=payload.get("resource").cloned().ok_or_else(||bad_input("resource",correlation))?; let ws=resource.get("workspaceId").and_then(Value::as_str).filter(|value|!value.is_empty()).ok_or_else(||bad_input("resource.workspaceId",correlation))?; let ws=path_arg(&json!({"workspaceId":ws}),"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/resources"),Some(resource),correlation,idem,None,&[]).await? },
-            "cookie_list" => { let id=path_arg(&payload,"profileId",correlation)?; let ws=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/profiles/{id}/cookies?workspaceId={ws}"),correlation).await? },
+            "resource_register" => {
+                let resource = payload
+                    .get("resource")
+                    .cloned()
+                    .ok_or_else(|| bad_input("resource", correlation))?;
+                let ws = resource
+                    .get("workspaceId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| bad_input("resource.workspaceId", correlation))?;
+                let ws = path_arg(&json!({"workspaceId":ws}), "workspaceId", correlation)?;
+                self.send::<Value>(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/resources"),
+                    Some(resource),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "cookie_list" => {
+                let id = path_arg(&payload, "profileId", correlation)?;
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                self.get::<Value>(
+                    &format!("/v1/profiles/{id}/cookies?workspaceId={ws}"),
+                    correlation,
+                )
+                .await?
+            }
             "cookie_stage" | "cookie_import" | "cookie_copy" => {
                 return Err(Problem::new(
                     "production_cookie_device_dispatch_required",
                     "Cookie mutations must execute on the authorized connected device",
                     503,
                     correlation,
-                ).retryable(true));
+                )
+                .retryable(true));
             }
             "grant_list" => {
                 let ws = path_arg(&payload, "workspaceId", correlation)?;
@@ -2438,7 +3244,7 @@ impl RemoteApiClient {
                     path.push_str(&query.join("&"));
                 }
                 self.get::<Value>(&path, correlation).await?
-            },
+            }
             "grant_list_page" => {
                 let ws = path_arg(&payload, "workspaceId", correlation)?;
                 let limit = optional_page_limit(&payload, correlation)?;
@@ -2458,11 +3264,43 @@ impl RemoteApiClient {
                     path.push_str(&query.join("&"));
                 }
                 self.get::<Value>(&path, correlation).await?
-            },
-            "grant_create" => { let ws=path_arg(&payload,"workspaceId",correlation)?; self.send(Method::POST,&format!("/v1/workspaces/{ws}/grants"),Some(payload),correlation,idem,None,&[]).await? },
-            "grant_revoke" => { let ws=path_arg(&payload,"workspaceId",correlation)?;let id=path_arg(&payload,"grantId",correlation)?;self.send(Method::DELETE,&format!("/v1/workspaces/{ws}/grants/{id}"),None,correlation,idem,None,&[]).await? },
-            "migration_inspect" | "migration_import" => return Err(Problem::new("production_migration_device_dispatch_required","Migration commands must execute against an authorized local device, not the API server filesystem",503,correlation).retryable(true)),
-            _ => return Err(Problem::new("api_command_unsupported","This command has no verified REST mapping",501,correlation).with_field("command",name)),
+            }
+            "grant_create" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                self.send(
+                    Method::POST,
+                    &format!("/v1/workspaces/{ws}/grants"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            "grant_revoke" => {
+                let ws = path_arg(&payload, "workspaceId", correlation)?;
+                let id = path_arg(&payload, "grantId", correlation)?;
+                self.send(
+                    Method::DELETE,
+                    &format!("/v1/workspaces/{ws}/grants/{id}"),
+                    None,
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
+            _ => {
+                return Err(Problem::new(
+                    "api_command_unsupported",
+                    "This command has no verified REST mapping",
+                    501,
+                    correlation,
+                )
+                .with_field("command", name));
+            }
         };
         Ok(buglogin_api::commands::CommandResult {
             command_id: command_id(name).to_owned(),
@@ -3189,6 +4027,7 @@ fn command_id(name: &str) -> &str {
         "organization_list" => "organization.list",
         "organization_get" => "organization.get",
         "organization_record_get" => "organization.record.get",
+        "organization_delete_preflight" => "organization.delete.preflight",
         "organization_create" => "organization.create",
         "organization_update" => "organization.update",
         "organization_delete" => "organization.delete",
@@ -3200,6 +4039,7 @@ fn command_id(name: &str) -> &str {
         "workspace_list" => "workspace.list",
         "workspace_get" => "workspace.get",
         "workspace_record_get" => "workspace.record.get",
+        "workspace_delete_preflight" => "workspace.delete.preflight",
         "workspace_create" => "workspace.create",
         "workspace_update" => "workspace.update",
         "workspace_delete" => "workspace.delete",
@@ -3219,8 +4059,6 @@ fn command_id(name: &str) -> &str {
         "group_share_revoke" => "group.share.revoke",
         "profile_groups_replace" => "profile.groups.replace",
         "operation_get" => "operation.get",
-        "migration_inspect" => "migration.inspect",
-        "migration_import" => "migration.import",
         "profile_list" => "profile.list",
         "profile_get" => "profile.get",
         "profile_binding_get" => "profile.binding.get",
@@ -4065,6 +4903,28 @@ mod tests {
                 path: "/v1/account",
                 body: None,
                 idempotency_key: None,
+            },
+            Invocation {
+                name: "account_identity_update",
+                command_id: "account.identity.update",
+                payload: json!({
+                    "accountId":"acct_1",
+                    "username":"alice",
+                    "email":"alice@example.test",
+                    "displayName":"Alice",
+                    "expectedRevision":2,
+                    "currentPassword":"secret"
+                }),
+                method: "PATCH",
+                path: "/v1/accounts/acct_1/identity",
+                body: Some(json!({
+                    "username":"alice",
+                    "email":"alice@example.test",
+                    "displayName":"Alice",
+                    "expectedRevision":2,
+                    "currentPassword":"secret"
+                })),
+                idempotency_key: write_key("account-identity-update"),
             },
             Invocation {
                 name: "account_list",

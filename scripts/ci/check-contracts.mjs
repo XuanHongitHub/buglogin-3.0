@@ -231,11 +231,13 @@ if (
 const workPackets = [...ownership.matchAll(/^\| `WP-(\d+)` \|/gm)].map(
   (match) => Number(match[1]),
 );
+// WP-39 and WP-40 were retired with the migration package; keep the remaining
+// packet IDs stable and require all active ownership rows to stay unique.
 if (
-  workPackets.length !== 50 ||
+  workPackets.length !== 48 ||
   new Set(workPackets).size !== workPackets.length
 ) {
-  fail(`expected 50 unique work packets, found ${workPackets.length}`);
+  fail(`expected 48 unique active work packets, found ${workPackets.length}`);
 }
 
 console.log(

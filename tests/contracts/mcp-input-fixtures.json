@@ -359,8 +359,5 @@
   "GrantIdInput": {
     "workspaceId": "ws_fixture_001",
     "grantId": "grt_fixture_001"
-  },
-  "MigrationPackageActivationInput": {
-    "packageId": "pkg_fixture_001"
   }
 }

@@ -26,7 +26,6 @@ Physical or dedicated hosted instances required. Cross-compilation is insufficie
 | `E2E-DEGRADED` | Latency/loss/DNS failure | Sync/API | Retry/recovery |
 | `E2E-PROXY` | Controlled HTTP/SOCKS | Synthetic auth | Proxy/redaction |
 | `E2E-UPGRADE` | Normal | Previous stable data | Upgrade/rollback |
-| `E2E-MIGRATION` | Isolated | Migration fixtures | Migration |
 | `E2E-ACL` | Normal | Multi-user fixtures | Server authority |
 
 Each case records case ID, artifact SHA-256, versions, OS build, architecture, fixture, UTC times, steps, assertions, process list, logs, screenshots, result, defect, tester, reviewer.
@@ -128,15 +127,10 @@ Run only when capability ships.
 | `E2E-ACL-001` | Role/resource matrix | Effective access exact |
 | `E2E-ACL-002` | Frontend bypass | Backend rejects mutation |
 
-### Migration and recovery
+### Recovery
 
 | ID | Journey | Pass criteria |
 |---|---|---|
-| `E2E-MIG-001` | `MIG-002` full migration | Counts, hashes, launch, cookies, proxy, extension |
-| `E2E-MIG-002` | Unsupported runtime | Data retained; launch blocked |
-| `E2E-MIG-003` | Secret canary | Zero leakage |
-| `E2E-MIG-004` | Interrupted migration | Source unchanged; safe resume/cleanup |
-| `E2E-MIG-005` | Rollback/repeat | Pre-state restored; identical rerun |
 | `E2E-REC-001` | Corrupt metadata | Isolated damage; recovery report |
 | `E2E-REC-002` | Crash during write | Atomic state after restart |
 
@@ -163,7 +157,7 @@ Run only when capability ships.
 ## Release thresholds
 
 - Required cases: 100% pass on every supported OS/architecture lane.
-- Critical/high data, auth, ACL, runtime, sync, migration, update, or cleanup defects: zero.
+- Critical/high data, auth, ACL, runtime, sync, update, or cleanup defects: zero.
 - Flaky required case remains failed until root cause fixed.
 - `not applicable` requires release manifest capability exclusion.
 - QA lead and release commander sign final evidence index.

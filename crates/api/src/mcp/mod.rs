@@ -479,9 +479,6 @@ where
         let command = dispatch_metadata(&request.tool_name)
             .map_err(|error| dispatch_problem(error, &request.correlation_id))?
             .command;
-        if command.id.as_str() == "migration.package.activate" {
-            return self.dispatch_package_activation(request, command).await;
-        }
         if !matches!(command.id.as_str(), "events.stream" | "resource.lease.get")
             || command.idempotency_required
         {
@@ -588,185 +585,6 @@ where
         }
     }
 
-    async fn dispatch_package_activation(
-        &mut self,
-        request: McpRequest,
-        command: &'static CommandMetadata,
-    ) -> Result<Value, Problem> {
-        if !self.enabled {
-            return Err(problem("mcp_disabled", "MCP execution is disabled", 503));
-        }
-        validate_mcp_input(command, &request.input)?;
-        let principal = match self.policy.authenticate(
-            request.bearer_token.as_deref(),
-            command.auth_required,
-            &request.correlation_id,
-        ) {
-            Ok(principal) => principal,
-            Err(error) => {
-                self.audit_denied(
-                    command,
-                    &request.correlation_id,
-                    ResourceScope::global(),
-                    None,
-                );
-                return Err(error);
-            }
-        };
-        let actor_id = principal
-            .account_id
-            .as_ref()
-            .map(|id| id.as_str().to_owned());
-        let scope = match self
-            .policy
-            .resolve_scope(&principal, command, &request.input)
-        {
-            Ok(scope) => scope,
-            Err(error) => {
-                self.audit_denied(
-                    command,
-                    &request.correlation_id,
-                    ResourceScope::global(),
-                    actor_id,
-                );
-                return Err(error);
-            }
-        };
-        if let Err(error) = self.policy.authorize(&principal, command, &scope) {
-            self.audit_denied(command, &request.correlation_id, scope, actor_id);
-            return Err(error);
-        }
-        let idempotency_key = match request.idempotency_key.as_deref() {
-            Some(key) if valid_idempotency_key(key) => key.to_owned(),
-            _ => {
-                self.audit_denied(command, &request.correlation_id, scope, actor_id);
-                return Err(problem(
-                    "idempotency_key_required",
-                    "A valid idempotency key is required",
-                    400,
-                ));
-            }
-        };
-        let claim = match self.policy.claim_idempotency(
-            &principal,
-            command,
-            &scope,
-            &idempotency_key,
-            &request.input,
-        ) {
-            Ok(claim) => claim,
-            Err(error) => {
-                self.audit_denied(command, &request.correlation_id, scope, actor_id);
-                return Err(error);
-            }
-        };
-        match claim {
-            IdempotencyClaim::Replay(value) => {
-                reject_mcp_output_secrets(command, &value)?;
-                self.policy.audit(AuditRecord {
-                    actor_id,
-                    command_id: command.id.as_str(),
-                    correlation_id: request.correlation_id,
-                    scope,
-                    outcome: AuditOutcome::Succeeded,
-                    metadata: BTreeMap::from([("idempotency".into(), "replay".into())]),
-                })?;
-                return Ok(value);
-            }
-            IdempotencyClaim::Pending(value) => {
-                reject_mcp_output_secrets(command, &value)?;
-                return Ok(value);
-            }
-            IdempotencyClaim::ReplayError(error) => {
-                self.policy.audit(AuditRecord {
-                    actor_id,
-                    command_id: command.id.as_str(),
-                    correlation_id: request.correlation_id,
-                    scope,
-                    outcome: AuditOutcome::Failed,
-                    metadata: BTreeMap::from([("idempotency".into(), "replay".into())]),
-                })?;
-                return Err(error);
-            }
-            IdempotencyClaim::Execute => {}
-        }
-        let result = self
-            .executor
-            .execute_async(ExecutionRequest {
-                command,
-                correlation_id: request.correlation_id.clone(),
-                principal: principal.clone(),
-                scope: scope.clone(),
-                input: request.input,
-                idempotency_key: Some(idempotency_key),
-                coordination_auth: None,
-                bearer_token: request.bearer_token,
-            })
-            .await;
-        match result {
-            Ok(value) => {
-                if let Err(error) = reject_mcp_output_secrets(command, &value) {
-                    self.policy.complete_idempotency_with_audit(
-                        &principal,
-                        command,
-                        &Err(error.clone()),
-                        AuditRecord {
-                            actor_id: actor_id.clone(),
-                            command_id: command.id.as_str(),
-                            correlation_id: request.correlation_id.clone(),
-                            scope: scope.clone(),
-                            outcome: AuditOutcome::Denied,
-                            metadata: BTreeMap::from([(
-                                "output_policy".to_owned(),
-                                "rejected".to_owned(),
-                            )]),
-                        },
-                    )?;
-                    return Err(error);
-                }
-                self.policy.complete_idempotency_with_audit(
-                    &principal,
-                    command,
-                    &Ok(value.clone()),
-                    AuditRecord {
-                        actor_id,
-                        command_id: command.id.as_str(),
-                        correlation_id: request.correlation_id,
-                        scope,
-                        outcome: AuditOutcome::Succeeded,
-                        metadata: BTreeMap::new(),
-                    },
-                )?;
-                Ok(value)
-            }
-            Err(error) => {
-                let audit = AuditRecord {
-                    actor_id,
-                    command_id: command.id.as_str(),
-                    correlation_id: request.correlation_id,
-                    scope,
-                    outcome: AuditOutcome::Failed,
-                    metadata: BTreeMap::new(),
-                };
-                if should_abandon_mcp_claim(&error) {
-                    self.policy.abandon_idempotency_with_audit(audit)?;
-                } else {
-                    self.policy.complete_idempotency_with_audit(
-                        &principal,
-                        command,
-                        &Err(error.clone()),
-                        audit,
-                    )?;
-                }
-                Err(error)
-            }
-        }
-    }
-
-    pub fn into_parts(self) -> (P, E) {
-        (self.policy, self.executor)
-    }
-
     fn audit_denied(
         &mut self,
         command: &CommandMetadata,
@@ -782,6 +600,10 @@ where
             outcome: AuditOutcome::Denied,
             metadata: BTreeMap::new(),
         });
+    }
+
+    pub fn into_parts(self) -> (P, E) {
+        (self.policy, self.executor)
     }
 }
 
@@ -2817,7 +2639,7 @@ impl McpExecutor for ProductionMcpExecutor {
                     .get(&workspace_id, &proxy_id, &principal, &grants)
                     .map_err(proxy_problem)?;
                 crate::services::profile_sync::ensure_proxy_update_allowed(
-                    &state,
+                    state,
                     &workspace_id,
                     &proxy_id,
                     &request.correlation_id,
@@ -4180,7 +4002,7 @@ impl McpExecutor for ProductionMcpExecutor {
                 let limit = input
                     .get("limit")
                     .and_then(Value::as_u64)
-                    .map_or(Ok(100_usize), |value| usize::try_from(value))
+                    .map_or(Ok(100_usize), usize::try_from)
                     .map_err(|_| problem("invalid_page_limit", "Page limit is invalid", 400))?;
                 let member_service = state.members.read().map_err(|_| {
                     Problem::new(
@@ -4399,7 +4221,7 @@ impl McpExecutor for ProductionMcpExecutor {
                 let limit = input
                     .get("limit")
                     .and_then(Value::as_u64)
-                    .map_or(Ok(100_usize), |value| usize::try_from(value))
+                    .map_or(Ok(100_usize), usize::try_from)
                     .map_err(|_| problem("invalid_page_limit", "Page limit is invalid", 400))?;
                 let (items, next_cursor) = state
                     .resources
@@ -5128,16 +4950,15 @@ impl McpExecutor for ProductionMcpExecutor {
             )),
         };
 
-        if is_mutation {
-            if result.is_err() {
-                if let Some(mut before) = before_state {
-                    // Operation outcomes are durable records in the same
-                    // control aggregate; retain a failed operation while
-                    // rolling back any other in-memory mutation from this call.
-                    before.operations = state.control_aggregate()?.operations;
-                    state.replace_control_aggregate(before)?;
-                }
-            }
+        if is_mutation
+            && result.is_err()
+            && let Some(mut before) = before_state
+        {
+            // Operation outcomes are durable records in the same
+            // control aggregate; retain a failed operation while
+            // rolling back any other in-memory mutation from this call.
+            before.operations = state.control_aggregate()?.operations;
+            state.replace_control_aggregate(before)?;
         }
 
         result
@@ -5151,70 +4972,6 @@ impl McpExecutor for ProductionMcpExecutor {
     }
 
     async fn execute_async(&mut self, request: ExecutionRequest<'_>) -> Result<Value, Problem> {
-        if request.command.id.as_str() == "migration.package.activate" {
-            let package_id = request
-                .input
-                .get("packageId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| problem("invalid_input", "packageId is required", 400))?;
-            let bearer = request.bearer_token.as_deref().ok_or_else(|| {
-                problem("authentication_required", "Authentication required", 401)
-            })?;
-            let idempotency_key = request.idempotency_key.as_deref().ok_or_else(|| {
-                problem("idempotency_key_required", "Idempotency key required", 400)
-            })?;
-            let mut headers = axum::http::HeaderMap::new();
-            headers.insert(
-                axum::http::header::AUTHORIZATION,
-                axum::http::HeaderValue::from_str(&format!("Bearer {bearer}")).map_err(|_| {
-                    problem("authentication_required", "Authentication required", 401)
-                })?,
-            );
-            headers.insert(
-                "x-correlation-id",
-                axum::http::HeaderValue::from_str(&request.correlation_id).map_err(|_| {
-                    problem("invalid_correlation_id", "Correlation ID is invalid", 400)
-                })?,
-            );
-            headers.insert(
-                "idempotency-key",
-                axum::http::HeaderValue::from_str(idempotency_key).map_err(|_| {
-                    problem("invalid_idempotency_key", "Idempotency key is invalid", 400)
-                })?,
-            );
-            let response = crate::http::package_upload::activate_package_upload(
-                axum::extract::State(self.state.clone()),
-                axum::extract::Path(package_id.to_owned()),
-                headers,
-            )
-            .await;
-            let response = match response {
-                Ok(response) => response,
-                Err(response) => {
-                    return Err(crate::http::package_upload::response_problem(response).await);
-                }
-            };
-            let status = response.status();
-            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
-                .await
-                .map_err(|_| {
-                    problem(
-                        "migration_package_activation_failed",
-                        "Migration package activation failed",
-                        500,
-                    )
-                })?;
-            if !status.is_success() {
-                return Err(serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-                    problem(
-                        "migration_package_activation_failed",
-                        "Migration package activation failed",
-                        status.as_u16(),
-                    )
-                }));
-            }
-            return serde_json::from_slice(&bytes).map_err(serialization_problem);
-        }
         if request.command.id.as_str() == "resource.lease.get" {
             let workspace_id = required_id(&request.input, "workspaceId", WorkspaceId::from_str)?;
             let resource_id = required_id(&request.input, "resourceId", ResourceId::from_str)?;
@@ -5765,13 +5522,13 @@ mod scope_tests {
                 },
             }],
         });
-        assert!(reject_mcp_output_secrets(&command, &safe_manifest_metadata).is_ok());
+        assert!(reject_mcp_output_secrets(command, &safe_manifest_metadata).is_ok());
 
         let malformed_reference = serde_json::json!({
             "dependencies": [{"credentialEnvelopeObject": "password=plaintext"}],
         });
         assert_eq!(
-            reject_mcp_output_secrets(&command, &malformed_reference)
+            reject_mcp_output_secrets(command, &malformed_reference)
                 .unwrap_err()
                 .code,
             "secret_material_rejected"
@@ -6271,6 +6028,23 @@ mod input_fixture_tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    fn retry_if_credential_capacity_is_busy<T>(
+        mut operation: impl FnMut() -> Result<T, Problem>,
+    ) -> Result<T, Problem> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match operation() {
+                Err(error)
+                    if error.code == "credential_capacity_exhausted"
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => return result,
+            }
+        }
+    }
+
     #[test]
     fn every_mcp_input_schema_has_a_valid_fixture_and_rejects_null() {
         let fixtures: BTreeMap<String, Value> = serde_json::from_str(include_str!(
@@ -6556,11 +6330,14 @@ mod input_fixture_tests {
                 .starts_with("$argon2id$")
         );
         assert!(!credential.to_string().contains("mcp-atomic-password-123"));
-        assert_eq!(
+        let credentials =
             crate::services::credentials::CredentialService::new(state.control_persistence.clone())
-                .unwrap()
-                .authenticate("mcp-atomic-target", "mcp-atomic-password-123", 1)
-                .unwrap(),
+                .unwrap();
+        assert_eq!(
+            retry_if_credential_capacity_is_busy(|| {
+                credentials.authenticate("mcp-atomic-target", "mcp-atomic-password-123", 1)
+            })
+            .unwrap(),
             account_id
         );
         let members = state.members.read().unwrap().active_members();

@@ -19,7 +19,7 @@ BugLogin is an operations product for launching, governing, sharing, migrating, 
 2. **Local-first truth is legible.** Desktop differentiates local, queued, syncing, synced, conflicting, unavailable, and policy-blocked states.
 3. **Operations beat presentation.** Tables, command bars, filters, split panes, logs, and progress surfaces are first-class. Decorative cards are exceptional.
 4. **Danger is proportional.** Reversible actions stay lightweight. Destructive, security-sensitive, or externally visible actions show scope, consequences, and recovery path.
-5. **Progressive disclosure preserves speed.** Common paths remain compact. Advanced fingerprint, runtime, network, policy, and migration controls open in drawers or dedicated detail sections.
+5. **Progressive disclosure preserves speed.** Common paths remain compact. Advanced fingerprint, runtime, network, and policy controls open in drawers or dedicated detail sections.
 6. **One system, four modes.** Public pages may breathe; account pages remain focused; workspace pages are dense; platform admin pages are austere and audit-heavy.
 7. **No fake parity.** Runtime and integration capabilities come from real capability data. Unsupported controls are explained, not silently hidden.
 8. **Every screen survives failure.** Loading, empty, error, forbidden, offline/degraded, partial, locked, and success states are designed before implementation.

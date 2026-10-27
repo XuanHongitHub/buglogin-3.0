@@ -1,20 +1,20 @@
-# BugLogin 2.0 Documentation
+# BugLogin Documentation
 
-Implementation starts only after the Gate 0 readiness audit passes.
+Project rules and current architecture live in `AGENTS.md`, `DESIGN.md`, the
+architecture/contracts/capability docs, and the dated implementation plans.
 
 Read in order:
 
-1. `docs/superpowers/specs/2026-07-20-buglogin-rebuild-discovery-design.md`
-2. `docs/superpowers/plans/2026-07-20-buglogin-rebuild-discovery.md`
-3. `DESIGN.md`
-4. `docs/design/ui-authority.md`
-5. `docs/architecture/`
-6. `docs/contracts/`
-7. `docs/capabilities/`
-8. `docs/agents/`
-9. `docs/migration/`
-10. `docs/e2e/`
-11. `docs/release/`
+1. `AGENTS.md`
+2. `DESIGN.md`
+3. `docs/design/ui-authority.md`
+4. `docs/architecture/`
+5. `docs/contracts/`
+6. `docs/capabilities/`
+7. `docs/agents/`
+8. `docs/superpowers/specs/` and `docs/superpowers/plans/`
+9. `docs/e2e/`
+10. `docs/release/`
 
 For the end-to-end Windows workstation release sequence across the Malvanut product repo, XuanHong Actions/API repo, S3, updater, VPS API, browser catalog, and landing page, use [`docs/release/windows-release-workstation.md`](release/windows-release-workstation.md).
 

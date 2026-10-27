@@ -185,16 +185,16 @@ impl RecoveryService {
             });
             match result {
                 Ok(_) => {
-                    if let Some((identity, record, mut raw_token)) = issued {
-                        if let Err(error) = self.delivery.deliver(RecoveryDeliveryMessage {
+                    if let Some((identity, record, mut raw_token)) = issued
+                        && let Err(error) = self.delivery.deliver(RecoveryDeliveryMessage {
                             account_id: identity.account_id,
                             destination: identity.email,
                             raw_token: std::mem::take(&mut *raw_token),
                             expires_at: record.expires_at,
-                        }) {
-                            self.invalidate(&record, now)?;
-                            let _ = error;
-                        }
+                        })
+                    {
+                        self.invalidate(&record, now)?;
+                        let _ = error;
                     }
                     return Ok(());
                 }

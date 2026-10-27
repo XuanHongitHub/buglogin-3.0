@@ -63,6 +63,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createTauriDesktopApi } from "../../../apps/desktop/src/bridge";
+import { accountDirectoryStatuses } from "../../../apps/desktop/src/management-account-status";
 import type {
   AccountIdentity,
   AccountProvisioningReceipt,
@@ -145,17 +146,12 @@ export function RolePicker({
       <SelectTrigger className="w-full min-w-36">
         <SelectValue />
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent className="max-w-[calc(100vw-2rem)]">
         {roleOrder
           .filter((role) => includeOwner || role !== "owner")
           .map((role) => (
-            <SelectItem key={role} value={role}>
-              <span className="flex flex-col gap-0.5 py-1">
-                <span className="font-medium">{t(role)}</span>
-                <span className="max-w-72 whitespace-normal text-xs text-muted-foreground">
-                  {t(`${role}Help`)}
-                </span>
-              </span>
+            <SelectItem key={role} value={role} title={t(`${role}Help`)}>
+              <span className="font-medium">{t(role)}</span>
             </SelectItem>
           ))}
       </SelectContent>
@@ -1213,7 +1209,7 @@ export function AccountProvisioning({
                 </table>
               </div>
               <p className="text-xs text-muted-foreground">
-                {t("groupHint")} {t("roleHint")}
+                {t("groupHint")} {t(`${commonRole}Help`)} {t("roleHint")}
               </p>
             </>
           ) : null}
@@ -1446,8 +1442,9 @@ type DirectoryEntry = {
   username: string;
   displayName: string;
   email: string;
-  status: string;
+  status?: string;
   orgStatus?: string;
+  workspaceStatus?: string;
   identity?: AccountIdentity;
   accountRevision?: number;
   workspaceIds: string[];
@@ -1480,6 +1477,10 @@ export function AccountDirectory({
   const [selected, setSelected] = useState<string[]>([]);
   const [provisioning, setProvisioning] = useState<"single" | "bulk">();
   const [editing, setEditing] = useState<DirectoryEntry[]>([]);
+  const [passwordTarget, setPasswordTarget] = useState<DirectoryEntry>();
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetPasswordConfirm, setResetPasswordConfirm] = useState("");
+  const [resetPasswordError, setResetPasswordError] = useState("");
   const [editValues, setEditValues] = useState<
     Record<
       string,
@@ -1500,6 +1501,18 @@ export function AccountDirectory({
   const [outcomes, setOutcomes] = useState<
     { label: string; result: string; failed: boolean }[]
   >([]);
+  const [statusRetry, setStatusRetry] = useState<
+    | {
+        scope: "account";
+        status: AccountStatus;
+        accountIds: string[];
+      }
+    | {
+        scope: "organization";
+        status: "active" | "suspended";
+        accountIds: string[];
+      }
+  >();
   const reload = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -1539,7 +1552,7 @@ export function AccountDirectory({
             username: item.username,
             displayName: map.get(item.accountId)?.displayName ?? "",
             email: item.email,
-            status: map.get(item.accountId)?.status ?? item.status,
+            status: map.get(item.accountId)?.status,
             orgStatus: item.status,
             workspaceIds: [],
             workspaceNames: [],
@@ -1567,7 +1580,7 @@ export function AccountDirectory({
                   username: member.identity?.username ?? "",
                   displayName: "",
                   email: member.identity?.email ?? "",
-                  status: member.status,
+                  workspaceStatus: member.status,
                   workspaceIds: [result.value.workspace.id],
                   workspaceNames: [result.value.workspace.name],
                 });
@@ -1585,7 +1598,7 @@ export function AccountDirectory({
               username: member.identity?.username ?? "",
               displayName: "",
               email: member.identity?.email ?? "",
-              status: member.status,
+              workspaceStatus: member.status,
               workspaceIds: [workspaceId],
               workspaceNames: [],
             });
@@ -1612,7 +1625,7 @@ export function AccountDirectory({
   const assignableWorkspaces = workspaces.filter(
     (workspace) =>
       viewer?.platformAdmin ||
-      viewer?.managedWorkspaceIds.includes(workspace.id),
+      viewer?.manageableWorkspaceIds.includes(workspace.id),
   );
   const unavailableWorkspaceIds = assignableWorkspaces
     .filter((workspace) =>
@@ -1628,8 +1641,12 @@ export function AccountDirectory({
       organizationId &&
         entry.orgMemberId &&
         (viewer?.platformAdmin ||
-          workspaces.some((item) =>
-            viewer?.managedWorkspaceIds.includes(item.id),
+          (organizationId &&
+            viewer?.manageableOrganizationIds.includes(organizationId)) ||
+          workspaces.some(
+            (item) =>
+              item.organizationId === organizationId &&
+              viewer?.manageableWorkspaceIds.includes(item.id),
           )),
     );
   function beginEdit(items: DirectoryEntry[]) {
@@ -1702,6 +1719,8 @@ export function AccountDirectory({
   }
   async function changeStatus() {
     if (!status) return;
+    const requestedStatus = status;
+    setStatusRetry(undefined);
     setPending(true);
     setError("");
     try {
@@ -1733,6 +1752,14 @@ export function AccountDirectory({
           failed: item.status === "failed",
         })),
       );
+      const failedIds = result.items
+        .filter((item) => item.status === "failed")
+        .map((item) => item.key);
+      setStatusRetry(
+        failedIds.length
+          ? { scope: "account", status: requestedStatus, accountIds: failedIds }
+          : undefined,
+      );
       setStatus(undefined);
       await reload();
       onDataChanged?.();
@@ -1742,8 +1769,61 @@ export function AccountDirectory({
       setPending(false);
     }
   }
+  async function resetAccountPassword() {
+    if (!passwordTarget || !viewer?.platformAdmin) return;
+    if (resetPassword.length < 12 || resetPassword.length > 256) {
+      setResetPasswordError(t("adminPasswordLength"));
+      return;
+    }
+    if (resetPassword !== resetPasswordConfirm) {
+      setResetPasswordError(t("passwordMismatch"));
+      return;
+    }
+    setPending(true);
+    setResetPasswordError("");
+    try {
+      const result = await api.managementBatch(
+        {
+          items: [
+            {
+              key: passwordTarget.accountId,
+              commandId: "account.password.change",
+              input: {
+                accountId: passwordTarget.accountId,
+                newPassword: resetPassword,
+              },
+            },
+          ],
+        },
+        `account-password-reset-${crypto.randomUUID()}`,
+      );
+      const item = result.items[0];
+      if (item?.status !== "succeeded") {
+        setResetPasswordError(item?.error?.title ?? t("failed"));
+        return;
+      }
+      setOutcomes([
+        {
+          label: passwordTarget.username || passwordTarget.email,
+          result: t("adminPasswordResetDone"),
+          failed: false,
+        },
+      ]);
+      setPasswordTarget(undefined);
+      setResetPassword("");
+      setResetPasswordConfirm("");
+      await reload();
+      onDataChanged?.();
+    } catch (reason) {
+      setResetPasswordError(accountError(reason));
+    } finally {
+      setPending(false);
+    }
+  }
   async function changeOrganizationStatus() {
     if (!organizationId || !orgStatus) return;
+    const requestedStatus = orgStatus;
+    setStatusRetry(undefined);
     setPending(true);
     setError("");
     try {
@@ -1776,6 +1856,18 @@ export function AccountDirectory({
               : (item.error?.title ?? t("failed")),
           failed: item.status === "failed",
         })),
+      );
+      const failedIds = result.items
+        .filter((item) => item.status === "failed")
+        .map((item) => item.key);
+      setStatusRetry(
+        failedIds.length
+          ? {
+              scope: "organization",
+              status: requestedStatus,
+              accountIds: failedIds,
+            }
+          : undefined,
       );
       setOrgStatus(undefined);
       await reload();
@@ -1820,6 +1912,7 @@ export function AccountDirectory({
         },
         `account-assign-${crypto.randomUUID()}`,
       );
+      setStatusRetry(undefined);
       setOutcomes(
         result.items.map((item) => ({
           label: (() => {
@@ -2026,9 +2119,6 @@ export function AccountDirectory({
                   </tr>
                 ))
               : visible.map((entry) => {
-                  const effectiveStatus = organizationId
-                    ? (entry.orgStatus ?? entry.status)
-                    : entry.status;
                   return (
                     <tr key={entry.accountId} className="hover:bg-muted/30">
                       <td className="px-3">
@@ -2063,7 +2153,24 @@ export function AccountDirectory({
                         {entry.workspaceNames.join(", ") || "—"}
                       </td>
                       <td className={td}>
-                        <Badge variant="secondary">{t(effectiveStatus)}</Badge>
+                        <div className="flex flex-col gap-1 text-xs">
+                          {accountDirectoryStatuses(
+                            organizationId
+                              ? "organization"
+                              : workspaceId
+                                ? "workspace"
+                                : "platform",
+                            {
+                              accountStatus: entry.status,
+                              organizationMembershipStatus: entry.orgStatus,
+                              workspaceMembershipStatus: entry.workspaceStatus,
+                            },
+                          ).map((row) => (
+                            <span key={row.label}>
+                              {t(row.label)}: {t(row.value ?? "notAvailable")}
+                            </span>
+                          ))}
+                        </div>
                       </td>
                       <td className={`${td} text-right`}>
                         {editable(entry) ||
@@ -2091,6 +2198,20 @@ export function AccountDirectory({
                                 >
                                   <LuPencil />
                                   {t("editAccount")}
+                                </DropdownMenuItem>
+                              ) : null}
+                              {viewer?.platformAdmin &&
+                              entry.accountId !== viewer.accountId ? (
+                                <DropdownMenuItem
+                                  onSelect={() => {
+                                    setPasswordTarget(entry);
+                                    setResetPassword("");
+                                    setResetPasswordConfirm("");
+                                    setResetPasswordError("");
+                                  }}
+                                >
+                                  <LuKeyRound />
+                                  {t("adminResetPassword")}
                                 </DropdownMenuItem>
                               ) : null}
                               {canAssignWorkspace(entry) ? (
@@ -2170,16 +2291,36 @@ export function AccountDirectory({
         ) : null}
       </div>
       {outcomes.length ? (
-        <div className="max-h-40 overflow-auto rounded-md border border-border p-3">
-          {outcomes.map((result, index) => (
-            <div
-              key={`${result.label}-${index}`}
-              className={`flex justify-between gap-3 py-1 text-xs ${result.failed ? "text-destructive" : "text-muted-foreground"}`}
+        <div className="space-y-2 rounded-md border border-border p-3">
+          <div className="max-h-40 overflow-auto">
+            {outcomes.map((result, index) => (
+              <div
+                key={`${result.label}-${index}`}
+                className={`flex justify-between gap-3 py-1 text-xs ${result.failed ? "text-destructive" : "text-muted-foreground"}`}
+              >
+                <span>{result.label}</span>
+                <span>{result.result}</span>
+              </div>
+            ))}
+          </div>
+          {statusRetry ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={pending || loading || Boolean(error)}
+              onClick={() => {
+                setSelected(statusRetry.accountIds);
+                if (statusRetry.scope === "organization") {
+                  setOrgStatus(statusRetry.status);
+                } else {
+                  setStatus(statusRetry.status);
+                }
+              }}
             >
-              <span>{result.label}</span>
-              <span>{result.result}</span>
-            </div>
-          ))}
+              <LuRefreshCw />
+              {t("retryFailed")}
+            </Button>
+          ) : null}
         </div>
       ) : null}
       {provisioning ? (
@@ -2379,7 +2520,9 @@ export function AccountDirectory({
             disabled={pending}
           />
           <RolePicker value={assignRole} onChange={setAssignRole} />
-          <p className="text-xs text-muted-foreground">{t("roleHint")}</p>
+          <p className="text-xs text-muted-foreground">
+            {t(`${assignRole}Help`)} {t("roleHint")}
+          </p>
           <DialogFooter>
             <Button
               variant="outline"
@@ -2407,6 +2550,80 @@ export function AccountDirectory({
         </DialogContent>
       </Dialog>
       <Dialog
+        open={Boolean(passwordTarget)}
+        onOpenChange={(open) => {
+          if (!open && !pending) {
+            setPasswordTarget(undefined);
+            setResetPassword("");
+            setResetPasswordConfirm("");
+            setResetPasswordError("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("adminResetPassword")}</DialogTitle>
+            <DialogDescription>
+              {t("adminResetPasswordHint", {
+                account:
+                  passwordTarget?.username || passwordTarget?.email || "",
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-account-new-password">
+                {t("newPassword")}
+              </Label>
+              <Input
+                id="admin-account-new-password"
+                type="password"
+                autoComplete="new-password"
+                value={resetPassword}
+                onChange={(event) => setResetPassword(event.target.value)}
+                disabled={pending}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-account-confirm-password">
+                {t("confirmPassword")}
+              </Label>
+              <Input
+                id="admin-account-confirm-password"
+                type="password"
+                autoComplete="new-password"
+                value={resetPasswordConfirm}
+                onChange={(event) =>
+                  setResetPasswordConfirm(event.target.value)
+                }
+                disabled={pending}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t("adminPasswordResetImpact")}
+            </p>
+            {resetPasswordError ? (
+              <AccountError message={resetPasswordError} />
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={pending}
+              onClick={() => setPasswordTarget(undefined)}
+            >
+              {t("cancel")}
+            </Button>
+            <Button
+              disabled={pending || !resetPassword || !resetPasswordConfirm}
+              onClick={() => void resetAccountPassword()}
+            >
+              {pending ? t("processing") : t("adminResetPassword")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
         open={Boolean(status)}
         onOpenChange={(open) => {
           if (!open && !pending) setStatus(undefined);
@@ -2423,8 +2640,8 @@ export function AccountDirectory({
           <ul className="max-h-48 overflow-auto text-sm">
             {selectedEntries.map((entry) => (
               <li className="py-1" key={entry.accountId}>
-                {entry.username || entry.email}: {t(entry.status)} →{" "}
-                {status ? t(status) : ""}
+                {entry.username || entry.email}:{" "}
+                {t(entry.status ?? "notAvailable")} → {status ? t(status) : ""}
               </li>
             ))}
           </ul>

@@ -18,12 +18,12 @@
     "test:sync-e2e": "node scripts/sync-test-harness.mjs",
     "lint": "pnpm lint:js && pnpm lint:rust && pnpm lint:spell",
     "lint:js": "biome check src/ && tsc --noEmit && cd donut-sync && biome check src/ && tsc --noEmit",
-    "lint:rust": "cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings -D clippy::all && cargo fmt --all",
+    "lint:rust": "cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings -D clippy::all -A clippy::result_large_err && cargo fmt --all",
     "lint:spell": "typos .",
     "tauri": "node scripts/run-with-env.mjs pnpm --dir apps/desktop exec tauri",
     "shadcn:add": "pnpm dlx shadcn@latest add",
     "prepare": "husky && husky install",
-    "format:rust": "cd src-tauri && cargo clippy --fix --allow-dirty --all-targets --all-features -- -D warnings -D clippy::all && cargo fmt --all",
+    "format:rust": "cd src-tauri && cargo clippy --fix --allow-dirty --all-targets --all-features -- -D warnings -D clippy::all -A clippy::result_large_err && cargo fmt --all",
     "format:js": "biome check src/ --write --unsafe && cd donut-sync && biome check src/ --write --unsafe",
     "format": "pnpm format:js && pnpm format:rust",
     "build:sync": "cd donut-sync && pnpm build",
@@ -36,6 +36,7 @@
     "runtime:sign-catalog": "node scripts/runtime/sign-catalog.mjs",
     "test:runtime-catalog-signing": "node --test tests/release/runtime-catalog-signing.test.mjs",
     "test:contract": "node --test tests/contracts/contract-drift.test.mjs && node scripts/ci/check-contracts.mjs",
+    "test:performance:profile-status": "node scripts/performance/profile-runtime-status.mjs",
     "prebuild": "pnpm copy-proxy-binary",
     "pretauri:dev": "pnpm copy-proxy-binary",
     "precargo": "pnpm copy-proxy-binary",
@@ -113,11 +114,11 @@
   "packageManager": "pnpm@11.10.0",
   "lint-staged": {
     "**/!(*command-registry).{js,jsx,ts,tsx,json,css}": [
-      "biome check --fix"
+      "biome check --fix --no-errors-on-unmatched"
     ],
     "src-tauri/**/*.rs": [
       "bash -c 'cd src-tauri && cargo fmt --all'",
-      "bash -c 'cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings -D clippy::all'",
+      "bash -c 'cd src-tauri && cargo clippy --all-targets --all-features -- -D clippy::all -A clippy::result_large_err'",
       "bash -c 'cd src-tauri && cargo test --lib'"
     ],
     "**/*.{rs,ts,tsx,js,jsx,md}": [

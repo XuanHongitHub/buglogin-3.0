@@ -1484,11 +1484,12 @@ mod profile_launch_lock_tests {
     let other_profile = format!("launch-lock-{}", uuid::Uuid::new_v4());
     let first = lock_profile_launch(&profile).await;
 
-    assert!(
-      tokio::time::timeout(Duration::from_millis(100), lock_profile_launch(&other_profile))
-        .await
-        .is_ok()
-    );
+    assert!(tokio::time::timeout(
+      Duration::from_millis(100),
+      lock_profile_launch(&other_profile)
+    )
+    .await
+    .is_ok());
     assert!(
       tokio::time::timeout(Duration::from_millis(100), lock_profile_launch(&profile))
         .await

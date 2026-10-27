@@ -1,3 +1,7 @@
+// This integration test includes the whole implementation module to exercise
+// crate-private cookie behavior; not every production method is used here.
+#![allow(dead_code)]
+
 #[path = "../src/cookies/mod.rs"]
 mod cookies;
 

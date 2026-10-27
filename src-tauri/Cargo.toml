@@ -37,7 +37,6 @@ serde = { version = "1", features = ["derive"] }
 buglogin-domain = { path = "../crates/domain" }
 buglogin-api = { path = "../crates/api" }
 buglogin-browser = { path = "../crates/browser" }
-buglogin-migration = { path = "../crates/migration" }
 buglogin-network = { path = "../crates/network" }
 buglogin-storage = { path = "../crates/storage" }
 tauri = { version = "2", features = ["devtools", "test", "tray-icon", "image-png"] }

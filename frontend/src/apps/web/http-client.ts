@@ -26,8 +26,6 @@ import {
   type JsonValue,
   type LaunchInput,
   type MemberSummary,
-  type MigrationImportInput,
-  type MigrationInspectInput,
   type MutationOptions,
   type Operation,
   type OperationStatus,
@@ -697,22 +695,6 @@ export function createWebApiClient(options: WebApiClientOptions): WebApiClient {
           parseProfileRecord,
         );
       },
-      inspectMigration: (input: MigrationInspectInput, mutationOptions) =>
-        mutation(
-          "/v1/migrations/inspect",
-          "POST",
-          input,
-          mutationOptions,
-          parseOperation,
-        ),
-      importMigration: (input: MigrationImportInput, mutationOptions) =>
-        mutation(
-          "/v1/migrations/import",
-          "POST",
-          input,
-          mutationOptions,
-          parseOperation,
-        ),
     },
   };
 
@@ -783,6 +765,18 @@ function parseAccount(value: unknown): AccountSummary | undefined {
       ? value.managedWorkspaceIds.filter(
           (workspaceId): workspaceId is string =>
             typeof workspaceId === "string",
+        )
+      : [],
+    manageableWorkspaceIds: Array.isArray(value.manageableWorkspaceIds)
+      ? value.manageableWorkspaceIds.filter(
+          (workspaceId): workspaceId is string =>
+            typeof workspaceId === "string",
+        )
+      : [],
+    manageableOrganizationIds: Array.isArray(value.manageableOrganizationIds)
+      ? value.manageableOrganizationIds.filter(
+          (organizationId): organizationId is string =>
+            typeof organizationId === "string",
         )
       : [],
     ...(status !== undefined ? { status } : {}),

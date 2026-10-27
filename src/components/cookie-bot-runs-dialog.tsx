@@ -136,9 +136,20 @@ export function CookieBotRunsDialog({
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {error ? (
-            <p className="py-8 text-center text-sm text-destructive-text">
-              {error}
-            </p>
+            <div
+              role="alert"
+              className="flex flex-col items-center gap-3 py-8 text-center"
+            >
+              <p className="text-sm text-destructive-text">{error}</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void load()}
+              >
+                {t("common.buttons.retry")}
+              </Button>
+            </div>
           ) : isLoading && runs.length === 0 ? (
             <div className="space-y-2 py-2">
               {Array.from({ length: 5 }, (_, index) => (

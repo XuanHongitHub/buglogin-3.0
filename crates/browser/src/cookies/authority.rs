@@ -447,6 +447,7 @@ impl<V: OsVault> CookieAuthority<V> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn persisted_state_with(
         generations: &BTreeMap<CookieScope, u64>,
         idempotency: &BTreeMap<IdempotencyKey, Replay>,
@@ -717,6 +718,7 @@ impl<V: OsVault> CookieAuthority<V> {
         Ok(id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn import(
         &mut self,
         stage_id: &StagedImportId,
@@ -739,6 +741,7 @@ impl<V: OsVault> CookieAuthority<V> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn import_hosted(
         &mut self,
         stage_id: &StagedImportId,
@@ -911,6 +914,7 @@ impl<V: OsVault> CookieAuthority<V> {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn copy(
         &mut self,
         source: &CookieScope,
@@ -1188,22 +1192,6 @@ impl<V: OsVault> CookieAuthority<V> {
             None => Err(CookieAuthorityError::ProfileStateUnknown),
         }
     }
-
-    fn advance_generation(
-        &mut self,
-        scope: &CookieScope,
-        expected: u64,
-    ) -> Result<u64, CookieAuthorityError> {
-        let actual = self.generation(scope);
-        if actual != expected {
-            return Err(CookieAuthorityError::GenerationMismatch { expected, actual });
-        }
-        let next = expected
-            .checked_add(1)
-            .ok_or(CookieAuthorityError::GenerationExhausted)?;
-        self.generations.insert(scope.clone(), next);
-        Ok(next)
-    }
 }
 
 fn validate_persisted_stage_ids(
@@ -1322,6 +1310,101 @@ fn validate_pending_materialization_binding(
         return Err(CookieAuthorityError::Storage);
     }
     Ok(())
+}
+
+fn authorize(
+    scope: &CookieScope,
+    action: Action,
+    principal: &Principal,
+    grants: &[Grant],
+) -> Result<(), CookieAuthorityError> {
+    let capability =
+        Capability::new(COOKIE_CAPABILITY).map_err(|_| CookieAuthorityError::Forbidden)?;
+    let resource_scope = ResourceScope {
+        workspace_id: Some(scope.workspace_id.clone()),
+        profile_id: Some(scope.profile_id.clone()),
+        ..ResourceScope::default()
+    };
+    if is_allowed(principal, &capability, action, &resource_scope, grants) {
+        Ok(())
+    } else {
+        Err(CookieAuthorityError::Forbidden)
+    }
+}
+
+fn validate_lease(scope: &CookieScope, lease: &Lease) -> Result<(), CookieAuthorityError> {
+    if lease.workspace_id != scope.workspace_id
+        || lease.resource_id.as_str().is_empty()
+        || lease.owner_id.is_empty()
+        || lease.token.is_empty()
+        || lease.fencing_token == 0
+        || lease.expires_at <= lease.issued_at
+    {
+        return Err(CookieAuthorityError::InvalidLease);
+    }
+    Ok(())
+}
+
+fn validate_hosted_job_binding(
+    binding: &HostedCookieJobBinding,
+) -> Result<(), CookieAuthorityError> {
+    for value in [&binding.job_id, &binding.operation_id, &binding.device_id] {
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(CookieAuthorityError::InvalidHostedJobBinding);
+        }
+    }
+    Ok(())
+}
+
+fn persisted_hosted_job_binding(
+    binding: &HostedCookieJobBinding,
+) -> PersistedHostedCookieJobBinding {
+    PersistedHostedCookieJobBinding {
+        job_id: binding.job_id.clone(),
+        operation_id: binding.operation_id.clone(),
+        device_id: binding.device_id.clone(),
+    }
+}
+
+fn fingerprint(
+    operation: &str,
+    values: &[&str],
+    expected_generation: u64,
+    fencing_token: u64,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(operation.as_bytes());
+    hasher.update([0]);
+    for value in values {
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    hasher.update(expected_generation.to_be_bytes());
+    hasher.update(fencing_token.to_be_bytes());
+    hasher.finalize().into()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex_decode(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect()
+}
+
+fn unix_now_ms() -> Result<u64, CookieAuthorityError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CookieAuthorityError::ClockUnavailable)
+        .and_then(|duration| {
+            u64::try_from(duration.as_millis()).map_err(|_| CookieAuthorityError::ClockUnavailable)
+        })
 }
 
 #[cfg(test)]
@@ -1465,99 +1548,4 @@ mod tests {
             Err(CookieAuthorityError::Storage)
         );
     }
-}
-
-fn authorize(
-    scope: &CookieScope,
-    action: Action,
-    principal: &Principal,
-    grants: &[Grant],
-) -> Result<(), CookieAuthorityError> {
-    let capability =
-        Capability::new(COOKIE_CAPABILITY).map_err(|_| CookieAuthorityError::Forbidden)?;
-    let resource_scope = ResourceScope {
-        workspace_id: Some(scope.workspace_id.clone()),
-        profile_id: Some(scope.profile_id.clone()),
-        ..ResourceScope::default()
-    };
-    if is_allowed(principal, &capability, action, &resource_scope, grants) {
-        Ok(())
-    } else {
-        Err(CookieAuthorityError::Forbidden)
-    }
-}
-
-fn validate_lease(scope: &CookieScope, lease: &Lease) -> Result<(), CookieAuthorityError> {
-    if lease.workspace_id != scope.workspace_id
-        || lease.resource_id.as_str().is_empty()
-        || lease.owner_id.is_empty()
-        || lease.token.is_empty()
-        || lease.fencing_token == 0
-        || lease.expires_at <= lease.issued_at
-    {
-        return Err(CookieAuthorityError::InvalidLease);
-    }
-    Ok(())
-}
-
-fn validate_hosted_job_binding(
-    binding: &HostedCookieJobBinding,
-) -> Result<(), CookieAuthorityError> {
-    for value in [&binding.job_id, &binding.operation_id, &binding.device_id] {
-        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-            return Err(CookieAuthorityError::InvalidHostedJobBinding);
-        }
-    }
-    Ok(())
-}
-
-fn persisted_hosted_job_binding(
-    binding: &HostedCookieJobBinding,
-) -> PersistedHostedCookieJobBinding {
-    PersistedHostedCookieJobBinding {
-        job_id: binding.job_id.clone(),
-        operation_id: binding.operation_id.clone(),
-        device_id: binding.device_id.clone(),
-    }
-}
-
-fn fingerprint(
-    operation: &str,
-    values: &[&str],
-    expected_generation: u64,
-    fencing_token: u64,
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(operation.as_bytes());
-    hasher.update([0]);
-    for value in values {
-        hasher.update(value.as_bytes());
-        hasher.update([0]);
-    }
-    hasher.update(expected_generation.to_be_bytes());
-    hasher.update(fencing_token.to_be_bytes());
-    hasher.finalize().into()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn hex_decode(value: &str) -> Option<Vec<u8>> {
-    if value.len() % 2 != 0 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    (0..value.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
-        .collect()
-}
-
-fn unix_now_ms() -> Result<u64, CookieAuthorityError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| CookieAuthorityError::ClockUnavailable)
-        .and_then(|duration| {
-            u64::try_from(duration.as_millis()).map_err(|_| CookieAuthorityError::ClockUnavailable)
-        })
 }

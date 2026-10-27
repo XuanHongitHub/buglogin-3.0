@@ -218,24 +218,6 @@ endpoints:
       - checks only the server-derived storage key for this workspace resource, generation, object key, and checksum
       - returns presence only; it never returns bytes or caller-controlled storage keys
 
-  - id: migration.sync.import
-    method: POST
-    path: /v1/migrations/sync/import
-    capability: migration.write
-    idempotency: required
-    status: implementation-staging-not-release-ready
-    input: SyncImportInput
-    response: SyncImportReceipt
-    invariants:
-      - refreshes the PostgreSQL-backed authorization snapshot and reauthenticates before preflight
-      - acquires destination lease, then rechecks actor, migration ACL, active binding, and proxy dependencies before object writes
-      - plans against the PostgreSQL-backed current manifest after acquiring the destination lease
-      - remaps source fencing token to destination fencing authority
-      - holds the journal-scoped PostgreSQL advisory lock from before idempotency claim through finalization/release; stale recovery acquires the same lock, reloads the durable journal, and reapplies the stale cutoff before fencing
-      - never calls Redis manifest commit
-      - PostgreSQL aggregate journal audit and receipt finalize in one transaction
-      - ambiguous commit probes durable receipt and never deletes blobs
-
   - id: profile.blob.put
     method: PUT
     path: /v1/workspaces/{workspaceId}/resources/{resourceId}/blobs?key={objectKey}
@@ -426,48 +408,6 @@ schemas:
       key: string
       size: integer
       checksum: string
-
-migrationEnvelope:
-  schema: buglogin.sync-export/1
-  implemented:
-    - canonical manifest SHA-256
-    - deterministic complete blob-set SHA-256
-    - ordered generation chain
-    - retained tombstones
-    - exact blob coverage and checksum verification
-    - source fencing token replaced by destination authority
-    - signed migration package preservation as sync/export.json
-    - startup recovery and a 60-second retry worker for stale finalizing and cleanup-pending journals
-    - per-object staging intent checkpoints before immutable blob writes; retries resume checksum-verified objects while preserving import ownership
-  pendingReleaseBlockers:
-    - live PostgreSQL proof that journal-scoped recovery locking defers active writers and safely resumes stale staging cleanup
-    - idempotent end-to-end process-loss rehearsal for retried signed exports
-    - PostgreSQL integration proof that manifest, import journal, audit, and idempotency receipt promotion commit atomically after every blob verifies
-    - ambiguous-commit reconciliation and orphan-blob retention/GC proof
-  invariants:
-    - generation is the canonical sync revision
-    - same-generation import replay requires identical manifest schema, scope, generation chain, root/object/tombstone state, dependencies, encryption metadata, and chunk mappings; destination fencing token is reissued by the destination authority
-    - manifestSha256 canonicalizes scope, generation, objects, and tombstones with fencingToken set to zero
-    - source fencing tokens never authorize destination writes
-    - migration exports contain every manifest object's verified bytes; imports stage each object at the destination manifest generation and clear sourceGeneration
-    - same-state migration replay ignores sourceGeneration because it identifies source-store placement, not object content or logical manifest state
-    - missing extra duplicate or tampered blobs block import
-    - failed import cannot replace the current destination manifest
-    - PostgreSQL is the only hosted manifest visibility authority
-    - Redis is lease/fencing/event infrastructure only and never migration manifest authority
-    - object-store blobs are immutable and invisible until PostgreSQL activation
-    - successful migration activation promotes its object reservations to committed manifest bytes atomically; promoted reservation rows are removed in the same PostgreSQL transaction
-    - retrying a pending import uses a fresh resource-lease attempt key so an expired Redis grant cannot be replayed as current authority
-    - ambiguous staging or finalizing journal acknowledgements preserve immutable blobs until durable journal and receipt state is reconciled
-    - lease and import-plan failures after journal creation persist retryable or cleanup-pending state instead of leaving an unclassified staging journal
-    - destination write authority is renewed after blob staging and validated immediately before manifest activation
-    - long-running object staging renews the destination lease independently of blocking storage I/O; lease loss prevents manifest activation
-    - profile manifests with a selected proxy include exactly one matching proxy dependency
-    - sourceGeneration reuses only an exact object in the immediately previous active manifest under the same resource key version
-    - proxy dependency revision and metadata object must match same-workspace Rust API authority
-    - normal manifest reads reject a proxy dependency whose revision is no longer current
-    - repairStaleProxy reads with profile.read and profile.update may expose that active manifest only to re-encrypt against current proxy state; commits and launches still require current dependency revisions
-    - proxy credential state requires a separate opaque encrypted envelope object; new commits also bind its opaque credentialVersion to the canonical proxy record
 
 serviceManagedProfileKeys:
   status: implementation-in-progress

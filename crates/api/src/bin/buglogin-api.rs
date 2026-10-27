@@ -12,12 +12,9 @@ use buglogin_api::http::{ApiState, coordination_authorizer, router};
 use buglogin_api::mcp::transport::{McpTransportConfig, production_router};
 use buglogin_api::services::deployment_config::validate_production_s3_namespace;
 use buglogin_api::services::runtime_catalog::PublishedRuntimeCatalog;
-use buglogin_migration::MigrationKey;
-use buglogin_migration::{package::NeutralPackage, verify::validate_relative_path};
 use buglogin_storage::{
     control::{PostgresConfig, PostgresControlRecordStore, SqliteControlRecordStore},
     remote::{LocalRemoteChunkStore, S3Config, S3RemoteChunkStore},
-    secrets::SecretValue,
 };
 use buglogin_sync::coordination::{LocalCoordination, RedisCoordination, RedisCoordinationConfig};
 use buglogin_sync::crypto::ClientKey;
@@ -29,9 +26,6 @@ const MAX_INLINE_RUNTIME_CONFIG_BYTES: usize = 24 * 1024;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let production = production_mode()?;
-    if let Some(package_dir) = initial_migration_import_argument()? {
-        return run_initial_migration_import(production, package_dir).await;
-    }
     if production && env::var_os("BUGLOGIN_DATA_ROOT").is_some() {
         return Err("BUGLOGIN_DATA_ROOT is forbidden in production".into());
     }
@@ -70,7 +64,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_concurrent_remote_chunks(Box::new(chunks))
         }
     };
-    let state = with_configured_migration_keys(state)?;
     let state = with_configured_profile_key_provider(state, production)?;
     let state = with_configured_runtime_catalog(state)?;
     let state = match env::var("BUGLOGIN_DEVICE_VERIFICATION_URI") {
@@ -177,122 +170,11 @@ fn with_optional_mcp(app: Router, state: ApiState) -> Result<Router, Box<dyn std
     ))
 }
 
-fn initial_migration_import_argument() -> Result<Option<PathBuf>, String> {
-    let mut arguments = env::args_os().skip(1);
-    match (arguments.next(), arguments.next(), arguments.next()) {
-        (None, _, _) => Ok(None),
-        (Some(flag), Some(path), None) if flag == "--initial-migration-import" => {
-            let path = PathBuf::from(path);
-            if !path.is_absolute() {
-                return Err("initial migration package path must be absolute".into());
-            }
-            Ok(Some(path))
-        }
-        _ => Err("usage: buglogin-api [--initial-migration-import <absolute-package-dir>]".into()),
-    }
-}
-
-async fn run_initial_migration_import(
-    production: bool,
-    package_dir: PathBuf,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !production
-        || env::var("BUGLOGIN_MIGRATION_OPERATOR_MODE").ok().as_deref() != Some("enabled")
-    {
-        return Err("initial migration import requires production mode and BUGLOGIN_MIGRATION_OPERATOR_MODE=enabled".into());
-    }
-    if env::var_os("BUGLOGIN_POSTGRES_URL").is_none() {
-        return Err("BUGLOGIN_POSTGRES_URL is required for initial migration import".into());
-    }
-    let files = read_initial_package(&package_dir)?;
-    let package = NeutralPackage::from_files(files);
-    let config = PostgresConfig::from_env()?;
-    let state = tokio::task::spawn_blocking(move || ApiState::production(config)).await??;
-    let state = with_configured_migration_keys(state)?;
-    let receipt = state.import_initial_signed_migration_package(&package)?;
-    println!("{}", serde_json::to_string(&receipt)?);
-    Ok(())
-}
-
-fn read_initial_package(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let root_metadata = fs::symlink_metadata(root)
-        .map_err(|_| "initial migration package directory cannot be read")?;
-    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-        return Err("initial migration package path must be a real directory".into());
-    }
-    let mut files = BTreeMap::new();
-    let mut pending = vec![root.to_path_buf()];
-    let mut total_bytes = 0_u64;
-    while let Some(directory) = pending.pop() {
-        let entries = fs::read_dir(&directory)
-            .map_err(|_| "initial migration package directory cannot be read")?;
-        for entry in entries {
-            let entry = entry.map_err(|_| "initial migration package entry cannot be read")?;
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|_| "initial migration package entry metadata cannot be read")?;
-            if metadata.file_type().is_symlink() {
-                return Err("initial migration package cannot contain symlinks".into());
-            }
-            if metadata.is_dir() {
-                pending.push(path);
-                continue;
-            }
-            if !metadata.is_file() || files.len() >= 512 {
-                return Err(
-                    "initial migration package has an unsupported entry or too many files".into(),
-                );
-            }
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| "initial migration package path escaped its root")?;
-            let relative = relative
-                .to_str()
-                .ok_or("initial migration package path is not valid Unicode")?
-                .replace('\\', "/");
-            validate_relative_path(&relative)
-                .map_err(|_| "initial migration package path is invalid")?;
-            total_bytes = total_bytes
-                .checked_add(metadata.len())
-                .filter(|size| *size <= 32 * 1024 * 1024)
-                .ok_or("initial migration package exceeds the 32 MiB limit")?;
-            let bytes =
-                fs::read(&path).map_err(|_| "initial migration package file cannot be read")?;
-            files.insert(relative, bytes);
-        }
-    }
-    if files.is_empty() {
-        return Err("initial migration package directory is empty".into());
-    }
-    Ok(files)
-}
-
-fn with_configured_migration_keys(state: ApiState) -> Result<ApiState, String> {
-    let encryption_key = migration_key_from_env("BUGLOGIN_MIGRATION_ENCRYPTION_KEY_HEX")?;
-    let signing_key = migration_key_from_env("BUGLOGIN_MIGRATION_SIGNING_KEY_HEX")?;
-    match (encryption_key, signing_key) {
-        (None, None) => Ok(state),
-        (Some(_), None) | (None, Some(_)) => Err(
-            "BUGLOGIN_MIGRATION_ENCRYPTION_KEY_HEX and BUGLOGIN_MIGRATION_SIGNING_KEY_HEX must be configured together".into(),
-        ),
-        (Some(encryption_key), Some(signing_key)) => {
-            if *encryption_key == *signing_key {
-                return Err("migration encryption and signing keys must be different".into());
-            }
-            let signing_key = SecretValue::new(signing_key.to_vec())
-                .map_err(|_| "migration signing key is invalid".to_owned())?;
-            Ok(state
-                .with_migration_key(MigrationKey::from_bytes(*encryption_key))
-                .with_migration_signing_key(signing_key))
-        }
-    }
-}
-
 fn with_configured_profile_key_provider(
     state: ApiState,
     production: bool,
 ) -> Result<ApiState, String> {
-    let key = migration_key_from_env("BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX")?;
+    let key = profile_key_from_env("BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX")?;
     match key {
         Some(key) => Ok(state.with_profile_key_wrapping_key(ClientKey::from_bytes(*key))),
         None if production => {
@@ -404,7 +286,7 @@ fn read_bounded_config_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Stri
     Ok(bytes)
 }
 
-fn migration_key_from_env(name: &str) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
+fn profile_key_from_env(name: &str) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
     let value = match env::var(name) {
         Ok(value) => value,
         Err(env::VarError::NotPresent) => return Ok(None),
@@ -570,10 +452,10 @@ fn local_data_root(configured: Option<std::ffi::OsString>) -> Result<PathBuf, St
     }
     #[cfg(target_os = "windows")]
     {
-        return env::var_os("LOCALAPPDATA")
+        env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .map(|path| path.join("BugLogin").join("API"))
-            .ok_or_else(|| "LOCALAPPDATA is required when BUGLOGIN_DATA_ROOT is unset".into());
+            .ok_or_else(|| "LOCALAPPDATA is required when BUGLOGIN_DATA_ROOT is unset".into())
     }
     #[cfg(target_os = "macos")]
     {

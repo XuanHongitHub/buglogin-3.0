@@ -184,13 +184,14 @@ async function load() {
   }
   if (quota.status === "fulfilled") next.quota = quota.value;
 
-  // Both failing is a real outage worth surfacing; one failing leaves the
-  // other half of the screen correct, which beats blanking everything.
-  if (schedules.status === "rejected" && quota.status === "rejected") {
-    next.error = String(schedules.reason);
-  } else {
-    next.error = null;
-  }
+  // Keep the successful half of the page, but surface any failed authority
+  // read so retained last-known data is not mistaken for a complete snapshot.
+  next.error =
+    schedules.status === "rejected"
+      ? String(schedules.reason)
+      : quota.status === "rejected"
+        ? String(quota.reason)
+        : null;
   emit(next);
 }
 

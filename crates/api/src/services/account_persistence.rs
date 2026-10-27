@@ -68,6 +68,7 @@ impl AccountPersistence {
         Ok(Some((account, revision)))
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_import_put(
         &self,
         account: &Account,

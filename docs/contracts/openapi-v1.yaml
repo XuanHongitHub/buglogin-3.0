@@ -718,89 +718,6 @@ paths:
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
         - { name: Last-Event-ID, in: header, required: false, schema: { type: string, minLength: 1 } }
       responses: { "200": { description: Event stream, content: { text/event-stream: { schema: { type: string } } } }, "409": { $ref: '#/components/responses/Problem' }, "503": { $ref: '#/components/responses/Problem' } }
-  /v1/migrations/inspect:
-    post:
-      operationId: migration.inspect
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationInspectInput' } } } }
-      responses: { "202": { description: Migration inspection operation, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } } }
-  /v1/migrations/import:
-    post:
-      operationId: migration.import
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationImportInput' } } } }
-      responses: { "202": { description: Migration import operation, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } } }
-  /v1/migrations/control/import:
-    post:
-      operationId: migration.control.import
-      description: Requires the migration.write execute capability. dryRun returns a non-mutating plan; otherwise the import activates the validated control graph. Idempotent retries replay the existing package receipt.
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ControlImportInput' } } } }
-      responses:
-        "200": { description: Dry-run plan or activated/replayed import receipt, content: { application/json: { schema: { $ref: '#/components/schemas/ControlImportResult' } } } }
-        "400": { $ref: '#/components/responses/Problem' }
-        "401": { $ref: '#/components/responses/Problem' }
-        "403": { $ref: '#/components/responses/Problem' }
-        "409": { $ref: '#/components/responses/Problem' }
-        "422": { $ref: '#/components/responses/Problem' }
-        "503": { $ref: '#/components/responses/Problem' }
-  /v1/migrations/control/rollback:
-    post:
-      operationId: migration.control.rollback
-      description: Requires the migration.write execute capability and exact confirmation ROLLBACK_CONTROL_MIGRATION. Rollback is compare-and-swap guarded and replays an already completed rollback.
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ControlRollbackInput' } } } }
-      responses:
-        "200": { description: Rollback receipt, content: { application/json: { schema: { $ref: '#/components/schemas/ControlImportReceipt' } } } }
-        "400": { $ref: '#/components/responses/Problem' }
-        "401": { $ref: '#/components/responses/Problem' }
-        "403": { $ref: '#/components/responses/Problem' }
-        "404": { $ref: '#/components/responses/Problem' }
-        "409": { $ref: '#/components/responses/Problem' }
-        "422": { $ref: '#/components/responses/Problem' }
-        "503": { $ref: '#/components/responses/Problem' }
-  /v1/migrations/sync/import:
-    post:
-      operationId: migration.sync.import
-      description: Refreshes authorization before preflight and again after acquiring the destination lease. The API rechecks the actor, migration ACL, active profile-resource binding, and proxy dependencies before writing blobs; import planning uses the PostgreSQL-backed current manifest.
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
-      requestBody:
-        required: true
-        description: Direct JSON imports are limited to 320 MiB, with one import admitted per API process and a shared two-slot body-transfer budget across sync imports, profile blobs, and migration package files. Saturation returns a retryable 503; use staged migration-package upload for larger exports.
-        content: { application/json: { schema: { $ref: '#/components/schemas/SyncImportInput' } } }
-      responses:
-        "200": { description: Hosted sync import receipt, content: { application/json: { schema: { $ref: '#/components/schemas/SyncImportReceipt' } } } }
-        "400": { $ref: '#/components/responses/Problem' }
-        "401": { $ref: '#/components/responses/Problem' }
-        "403": { $ref: '#/components/responses/Problem' }
-        "409": { $ref: '#/components/responses/Problem' }
-        "413": { $ref: '#/components/responses/Problem' }
-        "415": { $ref: '#/components/responses/Problem' }
-        "422": { $ref: '#/components/responses/Problem' }
-        "503": { $ref: '#/components/responses/Problem' }
-  /v1/migrations/packages/{packageId}/files:
-    put:
-      operationId: migration.package.file.put
-      parameters:
-        - { $ref: '#/components/parameters/MigrationPackageId' }
-        - { name: path, in: query, required: true, schema: { type: string, minLength: 1 } }
-        - { name: x-content-sha256, in: header, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }
-        - { $ref: '#/components/parameters/IdempotencyKey' }
-      requestBody: { required: true, description: "Each staged file is limited to 67108864 bytes; each package is limited to 67108864 bytes total and 10000 files, enforced before staging each new file. Browser payloads use encrypted profile sync, not migration packages.", content: { application/octet-stream: { schema: { type: string, format: binary, maxLength: 67108864 } } } }
-      responses: { "200": { description: Staged migration package file, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationPackageFileReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' }, "413": { $ref: '#/components/responses/Problem' }, "415": { $ref: '#/components/responses/Problem' }, "503": { $ref: '#/components/responses/Problem', description: The shared two-slot large-transfer budget is full; retry the request } }
-  /v1/migrations/packages/{packageId}/verify:
-    post:
-      operationId: migration.package.verify
-      parameters:
-        - { $ref: '#/components/parameters/MigrationPackageId' }
-        - { $ref: '#/components/parameters/IdempotencyKey' }
-      responses: { "200": { description: Verified staged migration package, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationPackageVerifyReceipt' } } } }, "401": { $ref: '#/components/responses/Problem' }, "403": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "409": { $ref: '#/components/responses/Problem' }, "413": { $ref: '#/components/responses/Problem', description: Package exceeds the 64 MiB or 10,000-file limit }, "503": { $ref: '#/components/responses/Problem' } }
-  /v1/migrations/packages/{packageId}/activate:
-    post:
-      operationId: migration.package.activate
-      parameters:
-        - { $ref: '#/components/parameters/MigrationPackageId' }
-        - { $ref: '#/components/parameters/IdempotencyKey' }
-      responses: { "200": { description: Activated migration package, content: { application/json: { schema: { $ref: '#/components/schemas/MigrationPackageActivationReceipt' } } } }, "409": { $ref: '#/components/responses/Problem' } }
-
   /v1/account:
     get:
       operationId: account.get
@@ -906,6 +823,12 @@ paths:
     get:
       operationId: organization.record.get
       responses: { "200": { description: Revision-aware organization record, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/delete-preflight:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: organization.delete.preflight
+      description: Checks current delete authorization, revision, and organization dependencies. Deletion rechecks conditions before commit.
+      responses: { "200": { description: Organization deletion dependencies, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationDeletePreflight' } } } }, "403": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "503": { $ref: '#/components/responses/Problem' } }
   /v1/organizations/{organizationId}/members:
     parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
     get:
@@ -975,6 +898,14 @@ paths:
     get:
       operationId: workspace.record.get
       responses: { "200": { description: Revision-aware workspace record, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceRecord' } } } }, "404": { $ref: '#/components/responses/Problem' } }
+  /v1/organizations/{organizationId}/workspaces/{workspaceId}/delete-preflight:
+    parameters:
+      - { $ref: '#/components/parameters/OrganizationId' }
+      - { $ref: '#/components/parameters/WorkspaceId' }
+    get:
+      operationId: workspace.delete.preflight
+      description: Checks current delete authorization, revision, and workspace dependencies. Deletion rechecks all conditions atomically.
+      responses: { "200": { description: Workspace deletion dependencies, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceDeletePreflight' } } } }, "403": { $ref: '#/components/responses/Problem' }, "404": { $ref: '#/components/responses/Problem' }, "503": { $ref: '#/components/responses/Problem' } }
   /v1/organizations/{organizationId}/workspaces/{workspaceId}/snapshot:
     parameters:
       - { $ref: '#/components/parameters/OrganizationId' }
@@ -1567,7 +1498,6 @@ components:
     ProxyId: { name: proxyId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     JobId: { name: jobId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     OperationId: { name: operationId, in: path, required: true, schema: { $ref: '#/components/schemas/OperationIdentifier' } }
-    MigrationPackageId: { name: packageId, in: path, required: true, schema: { $ref: '#/components/schemas/MigrationPackageId' } }
     ApiTokenId: { name: tokenId, in: path, required: true, schema: { $ref: '#/components/schemas/ApiTokenIdentifier' } }
     SessionId: { name: sessionId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
@@ -1580,7 +1510,6 @@ components:
     Empty: { type: object, properties: {}, additionalProperties: false }
     CanonicalId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }
     OperationIdentifier: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
-    MigrationPackageId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
     NonBlankText: { type: string, minLength: 1, pattern: '^[\s\S]*\S[\s\S]*$' }
     SyncObjectKey: { type: string, minLength: 1, maxLength: 1024, pattern: '^(?!/)(?!.*\\)(?!.*:)(?!.*[\x00-\x1F\x7F])(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$)).{1,1024}$', description: 'Confined slash-separated relative storage key; server enforces a 1024-byte UTF-8 limit.' }
     ProfileFilePath: { type: string, minLength: 1, maxLength: 512, description: 'The API additionally enforces a maximum UTF-8 encoded size of 512 bytes; OpenAPI maxLength counts Unicode characters.', pattern: '^(?!/)(?!\.buglogin/)(?![\s\S]*(?:^|/)\.{1,2}(?:/|$))(?![\s\S]*[\\:])[^/]+(?:/[^/]+)*$' }
@@ -1600,7 +1529,7 @@ components:
     AccountPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/Account' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
     AccountAdminRecord: { type: object, required: [account, identity], properties: { account: { $ref: '#/components/schemas/Account' }, identity: { oneOf: [{ $ref: '#/components/schemas/AccountIdentity' }, { type: "null" }] } }, additionalProperties: false }
     AccountAdminPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/AccountAdminRecord' } }, nextCursor: { type: [string, "null"], minLength: 1 } }, additionalProperties: false }
-    AccountView: { type: object, required: [accountId, platformAdmin, managedWorkspaceIds], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, platformAdmin: { type: boolean, description: True when the authenticated principal has the platform administrator role. }, managedWorkspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' }, description: Workspaces whose parent organization the authenticated principal can manage. } }, additionalProperties: false }
+    AccountView: { type: object, required: [accountId, platformAdmin, managedWorkspaceIds, manageableWorkspaceIds, manageableOrganizationIds], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, platformAdmin: { type: boolean, description: True when the authenticated principal has the platform administrator role. }, managedWorkspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' }, description: Workspaces whose parent organization the authenticated principal can manage. }, manageableWorkspaceIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' }, description: Workspaces where the authenticated principal can manage workspace-scoped settings. }, manageableOrganizationIds: { type: array, items: { $ref: '#/components/schemas/CanonicalId' }, description: Organizations with at least one management capability available to the authenticated principal. Each action is still authorized independently. } }, additionalProperties: false }
     AccountStatusUpdateInput: { type: object, required: [status, expectedRevision], properties: { status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     AccountStatusUpdateCommandInput: { type: object, required: [accountId, status, expectedRevision], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/AccountStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     AccountCreatePendingInput: { type: object, required: [accountId, username, email], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, format: email, minLength: 3, maxLength: 254 } }, additionalProperties: false, description: Creates only an account with pending identity verification. Passwords and credentials are not accepted; login remains disabled until a separate verification and credential flow completes. }
@@ -1609,7 +1538,7 @@ components:
     AccountIdentityVerification: { type: string, enum: [pending, admin_provisioned, verified] }
     AccountIdentity: { type: object, required: [accountId, username, canonicalUsername, email, canonicalEmail, verification, revision, createdAt, updatedAt], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, canonicalUsername: { type: string }, email: { type: string }, canonicalEmail: { type: string }, displayName: { type: string }, verification: { $ref: '#/components/schemas/AccountIdentityVerification' }, revision: { type: integer, minimum: 1 }, createdAt: { type: string, format: date-time }, updatedAt: { type: string, format: date-time } }, additionalProperties: false }
     AccountIdentityUpdateInput: { type: object, required: [username, email, displayName, expectedRevision], properties: { username: { type: string, minLength: 3, maxLength: 64 }, email: { type: string, maxLength: 254 }, displayName: { type: string, maxLength: 120 }, expectedRevision: { type: integer, minimum: 1 }, currentPassword: { type: string, minLength: 1, maxLength: 256, writeOnly: true } }, additionalProperties: false }
-    AccountPasswordChangeInput: { type: object, required: [currentPassword, newPassword], properties: { currentPassword: { type: string, minLength: 1, maxLength: 256, writeOnly: true }, newPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
+    AccountPasswordChangeInput: { type: object, required: [newPassword], properties: { accountId: { $ref: '#/components/schemas/CanonicalId', description: 'Optional target account; only platform administrators may set another account password.' }, currentPassword: { type: string, minLength: 1, maxLength: 256, writeOnly: true }, newPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
     AccountDraftsInput: { type: object, required: [count, prefix, start, displayNameTemplate], properties: { count: { type: integer, minimum: 1, maximum: 100 }, prefix: { type: string, maxLength: 48 }, start: { type: integer, minimum: 0, maximum: 2147483647 }, displayNameTemplate: { type: string, maxLength: 100 } }, additionalProperties: false }
     AccountDraft: { type: object, required: [accountId, username, displayName, initialPassword], properties: { accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string }, displayName: { type: string }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false }
     AccountDraftPage: { type: object, required: [items], properties: { items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/AccountDraft' } } }, additionalProperties: false }
@@ -1657,7 +1586,9 @@ components:
     OrganizationMemberWorkspaceAssignInput: { type: object, required: [organizationId, workspaceId, organizationMemberId, organizationMemberRevision, role], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberRevision: { type: integer, minimum: 1 }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false }
     OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
     OrganizationRecord: { type: object, required: [organization, policy, revision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    OrganizationDeletePreflight: { type: object, required: [organizationId, revision, workspaceCount, memberCount, blockers, canDelete], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, workspaceCount: { type: integer, minimum: 0 }, memberCount: { type: integer, minimum: 0 }, canDelete: { type: boolean }, blockers: { type: array, items: { type: object, required: [code, count], properties: { code: { type: string }, count: { type: integer, minimum: 1 } }, additionalProperties: false } } }, additionalProperties: false }
     WorkspaceRecord: { type: object, required: [workspace, revision], properties: { workspace: { $ref: '#/components/schemas/Workspace' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
+    WorkspaceDeletePreflight: { type: object, required: [workspaceId, revision, blockers, canDelete], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, canDelete: { type: boolean }, blockers: { type: array, items: { type: object, required: [code, count], properties: { code: { type: string }, count: { type: integer, minimum: 1 } }, additionalProperties: false } } }, additionalProperties: false }
     OrganizationCreateInput: { type: object, required: [organization, policy], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' } }, additionalProperties: false }
     OrganizationIdInput: { type: object, required: [organizationId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     OrganizationListInput: { type: object, properties: {}, additionalProperties: false }
@@ -1868,11 +1799,9 @@ components:
     ProfileKeyRotationRecipientDevices: { type: object, required: [memberId, deviceKeys], properties: { memberId: { $ref: '#/components/schemas/CanonicalId' }, deviceKeys: { type: array, minItems: 1, maxItems: 64, items: { $ref: '#/components/schemas/DeviceEncryptionKey' } } }, additionalProperties: false }
     ProfileKeyRotationRecipientDevicesList: { type: array, maxItems: 256, items: { $ref: '#/components/schemas/ProfileKeyRotationRecipientDevices' } }
     ProfileKeyRotationExecuteInput: { type: object, required: [profileId, confirmedRecipients], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, confirmedRecipients: { type: array, maxItems: 16384, items: { type: object, required: [memberId, deviceId, fingerprint], properties: { memberId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/DeviceIdentifier' }, fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } }, additionalProperties: false }
-    SyncImportInput: { type: object, required: [export], properties: { export: { $ref: '#/components/schemas/SyncExport' }, dryRun: { type: boolean, default: false } }, additionalProperties: false }
     SyncExport: { type: object, required: [schemaVersion, exportId, sourceInstanceId, workspaceId, resourceId, baseGeneration, currentGeneration, manifestSha256, blobSetSha256, manifest, revisions, blobs, createdAtUnixMs, toolVersion], properties: { schemaVersion: { const: 1 }, exportId: { $ref: '#/components/schemas/NonBlankText' }, sourceInstanceId: { $ref: '#/components/schemas/NonBlankText' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, baseGeneration: { type: [integer, "null"], minimum: 0 }, currentGeneration: { type: integer, minimum: 1 }, manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, blobSetSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, manifest: { $ref: '#/components/schemas/SyncManifest' }, revisions: { type: array, minItems: 1, items: { $ref: '#/components/schemas/SyncRevision' } }, blobs: { type: array, items: { $ref: '#/components/schemas/SyncExportBlob' } }, createdAtUnixMs: { type: integer, minimum: 1 }, toolVersion: { $ref: '#/components/schemas/NonBlankText' } }, additionalProperties: false }
     SyncRevision: { type: object, required: [generation, parentGeneration, manifestSha256], properties: { generation: { type: integer, minimum: 1 }, parentGeneration: { type: [integer, "null"], minimum: 1 }, manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
     SyncExportBlob: { type: object, required: [key, size, checksum, data], properties: { key: { $ref: '#/components/schemas/SyncObjectKey' }, size: { type: integer, minimum: 0, maximum: 67108864 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' }, data: { type: array, maxItems: 67108864, items: { type: integer, minimum: 0, maximum: 255 } } }, additionalProperties: false }
-    SyncImportReceipt: { type: object, required: [operationId, exportId, workspaceId, resourceId, generation, manifestSha256, replayed, dryRun, createdBlobs, resumedBlobs, state], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' }, exportId: { $ref: '#/components/schemas/NonBlankText' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, generation: { type: integer, minimum: 1 }, manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, replayed: { type: boolean }, dryRun: { type: boolean }, createdBlobs: { type: integer, minimum: 0 }, resumedBlobs: { type: integer, minimum: 0 }, state: { enum: [planned, active] } }, additionalProperties: false }
     ManifestObject: { type: object, required: [key, size, checksum], properties: { key: { $ref: '#/components/schemas/SyncObjectKey' }, size: { type: integer, minimum: 0, maximum: 67108864 }, checksum: { type: string, pattern: '^[0-9a-f]{64}$' }, sourceGeneration: { type: integer, minimum: 1 } }, additionalProperties: false }
     ManifestTombstone: { type: object, required: [key, deletedGeneration, deletedAtUnixMs, retentionDeadlineUnixMs], properties: { key: { $ref: '#/components/schemas/SyncObjectKey' }, deletedGeneration: { type: integer, minimum: 1 }, deletedAtUnixMs: { type: integer, minimum: 1 }, retentionDeadlineUnixMs: { type: integer, minimum: 1 }, objectRetired: { type: boolean, default: false } }, additionalProperties: false }
     ManifestPayloadEncryption: { type: object, required: [schemaVersion, algorithm, resourceKeyEnvelope], properties: { schemaVersion: { const: 1 }, algorithm: { enum: [aes-256-gcm-chunk-v1, aes-256-gcm-chunk-v2] }, keyVersion: { type: string, pattern: '^[0-9a-f]{64}$' }, resourceKeyEnvelope: { allOf: [{ $ref: '#/components/schemas/ManifestObjectReference' }], properties: { key: { const: .buglogin/resource-key-envelope.json } } } }, allOf: [{ if: { properties: { algorithm: { const: aes-256-gcm-chunk-v2 } }, required: [algorithm] }, then: { required: [keyVersion] } }], additionalProperties: false }
@@ -1886,166 +1815,6 @@ components:
     OperationAccepted: { type: object, required: [operationId, commandId, status], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' }, commandId: { $ref: '#/components/schemas/OperationIdentifier' }, status: { enum: [accepted] } } }
     OperationStatus: { type: string, enum: [queued, running, completed, failed, cancelled] }
     Operation: { type: object, required: [operationId, commandId, scope, status, progress], properties: { operationId: { $ref: '#/components/schemas/OperationIdentifier' }, commandId: { $ref: '#/components/schemas/OperationIdentifier' }, scope: { $ref: '#/components/schemas/ResourceScope' }, status: { $ref: '#/components/schemas/OperationStatus' }, progress: { type: [number, 'null'], minimum: 0, maximum: 1 }, result: {}, error: { $ref: '#/components/schemas/Problem' } }, additionalProperties: false }
-    MigrationInspectInput: { type: object, required: [sourceRoot], properties: { sourceRoot: { type: string } }, additionalProperties: false }
-    MigrationImportInput: { type: object, required: [sourceRoot, stagingParent, destinationRoot, runId, confirmation], properties: { sourceRoot: { type: string }, stagingParent: { type: string }, destinationRoot: { type: string }, runId: { type: string }, confirmation: { type: string } }, additionalProperties: false }
-    MigrationProfileDataImportInput: { type: object, required: [sourceRoot], properties: { sourceRoot: { type: string, minLength: 1 } }, additionalProperties: false }
-    ControlImportInput:
-      type: object
-      required: [packageId]
-      properties:
-        packageId: { $ref: '#/components/schemas/MigrationPackageId' }
-        dryRun: { type: boolean, default: false }
-        accounts: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralAccountRecord' }, default: [] }
-        profiles: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralProfileRecord' }, default: [] }
-        organizations: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralOrganizationRecord' }, default: [] }
-        workspaces: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralWorkspaceRecord' }, default: [] }
-        teams: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralTeamRecord' }, default: [] }
-        members: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralMemberRecord' }, default: [] }
-        resources: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralResourceRecord' }, default: [] }
-        profileResources: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralProfileResourceRecord' }, default: [] }
-        grants: { type: array, items: { $ref: '#/components/schemas/MigrationNeutralGrantRecord' }, default: [] }
-      additionalProperties: false
-    ControlRollbackInput:
-      type: object
-      required: [packageId, confirmation]
-      properties:
-        packageId: { $ref: '#/components/schemas/MigrationPackageId' }
-        confirmation: { const: ROLLBACK_CONTROL_MIGRATION }
-      additionalProperties: false
-    MigrationNeutralSourceRef:
-      type: object
-      required: [system, instance_id, id]
-      properties:
-        system: { type: string, minLength: 1 }
-        instance_id: { type: string, minLength: 1 }
-        id: { type: string, minLength: 1 }
-      additionalProperties: false
-    MigrationNeutralAccountRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.account/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [status], properties: { status: { type: string, minLength: 1 } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralOrganizationRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.organization/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [account_id, name], properties: { account_id: { type: string, minLength: 1 }, name: { type: string, minLength: 1 } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralWorkspaceRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.workspace/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [organization_id, name, policy], properties: { organization_id: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, policy: { type: object, required: [max_profiles, max_members, max_storage_bytes, offline_entitled], properties: { max_profiles: { type: integer, minimum: 0 }, max_members: { type: integer, minimum: 0 }, max_storage_bytes: { type: integer, minimum: 0 }, offline_entitled: { type: boolean } }, additionalProperties: false } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralTeamRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.team/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [workspace_id, name, member_ids], properties: { workspace_id: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, member_ids: { type: array, items: { type: string, minLength: 1 } } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralMemberRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.member/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [account_id, workspace_id, role, status], properties: { account_id: { type: string, minLength: 1 }, workspace_id: { type: string, minLength: 1 }, team_id: { type: [string, "null"] }, role: { type: string, minLength: 1 }, status: { type: string, minLength: 1 } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralResourceRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.resource/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [workspace_id, kind, state, display_name], properties: { workspace_id: { type: string, minLength: 1 }, kind: { type: string, minLength: 1 }, state: { type: string, minLength: 1 }, display_name: { type: string, minLength: 1 } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralProfileResourceRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.profile-resource/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [profile_id, resource_id, workspace_id, archive_state], properties: { profile_id: { type: string, minLength: 1 }, resource_id: { type: string, minLength: 1 }, workspace_id: { type: string, minLength: 1 }, archive_state: { type: string, enum: [active, archived] } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralGrantRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.grant/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [workspace_id, resource_id, member_id, action, effect], properties: { workspace_id: { type: string, minLength: 1 }, resource_id: { type: string, minLength: 1 }, member_id: { type: string, minLength: 1 }, action: { type: string, minLength: 1 }, effect: { type: string, minLength: 1 } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    MigrationNeutralProfileRecord:
-      type: object
-      required: [schema, source_ref, id, revision, data, extensions]
-      properties:
-        schema: { const: buglogin.profile/1 }
-        source_ref: { $ref: '#/components/schemas/MigrationNeutralSourceRef' }
-        id: { type: string, minLength: 1 }
-        revision: { type: integer, minimum: 1 }
-        created_at: { type: [string, "null"], format: date-time }
-        updated_at: { type: [string, "null"], format: date-time }
-        data: { type: object, required: [name, runtime, release_type, ephemeral, source_data_object, migration_class, tags], properties: { name: { type: string, minLength: 1 }, runtime: { type: string, minLength: 1 }, runtime_version: { type: [string, "null"] }, release_type: { type: string, minLength: 1 }, ephemeral: { type: boolean }, source_data_object: { type: object, required: [path, logical_type, disposition], properties: { path: { type: string, minLength: 1 }, logical_type: { type: string, minLength: 1 }, disposition: { type: object, required: [classification, reason_code], properties: { classification: { type: string, enum: [encrypted, excluded] }, reason_code: { type: string, minLength: 1 } }, additionalProperties: false } }, additionalProperties: false }, migration_class: { type: string, minLength: 1 }, group_id: { type: [string, "null"] }, proxy_id: { type: [string, "null"] }, vpn_id: { type: [string, "null"] }, extension_group_id: { type: [string, "null"] }, tags: { type: array, items: { type: string } }, note: { type: [string, "null"] }, legacy_runtime_config: { oneOf: [{ $ref: '#/components/schemas/JsonValue' }, { type: "null" }] } }, additionalProperties: false }
-        extensions: { type: object, additionalProperties: { $ref: '#/components/schemas/JsonValue' } }
-      additionalProperties: false
-    ControlImportCounts: { type: object, required: [profiles, accounts, organizations, workspaces, teams, members, resources, profileResources, grants], properties: { profiles: { type: integer, minimum: 0 }, accounts: { type: integer, minimum: 0 }, organizations: { type: integer, minimum: 0 }, workspaces: { type: integer, minimum: 0 }, teams: { type: integer, minimum: 0 }, members: { type: integer, minimum: 0 }, resources: { type: integer, minimum: 0 }, profileResources: { type: integer, minimum: 0 }, grants: { type: integer, minimum: 0 } }, additionalProperties: false }
-    ControlImportPlan: { type: object, required: [packageId, packageSha256, create, reuse], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, packageSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, create: { $ref: '#/components/schemas/ControlImportCounts' }, reuse: { $ref: '#/components/schemas/ControlImportCounts' } }, additionalProperties: false }
-    ControlImportReceipt: { type: object, required: [packageId, packageSha256, state, replayed, create, reuse], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, packageSha256: { type: string, pattern: '^[0-9a-f]{64}$' }, state: { type: string, enum: [active, rolled_back] }, replayed: { type: boolean }, create: { $ref: '#/components/schemas/ControlImportCounts' }, reuse: { $ref: '#/components/schemas/ControlImportCounts' } }, additionalProperties: false }
-    ControlImportResult: { oneOf: [{ $ref: '#/components/schemas/ControlImportPlan' }, { $ref: '#/components/schemas/ControlImportReceipt' }] }
-    MigrationPackageFileInput: { type: string, format: binary }
-    MigrationPackageFileReceipt: { type: object, required: [packageId, path, contentSha256, sizeBytes], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, path: { type: string }, contentSha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, sizeBytes: { type: integer, minimum: 0 } }, additionalProperties: false }
-    MigrationPackageVerifyReceipt: { type: object, required: [packageId, verified], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, verified: { type: boolean }, manifestSha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }, fileCount: { type: integer, minimum: 0 } }, additionalProperties: false }
-    MigrationPackageActivationReceipt: { type: object, required: [packageId, state, replayed, controlImport, syncImport], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' }, state: { enum: [active] }, replayed: { type: boolean }, controlImport: {}, syncImport: {} }, additionalProperties: false }
-    MigrationPackageActivationInput: { type: object, required: [packageId], properties: { packageId: { $ref: '#/components/schemas/MigrationPackageId' } }, additionalProperties: false }
     DeleteReceipt: { type: object, required: [id, deleted, recoverable], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, deleted: { type: boolean }, recoverable: { type: boolean } } }
     AuditEventsListInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, cursor: { type: [string, "null"], maxLength: 280 }, limit: { type: [integer, "null"], minimum: 1, maximum: 100, default: 50 } }, additionalProperties: false }
     AuditEventPage: { type: object, required: [items, nextCursor], properties: { items: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }, nextCursor: { type: [string, "null"], maxLength: 280 } }, additionalProperties: false }

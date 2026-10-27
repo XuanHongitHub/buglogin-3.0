@@ -3568,7 +3568,10 @@ export function ProfilesDataTable({
           const profile = row.original;
           const meta = table.options.meta as TableMeta;
           const syncEntry = meta.syncStatuses[profile.id];
-          const liveStatus = syncEntry?.status as
+          const lockInfo = meta.getProfileLockInfo(profile.id);
+          const liveStatus = (
+            lockInfo?.activity === "syncing" ? "syncing" : syncEntry?.status
+          ) as
             | "syncing"
             | "waiting"
             | "synced"

@@ -145,58 +145,6 @@ export type WebSessionSummary = SessionSummaryDto;
 export type ApiTokenSummary = ApiToken;
 
 export type LaunchInput = ProfileLaunchInput;
-export type MigrationClass = "direct" | "partial" | "unsupported" | "unknown";
-export type MigrationSourceIdentity = {
-  system: string;
-  version: string;
-  instanceId: string;
-  os: string;
-  architecture: string;
-  root: string;
-};
-export type MigrationRuntimeFinding = {
-  runtime: string;
-  class: MigrationClass;
-  reasonCode: string;
-  records: number;
-};
-export type MigrationRecordIssue = { sourceRef: string; code: string };
-export type MigrationInspectReport = {
-  schema: string;
-  source: MigrationSourceIdentity;
-  entityCounts: Record<string, number>;
-  totalBytes: number;
-  runtimeFindings: MigrationRuntimeFinding[];
-  secretScan: { filesWithSecretFields: number; secretFieldsPresent: number };
-  invalidRecords: MigrationRecordIssue[];
-  warnings: MigrationRecordIssue[];
-  danglingReferences: MigrationRecordIssue[];
-  sourceTreeSha256: string;
-  cutoverEligibility: "eligible" | "blocked";
-};
-export type MigrationSnapshotEntry = {
-  path: string;
-  bytes: number;
-  sha256: string;
-};
-export type MigrationSourceSnapshot = {
-  snapshotId: string;
-  sourceTreeSha256: string;
-  totalBytes: number;
-  files: MigrationSnapshotEntry[];
-};
-export type MigrationInspectResult = {
-  report: MigrationInspectReport;
-  snapshot: MigrationSourceSnapshot;
-};
-export type MigrationInspectInput = { sourceRoot: string };
-export type MigrationImportInput = {
-  sourceRoot: string;
-  stagingParent: string;
-  destinationRoot: string;
-  runId: string;
-  confirmation: string;
-};
 export type ProxyParseRow = {
   protocol: string | null;
   endpoint: string | null;
@@ -430,14 +378,6 @@ export type WebApiClient = {
       input: ProfileGroupsReplaceInput,
       options: MutationOptions,
     ): Promise<ProfileRecord>;
-    inspectMigration(
-      input: MigrationInspectInput,
-      options: MutationOptions,
-    ): Promise<Operation>;
-    importMigration(
-      input: MigrationImportInput,
-      options: MutationOptions,
-    ): Promise<Operation>;
   };
 };
 

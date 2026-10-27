@@ -124,7 +124,7 @@ fn artifact_replacement_after_validation_is_rejected_at_process_launch() {
     let specification = adapter
         .launch_specification(&binary, &fixture.0, &[])
         .unwrap();
-    fs::write(&fixture.0.join("browser"), b"replaced-after-validation").unwrap();
+    fs::write(fixture.0.join("browser"), b"replaced-after-validation").unwrap();
 
     let approved = ApprovedExecutable::new(&fixture.0.join("browser")).unwrap();
     let controller =

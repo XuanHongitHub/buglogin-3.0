@@ -24,10 +24,15 @@ export const COOKIE_BOT_DAY_BITS = [1, 2, 4, 8, 16, 32, 64] as const;
  * call site.
  */
 export const COOKIE_BOT_USER_TEMPLATE_PREFIX = "user:";
+// Older desktop builds stored user templates locally as `tmpl_<unix-seconds>`.
+// Keep those rows recognizable while new writes use the server-compatible ID.
+const LEGACY_COOKIE_BOT_USER_TEMPLATE_PREFIX = "tmpl_";
 
 export function isUserTemplateId(id: string | null | undefined): boolean {
   return (
-    typeof id === "string" && id.startsWith(COOKIE_BOT_USER_TEMPLATE_PREFIX)
+    typeof id === "string" &&
+    (id.startsWith(COOKIE_BOT_USER_TEMPLATE_PREFIX) ||
+      id.startsWith(LEGACY_COOKIE_BOT_USER_TEMPLATE_PREFIX))
   );
 }
 

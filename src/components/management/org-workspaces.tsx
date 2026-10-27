@@ -9,11 +9,14 @@ import {
   LuCheck,
   LuChevronDown,
   LuCircleAlert,
+  LuDatabase,
   LuDownload,
   LuEllipsis,
   LuFileUp,
+  LuFolderKanban,
   LuKeyRound,
   LuLoaderCircle,
+  LuPanelsTopLeft,
   LuPencil,
   LuPlus,
   LuRefreshCw,
@@ -61,7 +64,11 @@ import type {
   WorkspaceRecord,
 } from "../../../frontend/src/generated/command-registry";
 import { AccountDirectory, AccountProvisioning } from "./accounts";
-import { ManagementWorkspace } from "./workspace";
+import {
+  parseOrganizationManagementRoute,
+  serializeOrganizationManagementRoute,
+} from "./org-management-route";
+import { ManagementWorkspace, type ManagementWorkspaceTab } from "./workspace";
 import "./org-platform-i18n";
 
 const api = createTauriDesktopApi();
@@ -91,6 +98,44 @@ type BatchRow = {
 };
 type Route = { orgId: string | null; workspaceId: string | null };
 type PlatformView = "organizations" | "workspaces" | "quotas";
+
+type SavedManagementState = {
+  route: Route;
+  orgTab: "workspaces" | "accounts" | "settings";
+  search: string;
+  page: number;
+};
+
+function readManagementState(key: string): SavedManagementState {
+  const empty: SavedManagementState = {
+    route: { orgId: null, workspaceId: null },
+    orgTab: "workspaces",
+    search: "",
+    page: 1,
+  };
+  if (typeof window === "undefined") return empty;
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(key) ?? "null");
+    if (!value || typeof value !== "object") return empty;
+    return {
+      route: {
+        orgId:
+          typeof value.route?.orgId === "string" ? value.route.orgId : null,
+        workspaceId:
+          typeof value.route?.workspaceId === "string"
+            ? value.route.workspaceId
+            : null,
+      },
+      orgTab: ["workspaces", "accounts", "settings"].includes(value.orgTab)
+        ? value.orgTab
+        : empty.orgTab,
+      search: typeof value.search === "string" ? value.search : "",
+      page: Number.isSafeInteger(value.page) && value.page > 0 ? value.page : 1,
+    };
+  } catch {
+    return empty;
+  }
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -261,29 +306,51 @@ function useDirectory() {
         api.getAccount(),
         api.listOrganizations(),
       ]);
-      const orgEntries = await Promise.all(
-        orgPage.items.map(async (organization) => {
-          const [ws, people] = await Promise.allSettled([
-            api.listWorkspaces(organization.id),
-            api.listOrganizationMembers(organization.id),
-          ]);
-          const owner =
-            people.status === "fulfilled"
-              ? people.value.items.find(
-                  (person) => person.accountId === organization.accountId,
-                )
-              : null;
-          return {
-            organization,
-            owner: owner?.username || owner?.email || null,
-            workspaces: ws.status === "fulfilled" ? ws.value.items : null,
-            error: ws.status === "rejected" ? errorMessage(ws.reason) : null,
-          };
-        }),
-      );
       if (id !== request.current) return;
       setActor(account);
-      setOrganizations(orgEntries);
+      const initialOrganizations: OrgEntry[] = orgPage.items.map(
+        (organization) => ({
+          organization,
+          owner: null,
+          workspaces: null,
+          error: null,
+        }),
+      );
+      setOrganizations(initialOrganizations);
+      const orgEntries: OrgEntry[] = [];
+      for (let start = 0; start < initialOrganizations.length; start += 4) {
+        const batch = await Promise.all(
+          initialOrganizations.slice(start, start + 4).map(async (entry) => {
+            const [ws, people] = await Promise.allSettled([
+              api.listWorkspaces(entry.organization.id),
+              api.listOrganizationMembers(entry.organization.id),
+            ]);
+            const owner =
+              people.status === "fulfilled"
+                ? people.value.items.find(
+                    (person) =>
+                      person.accountId === entry.organization.accountId,
+                  )
+                : null;
+            return {
+              ...entry,
+              owner: owner?.username || owner?.email || null,
+              workspaces: ws.status === "fulfilled" ? ws.value.items : null,
+              error: ws.status === "rejected" ? errorMessage(ws.reason) : null,
+            };
+          }),
+        );
+        if (id !== request.current) return;
+        orgEntries.push(...batch);
+        setOrganizations((current) =>
+          current.map(
+            (entry) =>
+              batch.find(
+                (updated) => updated.organization.id === entry.organization.id,
+              ) ?? entry,
+          ),
+        );
+      }
       const entries: WorkspaceEntry[] = orgEntries.flatMap((entry) =>
         (entry.workspaces ?? []).map((workspace) => ({
           organization: entry.organization,
@@ -293,7 +360,10 @@ function useDirectory() {
         })),
       );
       setWorkspaces(entries);
-      // Bound usage lookups instead of launching unbounded requests per tenant.
+      // The inventory is usable now. Usage counts are secondary and must not
+      // keep the whole management page in a loading state.
+      setLoading(false);
+      // Keep optional usage lookups bounded independently of tenant count.
       for (let start = 0; start < entries.length; start += 4) {
         const next = await Promise.all(
           entries.slice(start, start + 4).map(async (entry) => {
@@ -342,12 +412,27 @@ export function OrganizationManagement({
   const { t } = useTranslation("managementOrg");
   const { actor, organizations, workspaces, loading, error, reload } =
     useDirectory();
-  const [route, setRoute] = useState<Route>({ orgId: null, workspaceId: null });
-  const [orgTab, setOrgTab] = useState<"workspaces" | "accounts" | "settings">(
-    "workspaces",
+  const stateKey = `buglogin:management:${platformView ?? "organization"}:v1`;
+  const [savedState] = useState(() => readManagementState(stateKey));
+  const [initialUrlRoute] = useState(() =>
+    typeof window === "undefined"
+      ? null
+      : parseOrganizationManagementRoute(window.location.search),
   );
-  const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
+  const [route, setRoute] = useState<Route>(
+    initialUrlRoute
+      ? {
+          orgId: initialUrlRoute.organizationId,
+          workspaceId: initialUrlRoute.workspaceId,
+        }
+      : savedState.route,
+  );
+  const [orgTab, setOrgTab] = useState<"workspaces" | "accounts" | "settings">(
+    initialUrlRoute?.organizationTab ?? savedState.orgTab,
+  );
+  const skipHistoryPush = useRef(false);
+  const [search, setSearch] = useState(savedState.search);
+  const [page, setPage] = useState(savedState.page);
   const [selection, setSelection] = useState<string[]>([]);
   const [orgEditor, setOrgEditor] = useState<Organization | "new" | null>(null);
   const [workspaceEditor, setWorkspaceEditor] = useState<
@@ -363,6 +448,55 @@ export function OrganizationManagement({
   const [transferTarget, setTransferTarget] = useState<Organization | null>(
     null,
   );
+  const [workspaceInitialTab, setWorkspaceInitialTab] =
+    useState<ManagementWorkspaceTab>(
+      initialUrlRoute?.workspaceTab ?? "overview",
+    );
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(
+        stateKey,
+        JSON.stringify({ route, orgTab, search, page }),
+      );
+    } catch {
+      // The current view still works when the desktop storage is unavailable.
+    }
+  }, [orgTab, page, route, search, stateKey]);
+  useEffect(() => {
+    const onPopState = () => {
+      skipHistoryPush.current = true;
+      const urlRoute = parseOrganizationManagementRoute(window.location.search);
+      setRoute({
+        orgId: urlRoute?.organizationId ?? null,
+        workspaceId: urlRoute?.workspaceId ?? null,
+      });
+      setOrgTab(urlRoute?.organizationTab ?? "workspaces");
+      setWorkspaceInitialTab(urlRoute?.workspaceTab ?? "overview");
+      setSelection([]);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+  useEffect(() => {
+    if (skipHistoryPush.current) {
+      skipHistoryPush.current = false;
+      return;
+    }
+    const query = serializeOrganizationManagementRoute(window.location.search, {
+      organizationId: route.orgId,
+      workspaceId: route.workspaceId,
+      organizationTab: orgTab,
+      workspaceTab: workspaceInitialTab,
+    });
+    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextUrl !== currentUrl)
+      window.history.pushState(
+        { ...window.history.state, bugloginOrganizationManagement: true },
+        "",
+        nextUrl,
+      );
+  }, [orgTab, route, workspaceInitialTab]);
   const [createAccounts, setCreateAccounts] = useState<{
     workspaceId?: string;
     bulk?: boolean;
@@ -376,13 +510,15 @@ export function OrganizationManagement({
   const canManageOrg = useCallback(
     (org: Organization) =>
       Boolean(
-        actor && (actor.platformAdmin || org.accountId === actor.accountId),
+        actor &&
+          (actor.platformAdmin ||
+            actor.manageableOrganizationIds.includes(org.id)),
       ),
     [actor],
   );
   const canManageWorkspace = (entry: WorkspaceEntry) =>
     canManageOrg(entry.organization) ||
-    Boolean(actor?.managedWorkspaceIds.includes(entry.workspace.id));
+    Boolean(actor?.manageableWorkspaceIds.includes(entry.workspace.id));
   const showOrgs = !platformView
     ? !selectedOrg
     : platformView === "organizations" && !selectedOrg;
@@ -416,8 +552,10 @@ export function OrganizationManagement({
       : organizations.find((entry) => canManageOrg(entry.organization))
           ?.organization);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: platformView is a stable parent prop and this reset intentionally runs only on view changes.
+  const previousPlatformView = useRef(platformView);
   useEffect(() => {
+    if (previousPlatformView.current === platformView) return;
+    previousPlatformView.current = platformView;
     setSelection([]);
     setPage(1);
     setSearch("");
@@ -436,6 +574,7 @@ export function OrganizationManagement({
     setSelection([]);
   };
   const openWs = (entry: WorkspaceEntry) => {
+    setWorkspaceInitialTab("overview");
     setRoute({ orgId: entry.organization.id, workspaceId: entry.workspace.id });
     setSelection([]);
   };
@@ -458,6 +597,8 @@ export function OrganizationManagement({
         organizationName={selectedWs.organization.name}
         workspaceId={selectedWs.workspace.id}
         workspaceName={selectedWs.workspace.name}
+        initialTab={workspaceInitialTab}
+        onTabChange={setWorkspaceInitialTab}
         onBack={() =>
           setRoute((current) => ({ ...current, workspaceId: null }))
         }
@@ -1110,14 +1251,22 @@ export function OrganizationManagement({
         <DeleteTenancy
           target={deleteTarget}
           onClose={() => setDeleteTarget(null)}
-          onNavigate={(tab) => {
+          onNavigate={(destination) => {
             const organization =
               "workspace" in deleteTarget
                 ? deleteTarget.organization
                 : deleteTarget;
             setDeleteTarget(null);
-            setRoute({ orgId: organization.id, workspaceId: null });
-            setOrgTab(tab);
+            if (typeof destination === "string") {
+              setRoute({ orgId: organization.id, workspaceId: null });
+              setOrgTab(destination);
+            } else if ("workspace" in deleteTarget) {
+              setWorkspaceInitialTab(destination.workspaceTab);
+              setRoute({
+                orgId: organization.id,
+                workspaceId: deleteTarget.workspace.id,
+              });
+            }
           }}
           onSaved={() => {
             setRoute({ orgId: null, workspaceId: null });
@@ -2143,7 +2292,12 @@ function DeleteTenancy({
   target: Organization | WorkspaceEntry;
   onClose: () => void;
   onSaved: () => void;
-  onNavigate: (tab: "workspaces" | "accounts") => void;
+  onNavigate: (
+    destination:
+      | "workspaces"
+      | "accounts"
+      | { workspaceTab: "members" | "groups" | "profiles" | "resources" },
+  ) => void;
 }) {
   const { t } = useTranslation("managementOrg");
   const workspace = "workspace" in target ? target : null;
@@ -2152,66 +2306,74 @@ function DeleteTenancy({
   const [confirmation, setConfirmation] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState<string | null>(null),
-    [dependencyCheck, setDependencyCheck] = useState<{
-      members: number;
-      workspaces: number;
-    } | null>(workspace ? null : { members: 0, workspaces: 0 }),
+    [workspacePreflight, setWorkspacePreflight] = useState<Awaited<
+      ReturnType<typeof api.getWorkspaceDeletePreflight>
+    > | null>(null),
+    [dependencyCheck, setDependencyCheck] = useState<Awaited<
+      ReturnType<typeof api.getOrganizationDeletePreflight>
+    > | null>(null),
     [checkingDependencies, setCheckingDependencies] = useState(!workspace),
     [dependencyError, setDependencyError] = useState<string | null>(null);
   const refreshDependencies = useCallback(async () => {
-    if (workspace) return;
     setCheckingDependencies(true);
     setDependencyError(null);
     try {
-      const [members, workspaces] = await Promise.all([
-        api.listOrganizationMembers(org.id),
-        api.listWorkspaces(org.id),
-      ]);
-      setDependencyCheck({
-        members: members.items.filter(
-          (member) => member.accountId !== org.accountId,
-        ).length,
-        workspaces: workspaces.items.length,
-      });
+      if (workspace) {
+        setWorkspacePreflight(
+          await api.getWorkspaceDeletePreflight({
+            organizationId: org.id,
+            workspaceId: workspace.workspace.id,
+          }),
+        );
+        setDependencyCheck(null);
+        return;
+      }
+      setDependencyCheck(
+        await api.getOrganizationDeletePreflight({ organizationId: org.id }),
+      );
     } catch (err) {
       setDependencyCheck(null);
+      setWorkspacePreflight(null);
       setDependencyError(errorMessage(err));
     } finally {
       setCheckingDependencies(false);
     }
-  }, [org.id, org.accountId, workspace]);
+  }, [org.id, workspace]);
   useEffect(() => {
     void refreshDependencies();
   }, [refreshDependencies]);
   const blockedByDependencies = Boolean(
-    !workspace &&
-      (checkingDependencies ||
-        dependencyError ||
-        !dependencyCheck ||
-        dependencyCheck.members > 0 ||
-        dependencyCheck.workspaces > 0),
+    checkingDependencies ||
+      dependencyError ||
+      (workspace
+        ? !workspacePreflight?.canDelete
+        : !dependencyCheck?.canDelete),
   );
   const remove = async () => {
     setBusy(true);
     setError(null);
     try {
       if (workspace) {
-        const record = await api.getWorkspaceRecord({
+        const preflight = await api.getWorkspaceDeletePreflight({
           organizationId: org.id,
           workspaceId: workspace.workspace.id,
         });
+        setWorkspacePreflight(preflight);
+        if (!preflight.canDelete) return;
         await api.deleteWorkspace({
           organizationId: org.id,
           workspaceId: workspace.workspace.id,
-          expectedRevision: record.revision,
+          expectedRevision: preflight.revision,
         });
       } else {
-        const record = await api.getOrganizationRecord({
+        const preflight = await api.getOrganizationDeletePreflight({
           organizationId: org.id,
         });
+        setDependencyCheck(preflight);
+        if (!preflight.canDelete) return;
         await api.deleteOrganization({
           organizationId: org.id,
-          expectedRevision: record.revision,
+          expectedRevision: preflight.revision,
         });
       }
       showSuccessToast(t("deleted"));
@@ -2238,7 +2400,119 @@ function DeleteTenancy({
           </DialogDescription>
         </DialogHeader>
         {error ? <ErrorNotice message={error} /> : null}
-        {!workspace ? (
+        {workspace ? (
+          <section
+            className="space-y-2 rounded-md border border-border bg-muted/20 p-3"
+            aria-live="polite"
+          >
+            <p className="text-sm font-medium">{t("deleteDependencies")}</p>
+            {checkingDependencies ? (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <LuLoaderCircle className="size-4 animate-spin" />
+                {t("checkingWorkspaceDependencies")}
+              </p>
+            ) : dependencyError ? (
+              <div className="space-y-2">
+                <ErrorNotice message={dependencyError} />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void refreshDependencies()}
+                >
+                  <LuRefreshCw />
+                  {t("retry")}
+                </Button>
+              </div>
+            ) : workspacePreflight ? (
+              workspacePreflight.canDelete ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("workspaceDeleteReady")}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="space-y-1 text-sm text-muted-foreground">
+                    {workspacePreflight.blockers.map((blocker) => (
+                      <p key={blocker.code}>
+                        {t(`deleteBlocker_${blocker.code}`, {
+                          count: blocker.count,
+                        })}
+                      </p>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {workspacePreflight.blockers.some(
+                      (item) => item.code === "workspace_has_profiles",
+                    ) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onNavigate({ workspaceTab: "profiles" })}
+                      >
+                        <LuPanelsTopLeft />
+                        {t("manageProfiles")}
+                      </Button>
+                    ) : null}
+                    {workspacePreflight.blockers.some(
+                      (item) => item.code === "workspace_has_resources",
+                    ) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          onNavigate({ workspaceTab: "resources" })
+                        }
+                      >
+                        <LuDatabase />
+                        {t("manageResources")}
+                      </Button>
+                    ) : null}
+                    {workspacePreflight.blockers.some(
+                      (item) => item.code === "workspace_has_groups",
+                    ) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onNavigate({ workspaceTab: "groups" })}
+                      >
+                        <LuFolderKanban />
+                        {t("manageGroups")}
+                      </Button>
+                    ) : null}
+                    {workspacePreflight.blockers.some((item) =>
+                      ["workspace_has_teams", "workspace_has_members"].includes(
+                        item.code,
+                      ),
+                    ) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onNavigate({ workspaceTab: "members" })}
+                      >
+                        <LuUsers />
+                        {t("manageMembers")}
+                      </Button>
+                    ) : null}
+                    {workspacePreflight.blockers.some((item) =>
+                      [
+                        "workspace_has_active_operations",
+                        "workspace_has_sync_reservations",
+                      ].includes(item.code),
+                    ) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void refreshDependencies()}
+                      >
+                        <LuRefreshCw />
+                        {t("retry")}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            ) : null}
+          </section>
+        ) : (
           <section
             className="space-y-2 rounded-md border border-border bg-muted/20 p-3"
             aria-live="polite"
@@ -2266,18 +2540,18 @@ function DeleteTenancy({
                 <ul className="space-y-1 text-sm text-muted-foreground">
                   <li>
                     {t("organizationMemberCount", {
-                      count: dependencyCheck.members,
+                      count: dependencyCheck.memberCount,
                     })}
                   </li>
                   <li>
                     {t("organizationWorkspaceCount", {
-                      count: dependencyCheck.workspaces,
+                      count: dependencyCheck.workspaceCount,
                     })}
                   </li>
                 </ul>
                 {blockedByDependencies ? (
                   <div className="flex flex-wrap gap-2 pt-1">
-                    {dependencyCheck.members > 0 ? (
+                    {dependencyCheck.memberCount > 0 ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2287,7 +2561,7 @@ function DeleteTenancy({
                         {t("directory")}
                       </Button>
                     ) : null}
-                    {dependencyCheck.workspaces > 0 ? (
+                    {dependencyCheck.workspaceCount > 0 ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2302,7 +2576,7 @@ function DeleteTenancy({
               </>
             ) : null}
           </section>
-        ) : null}
+        )}
         <p className="break-words text-sm font-semibold">{name}</p>
         {!blockedByDependencies ? (
           <div className="space-y-1.5">
@@ -2351,9 +2625,16 @@ function TransferOwnership({
     [confirm, setConfirm] = useState(false),
     [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(true),
+    [reloadToken, setReloadToken] = useState(0),
     [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setError(null);
+    if (reloadToken > 0) {
+      setTarget("");
+      setConfirm(false);
+    }
     void api
       .listOrganizationMembers(organization.id)
       .then((page) => {
@@ -2375,7 +2656,7 @@ function TransferOwnership({
     return () => {
       active = false;
     };
-  }, [organization.id, organization.accountId]);
+  }, [organization.id, organization.accountId, reloadToken]);
   const transfer = async () => {
     setBusy(true);
     setError(null);
@@ -2413,28 +2694,30 @@ function TransferOwnership({
         <p className="text-sm font-medium">{organization.name}</p>
         <div className="space-y-1.5">
           <Label>{t("newOwner")}</Label>
-          <Select
-            value={target}
-            onValueChange={(value) => {
-              setTarget(value);
-              setConfirm(false);
-            }}
-            disabled={loading || busy || confirm}
-          >
-            <SelectTrigger>
-              <SelectValue
-                placeholder={t(loading ? "loading" : "searchAccount")}
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {people.map((person) => (
-                <SelectItem key={person.accountId} value={person.accountId}>
-                  {person.username || person.email || t("unavailable")}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {!loading && people.length === 0 ? (
+          {loading || people.length > 0 ? (
+            <Select
+              value={target}
+              onValueChange={(value) => {
+                setTarget(value);
+                setConfirm(false);
+              }}
+              disabled={loading || busy || confirm}
+            >
+              <SelectTrigger>
+                <SelectValue
+                  placeholder={t(loading ? "loading" : "searchAccount")}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {people.map((person) => (
+                  <SelectItem key={person.accountId} value={person.accountId}>
+                    {person.username || person.email || t("unavailable")}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+          {!loading && !error && people.length === 0 ? (
             <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
               <p className="text-sm text-muted-foreground">
                 {t("noEligibleAccounts")}
@@ -2444,6 +2727,17 @@ function TransferOwnership({
                 {t("directory")}
               </Button>
             </div>
+          ) : null}
+          {error ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={loading || busy}
+              onClick={() => setReloadToken((value) => value + 1)}
+            >
+              <LuRefreshCw className={loading ? "animate-spin" : undefined} />
+              {t("retry")}
+            </Button>
           ) : null}
         </div>
         {confirm ? (
@@ -2455,6 +2749,9 @@ function TransferOwnership({
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {t("transferHelp")}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t("transferImpact")}
             </p>
           </div>
         ) : null}

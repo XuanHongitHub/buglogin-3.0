@@ -3,7 +3,11 @@ use std::env;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 use std::thread;
 
 use buglogin_domain::errors::Problem;
@@ -719,6 +723,7 @@ impl ControlRecordStore for MemoryControlRecordStore {
 
 pub struct PostgresControlRecordStore {
     worker: mpsc::SyncSender<PgOperation>,
+    queued: Arc<AtomicUsize>,
 }
 
 type PgOperation = Box<dyn FnOnce(&mut PostgresControlRecordWorker) + Send + 'static>;
@@ -735,6 +740,7 @@ impl PostgresControlRecordStore {
         let config = config.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (worker_tx, worker_rx) = mpsc::sync_channel::<PgOperation>(PG_WORKER_QUEUE_CAPACITY);
+        let queued = Arc::new(AtomicUsize::new(0));
         thread::Builder::new()
             .name("buglogin-postgres".into())
             .spawn(
@@ -753,7 +759,10 @@ impl PostgresControlRecordStore {
             )
             .map_err(|_| unavailable())?;
         ready_rx.recv().map_err(|_| unavailable())??;
-        Ok(Self { worker: worker_tx })
+        Ok(Self {
+            worker: worker_tx,
+            queued,
+        })
     }
 
     fn call<T, F>(&self, operation: F) -> Result<T, Problem>
@@ -762,15 +771,47 @@ impl PostgresControlRecordStore {
         F: FnOnce(&mut PostgresControlRecordWorker) -> Result<T, Problem> + Send + 'static,
     {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.worker
-            .try_send(Box::new(move |worker| {
-                let _ = reply_tx.send(operation(worker));
-            }))
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => overloaded(),
+        let queued = Arc::clone(&self.queued);
+        let enqueued_at = std::time::Instant::now();
+        queued.fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = self.worker.try_send(Box::new(move |worker| {
+            let pending = queued.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+            let queue_wait = enqueued_at.elapsed();
+            let started_at = std::time::Instant::now();
+            let result = operation(worker);
+            let service_time = started_at.elapsed();
+            if queue_wait >= std::time::Duration::from_millis(100)
+                || service_time >= std::time::Duration::from_millis(500)
+                || pending >= PG_WORKER_QUEUE_CAPACITY * 3 / 4
+            {
+                eprintln!(
+                    "control_pg_worker queue_wait_ms={} service_ms={} pending={pending}",
+                    queue_wait.as_millis(),
+                    service_time.as_millis()
+                );
+            }
+            let _ = reply_tx.send(result);
+        })) {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            return Err(match error {
+                mpsc::TrySendError::Full(_) => {
+                    eprintln!("control_pg_worker queue_full capacity={PG_WORKER_QUEUE_CAPACITY}");
+                    overloaded()
+                }
                 mpsc::TrySendError::Disconnected(_) => unavailable(),
-            })?;
-        reply_rx.recv().map_err(|_| unavailable())?
+            });
+        }
+        let reply_wait_started = std::time::Instant::now();
+        let result = reply_rx.recv().map_err(|_| unavailable())?;
+        let reply_wait = reply_wait_started.elapsed();
+        if reply_wait >= std::time::Duration::from_millis(250) {
+            eprintln!(
+                "control_pg_worker reply_wait_ms={} pending={}",
+                reply_wait.as_millis(),
+                self.queued.load(Ordering::Relaxed)
+            );
+        }
+        result
     }
 
     pub fn ensure_schema(&mut self) -> Result<(), Problem> {
@@ -1750,7 +1791,10 @@ mod tests {
         for _ in 0..PG_WORKER_QUEUE_CAPACITY {
             assert!(worker.try_send(Box::new(|_| {})).is_ok());
         }
-        let store = PostgresControlRecordStore { worker };
+        let store = PostgresControlRecordStore {
+            worker,
+            queued: Arc::new(AtomicUsize::new(0)),
+        };
 
         let error = store.call(|_| Ok(())).unwrap_err();
         assert_eq!(error.code, "control_storage_overloaded");

@@ -51,10 +51,10 @@ import {
   type MemberRemoveInput,
   type MemberRemoveReceipt,
   type MemberRoleUpdateInput,
-  type MigrationProfileDataImportInput,
   type OrganizationAccountCreateInput,
   type OrganizationCreateInput,
   type OrganizationDeleteCommandInput,
+  type OrganizationDeletePreflight,
   type OrganizationDeleteReceipt,
   type OrganizationIdInput,
   type OrganizationMember,
@@ -95,6 +95,7 @@ import {
   type WorkspaceAccountCreateInput,
   type WorkspaceCreateInput,
   type WorkspaceDeleteCommandInput,
+  type WorkspaceDeletePreflight,
   type WorkspaceDeleteReceipt,
   type WorkspaceIdInput,
   type WorkspaceRecord,
@@ -237,6 +238,9 @@ export interface DesktopApi {
   getOrganizationRecord(
     input: OrganizationIdInput,
   ): Promise<OrganizationRecord>;
+  getOrganizationDeletePreflight(
+    input: OrganizationIdInput,
+  ): Promise<OrganizationDeletePreflight>;
   listOrganizationMembers(
     organizationId: string,
   ): Promise<OrganizationMemberPage>;
@@ -262,6 +266,9 @@ export interface DesktopApi {
   listWorkspaces(organizationId: string): Promise<Page<Workspace>>;
   getWorkspace(input: WorkspaceIdInput): Promise<Workspace>;
   getWorkspaceRecord(input: WorkspaceIdInput): Promise<WorkspaceRecord>;
+  getWorkspaceDeletePreflight(
+    input: WorkspaceIdInput,
+  ): Promise<WorkspaceDeletePreflight>;
   createWorkspace(input: WorkspaceCreateInput): Promise<Workspace>;
   updateWorkspace(input: WorkspaceUpdateBridgeInput): Promise<Workspace>;
   deleteWorkspace(
@@ -363,13 +370,6 @@ export interface DesktopApi {
   importCookies(input: CookieImportInput): Promise<CookieMutationResult>;
   copyCookies(input: CookieCopyInput): Promise<CookieMutationResult>;
   getOperation(operationId: string): Promise<Operation>;
-  inspectMigration(sourceRoot: string): Promise<OperationAccepted>;
-  importMigration(
-    input: Record<string, string | boolean>,
-  ): Promise<OperationAccepted>;
-  importLegacyProfileData(
-    input: MigrationProfileDataImportInput,
-  ): Promise<OperationAccepted>;
 }
 
 // The Tauri adapter accepts a narrow legacy patch shape and resolves it to a
@@ -405,6 +405,7 @@ const invokeNames = {
   organizationList: contractInvoke("organization.list"),
   organizationGet: contractInvoke("organization.get"),
   organizationRecordGet: contractInvoke("organization.record.get"),
+  organizationDeletePreflight: contractInvoke("organization.delete.preflight"),
   organizationMembersList: contractInvoke("organization.members.list"),
   organizationAccountCreate: contractInvoke("organization.account.create"),
   organizationMemberStatusUpdate: contractInvoke(
@@ -420,6 +421,7 @@ const invokeNames = {
   workspaceList: contractInvoke("workspace.list"),
   workspaceGet: contractInvoke("workspace.get"),
   workspaceRecordGet: contractInvoke("workspace.record.get"),
+  workspaceDeletePreflight: contractInvoke("workspace.delete.preflight"),
   workspaceCreate: contractInvoke("workspace.create"),
   workspaceUpdate: contractInvoke("workspace.update"),
   workspaceDelete: contractInvoke("workspace.delete"),
@@ -495,9 +497,6 @@ const invokeNames = {
   grantCreate: contractInvoke("grant.create"),
   grantRevoke: contractInvoke("grant.revoke"),
   operationGet: contractInvoke("operation.get"),
-  migrationInspect: contractInvoke("migration.inspect"),
-  migrationImport: contractInvoke("migration.import"),
-  migrationProfileDataImport: contractInvoke("migration.profile.data.import"),
 } as const;
 
 export function createTauriDesktopApi(
@@ -768,6 +767,11 @@ export function createTauriDesktopApi(
       call<Organization>(invokeNames.organizationGet, input),
     getOrganizationRecord: (input) =>
       call<OrganizationRecord>(invokeNames.organizationRecordGet, input),
+    getOrganizationDeletePreflight: (input) =>
+      call<OrganizationDeletePreflight>(
+        invokeNames.organizationDeletePreflight,
+        input,
+      ),
     listOrganizationMembers: (organizationId) =>
       call<OrganizationMemberPage>(invokeNames.organizationMembersList, {
         organizationId,
@@ -809,6 +813,11 @@ export function createTauriDesktopApi(
     getWorkspace: (input) => call<Workspace>(invokeNames.workspaceGet, input),
     getWorkspaceRecord: (input) =>
       call<WorkspaceRecord>(invokeNames.workspaceRecordGet, input),
+    getWorkspaceDeletePreflight: (input) =>
+      call<WorkspaceDeletePreflight>(
+        invokeNames.workspaceDeletePreflight,
+        input,
+      ),
     createWorkspace: (input) =>
       call<Workspace>(invokeNames.workspaceCreate, input, true),
     updateWorkspace: (input) =>
@@ -1068,20 +1077,6 @@ export function createTauriDesktopApi(
       call<CookieMutationResult>(invokeNames.cookieCopy, input, true),
     getOperation: (operationId) =>
       call<Operation>(invokeNames.operationGet, { operationId }),
-    inspectMigration: (sourceRoot) =>
-      call<OperationAccepted>(
-        invokeNames.migrationInspect,
-        { sourceRoot },
-        true,
-      ),
-    importMigration: (input) =>
-      call<OperationAccepted>(invokeNames.migrationImport, input, true),
-    importLegacyProfileData: (input) =>
-      call<OperationAccepted>(
-        invokeNames.migrationProfileDataImport,
-        input,
-        true,
-      ),
   };
 }
 

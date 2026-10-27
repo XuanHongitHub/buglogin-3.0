@@ -259,9 +259,22 @@ pub async fn export_profile_cookies(
             let value = if !plaintext_value.is_empty() {
                 plaintext_value
             } else if !encrypted_value.is_empty() {
-                encryption_key
-                    .and_then(|key| decrypt_cookie_value(&encrypted_value, &domain, &key))
-                    .unwrap_or_default()
+                let key = encryption_key.ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Blob,
+                        Box::new(std::io::Error::other(
+                            "OS encryption key is unavailable for this cookie",
+                        )),
+                    )
+                })?;
+                decrypt_cookie_value(&encrypted_value, &domain, &key).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Blob,
+                        Box::new(std::io::Error::other("Cookie value could not be decrypted")),
+                    )
+                })?
             } else {
                 String::new()
             };
@@ -294,8 +307,15 @@ pub async fn export_profile_cookies(
         })?;
 
     let mut cookies = Vec::new();
-    for r in rows.flatten() {
-        cookies.push(r);
+    for row in rows {
+        cookies.push(row.map_err(|e| {
+            Problem::new(
+                "cookie_row_error",
+                format!("Failed to read a cookie row: {e}"),
+                500,
+                "cookie-export",
+            )
+        })?);
     }
 
     match format.as_str() {
@@ -722,17 +742,78 @@ pub async fn export_profile_storage_state(
     include_cookies: Option<bool>,
     include_indexed_db: Option<bool>,
 ) -> Result<String, Problem> {
+    if include_indexed_db.unwrap_or(false) {
+        return Err(Problem::new(
+            "storage_state_feature_unavailable",
+            "IndexedDB export is not supported yet",
+            501,
+            "storage-state",
+        ));
+    }
+
+    let profile_dir = resolve_profile_dir(&state, &profile_id).ok_or_else(|| {
+        Problem::new(
+            "profile_not_found",
+            "Profile directory not found",
+            404,
+            "storage-state",
+        )
+    })?;
+    let local_storage_paths = [
+        profile_dir
+            .join("profile")
+            .join("Default")
+            .join("Local Storage")
+            .join("leveldb"),
+        profile_dir
+            .join("Default")
+            .join("Local Storage")
+            .join("leveldb"),
+    ];
+    let has_local_storage = local_storage_paths.iter().any(|path| {
+        fs::read_dir(path).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                matches!(
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|extension| extension.to_str()),
+                    Some("ldb" | "log")
+                )
+            })
+        })
+    });
+    if has_local_storage {
+        return Err(Problem::new(
+            "storage_state_feature_unavailable",
+            "Local Storage export is not supported yet; export cookies from Cookie Management",
+            501,
+            "storage-state",
+        ));
+    }
+
     let cookies_json: Value = if include_cookies.unwrap_or(true) {
-        if let Ok(raw_cookies) =
-            export_profile_cookies(state.clone(), profile_id.clone(), "json".to_string()).await
-        {
-            serde_json::from_str(&raw_cookies).unwrap_or_else(|_| json!([]))
-        } else {
-            json!([])
-        }
+        let raw_cookies =
+            export_profile_cookies(state, profile_id.clone(), "json".to_string()).await?;
+        serde_json::from_str(&raw_cookies).map_err(|error| {
+            Problem::new(
+                "storage_state_export_error",
+                format!("Cookie export returned invalid JSON: {error}"),
+                500,
+                "storage-state",
+            )
+        })?
     } else {
         json!([])
     };
+    if !cookies_json.is_array() {
+        return Err(Problem::new(
+            "storage_state_export_error",
+            "Cookie export returned an unexpected JSON value",
+            500,
+            "storage-state",
+        ));
+    }
 
     let output = json!({
         "profileId": profile_id,
@@ -762,16 +843,57 @@ pub async fn import_profile_storage_state(
         )
     })?;
 
-    let mut cookies_imported = 0;
-    if let Some(cookies_val) = parsed.get("cookies") {
-        let cookies_str = cookies_val.to_string();
-        if let Ok(res) = import_profile_cookies(state, app, profile_id, cookies_str).await {
-            cookies_imported = res
-                .get("cookies_imported")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-        }
+    let cookies = parsed.get("cookies").ok_or_else(|| {
+        Problem::new(
+            "invalid_storage_state",
+            "Storage state must contain a cookies array",
+            400,
+            "storage-state",
+        )
+    })?;
+    if !cookies.is_array() {
+        return Err(Problem::new(
+            "invalid_storage_state",
+            "Storage state cookies must be an array",
+            400,
+            "storage-state",
+        ));
     }
+    if parsed
+        .get("origins")
+        .is_some_and(|origins| !origins.is_array())
+    {
+        return Err(Problem::new(
+            "invalid_storage_state",
+            "Storage state origins must be an array",
+            400,
+            "storage-state",
+        ));
+    }
+    if parsed
+        .get("origins")
+        .and_then(Value::as_array)
+        .is_some_and(|origins| !origins.is_empty())
+        || parsed
+            .get("includeIndexedDb")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(Problem::new(
+            "storage_state_feature_unavailable",
+            "Local Storage and IndexedDB import are not supported yet; no data was changed",
+            501,
+            "storage-state",
+        ));
+    }
+    let cookies_imported = if cookies.as_array().is_some_and(|items| !items.is_empty()) {
+        let res = import_profile_cookies(state, app, profile_id, cookies.to_string()).await?;
+        res.get("cookies_imported")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     Ok(json!({
         "origins": 0,

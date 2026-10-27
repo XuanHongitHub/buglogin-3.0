@@ -61,6 +61,10 @@ mod management_tenancy;
 mod management;
 mod management_member_remove;
 
+const PROFILE_STATUS_BATCH_CONCURRENCY: usize = 4;
+static PROFILE_STATUS_BATCH_SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
 pub(super) async fn mutate_hosted_profile_archive_state(
     state: ApiState,
     headers: HeaderMap,
@@ -328,6 +332,8 @@ struct AccountView {
     account_id: AccountId,
     platform_admin: bool,
     managed_workspace_ids: Vec<WorkspaceId>,
+    manageable_workspace_ids: Vec<WorkspaceId>,
+    manageable_organization_ids: Vec<OrganizationId>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1131,6 +1137,10 @@ fn routes_core() -> Router<ApiState> {
             get(get_organization_record),
         )
         .route(
+            "/v1/organizations/{organization_id}/delete-preflight",
+            get(management_tenancy::organization_delete_preflight),
+        )
+        .route(
             "/v1/organizations/{organization_id}/members",
             get(list_organization_members),
         )
@@ -1159,6 +1169,10 @@ fn routes_core() -> Router<ApiState> {
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}/record",
             get(get_workspace_record),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/workspaces/{workspace_id}/delete-preflight",
+            get(management_tenancy::workspace_delete_preflight),
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}/snapshot",
@@ -1373,11 +1387,44 @@ pub(super) async fn refresh_hosted_snapshot(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
+    let profile_status_batch = request.method() == Method::GET
+        && path.starts_with("/v1/workspaces/")
+        && path.ends_with("/profile-runtime-status");
+    let _status_slot = if profile_status_batch {
+        let status_slots = std::sync::Arc::clone(PROFILE_STATUS_BATCH_SLOTS.get_or_init(|| {
+            std::sync::Arc::new(tokio::sync::Semaphore::new(
+                PROFILE_STATUS_BATCH_CONCURRENCY,
+            ))
+        }));
+        match status_slots.try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                let headers = request.headers().clone();
+                eprintln!(
+                    "profile_status_batch overloaded active_limit={PROFILE_STATUS_BATCH_CONCURRENCY}"
+                );
+                let mut response = problem_response(
+                    "profile_status_temporarily_overloaded",
+                    "Profile status is busy; retry shortly",
+                    503,
+                    correlation(&headers),
+                );
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("2"),
+                );
+                return response;
+            }
+        }
+    } else {
+        None
+    };
     let control_backed_read = request.method() == Method::GET
         && !matches!(path, "/v1/health" | "/v1/readyz")
         && !path.starts_with("/v1/auth/")
         && !path.starts_with("/v1/operations/")
-        && path != "/v1/events";
+        && path != "/v1/events"
+        && !profile_status_batch;
     if !control_backed_read {
         return next.run(request).await;
     }
@@ -1770,12 +1817,14 @@ async fn create_account(
         "Account access denied",
     )?;
 
+    let operation_state = state.clone();
+    let operation_headers = headers.clone();
     with_authorization_snapshot(
         &state,
         &headers,
         &principal,
         &grant_snapshot,
-        |principal, current_grants, _| {
+        move |principal, current_grants, _| {
             authorize_control(
                 principal,
                 current_grants,
@@ -1790,14 +1839,15 @@ async fn create_account(
                     "account_missing",
                     "Account is missing",
                     401,
-                    correlation(&headers),
+                    correlation(&operation_headers),
                 )
             })?;
-            let idempotency_key = mutation_key(&headers, &correlation(&headers))?;
-            let created_at =
-                crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?;
+            let idempotency_key =
+                mutation_key(&operation_headers, &correlation(&operation_headers))?;
+            let created_at = crate::clock::rfc3339(&correlation(&operation_headers))
+                .map_err(response_problem)?;
             let pending = crate::services::account_provisioning::AccountProvisioningService::new(
-                state.control_persistence.clone(),
+                operation_state.control_persistence.clone(),
             )
             .create_pending(
                 input.account_id,
@@ -2137,13 +2187,22 @@ async fn set_account_status(
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let account_id = AccountId::from_str(&account_id).map_err(|_| bad_id("account_id"))?;
+    let operation_state = state.clone();
+    let operation_headers = headers.clone();
     with_authorization_snapshot(
         &state,
         &headers,
         &principal,
         &grants,
-        |principal, grants, _| {
-            set_account_status_authorized(&state, &headers, principal, grants, &account_id, &input)
+        move |principal, grants, _| {
+            set_account_status_authorized(
+                &operation_state,
+                &operation_headers,
+                principal,
+                grants,
+                &account_id,
+                &input,
+            )
         },
     )
     .await
@@ -2180,7 +2239,7 @@ fn set_account_status_authorized(
         "http-account-status-{:x}",
         Sha256::digest(legacy_store_key.as_bytes())
     );
-    let input_value = serde_json::to_value(&input).map_err(internal)?;
+    let input_value = serde_json::to_value(input).map_err(internal)?;
     let legacy_input_hash = input_hash(&input_value, &correlation)?;
     let normalized_input = serde_json::json!({
         "accountId": account_id.as_str(),
@@ -2191,17 +2250,16 @@ fn set_account_status_authorized(
         && legacy_store_key
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'));
-    if legacy_key_is_valid {
-        if let Some(response) = state
+    if legacy_key_is_valid
+        && let Some(response) = state
             .replay_control_response(&legacy_store_key, &legacy_input_hash)
             .map_err(response_problem)?
-        {
-            return Ok((
-                StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                Json(response.body),
-            )
-                .into_response());
-        }
+    {
+        return Ok((
+            StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(response.body),
+        )
+            .into_response());
     }
     if let Some(response) = state
         .replay_control_response(&store_key, &input_hash)
@@ -2215,7 +2273,7 @@ fn set_account_status_authorized(
     }
     let account = state
         .account_persistence
-        .load(&account_id)
+        .load(account_id)
         .map_err(response)?
         .ok_or_else(|| {
             problem_response(
@@ -2244,7 +2302,7 @@ fn set_account_status_authorized(
         value: body.clone(),
     }];
     let session_revocations = auth
-        .account_session_revocation_puts(&account_id, current)
+        .account_session_revocation_puts(account_id, current)
         .map_err(response)?;
     let revoked_family_count = session_revocations
         .iter()
@@ -2253,7 +2311,7 @@ fn set_account_status_authorized(
     puts.extend(session_revocations);
     let api_token_revocations = state
         .api_tokens
-        .account_revocation_puts(&account_id, current)
+        .account_revocation_puts(account_id, current)
         .map_err(response)?;
     let revoked_api_token_count = api_token_revocations.len();
     puts.extend(api_token_revocations);
@@ -2278,7 +2336,7 @@ fn set_account_status_authorized(
             puts,
         )
         .map_err(response)?;
-    auth.mark_account_sessions_revoked(&account_id, current);
+    auth.mark_account_sessions_revoked(account_id, current);
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
@@ -3470,17 +3528,22 @@ async fn account(
         ))
     })?;
     let grant_snapshot = grants(&state)?;
-    let managed_workspace_ids = state
+    let workspaces = state
         .workspaces
         .read()
-        .map_err(|_| service_unavailable("workspace"))?
-        .managed_workspace_ids(&principal, &grant_snapshot);
+        .map_err(|_| service_unavailable("workspace"))?;
+    let managed_workspace_ids = workspaces.managed_workspace_ids(&principal, &grant_snapshot);
+    let manageable_workspace_ids = workspaces.manageable_workspace_ids(&principal, &grant_snapshot);
+    let manageable_organization_ids =
+        workspaces.manageable_organization_ids(&principal, &grant_snapshot);
     Ok(Json(AccountView {
         account_id,
         platform_admin: principal
             .roles
             .contains(&buglogin_domain::permissions::Role::PlatformAdmin),
         managed_workspace_ids,
+        manageable_workspace_ids,
+        manageable_organization_ids,
     }))
 }
 
@@ -5295,6 +5358,10 @@ async fn get_profile_runtime_status_batch(
     }
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
+    state
+        .refresh_control_aggregate_async()
+        .await
+        .map_err(response_problem)?;
     let workspace_id =
         WorkspaceId::from_str(&workspace_path).map_err(|_| bad_id("workspace_id"))?;
     let actor_id = principal.account_id.as_ref().ok_or_else(|| {
@@ -5308,54 +5375,72 @@ async fn get_profile_runtime_status_batch(
     let auth = CoordinationAuth::new(actor_id.as_str(), bearer_token(&headers).to_owned())
         .map_err(response_problem)?;
     let coordination = state.coordination().map_err(response_problem)?;
-    let mut authorized = Vec::with_capacity(query.profile_id.len());
-    let mut seen = BTreeSet::new();
-    for raw_profile_id in query.profile_id {
-        let profile_id = ProfileId::from_str(&raw_profile_id).map_err(|_| bad_id("profile_id"))?;
-        if !seen.insert(profile_id.clone()) {
-            continue;
-        }
-        // Do not disclose whether an inaccessible profile is bound to this workspace.
-        if let Err(response) = authorize_action(
-            &state,
-            &principal,
-            &grants,
-            &profile_id,
-            Action::Read,
-            "profile.read",
-        ) {
-            if matches!(
-                response.status(),
-                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
-            ) {
+    let state_for_authorization = state.clone();
+    let principal_for_authorization = principal.clone();
+    let grants_for_authorization = grants.clone();
+    let workspace_for_authorization = workspace_id.clone();
+    let correlation_for_authorization = headers.clone();
+    let authorized = tokio::task::spawn_blocking(move || {
+        let mut authorized = Vec::with_capacity(query.profile_id.len());
+        let mut seen = BTreeSet::new();
+        for raw_profile_id in query.profile_id {
+            let profile_id =
+                ProfileId::from_str(&raw_profile_id).map_err(|_| bad_id("profile_id"))?;
+            if !seen.insert(profile_id.clone()) {
                 continue;
             }
-            return Err(response);
-        }
-        let binding = match active_profile_binding(&state, &profile_id) {
-            Ok(binding) if binding.workspace_id == workspace_id => binding,
-            Ok(_) => continue,
-            Err(response)
+            // Do not disclose whether an inaccessible profile is bound to this workspace.
+            if let Err(response) = authorize_action(
+                &state_for_authorization,
+                &principal_for_authorization,
+                &grants_for_authorization,
+                &profile_id,
+                Action::Read,
+                "profile.read",
+            ) {
                 if matches!(
                     response.status(),
-                    StatusCode::NOT_FOUND | StatusCode::CONFLICT
-                ) =>
-            {
-                continue;
+                    StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+                ) {
+                    continue;
+                }
+                return Err(response);
             }
-            Err(response) => return Err(response),
-        };
-        authorize_lease(
-            &state,
-            &principal,
-            &grants,
-            &workspace_id,
-            &binding.resource_id,
-            "profile.read",
-            Action::Read,
-        )?;
-        authorized.push((profile_id, binding.resource_id));
-    }
+            let binding = match active_profile_binding(&state_for_authorization, &profile_id) {
+                Ok(binding) if binding.workspace_id == workspace_for_authorization => binding,
+                Ok(_) => continue,
+                Err(response)
+                    if matches!(
+                        response.status(),
+                        StatusCode::NOT_FOUND | StatusCode::CONFLICT
+                    ) =>
+                {
+                    continue;
+                }
+                Err(response) => return Err(response),
+            };
+            authorize_lease(
+                &state_for_authorization,
+                &principal_for_authorization,
+                &grants_for_authorization,
+                &workspace_for_authorization,
+                &binding.resource_id,
+                "profile.read",
+                Action::Read,
+            )?;
+            authorized.push((profile_id, binding.resource_id));
+        }
+        Ok::<_, Response>(authorized)
+    })
+    .await
+    .map_err(|_| {
+        problem_response(
+            "profile_status_unavailable",
+            "Profile status is temporarily unavailable",
+            503,
+            correlation(&correlation_for_authorization),
+        )
+    })??;
     let mut lease_results =
         futures_util::stream::iter(authorized.into_iter().map(|(profile_id, resource_id)| {
             let coordination = &coordination;
@@ -5369,41 +5454,55 @@ async fn get_profile_runtime_status_batch(
                     .map_err(response_problem)
             }
         }))
-        .buffer_unordered(32)
+        .buffer_unordered(8)
         .try_collect::<Vec<_>>()
         .await?;
     lease_results.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut snapshots = Vec::with_capacity(lease_results.len());
-    for (profile_id, lease) in lease_results {
-        let runtime = state
-            .runtime_projection(&profile_id)
-            .map_err(response_problem)?
-            .map(|projection| {
-                let owner_id = AccountId::from_str(&projection.owner_id).map_err(|_| {
-                    problem_response(
-                        "runtime_owner_invalid",
-                        "Runtime owner identity is invalid",
-                        500,
-                        correlation(&headers),
-                    )
-                })?;
-                let owner_email = state
-                    .identity_persistence
-                    .load(&owner_id)
-                    .map_err(response_problem)?
-                    .map(|identity| identity.email);
-                Ok::<_, Response>(RuntimeProjectionView {
-                    projection,
-                    owner_email,
+    let state_for_projection = state.clone();
+    let headers_for_projection = headers.clone();
+    let snapshots = tokio::task::spawn_blocking(move || {
+        let mut snapshots = Vec::with_capacity(lease_results.len());
+        for (profile_id, lease) in lease_results {
+            let runtime = state_for_projection
+                .runtime_projection(&profile_id)
+                .map_err(response_problem)?
+                .map(|projection| {
+                    let owner_id = AccountId::from_str(&projection.owner_id).map_err(|_| {
+                        problem_response(
+                            "runtime_owner_invalid",
+                            "Runtime owner identity is invalid",
+                            500,
+                            correlation(&headers_for_projection),
+                        )
+                    })?;
+                    let owner_email = state_for_projection
+                        .identity_persistence
+                        .load(&owner_id)
+                        .map_err(response_problem)?
+                        .map(|identity| identity.email);
+                    Ok::<_, Response>(RuntimeProjectionView {
+                        projection,
+                        owner_email,
+                    })
                 })
-            })
-            .transpose()?;
-        snapshots.push(ProfileRuntimeStatusSnapshot {
-            profile_id,
-            lease,
-            runtime,
-        });
-    }
+                .transpose()?;
+            snapshots.push(ProfileRuntimeStatusSnapshot {
+                profile_id,
+                lease,
+                runtime,
+            });
+        }
+        Ok::<_, Response>(snapshots)
+    })
+    .await
+    .map_err(|_| {
+        problem_response(
+            "profile_status_unavailable",
+            "Profile status is temporarily unavailable",
+            503,
+            correlation(&headers),
+        )
+    })??;
     Ok(Json(snapshots))
 }
 
@@ -6585,7 +6684,7 @@ fn validate_payload_object_wire_format(
     }
 
     let authenticated = AuthenticatedChunk::decode(bytes).ok();
-    if !authenticated.is_some_and(|chunk| chunk.version == 1) {
+    if authenticated.is_none_or(|chunk| chunk.version != 1) {
         return Err(problem_response(
             "encrypted_payload_object_invalid",
             "Profile payload object is not a supported encrypted chunk",
@@ -6698,21 +6797,20 @@ fn validate_pending_key_rotation(
         .and_then(|value| value.key_version.as_ref());
     let candidate_encryption = candidate.payload_encryption.as_ref();
     let candidate_version = candidate_encryption.and_then(|value| value.key_version.as_ref());
-    if current_version == candidate_version {
-        if let Some(binding) = state
+    if current_version == candidate_version
+        && let Some(binding) = state
             .profile_resource_for_resource(workspace_id, resource_id)
             .map_err(response_problem)?
-            && state
-                .has_managed_profile_key_envelope(
-                    &binding.profile_id,
-                    workspace_id,
-                    resource_id,
-                    current_version.map(String::as_str).unwrap_or_default(),
-                )
-                .map_err(response_problem)?
-        {
-            return Ok(());
-        }
+        && state
+            .has_managed_profile_key_envelope(
+                &binding.profile_id,
+                workspace_id,
+                resource_id,
+                current_version.map(String::as_str).unwrap_or_default(),
+            )
+            .map_err(response_problem)?
+    {
+        return Ok(());
     }
     let is_new_version = candidate_version
         .is_some_and(|version| current_version.is_none_or(|previous| previous != version));
@@ -6925,15 +7023,14 @@ fn activate_pending_profile_proxy_assignment(
             .map_err(response_problem)?;
         if binding.as_ref().is_some_and(|binding| {
             &binding.workspace_id == workspace_id && &binding.resource_id == resource_id
-        }) {
-            if bound_profile.replace(profile).is_some() {
-                return Err(response_problem(Problem::new(
-                    "profile_binding_ambiguous",
-                    "Resource has multiple profile bindings",
-                    409,
-                    "sync",
-                )));
-            }
+        }) && bound_profile.replace(profile).is_some()
+        {
+            return Err(response_problem(Problem::new(
+                "profile_binding_ambiguous",
+                "Resource has multiple profile bindings",
+                409,
+                "sync",
+            )));
         }
     }
     let Some(profile) = bound_profile else {
@@ -7030,6 +7127,10 @@ fn activate_pending_profile_proxy_assignment(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit inputs make authorization and revision checks auditable"
+)]
 fn validate_profile_proxy_dependencies(
     state: &ApiState,
     principal: &Principal,
@@ -7055,6 +7156,10 @@ fn validate_profile_proxy_dependencies(
     .map_err(response_problem)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit inputs make authorization and revision checks auditable"
+)]
 pub(super) fn validate_profile_proxy_dependencies_problem(
     state: &ApiState,
     principal: &Principal,
@@ -7623,7 +7728,7 @@ fn validate_blob_wire_format(
     }
 
     let chunk = AuthenticatedChunk::decode(bytes).ok();
-    if !chunk.is_some_and(|chunk| chunk.version == 1) {
+    if chunk.is_none_or(|chunk| chunk.version != 1) {
         return Err(problem_response(
             "encrypted_payload_object_invalid",
             "Profile payload object is not a supported encrypted chunk",
@@ -8047,6 +8152,10 @@ struct AuditEventPageQuery {
     limit: Option<usize>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit fields preserve audited control mutation inputs"
+)]
 pub(super) async fn mutate<T, F>(
     state: &ApiState,
     headers: &HeaderMap,
@@ -8078,6 +8187,7 @@ where
     .await
 }
 
+#[derive(Clone)]
 struct MutationReplayKeys {
     correlation: String,
     legacy_store_key: String,
@@ -8165,20 +8275,18 @@ fn replay_mutation_receipt(
     state: &ApiState,
     keys: &MutationReplayKeys,
 ) -> Result<Option<Response>, Response> {
-    if keys.legacy_key_is_valid {
-        if let Some(receipt) = state
+    if keys.legacy_key_is_valid
+        && let Some(receipt) = state
             .replay_control_response(&keys.legacy_store_key, &keys.legacy_input_hash)
             .map_err(response_problem)?
-        {
-            return Ok(Some(
-                (
-                    StatusCode::from_u16(receipt.status)
-                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                    Json(receipt.body),
-                )
-                    .into_response(),
-            ));
-        }
+    {
+        return Ok(Some(
+            (
+                StatusCode::from_u16(receipt.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(receipt.body),
+            )
+                .into_response(),
+        ));
     }
     state
         .replay_control_response(&keys.store_key, &keys.input_hash)
@@ -8195,6 +8303,10 @@ fn replay_mutation_receipt(
         })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit fields preserve mutation replay authorization boundaries"
+)]
 async fn replay_authorized_mutation_receipt(
     state: &ApiState,
     headers: &HeaderMap,
@@ -8209,40 +8321,61 @@ async fn replay_authorized_mutation_receipt(
     let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
         .write_owned()
         .await;
-    let _mutation = state.control_mutation.lock().map_err(|_| {
-        problem_response(
-            "control_unavailable",
-            "Control state unavailable",
-            503,
-            keys.correlation.clone(),
-        )
-    })?;
-    state
-        .refresh_control_aggregate_locked()
-        .map_err(response_problem)?;
-    let principal = authenticate(state, headers)?;
-    let grants = state.grants().map_err(response_problem)?;
-    if &principal != expected_principal || !same_grant_snapshot(expected_grants, &grants) {
-        return Err(response(
-            problem(
-                "authorization_state_changed",
-                "Authorization changed; retry the request",
-                409,
+    let state = state.clone();
+    let headers = headers.clone();
+    let expected_principal = expected_principal.clone();
+    let expected_grants = expected_grants.to_vec();
+    let keys = keys.clone();
+    let workspace_id = workspace_id.clone();
+    let resource_id = resource_id.clone();
+    let capability = capability.to_owned();
+    let join_correlation = keys.correlation.clone();
+    tokio::task::spawn_blocking(move || {
+        let _snapshot = _snapshot;
+        let _mutation = state.control_mutation.lock().map_err(|_| {
+            problem_response(
+                "control_unavailable",
+                "Control state unavailable",
+                503,
+                keys.correlation.clone(),
             )
-            .with_instance(keys.correlation.clone())
-            .retryable(true),
-        ));
-    }
-    authorize_lease(
-        state,
-        &principal,
-        &grants,
-        workspace_id,
-        resource_id,
-        capability,
-        action,
-    )?;
-    replay_mutation_receipt(state, keys)
+        })?;
+        state
+            .refresh_control_aggregate_locked()
+            .map_err(response_problem)?;
+        let principal = authenticate(&state, &headers)?;
+        let grants = state.grants().map_err(response_problem)?;
+        if principal != expected_principal || !same_grant_snapshot(&expected_grants, &grants) {
+            return Err(response(
+                problem(
+                    "authorization_state_changed",
+                    "Authorization changed; retry the request",
+                    409,
+                )
+                .with_instance(keys.correlation.clone())
+                .retryable(true),
+            ));
+        }
+        authorize_lease(
+            &state,
+            &principal,
+            &grants,
+            &workspace_id,
+            &resource_id,
+            &capability,
+            action,
+        )?;
+        replay_mutation_receipt(&state, &keys)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(problem_response(
+            "control_unavailable",
+            "Control state worker unavailable",
+            503,
+            join_correlation,
+        ))
+    })
 }
 
 /// Run a specialized control-plane mutation while its authenticated principal
@@ -8257,39 +8390,63 @@ pub(super) async fn with_authorization_snapshot<T, F>(
     operation: F,
 ) -> Result<T, Response>
 where
-    F: FnOnce(&Principal, &[buglogin_domain::permissions::Grant], u64) -> Result<T, Response>,
+    T: Send + 'static,
+    F: FnOnce(&Principal, &[buglogin_domain::permissions::Grant], u64) -> Result<T, Response>
+        + Send
+        + 'static,
 {
     let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
         .write_owned()
         .await;
-    let _mutation = state.control_mutation.lock().map_err(|_| {
-        problem_response(
-            "control_unavailable",
-            "Control state unavailable",
-            503,
-            correlation(headers),
-        )
-    })?;
-    state
-        .refresh_control_aggregate_locked()
-        .map_err(response_problem)?;
-    let principal = authenticate(state, headers)?;
-    let grants = state.grants().map_err(response_problem)?;
-    if &principal != expected_principal || !same_grant_snapshot(expected_grants, &grants) {
-        return Err(response(
-            problem(
-                "authorization_state_changed",
-                "Authorization changed; retry the request",
-                409,
+    let state = state.clone();
+    let headers = headers.clone();
+    let expected_principal = expected_principal.clone();
+    let expected_grants = expected_grants.to_vec();
+    let join_correlation = correlation(&headers);
+    tokio::task::spawn_blocking(move || {
+        let _snapshot = _snapshot;
+        let _mutation = state.control_mutation.lock().map_err(|_| {
+            problem_response(
+                "control_unavailable",
+                "Control state unavailable",
+                503,
+                correlation(&headers),
             )
-            .with_instance(correlation(headers))
-            .retryable(true),
-        ));
-    }
-    let revision = state.control_revision().map_err(response_problem)?;
-    operation(&principal, &grants, revision)
+        })?;
+        state
+            .refresh_control_aggregate_locked()
+            .map_err(response_problem)?;
+        let principal = authenticate(&state, &headers)?;
+        let grants = state.grants().map_err(response_problem)?;
+        if principal != expected_principal || !same_grant_snapshot(&expected_grants, &grants) {
+            return Err(response(
+                problem(
+                    "authorization_state_changed",
+                    "Authorization changed; retry the request",
+                    409,
+                )
+                .with_instance(correlation(&headers))
+                .retryable(true),
+            ));
+        }
+        let revision = state.control_revision().map_err(response_problem)?;
+        operation(&principal, &grants, revision)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(problem_response(
+            "control_unavailable",
+            "Control state worker unavailable",
+            503,
+            join_correlation,
+        ))
+    })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit fields preserve audited control mutation inputs"
+)]
 pub(super) async fn mutate_with_additional_puts<T, F>(
     state: &ApiState,
     headers: &HeaderMap,
@@ -8322,6 +8479,10 @@ where
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit fields preserve audited control mutation inputs"
+)]
 pub(super) async fn mutate_with_additional_puts_and_replay_check<T, F, R>(
     state: &ApiState,
     headers: &HeaderMap,
@@ -8343,202 +8504,204 @@ where
     let _snapshot = std::sync::Arc::clone(&state.control_snapshot_gate)
         .write_owned()
         .await;
-    let _mutation = state.control_mutation.lock().map_err(|_| {
-        problem_response(
-            "control_unavailable",
-            "Control state unavailable",
-            503,
-            correlation(headers),
-        )
-    })?;
-    state
-        .refresh_control_aggregate_locked()
-        .map_err(response_problem)?;
-    let principal = authenticate(state, headers)?;
-    let grants = state.grants().map_err(response_problem)?;
-    if &principal != expected_principal || !same_grant_snapshot(expected_grants, &grants) {
-        return Err(response(
-            problem(
-                "authorization_state_changed",
-                "Authorization changed; retry the request",
-                409,
-            )
-            .with_instance(correlation(headers))
-            .retryable(true),
-        ));
-    }
-    let reauthorize = matches!(
-        command,
-        "profile.proxy.assignment.set"
-            | "profile.manifest.commit"
-            | "account.create.scoped"
-            | "organization.account.create"
-            | "organization.member.status.update"
-            | "member.invitation.create"
-            | "member.invitation.revoke"
-            | "member.activate"
-            | "member.suspend"
-            | "member.role.update"
-    );
-    if reauthorize {
-        let metadata = crate::commands::CommandRegistry::get(command).ok_or_else(|| {
+    with_control_blocking(|| {
+        let _mutation = state.control_mutation.lock().map_err(|_| {
             problem_response(
-                "command_contract_missing",
-                "Mutation command is not registered",
-                500,
+                "control_unavailable",
+                "Control state unavailable",
+                503,
                 correlation(headers),
             )
         })?;
-        let allowed = if matches!(
-            command,
-            "account.create.scoped" | "member.invitation.create"
-        ) {
-            let workspace_id = scope.workspace_id.as_ref().ok_or_else(|| {
-                problem_response(
-                    "invalid_scope",
-                    "Scoped account creation requires a workspace scope",
-                    400,
-                    correlation(headers),
+        state
+            .refresh_control_aggregate_locked()
+            .map_err(response_problem)?;
+        let principal = authenticate(state, headers)?;
+        let grants = state.grants().map_err(response_problem)?;
+        if &principal != expected_principal || !same_grant_snapshot(expected_grants, &grants) {
+            return Err(response(
+                problem(
+                    "authorization_state_changed",
+                    "Authorization changed; retry the request",
+                    409,
                 )
-            })?;
-            let role_value = if command == "account.create.scoped" {
-                input.get("member").and_then(|member| member.get("role"))
-            } else {
-                input.get("role")
-            };
-            let role: MemberRole = serde_json::from_value(
-                role_value.cloned().unwrap_or(Value::Null),
-            )
-            .map_err(|_| {
-                problem_response(
-                    "invalid_input",
-                    "Scoped account role is invalid",
-                    400,
-                    correlation(headers),
-                )
-            })?;
-            scoped_account_creation_authority(state, &principal, &grants, workspace_id, &role)
-                .is_ok()
-        } else if matches!(
+                .with_instance(correlation(headers))
+                .retryable(true),
+            ));
+        }
+        let reauthorize = matches!(
             command,
-            "member.activate" | "member.suspend" | "member.role.update"
-        ) {
-            let workspace_id = scope.workspace_id.as_ref().ok_or_else(|| {
-                problem_response(
-                    "invalid_scope",
-                    "Member management requires a workspace scope",
-                    400,
-                    correlation(headers),
-                )
-            })?;
-            let (member_grants, organization_owner) = workspace_member_management_grants(
-                state,
-                &principal,
-                &grants,
-                workspace_id,
-                Action::Manage,
-                correlation(headers),
-            )?;
-            if organization_owner {
-                let member_id = MemberId::from_str(resource_id).map_err(|_| bad_id("member_id"))?;
-                let target = state
-                    .members
-                    .read()
-                    .map_err(|_| service_unavailable("member"))?
-                    .get_in_workspace(&principal, &member_grants, &member_id, workspace_id)
-                    .map_err(response_problem)?;
-                if target.role == MemberRole::Owner
-                    || (command == "member.role.update"
-                        && input
-                            .get("role")
-                            .cloned()
-                            .and_then(|value| serde_json::from_value::<MemberRole>(value).ok())
-                            == Some(MemberRole::Owner))
-                {
-                    return Err(problem_response(
-                        "role_escalation",
-                        "Organization owner may manage only memberships below Owner",
-                        403,
-                        correlation(headers),
-                    ));
-                }
-            }
-            true
-        } else if matches!(
-            command,
-            "organization.account.create"
+            "profile.proxy.assignment.set"
+                | "profile.manifest.commit"
+                | "account.create.scoped"
+                | "organization.account.create"
                 | "organization.member.status.update"
-                | "organization.member.workspace.assign"
-        ) {
-            let organization_id = scope.organization_id.as_ref().ok_or_else(|| {
+                | "member.invitation.create"
+                | "member.invitation.revoke"
+                | "member.activate"
+                | "member.suspend"
+                | "member.role.update"
+        );
+        if reauthorize {
+            let metadata = crate::commands::CommandRegistry::get(command).ok_or_else(|| {
                 problem_response(
-                    "invalid_scope",
-                    "Organization membership mutation requires an organization scope",
-                    400,
-                    correlation(headers),
-                )
-            })?;
-            state
-                .workspaces
-                .read()
-                .map_err(|_| service_unavailable("workspace"))?
-                .authorize_organization_management(
-                    &principal,
-                    &grants,
-                    organization_id,
-                    metadata.action,
-                )
-                .is_ok()
-        } else if command == "profile.manifest.commit" {
-            let workspace_id = scope
-                .workspace_id
-                .as_ref()
-                .ok_or_else(|| bad_id("workspace_id"))?;
-            let resource_id = scope
-                .resource_id
-                .as_ref()
-                .ok_or_else(|| bad_id("resource_id"))?;
-            crate::services::profile_sync::authorize_resource_access(
-                state,
-                &principal,
-                &grants,
-                workspace_id,
-                resource_id,
-                metadata.capability,
-                metadata.action,
-            )
-            .is_ok()
-        } else if let Some(profile_id) = scope.profile_id.as_ref() {
-            HostedProfileService::authorized(
-                state,
-                &principal,
-                &grants,
-                profile_id,
-                metadata.action,
-                metadata.capability,
-            )
-            .map_err(response_problem)?
-        } else {
-            let capability = Capability::new(metadata.capability).map_err(|_| {
-                problem_response(
-                    "invalid_capability",
-                    "Mutation capability is invalid",
+                    "command_contract_missing",
+                    "Mutation command is not registered",
                     500,
                     correlation(headers),
                 )
             })?;
-            is_allowed(&principal, &capability, metadata.action, &scope, &grants)
-        };
-        if !allowed {
-            return Err(problem_response(
-                "forbidden",
-                "Permission denied",
-                403,
-                correlation(headers),
-            ));
-        }
-        if command == "profile.proxy.assignment.set" {
-            let input: crate::services::profile_proxy_assignment::ProfileProxyAssignmentSetInput =
+            let allowed = if matches!(
+                command,
+                "account.create.scoped" | "member.invitation.create"
+            ) {
+                let workspace_id = scope.workspace_id.as_ref().ok_or_else(|| {
+                    problem_response(
+                        "invalid_scope",
+                        "Scoped account creation requires a workspace scope",
+                        400,
+                        correlation(headers),
+                    )
+                })?;
+                let role_value = if command == "account.create.scoped" {
+                    input.get("member").and_then(|member| member.get("role"))
+                } else {
+                    input.get("role")
+                };
+                let role: MemberRole = serde_json::from_value(
+                    role_value.cloned().unwrap_or(Value::Null),
+                )
+                .map_err(|_| {
+                    problem_response(
+                        "invalid_input",
+                        "Scoped account role is invalid",
+                        400,
+                        correlation(headers),
+                    )
+                })?;
+                scoped_account_creation_authority(state, &principal, &grants, workspace_id, &role)
+                    .is_ok()
+            } else if matches!(
+                command,
+                "member.activate" | "member.suspend" | "member.role.update"
+            ) {
+                let workspace_id = scope.workspace_id.as_ref().ok_or_else(|| {
+                    problem_response(
+                        "invalid_scope",
+                        "Member management requires a workspace scope",
+                        400,
+                        correlation(headers),
+                    )
+                })?;
+                let (member_grants, organization_owner) = workspace_member_management_grants(
+                    state,
+                    &principal,
+                    &grants,
+                    workspace_id,
+                    Action::Manage,
+                    correlation(headers),
+                )?;
+                if organization_owner {
+                    let member_id =
+                        MemberId::from_str(resource_id).map_err(|_| bad_id("member_id"))?;
+                    let target = state
+                        .members
+                        .read()
+                        .map_err(|_| service_unavailable("member"))?
+                        .get_in_workspace(&principal, &member_grants, &member_id, workspace_id)
+                        .map_err(response_problem)?;
+                    if target.role == MemberRole::Owner
+                        || (command == "member.role.update"
+                            && input
+                                .get("role")
+                                .cloned()
+                                .and_then(|value| serde_json::from_value::<MemberRole>(value).ok())
+                                == Some(MemberRole::Owner))
+                    {
+                        return Err(problem_response(
+                            "role_escalation",
+                            "Organization owner may manage only memberships below Owner",
+                            403,
+                            correlation(headers),
+                        ));
+                    }
+                }
+                true
+            } else if matches!(
+                command,
+                "organization.account.create"
+                    | "organization.member.status.update"
+                    | "organization.member.workspace.assign"
+            ) {
+                let organization_id = scope.organization_id.as_ref().ok_or_else(|| {
+                    problem_response(
+                        "invalid_scope",
+                        "Organization membership mutation requires an organization scope",
+                        400,
+                        correlation(headers),
+                    )
+                })?;
+                state
+                    .workspaces
+                    .read()
+                    .map_err(|_| service_unavailable("workspace"))?
+                    .authorize_organization_management(
+                        &principal,
+                        &grants,
+                        organization_id,
+                        metadata.action,
+                    )
+                    .is_ok()
+            } else if command == "profile.manifest.commit" {
+                let workspace_id = scope
+                    .workspace_id
+                    .as_ref()
+                    .ok_or_else(|| bad_id("workspace_id"))?;
+                let resource_id = scope
+                    .resource_id
+                    .as_ref()
+                    .ok_or_else(|| bad_id("resource_id"))?;
+                crate::services::profile_sync::authorize_resource_access(
+                    state,
+                    &principal,
+                    &grants,
+                    workspace_id,
+                    resource_id,
+                    metadata.capability,
+                    metadata.action,
+                )
+                .is_ok()
+            } else if let Some(profile_id) = scope.profile_id.as_ref() {
+                HostedProfileService::authorized(
+                    state,
+                    &principal,
+                    &grants,
+                    profile_id,
+                    metadata.action,
+                    metadata.capability,
+                )
+                .map_err(response_problem)?
+            } else {
+                let capability = Capability::new(metadata.capability).map_err(|_| {
+                    problem_response(
+                        "invalid_capability",
+                        "Mutation capability is invalid",
+                        500,
+                        correlation(headers),
+                    )
+                })?;
+                is_allowed(&principal, &capability, metadata.action, &scope, &grants)
+            };
+            if !allowed {
+                return Err(problem_response(
+                    "forbidden",
+                    "Permission denied",
+                    403,
+                    correlation(headers),
+                ));
+            }
+            if command == "profile.proxy.assignment.set" {
+                let input: crate::services::profile_proxy_assignment::ProfileProxyAssignmentSetInput =
                 serde_json::from_value(input.clone()).map_err(|_| {
                     problem_response(
                         "invalid_input",
@@ -8547,18 +8710,18 @@ where
                         correlation(headers),
                     )
                 })?;
-            if let Some(proxy_id) = input.proxy_id.as_ref() {
-                state
-                    .proxies
-                    .read()
-                    .map_err(|_| service_unavailable("proxy"))?
-                    .get(&input.workspace_id, proxy_id, &principal, &grants)
-                    .map_err(proxy_response_problem)?;
-            }
-        } else if command == "profile.manifest.commit" {
-            let manifest: SyncManifest =
-                serde_json::from_value(input.get("manifest").cloned().unwrap_or(Value::Null))
-                    .map_err(|_| {
+                if let Some(proxy_id) = input.proxy_id.as_ref() {
+                    state
+                        .proxies
+                        .read()
+                        .map_err(|_| service_unavailable("proxy"))?
+                        .get(&input.workspace_id, proxy_id, &principal, &grants)
+                        .map_err(proxy_response_problem)?;
+                }
+            } else if command == "profile.manifest.commit" {
+                let manifest: SyncManifest =
+                    serde_json::from_value(input.get("manifest").cloned().unwrap_or(Value::Null))
+                        .map_err(|_| {
                         problem_response(
                             "invalid_input",
                             "Profile manifest is invalid",
@@ -8566,151 +8729,167 @@ where
                             correlation(headers),
                         )
                     })?;
-            for dependency in &manifest.dependencies {
-                let ManifestDependency::Proxy { proxy_id, .. } = dependency;
+                for dependency in &manifest.dependencies {
+                    let ManifestDependency::Proxy { proxy_id, .. } = dependency;
+                    state
+                        .proxies
+                        .read()
+                        .map_err(|_| service_unavailable("proxy"))?
+                        .get(&manifest.workspace_id, proxy_id, &principal, &grants)
+                        .map_err(proxy_response_problem)?;
+                }
+            }
+        }
+        let replay_keys = mutation_replay_keys(
+            headers,
+            &principal,
+            workspace,
+            command,
+            &input,
+            &scope,
+            resource_id,
+        )?;
+        if let Some(response) = replay_mutation_receipt(state, &replay_keys)? {
+            replay_check()?;
+            return Ok(response);
+        }
+        let correlation = replay_keys.correlation.clone();
+        let store_key = replay_keys.store_key.clone();
+        let input_hash = replay_keys.input_hash.clone();
+        // Validate the audit timestamp before executing the mutation. A clock
+        // failure must not leave a committed control change without its audit row.
+        let audit_time = checked_now(&correlation).map_err(response_problem)?;
+        let before = state.control_aggregate().map_err(response_problem)?;
+        let result = operation();
+        let success_status = if matches!(
+            command,
+            "profile.create"
+                | "account.create.scoped"
+                | "organization.account.create"
+                | "organization.member.workspace.assign"
+                | "member.invitation.create"
+        ) {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        };
+        let (status, body, replay_body, outcome, additional_puts) = match result {
+            Ok((value, additional_puts, replay_body)) => (
+                success_status,
+                serde_json::to_value(value).map_err(|_| {
+                    problem_response(
+                        "serialization_failed",
+                        "Response serialization failed",
+                        500,
+                        correlation.clone(),
+                    )
+                })?,
+                replay_body,
+                AuditOutcome::Succeeded,
+                additional_puts,
+            ),
+            Err(error) => {
                 state
-                    .proxies
-                    .read()
-                    .map_err(|_| service_unavailable("proxy"))?
-                    .get(&manifest.workspace_id, proxy_id, &principal, &grants)
-                    .map_err(proxy_response_problem)?;
-            }
-        }
-    }
-    let replay_keys = mutation_replay_keys(
-        headers,
-        &principal,
-        workspace,
-        command,
-        &input,
-        &scope,
-        resource_id,
-    )?;
-    if let Some(response) = replay_mutation_receipt(state, &replay_keys)? {
-        replay_check()?;
-        return Ok(response);
-    }
-    let correlation = replay_keys.correlation.clone();
-    let store_key = replay_keys.store_key.clone();
-    let input_hash = replay_keys.input_hash.clone();
-    // Validate the audit timestamp before executing the mutation. A clock
-    // failure must not leave a committed control change without its audit row.
-    let audit_time = checked_now(&correlation).map_err(response_problem)?;
-    let before = state.control_aggregate().map_err(response_problem)?;
-    let result = operation();
-    let success_status = if matches!(
-        command,
-        "profile.create"
-            | "account.create.scoped"
-            | "organization.account.create"
-            | "organization.member.workspace.assign"
-            | "member.invitation.create"
-    ) {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    let (status, body, replay_body, outcome, additional_puts) = match result {
-        Ok((value, additional_puts, replay_body)) => (
-            success_status,
-            serde_json::to_value(value).map_err(|_| {
-                problem_response(
-                    "serialization_failed",
-                    "Response serialization failed",
-                    500,
-                    correlation.clone(),
+                    .replace_control_aggregate(before.clone())
+                    .map_err(response_problem)?;
+                (
+                    StatusCode::from_u16(error.0).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    error.1,
+                    None,
+                    if error.0 == 403 {
+                        AuditOutcome::Denied
+                    } else {
+                        AuditOutcome::Failed
+                    },
+                    Vec::new(),
                 )
-            })?,
-            replay_body,
-            AuditOutcome::Succeeded,
-            additional_puts,
-        ),
-        Err(error) => {
-            state
-                .replace_control_aggregate(before.clone())
-                .map_err(response_problem)?;
-            (
-                StatusCode::from_u16(error.0).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                error.1,
-                None,
-                if error.0 == 403 {
-                    AuditOutcome::Denied
-                } else {
-                    AuditOutcome::Failed
+            }
+        };
+        if let Some(actor_id) = principal.account_id.clone() {
+            let event_id = format!(
+                "evt_{}",
+                &Sha256::digest(store_key.as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()[..24]
+            );
+            let event = AuditEvent::new(
+                event_id,
+                audit_time,
+                actor_id,
+                AuditResource {
+                    resource_type: "http".into(),
+                    resource_id: resource_id.into(),
+                    scope: scope.clone(),
                 },
-                Vec::new(),
+                command,
+                correlation.clone(),
+                outcome,
+                Default::default(),
             )
-        }
-    };
-    if let Some(actor_id) = principal.account_id.clone() {
-        let event_id = format!(
-            "evt_{}",
-            &Sha256::digest(store_key.as_bytes())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()[..24]
-        );
-        let event = AuditEvent::new(
-            event_id,
-            audit_time,
-            actor_id,
-            AuditResource {
-                resource_type: "http".into(),
-                resource_id: resource_id.into(),
-                scope: scope.clone(),
-            },
-            command,
-            correlation.clone(),
-            outcome,
-            Default::default(),
-        )
-        .map_err(response_problem)?;
-        state
-            .audit
-            .write()
-            .map_err(|_| {
-                problem_response(
-                    "audit_unavailable",
-                    "Audit service unavailable",
-                    503,
-                    correlation.clone(),
-                )
-            })?
-            .append(event)
             .map_err(response_problem)?;
-    }
-    state
-        .persist_control_aggregate_with_puts(
-            command,
-            store_key.clone(),
-            principal
-                .account_id
-                .as_ref()
-                .map(AccountId::as_str)
-                .unwrap_or("anonymous")
-                .to_owned(),
-            status.is_success(),
-            &input_hash,
-            serde_json::json!({
-                "correlationId": correlation,
-                "resourceId": resource_id,
-                "scope": scope,
-                "inputHash": input_hash,
-            }),
-            status.as_u16(),
-            replay_body.unwrap_or_else(|| body.clone()),
-            additional_puts,
-        )
-        .map_err(|error| {
-            if state.reload_control_aggregate().is_err() {
-                let _ = state.replace_control_aggregate(before);
-            }
-            response_problem(error)
-        })?;
-    if status.is_success() {
-        Ok((status, Json(body)).into_response())
+            state
+                .audit
+                .write()
+                .map_err(|_| {
+                    problem_response(
+                        "audit_unavailable",
+                        "Audit service unavailable",
+                        503,
+                        correlation.clone(),
+                    )
+                })?
+                .append(event)
+                .map_err(response_problem)?;
+        }
+        state
+            .persist_control_aggregate_with_puts(
+                command,
+                store_key.clone(),
+                principal
+                    .account_id
+                    .as_ref()
+                    .map(AccountId::as_str)
+                    .unwrap_or("anonymous")
+                    .to_owned(),
+                status.is_success(),
+                &input_hash,
+                serde_json::json!({
+                    "correlationId": correlation,
+                    "resourceId": resource_id,
+                    "scope": scope,
+                    "inputHash": input_hash,
+                }),
+                status.as_u16(),
+                replay_body.unwrap_or_else(|| body.clone()),
+                additional_puts,
+            )
+            .map_err(|error| {
+                if state.reload_control_aggregate().is_err() {
+                    let _ = state.replace_control_aggregate(before);
+                }
+                response_problem(error)
+            })?;
+        if status.is_success() {
+            Ok((status, Json(body)).into_response())
+        } else {
+            Ok(response(super::canonical_problem(status.as_u16(), body)))
+        }
+    })
+}
+
+fn with_control_blocking<T>(operation: impl FnOnce() -> T) -> T {
+    let multi_thread_runtime = tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if multi_thread_runtime {
+        // ControlPersistence uses a bounded synchronous PostgreSQL worker. Mark
+        // this whole mutation as blocking so Tokio can replace the occupied
+        // runtime worker while its serialized database operations complete.
+        tokio::task::block_in_place(operation)
     } else {
-        Ok(response(super::canonical_problem(status.as_u16(), body)))
+        // Current-thread runtimes are used by focused handler tests; they have
+        // no worker pool to hand off to.
+        operation()
     }
 }
 

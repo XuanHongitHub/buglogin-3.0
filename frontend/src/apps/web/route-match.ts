@@ -6,7 +6,6 @@ export type WebRoute =
   | { area: "profile"; profileId: string }
   | { area: "account" }
   | { area: "operations" }
-  | { area: "migration" }
   | {
       area: "workspace";
       workspaceId?: string;
@@ -55,7 +54,6 @@ export function matchWebRoute(path: string): WebRoute {
   )
     return { area: "account" };
   if (path === "/operations") return { area: "operations" };
-  if (path === "/migration") return { area: "migration" };
   if (path === "/workspaces" || path === "/workspaces/")
     return { area: "workspace" };
   const workspace = path.match(

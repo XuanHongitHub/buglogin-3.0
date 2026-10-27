@@ -2,12 +2,11 @@
 
 ## Objective
 
-Provide an explicit move of a canonical profile resource from one workspace to another, including cross-organization moves when the actor has authority over both scopes. This is a separate operation from assigning/removing groups, exporting a profile archive, importing a migration package, or copying cookies.
+Provide an explicit move of a canonical profile resource from one workspace to another, including cross-organization moves when the actor has authority over both scopes. This is a separate operation from assigning/removing groups or copying cookies.
 
 ## Existing constraints traced in source
 
 - `profile.groups.replace` is workspace-scoped; an empty group list means `No Group`. This remains the in-workspace organization action.
-- Existing migration/package imports stage and validate data, but they do not atomically retire the source canonical binding while publishing destination authority.
 - `ResourceKeyEnvelope` key wrapping uses `buglogin/resource-key/v1/{workspace_id}/{resource_id}` AAD (`crates/sync/src/crypto/mod.rs`). A source envelope cannot be replayed for a destination scope.
 - Device key-share envelopes use `buglogin/profile-key-share/v2/{workspace_id}/{resource_id}/{device_id}/{key_version}` AAD.
 - Proxy credential envelopes use `buglogin/proxy-credential/v1/{workspace_id}/{resource_id}/{proxy_id}/{proxy_revision}` AAD. The existing manifest validates proxy dependency/envelope consistency.

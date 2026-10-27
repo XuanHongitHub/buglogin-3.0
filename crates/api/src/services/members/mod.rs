@@ -1178,7 +1178,7 @@ mod tests {
                 members
                     .set_role(
                         &lead_principal,
-                        &[manage_members.clone()],
+                        std::slice::from_ref(&manage_members),
                         &workspace,
                         &target_id,
                         forbidden_role,
@@ -1378,7 +1378,7 @@ mod tests {
             members
                 .list_as_org_owner(
                     &owner,
-                    &[organization_manage.clone()],
+                    std::slice::from_ref(&organization_manage),
                     &organization,
                     &workspace,
                 )
@@ -1395,7 +1395,7 @@ mod tests {
             members
                 .assign_active_as_org_owner(
                     &owner,
-                    &[organization_manage.clone()],
+                    std::slice::from_ref(&organization_manage),
                     &organization,
                     owner_assignment,
                 )

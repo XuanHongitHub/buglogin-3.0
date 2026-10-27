@@ -51,10 +51,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::clock::{unix_time_millis, unix_time_nanos, unix_time_seconds};
-use crate::migration_commands::{
-    MigrationCommandRunner, MigrationImportInput, MigrationInspectInput, migration_import,
-    migration_inspect,
-};
 use crate::profile_runtime::{
     LaunchRequest, LeaseScope, ManagedCoordination, ProfileRuntimeHandle, spawn_profile_runtime,
 };
@@ -80,8 +76,6 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "workspace.create",
     "workspace.update",
     "operation.get",
-    "migration.inspect",
-    "migration.import",
     "profile.list",
     "extension.group.list",
     "extension.group.get",
@@ -438,7 +432,6 @@ pub struct RuntimeConfiguration {
     pub repository_root: PathBuf,
     pub profiles_root: PathBuf,
     pub targets: RuntimeTargets,
-    pub migration_executable: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -499,33 +492,6 @@ impl AdapterState {
                 repository_root,
                 profiles_root: profiles_root.into(),
                 targets,
-                migration_executable: std::env::var_os("BUGLOGIN_MIGRATION_BINARY")
-                    .map(PathBuf::from),
-            },
-            SystemProcessController::new(approved),
-        )
-    }
-
-    pub fn open_with_targets_and_migration(
-        repository_root: impl Into<PathBuf>,
-        profiles_root: impl Into<PathBuf>,
-        targets: RuntimeTargets,
-        migration_executable: Option<PathBuf>,
-    ) -> Result<Self, Problem> {
-        let approved = targets.approved_executables()?;
-        if approved.is_empty() {
-            return Err(runtime_not_configured());
-        }
-        let repository_root = repository_root.into();
-        let repository = LocalRepository::open(&repository_root)?;
-        Self::from_parts(
-            ProfileService::new(repository.clone()),
-            ProfileBindingService::new(repository),
-            RuntimeConfiguration {
-                repository_root,
-                profiles_root: profiles_root.into(),
-                targets,
-                migration_executable,
             },
             SystemProcessController::new(approved),
         )
@@ -688,139 +654,6 @@ impl AdapterState {
             "organization.list" => self.organization_list(payload, correlation_id),
             "workspace.list" => self.workspace_list(payload, correlation_id),
             "operation.get" => self.operation_get(payload, correlation_id),
-            "migration.inspect" => {
-                let key = validate_idempotency_key(idempotency_key, correlation_id)?;
-                let input: MigrationInspectInput = serde_json::from_value(payload.clone())
-                    .map_err(|_| {
-                        problem(
-                            "invalid_input",
-                            "Invalid migration inspection input",
-                            400,
-                            correlation_id,
-                        )
-                    })?;
-                let executable = self.runtime.migration_executable.clone().ok_or_else(|| {
-                    problem(
-                        "migration_executable_missing",
-                        "Migration executable is not configured",
-                        503,
-                        correlation_id,
-                    )
-                })?;
-                let operation_correlation = correlation_id.to_owned();
-                let worker_correlation = operation_correlation.clone();
-                self.run_operation(
-                    "migration.inspect",
-                    key,
-                    &payload_hash,
-                    correlation_id,
-                    move |_state| async move {
-                        let process_correlation = worker_correlation.clone();
-                        let error_correlation = worker_correlation.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let runner = MigrationCommandRunner::new(executable)?;
-                            let result = migration_inspect(&runner, input)?;
-                            serde_json::to_value(result.data).map_err(|_| {
-                                problem(
-                                    "migration_result_invalid",
-                                    "Migration result invalid",
-                                    500,
-                                    &process_correlation,
-                                )
-                            })
-                        })
-                        .await
-                        .map_err(|_| {
-                            problem(
-                                "migration_worker_failed",
-                                "Migration worker failed",
-                                500,
-                                &error_correlation,
-                            )
-                        })?
-                    },
-                )
-                .await
-            }
-            "migration.import" => {
-                let key = validate_idempotency_key(idempotency_key, correlation_id)?;
-                let input: MigrationImportInput =
-                    serde_json::from_value(payload.clone()).map_err(|_| {
-                        problem(
-                            "invalid_input",
-                            "Invalid migration import input",
-                            400,
-                            correlation_id,
-                        )
-                    })?;
-                let expected_destination = fs::canonicalize(&self.runtime.repository_root)
-                    .map_err(|_| {
-                        problem(
-                            "migration_destination_invalid",
-                            "Active local repository is unavailable",
-                            503,
-                            correlation_id,
-                        )
-                    })?;
-                let requested_destination =
-                    fs::canonicalize(&input.destination_root).map_err(|_| {
-                        problem(
-                            "migration_destination_invalid",
-                            "Migration destination is unavailable",
-                            400,
-                            correlation_id,
-                        )
-                    })?;
-                if requested_destination != expected_destination {
-                    return Err(problem(
-                        "migration_destination_mismatch",
-                        "Migration destination must match the active local repository",
-                        409,
-                        correlation_id,
-                    ));
-                }
-                let executable = self.runtime.migration_executable.clone().ok_or_else(|| {
-                    problem(
-                        "migration_executable_missing",
-                        "Migration executable is not configured",
-                        503,
-                        correlation_id,
-                    )
-                })?;
-                let worker_correlation = correlation_id.to_owned();
-                self.run_operation(
-                    "migration.import",
-                    key,
-                    &payload_hash,
-                    correlation_id,
-                    move |_state| async move {
-                        let process_correlation = worker_correlation.clone();
-                        let error_correlation = worker_correlation.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let runner = MigrationCommandRunner::new(executable)?;
-                            let result = migration_import(&runner, input)?;
-                            serde_json::to_value(result.data).map_err(|_| {
-                                problem(
-                                    "migration_result_invalid",
-                                    "Migration result invalid",
-                                    500,
-                                    &process_correlation,
-                                )
-                            })
-                        })
-                        .await
-                        .map_err(|_| {
-                            problem(
-                                "migration_worker_failed",
-                                "Migration worker failed",
-                                500,
-                                &error_correlation,
-                            )
-                        })?
-                    },
-                )
-                .await
-            }
             "profile.list" => self.profile_list(payload, correlation_id),
             "extension.group.list" => self.extension_group_list(payload, correlation_id),
             "extension.group.get" => self.extension_group_get(payload, correlation_id),
@@ -3185,7 +3018,6 @@ mod tests {
                     },
                     Vec::new(),
                 ),
-                migration_executable: None,
             },
             controller.clone(),
         )

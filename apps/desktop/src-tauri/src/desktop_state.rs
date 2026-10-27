@@ -60,7 +60,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     adapter::{AdapterState, RuntimeTarget, RuntimeTargets, push_or_replace_arg},
-    auth_vault::AuthVault,
+    auth_vault::{AuthVault, pending_sso_matches},
     device_key_vault::DeviceKeyVault,
     profile_projection::{HydratedProxyCredential, ProfileProjection, SnapshotBlob},
     profile_runtime::{
@@ -198,7 +198,6 @@ pub struct ProductionDesktopState {
     auth_expires_at: Arc<Mutex<u64>>,
     auth_refresh_uncertain: Arc<Mutex<bool>>,
     auth_refresh_gate: Arc<AsyncMutex<()>>,
-    pending_sso: Arc<Mutex<Option<(Zeroizing<String>, std::time::Instant)>>>,
     projection: Arc<RwLock<Option<Arc<ProfileProjection>>>>,
     projection_root: PathBuf,
     device_key_vault: Arc<DeviceKeyVault>,
@@ -592,7 +591,6 @@ impl ProductionDesktopState {
             auth_expires_at: Arc::new(Mutex::new(stored_expires_at)),
             auth_refresh_uncertain: Arc::new(Mutex::new(stored_refresh_pending)),
             auth_refresh_gate: Arc::new(AsyncMutex::new(())),
-            pending_sso: Arc::new(Mutex::new(None)),
             projection: Arc::new(RwLock::new(projection)),
             projection_root,
             device_key_vault: Arc::new(DeviceKeyVault::native()),
@@ -2135,13 +2133,15 @@ impl ProductionDesktopState {
                     correlation_id,
                 )
             })?;
-        *self
-            .pending_sso
+        let expires_at = checked_add_seconds(
+            unix_time_seconds(correlation_id)?,
+            response.expires_in,
+            correlation_id,
+        )?;
+        self.auth_vault
             .lock()
-            .map_err(|_| desktop_state_problem(correlation_id))? = Some((
-            Zeroizing::new(state),
-            std::time::Instant::now() + Duration::from_secs(response.expires_in),
-        ));
+            .map_err(|_| desktop_state_problem(correlation_id))?
+            .store_pending_sso(&self.device_id, &state, expires_at, correlation_id)?;
         Ok(response)
     }
 
@@ -2165,14 +2165,15 @@ impl ProductionDesktopState {
             self.ensure_device_key_registered(correlation_id).await?;
             return Ok(DesktopAuthStatus::Authenticated);
         }
-        let pending_matches = self
-            .pending_sso
+        let pending = self
+            .auth_vault
             .lock()
             .map_err(|_| desktop_state_problem(correlation_id))?
-            .as_ref()
-            .is_some_and(|(expected, expires_at)| {
-                *expires_at > std::time::Instant::now() && expected.as_str() == state.as_str()
-            });
+            .load_pending_sso(&self.device_id, correlation_id)?;
+        let now = unix_time_seconds(correlation_id)?;
+        let pending_matches = pending.as_ref().is_some_and(|(expected, expires_at)| {
+            pending_sso_matches(expected, *expires_at, state.as_str(), now)
+        });
         if !pending_matches {
             return Err(Problem::new(
                 "invalid_sso_callback",
@@ -2185,11 +2186,23 @@ impl ProductionDesktopState {
             .client
             .buglab_sso_complete(state.as_str(), provider_token.as_str(), correlation_id)
             .await?;
-        *self
-            .pending_sso
-            .lock()
-            .map_err(|_| desktop_state_problem(correlation_id))? = None;
-        self.install_session_tokens(token, correlation_id).await
+        let status = self.install_session_tokens(token, correlation_id).await?;
+        match self.auth_vault.lock() {
+            Ok(mut vault) => {
+                if let Err(error) = vault.remove_pending_sso(&self.device_id, correlation_id) {
+                    tauri_plugin_log::log::warn!(
+                        "Authenticated session installed; pending sign-in cleanup deferred (code={}, correlation_id={})",
+                        error.code,
+                        correlation_id
+                    );
+                }
+            }
+            Err(_) => tauri_plugin_log::log::warn!(
+                "Authenticated session installed; pending sign-in cleanup deferred (correlation_id={})",
+                correlation_id
+            ),
+        }
+        Ok(status)
     }
 
     async fn install_session_tokens(
@@ -2197,7 +2210,7 @@ impl ProductionDesktopState {
         token: DeviceSessionTokens,
         correlation_id: &str,
     ) -> Result<DesktopAuthStatus, Problem> {
-        let version = self.persist_session(&token, correlation_id)?;
+        self.persist_session(&token, correlation_id)?;
         self.client
             .replace_refreshed_token(token.access_token.clone())?;
         *self
@@ -2217,20 +2230,19 @@ impl ProductionDesktopState {
             .install_authenticated_coordination(correlation_id)
             .await
         {
-            let _ = self.client.clear_token();
-            if let Ok(mut stored_version) = self.auth_vault_version.lock() {
-                *stored_version = None;
-            }
-            let _ = self.remove_persisted_bearer(version, correlation_id);
-            if let Ok(mut refresh_token) = self.auth_refresh_token.lock() {
-                *refresh_token = None;
-            }
-            if let Ok(mut expires_at) = self.auth_expires_at.lock() {
-                *expires_at = 0;
-            }
-            return Err(error);
+            tauri_plugin_log::log::warn!(
+                "Authenticated session retained; coordination setup deferred (code={}, correlation_id={})",
+                error.code,
+                correlation_id
+            );
         }
-        self.ensure_device_key_registered(correlation_id).await?;
+        if let Err(error) = self.ensure_device_key_registered(correlation_id).await {
+            tauri_plugin_log::log::warn!(
+                "Authenticated session retained; device key enrollment deferred (code={}, correlation_id={})",
+                error.code,
+                correlation_id
+            );
+        }
         self.auth_status()
     }
 
@@ -2240,10 +2252,10 @@ impl ProductionDesktopState {
         idempotency_key: &str,
     ) -> Result<DesktopAuthStatus, Problem> {
         self.refresh_session_if_needed(correlation_id).await?;
-        let running = self.profile_runtime.running_profiles().await?;
-        if !running.is_empty() {
+        let active = self.profile_runtime.active_profiles().await?;
+        if !active.is_empty() {
             return Err(Problem::new(
-                "logout_running_profiles",
+                "logout_active_profiles",
                 "Stop running profiles before logout",
                 409,
                 correlation_id,
@@ -2818,37 +2830,6 @@ impl ProductionDesktopState {
                     )
                     .await?;
                 Ok(result("profile.sync.recover", correlation_id, data))
-            }
-            "migration_profile_data_import" => {
-                let key = validate_idempotency_key(idempotency_key, correlation_id)?;
-                let hash = payload_hash(&payload)?;
-                let input: MigrationProfileDataImportInput =
-                    parse_payload(payload, correlation_id)?;
-                let source_root = input.source_root;
-                let action_correlation = correlation_id.to_owned();
-                let operation_key = key.to_owned();
-                let data = self
-                    .run_operation(
-                        "migration.profile.data.import",
-                        key,
-                        &hash,
-                        correlation_id,
-                        move |state| async move {
-                            state
-                                .import_legacy_profile_data_tree(
-                                    source_root,
-                                    operation_key,
-                                    action_correlation,
-                                )
-                                .await
-                        },
-                    )
-                    .await?;
-                Ok(result(
-                    "migration.profile.data.import",
-                    correlation_id,
-                    data,
-                ))
             }
             "profile_launch" => {
                 let key = validate_idempotency_key(idempotency_key, correlation_id)?;
@@ -4089,7 +4070,7 @@ impl ProductionDesktopState {
                 .await
             {
                 Ok(_) => {}
-                Err(error) if error.code == "sync_manifest_conflict" => {
+                Err(error) if error.code == "sync_manifest_conflict" || error.retryable => {
                     pending_session_sync_error = Some(error);
                 }
                 Err(error) => return Err(error),
@@ -4350,11 +4331,13 @@ impl ProductionDesktopState {
                             )
                         })?;
                 }
-                Err(error) if error.code == "sync_manifest_conflict" => {
+                Err(error) if error.code == "sync_manifest_conflict" || error.retryable => {
                     // A failed upload must not prevent opening a still-current,
                     // locally decrypted generation. Never use this fallback if
                     // the process is alive, the remote base moved, or the local
-                    // generation cannot be tied to the manifest.
+                    // generation cannot be tied to the manifest. Retryable
+                    // service-capacity/network errors use the same safe fallback:
+                    // keep the dirty local tree and let background sync retry.
                     let still_running = self
                         .profile_runtime
                         .active_profiles()
@@ -4657,36 +4640,23 @@ impl ProductionDesktopState {
             let generation = projection.generation;
             let root_checksum = projection.root_checksum.clone();
             let profile_path = projection.path.clone();
-            let fingerprint_cdp_port = if fingerprint_target.is_some() {
-                let port = match configure_local_cdp_args(&mut specification.args, &correlation_id)
-                {
-                    Ok(port) => port,
-                    Err(mut error) => {
-                        if let Some(bridge) = proxy_bridge.take() {
-                            let _ = bridge.stop().await;
+            let (fingerprint_cdp_port, fingerprint_setup_warning) = if fingerprint_target.is_some()
+            {
+                match configure_local_cdp_args(&mut specification.args, &correlation_id) {
+                    Ok(port) => match clear_stale_cdp_marker(&profile_path, &correlation_id) {
+                        Ok(()) => (Some(port), None),
+                        Err(error) => {
+                            specification.args.retain(|argument| {
+                                !argument.starts_with("--remote-debugging-port=")
+                                    && !argument.starts_with("--remote-debugging-address=")
+                            });
+                            (None, Some(error))
                         }
-                        let _ = self
-                            .client
-                            .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
-                            .await;
-                        error.correlation_id = correlation_id.clone();
-                        return Err(error);
-                    }
-                };
-                if let Err(mut error) = clear_stale_cdp_marker(&profile_path, &correlation_id) {
-                    if let Some(bridge) = proxy_bridge.take() {
-                        let _ = bridge.stop().await;
-                    }
-                    let _ = self
-                        .client
-                        .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
-                        .await;
-                    error.correlation_id = correlation_id.clone();
-                    return Err(error);
+                    },
+                    Err(error) => (None, Some(error)),
                 }
-                Some(port)
             } else {
-                None
+                (None, None)
             };
             let runtime_key = runtime_projection_idempotency_key(&idempotency_key, "started");
             let lease_for_projection = lease.clone();
@@ -4725,55 +4695,60 @@ impl ProductionDesktopState {
                     return Err(error);
                 }
             };
-            let mut fingerprint_warning = None;
+            let mut fingerprint_warning = fingerprint_setup_warning.clone();
+            if let Some(warning) = fingerprint_setup_warning {
+                crate::diagnostics::report_problem_failure(
+                    DesktopState::Production(self.clone()),
+                    "profile.fingerprint.setup_unavailable",
+                    warning,
+                );
+            }
             if let Some(target) = fingerprint_target.as_ref() {
-                let cdp_port = match fingerprint_cdp_port {
-                    Some(port) => port,
-                    None => {
-                        if let Err(mut cleanup_error) =
-                            self.profile_runtime.stop(profile_id.clone()).await
-                        {
-                            cleanup_error.correlation_id = correlation_id.clone();
-                            return Err(cleanup_error);
+                if let Some(cdp_port) = fingerprint_cdp_port {
+                    match apply_wayfern_fingerprint(
+                        &profile_path,
+                        target,
+                        profile.value.runtime_version.as_deref().unwrap_or_default(),
+                        cdp_port,
+                        &correlation_id,
+                    )
+                    .await
+                    {
+                        Ok(warning) => {
+                            if let Some(warning) = warning {
+                                crate::diagnostics::report_problem_failure(
+                                    DesktopState::Production(self.clone()),
+                                    "profile.fingerprint.default",
+                                    warning.clone(),
+                                );
+                                fingerprint_warning = Some(warning);
+                            }
                         }
-                        let _ = local_projection.clear_active_session_marker(&profile_id);
-                        return Err(Problem::new(
-                            "wayfern_cdp_unavailable",
-                            "Wayfern local control port was not configured",
-                            503,
-                            &correlation_id,
-                        ));
-                    }
-                };
-                match apply_wayfern_fingerprint(
-                    &profile_path,
-                    target,
-                    profile.value.runtime_version.as_deref().unwrap_or_default(),
-                    cdp_port,
-                    &correlation_id,
-                )
-                .await
-                {
-                    Ok(warning) => {
-                        if let Some(warning) = warning {
+                        Err(error) => {
+                            // Fingerprint generation/application is an optional
+                            // runtime capability. Keep the authorized browser
+                            // session available and surface the failed check;
+                            // never report the configured fingerprint as verified.
                             crate::diagnostics::report_problem_failure(
                                 DesktopState::Production(self.clone()),
-                                "profile.fingerprint.default",
-                                warning.clone(),
+                                "profile.fingerprint.unverified",
+                                error.clone(),
                             );
-                            fingerprint_warning = Some(warning);
+                            fingerprint_warning = Some(Problem::new(
+                                "wayfern_fingerprint_unverified",
+                                "Profile opened, but BugLogin could not verify its configured fingerprint",
+                                error.status,
+                                &correlation_id,
+                            ));
                         }
                     }
-                    Err(error) => {
-                        if let Err(mut cleanup_error) =
-                            self.profile_runtime.stop(profile_id.clone()).await
-                        {
-                            cleanup_error.correlation_id = correlation_id.clone();
-                            return Err(cleanup_error);
-                        }
-                        let _ = local_projection.clear_active_session_marker(&profile_id);
-                        return Err(error);
-                    }
+                } else if fingerprint_warning.is_none() {
+                    fingerprint_warning = Some(Problem::new(
+                        "wayfern_fingerprint_unverified",
+                        "Profile opened, but BugLogin could not verify its configured fingerprint",
+                        409,
+                        &correlation_id,
+                    ));
                 }
             }
             if let Err(error) = self
@@ -5072,35 +5047,35 @@ impl ProductionDesktopState {
             }
             Err(error) => return Err(error),
         };
+        let mut syncing_projection_published = false;
         if let Some(stopped) = preheld_stop.as_ref().filter(|stopped| stopped.was_launched) {
             if let Some(lease) = stopped.lease.as_ref() {
-                if let Err(error) = self
+                match self
                     .client
-                    .runtime_stopped(
+                    .runtime_syncing(
                         &profile_id,
                         auth.actor_id(),
                         previous.generation,
                         &previous.root_checksum,
                         lease,
-                        &runtime_projection_idempotency_key(
-                            &idempotency_key,
-                            "process-stopped-preflight",
-                        ),
+                        &runtime_projection_idempotency_key(&idempotency_key, "syncing-preflight"),
                         &correlation_id,
                     )
                     .await
                 {
-                    crate::diagnostics::report_problem_failure(
+                    Ok(()) => syncing_projection_published = true,
+                    Err(error) => crate::diagnostics::report_problem_failure(
                         DesktopState::Production(self.clone()),
-                        "profile.runtime.stopped",
+                        "profile.runtime.syncing",
                         error,
-                    );
+                    ),
                 }
             }
         }
-        // The browser is already closed when this path is reached. Publish the
-        // operation phase only after its write lease is held, immediately before
-        // the sync work starts; this is telemetry and must never block syncing.
+        // A stopped browser with a held lease is already projected as syncing
+        // before the remaining key/proxy preflight. Idle-profile sync publishes
+        // the same phase after acquiring its lease below. Projection failure is
+        // diagnostic only and never blocks the sync lifecycle.
         self.ensure_device_key_registered(&correlation_id).await?;
         let rotation_recipients = match self
             .client
@@ -5129,16 +5104,17 @@ impl ProductionDesktopState {
             Err(error) => return Err(error),
         };
         let profile = self.client.profile(&profile_id, &correlation_id).await?;
-        let initial_owner_key_enrollment = rotation_recipients.as_ref().is_some_and(|recipients| {
-            previous.generation == 1
-                && previous.objects.is_empty()
-                && previous.payload_encryption.is_none()
-                && recipients.len() == 1
-                && recipients[0].device_keys.len() == 1
-                && recipients[0].device_keys[0].device_id == self.device_id
-        });
+        let initial_member_key_enrollment =
+            rotation_recipients.as_ref().is_some_and(|recipients| {
+                previous.generation == 1
+                    && previous.objects.is_empty()
+                    && previous.payload_encryption.is_none()
+                    && recipients.len() == 1
+                    && recipients[0].device_keys.len() == 1
+                    && recipients[0].device_keys[0].device_id == self.device_id
+            });
         if let Some(recipients) = rotation_recipients.as_ref() {
-            if initial_owner_key_enrollment {
+            if initial_member_key_enrollment {
                 let recipient = &recipients[0].device_keys[0];
                 let private_key = self
                     .device_key_vault
@@ -5149,7 +5125,7 @@ impl ProductionDesktopState {
                 if recipient.public_key != public_key_hex || recipient.fingerprint != fingerprint {
                     return Err(Problem::new(
                         "recipient_device_key_invalid",
-                        "The registered owner device key does not match this device",
+                        "The registered workspace member device key does not match this device",
                         409,
                         &correlation_id,
                     ));
@@ -5317,7 +5293,7 @@ impl ProductionDesktopState {
                 &correlation_id,
             ));
         };
-        if let Some(lease) = stopped.lease.as_ref() {
+        if !syncing_projection_published && let Some(lease) = stopped.lease.as_ref() {
             if let Err(error) = self
                 .client
                 .runtime_syncing(
@@ -5458,7 +5434,7 @@ impl ProductionDesktopState {
                     &correlation_id,
                 )?
             };
-            let rotation_keys = if rotation_recipients.is_some() && !initial_owner_key_enrollment {
+            let rotation_keys = if rotation_recipients.is_some() && !initial_member_key_enrollment {
                 Some(self.sync_key_vault.stage_rotation(
                     &binding.workspace_id,
                     &binding.resource_id,
@@ -5611,733 +5587,6 @@ impl ProductionDesktopState {
         self.profile_runtime
             .finish_sync_result(profile_id, sync_result)
             .await
-    }
-
-    async fn import_legacy_profile_data_tree(
-        &self,
-        source_root: PathBuf,
-        idempotency_key: String,
-        correlation_id: String,
-    ) -> Result<Value, Problem> {
-        let source_metadata = fs::symlink_metadata(&source_root).map_err(|_| {
-            Problem::new(
-                "migration_source_invalid",
-                "Prepared legacy source directory is unavailable",
-                400,
-                &correlation_id,
-            )
-        })?;
-        if !source_metadata.is_dir() || source_metadata.file_type().is_symlink() {
-            return Err(Problem::new(
-                "migration_source_invalid",
-                "Prepared legacy source directory is invalid",
-                400,
-                &correlation_id,
-            ));
-        }
-        let source_root = source_root.canonicalize().map_err(|_| {
-            Problem::new(
-                "migration_source_invalid",
-                "Prepared legacy source directory is unavailable",
-                400,
-                &correlation_id,
-            )
-        })?;
-        let version: LegacyPreparedSourceVersion = serde_json::from_slice(
-            &read_migration_source_file(&source_root, "version.json", 64 * 1024, &correlation_id)?,
-        )
-        .map_err(|_| {
-            Problem::new(
-                "migration_source_identity_invalid",
-                "Prepared legacy source identity is invalid",
-                422,
-                &correlation_id,
-            )
-        })?;
-        if version.instance_id.trim().is_empty()
-            || version.instance_id.len() > 128
-            || version.instance_id.chars().any(char::is_control)
-        {
-            return Err(Problem::new(
-                "migration_source_identity_invalid",
-                "Prepared legacy source identity is invalid",
-                422,
-                &correlation_id,
-            ));
-        }
-        let inventory: LegacyProfileDataInventory =
-            serde_json::from_slice(&read_migration_source_file(
-                &source_root,
-                "control-plane-export.json",
-                64 * 1024 * 1024,
-                &correlation_id,
-            )?)
-            .map_err(|_| {
-                Problem::new(
-                    "migration_control_export_invalid",
-                    "Prepared legacy control export is invalid",
-                    422,
-                    &correlation_id,
-                )
-            })?;
-        let profiles_root = source_root.join("profiles");
-        let profiles_metadata = fs::symlink_metadata(&profiles_root).map_err(|_| {
-            Problem::new(
-                "migration_profile_source_missing",
-                "Prepared legacy profile data is missing",
-                422,
-                &correlation_id,
-            )
-        })?;
-        if !profiles_metadata.is_dir() || profiles_metadata.file_type().is_symlink() {
-            return Err(Problem::new(
-                "migration_profile_source_invalid",
-                "Prepared legacy profile directory is invalid",
-                422,
-                &correlation_id,
-            ));
-        }
-
-        let mut profile_sources = BTreeMap::new();
-        let mut source_proxy_ids = BTreeSet::new();
-        for profile in inventory.profiles {
-            let local_id = buglogin_migration::legacy::legacy_local_profile_id(&profile.id)
-                .map_err(|_| {
-                    Problem::new(
-                        "migration_control_export_invalid",
-                        "Prepared legacy profile identity is invalid",
-                        422,
-                        &correlation_id,
-                    )
-                })?;
-            let profile_id = ProfileId::new(
-                buglogin_domain::ids::migration_uuid(
-                    "buglogin-legacy",
-                    &version.instance_id,
-                    "profile",
-                    &local_id,
-                )
-                .to_string(),
-            )
-            .map_err(|_| {
-                Problem::new(
-                    "migration_profile_id_invalid",
-                    "Mapped legacy profile ID is invalid",
-                    422,
-                    &correlation_id,
-                )
-            })?;
-            let proxy_id = profile.proxy_id;
-            if let Some(proxy_id) = proxy_id.as_deref() {
-                if proxy_id.trim().is_empty()
-                    || proxy_id.len() > 128
-                    || !proxy_id.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
-                    })
-                {
-                    return Err(Problem::new(
-                        "migration_control_export_invalid",
-                        "Prepared legacy profile proxy identity is invalid",
-                        422,
-                        &correlation_id,
-                    ));
-                }
-                source_proxy_ids.insert(proxy_id.to_owned());
-            }
-            if profile_sources
-                .insert(local_id, (profile.id, profile_id, proxy_id))
-                .is_some()
-            {
-                return Err(Problem::new(
-                    "migration_control_export_invalid",
-                    "Prepared legacy control export contains duplicate profiles",
-                    422,
-                    &correlation_id,
-                ));
-            }
-        }
-
-        let mut imported = Vec::new();
-        let mut already_imported = Vec::new();
-        let mut preserve_only = Vec::new();
-        let mut failed = Vec::new();
-        let proxy_export = if source_proxy_ids.is_empty() {
-            None
-        } else {
-            Some(
-                buglogin_migration::legacy::map_legacy_proxies_for_ids(
-                    &source_root,
-                    &version.instance_id,
-                    &source_proxy_ids,
-                )
-                .map_err(|_| {
-                    Problem::new(
-                        "migration_proxy_source_invalid",
-                        "A proxy referenced by the legacy profiles is missing or invalid",
-                        422,
-                        &correlation_id,
-                    )
-                })?,
-            )
-        };
-        let mut processed = 0usize;
-        let total_profiles = profile_sources.len();
-        let mut imported_proxy_scopes = BTreeSet::new();
-        let mut imported_proxy_count = 0usize;
-        for (local_id, (source_profile_id, profile_id, source_proxy_id)) in profile_sources {
-            processed += 1;
-            let progress_operation_id =
-                operation_id("migration.profile.data.import", &idempotency_key);
-            let progress = 0.1 + 0.8 * processed as f64 / total_profiles as f64;
-            if let Ok(mut operations) = self.operations.write() {
-                let _ = operations.transition(
-                    &progress_operation_id,
-                    OperationStatus::Running,
-                    Some(progress.min(0.9)),
-                    None,
-                    None,
-                );
-            }
-            let expected_proxy_id = source_proxy_id
-                .as_deref()
-                .map(|source_proxy_id| {
-                    ProxyId::new(
-                        buglogin_domain::ids::migration_uuid(
-                            "buglogin-legacy",
-                            &version.instance_id,
-                            "proxy",
-                            source_proxy_id,
-                        )
-                        .to_string(),
-                    )
-                    .map_err(|_| invalid_input("proxyId", &correlation_id))
-                })
-                .transpose()?;
-            let target_profile = match self.client.profile(&profile_id, &correlation_id).await {
-                Ok(profile) => profile,
-                Err(error) if error.status >= 500 || error.status == 408 || error.status == 429 => {
-                    return Err(error);
-                }
-                Err(error) => {
-                    failed.push(json!({
-                        "sourceProfileId": source_profile_id,
-                        "profileId": profile_id,
-                        "code": error.code
-                    }));
-                    continue;
-                }
-            };
-            if target_profile.value.id != profile_id
-                || target_profile.value.proxy_id != expected_proxy_id
-            {
-                failed.push(json!({
-                    "sourceProfileId": source_profile_id,
-                    "profileId": profile_id,
-                    "code": "migration_profile_control_mismatch"
-                }));
-                continue;
-            }
-            if let Some(source_proxy_id) = source_proxy_id.as_deref() {
-                let binding = match self
-                    .client
-                    .profile_binding(&profile_id, &correlation_id)
-                    .await
-                {
-                    Ok(binding) => binding,
-                    Err(error)
-                        if error.status >= 500 || error.status == 408 || error.status == 429 =>
-                    {
-                        return Err(error);
-                    }
-                    Err(error) => {
-                        failed.push(json!({
-                            "sourceProfileId": source_profile_id,
-                            "profileId": profile_id,
-                            "code": error.code
-                        }));
-                        continue;
-                    }
-                };
-                if binding.profile_id != profile_id
-                    || binding.archive_state != ProfileArchiveState::Active
-                {
-                    failed.push(json!({
-                        "sourceProfileId": source_profile_id,
-                        "profileId": profile_id,
-                        "code": "managed_profile_binding_required"
-                    }));
-                    continue;
-                }
-                let scope_key = format!("{}:{source_proxy_id}", binding.workspace_id.as_str());
-                if !imported_proxy_scopes.contains(&scope_key) {
-                    let export = proxy_export.as_ref().ok_or_else(|| {
-                        Problem::new(
-                            "migration_proxy_source_invalid",
-                            "A profile references a proxy that is missing from the prepared source",
-                            422,
-                            &correlation_id,
-                        )
-                    })?;
-                    let mapped_proxy = export
-                        .records
-                        .iter()
-                        .find(|record| record.source_ref.id == *source_proxy_id)
-                        .ok_or_else(|| {
-                            Problem::new(
-                                "migration_proxy_source_invalid",
-                                "A referenced legacy proxy could not be mapped",
-                                422,
-                                &correlation_id,
-                            )
-                        })?;
-                    let credential = export.credentials.iter().find(|secret| {
-                        mapped_proxy.data.credential_ref.as_deref()
-                            == Some(secret.credential_id.as_str())
-                    });
-                    let imported_proxy = self
-                        .ensure_legacy_proxy(
-                            &binding.workspace_id,
-                            mapped_proxy,
-                            credential,
-                            &version.instance_id,
-                            &correlation_id,
-                        )
-                        .await;
-                    if let Err(error) = imported_proxy {
-                        if error.status >= 500 || error.status == 408 || error.status == 429 {
-                            return Err(error);
-                        }
-                        failed.push(json!({
-                            "sourceProfileId": source_profile_id,
-                            "profileId": profile_id,
-                            "code": error.code
-                        }));
-                        continue;
-                    }
-                    imported_proxy_scopes.insert(scope_key);
-                    imported_proxy_count += 1;
-                }
-            }
-            let profile_root = profiles_root.join(&local_id);
-            let profile_root_metadata = match fs::symlink_metadata(&profile_root) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    preserve_only.push(json!({
-                        "sourceProfileId": source_profile_id,
-                        "profileId": profile_id,
-                        "reason": "browser_data_missing"
-                    }));
-                    continue;
-                }
-                Err(_) => {
-                    return Err(unavailable(
-                        "migration_profile_source_unavailable",
-                        &correlation_id,
-                    ));
-                }
-            };
-            if !profile_root_metadata.is_dir() || profile_root_metadata.file_type().is_symlink() {
-                failed.push(json!({
-                    "sourceProfileId": source_profile_id,
-                    "profileId": profile_id,
-                    "code": "migration_profile_source_invalid"
-                }));
-                continue;
-            }
-            let data_root = profile_root.join("profile");
-            let profile_metadata = match fs::symlink_metadata(&data_root) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    preserve_only.push(json!({
-                        "sourceProfileId": source_profile_id,
-                        "profileId": profile_id,
-                        "reason": "browser_data_missing"
-                    }));
-                    continue;
-                }
-                Err(_) => {
-                    return Err(unavailable(
-                        "migration_profile_source_unavailable",
-                        &correlation_id,
-                    ));
-                }
-            };
-            if !profile_metadata.is_dir() || profile_metadata.file_type().is_symlink() {
-                failed.push(json!({
-                    "sourceProfileId": source_profile_id,
-                    "profileId": profile_id,
-                    "code": "migration_profile_source_invalid"
-                }));
-                continue;
-            }
-            let profile_key = format!(
-                "migration_{:x}",
-                Sha256::digest(format!("{idempotency_key}:{}", profile_id.as_str()).as_bytes())
-            );
-            match self
-                .import_legacy_profile_data(
-                    profile_id.clone(),
-                    data_root,
-                    profile_key,
-                    correlation_id.clone(),
-                )
-                .await
-            {
-                Ok(receipt) => {
-                    if receipt.get("status").and_then(Value::as_str) == Some("already_imported") {
-                        already_imported.push(receipt);
-                    } else {
-                        imported.push(receipt);
-                    }
-                }
-                Err(error) if error.code == "migration_profile_source_empty" => {
-                    preserve_only.push(json!({
-                        "sourceProfileId": source_profile_id,
-                        "profileId": profile_id,
-                        "reason": "browser_data_empty"
-                    }));
-                }
-                Err(error) if error.status >= 500 || error.status == 408 || error.status == 429 => {
-                    return Err(error);
-                }
-                Err(error) => failed.push(json!({
-                    "sourceProfileId": source_profile_id,
-                    "profileId": profile_id,
-                    "code": error.code
-                })),
-            }
-        }
-        Ok(json!({
-            "status": if failed.is_empty() { "completed" } else { "completed_with_errors" },
-            "sourceProfileCount": processed,
-            "proxiesImportedOrReconciled": imported_proxy_count,
-            "imported": imported,
-            "alreadyImported": already_imported,
-            "preserveOnly": preserve_only,
-            "failed": failed
-        }))
-    }
-
-    async fn ensure_legacy_proxy(
-        &self,
-        workspace_id: &WorkspaceId,
-        proxy: &buglogin_migration::legacy::NeutralProxyRecord,
-        credential: Option<&buglogin_migration::encrypted_secrets::ProxyCredentialSecret>,
-        source_instance_id: &str,
-        correlation_id: &str,
-    ) -> Result<(), Problem> {
-        let proxy_id =
-            ProxyId::new(proxy.id.clone()).map_err(|_| invalid_input("proxyId", correlation_id))?;
-        let created_at = proxy
-            .created_at
-            .as_deref()
-            .unwrap_or("1970-01-01T00:00:00.000Z");
-        let updated_at = proxy.updated_at.as_deref().unwrap_or(created_at);
-        let proxy_metadata = json!({
-            "id": proxy_id,
-            "name": proxy.data.name,
-            "protocol": proxy.data.protocol,
-            "host": proxy.data.host,
-            "port": proxy.data.port,
-            "bypassRules": proxy.data.bypass_rules,
-            "createdAt": created_at,
-            "updatedAt": updated_at
-        });
-        let credential_payload = match credential {
-            Some(credential) => {
-                let (Some(username), Some(password)) =
-                    (credential.username.as_ref(), credential.password.as_ref())
-                else {
-                    return Err(Problem::new(
-                        "migration_proxy_credential_invalid",
-                        "A referenced legacy proxy has incomplete credentials and cannot be migrated",
-                        422,
-                        correlation_id,
-                    ));
-                };
-                if username.is_empty() || password.is_empty() {
-                    return Err(Problem::new(
-                        "migration_proxy_credential_invalid",
-                        "A referenced legacy proxy has incomplete credentials and cannot be migrated",
-                        422,
-                        correlation_id,
-                    ));
-                }
-                Some(SensitiveJson::new(json!({
-                    "username": username,
-                    "password": password
-                })))
-            }
-            None => None,
-        };
-        self.reconcile_pending_proxy_mutation(workspace_id, &proxy_id, correlation_id)
-            .await?;
-        let current = self
-            .client
-            .invoke(
-                "proxy_get",
-                correlation_id,
-                None,
-                json!({
-                    "workspaceId": workspace_id,
-                    "proxyId": proxy_id
-                }),
-            )
-            .await;
-        let existing = match current {
-            Ok(current) => Some(current.data),
-            Err(error) if error.status == 404 => None,
-            Err(error) => return Err(error),
-        };
-        let (command, expected_revision) = if let Some(existing) = existing {
-            let record = existing.get("proxy").ok_or_else(|| {
-                Problem::new(
-                    "migration_proxy_conflict",
-                    "An existing proxy with the mapped ID has an invalid API record",
-                    502,
-                    correlation_id,
-                )
-            })?;
-            let same_metadata = record.get("id").and_then(Value::as_str) == Some(proxy.id.as_str())
-                && record.get("name").and_then(Value::as_str) == proxy.data.name.as_deref()
-                && record.get("protocol").and_then(Value::as_str)
-                    == Some(proxy.data.protocol.as_str())
-                && record.get("host").and_then(Value::as_str) == Some(proxy.data.host.as_str())
-                && record.get("port").and_then(Value::as_u64) == Some(u64::from(proxy.data.port))
-                && record
-                    .get("bypassRules")
-                    .and_then(Value::as_array)
-                    .is_some_and(|rules| {
-                        rules.len() == proxy.data.bypass_rules.len()
-                            && rules.iter().all(Value::is_string)
-                            && rules.iter().filter_map(Value::as_str).eq(proxy
-                                .data
-                                .bypass_rules
-                                .iter()
-                                .map(String::as_str))
-                    });
-            if !same_metadata {
-                return Err(Problem::new(
-                    "migration_proxy_conflict",
-                    "An existing proxy with the mapped ID differs from the legacy source; it was preserved",
-                    409,
-                    correlation_id,
-                ));
-            }
-            let revision = existing
-                .get("revision")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    Problem::new(
-                        "migration_proxy_conflict",
-                        "An existing proxy has no valid revision",
-                        502,
-                        correlation_id,
-                    )
-                })?;
-            let has_credential = record.get("hasCredential").and_then(Value::as_bool);
-            if credential_payload.is_none() && has_credential == Some(true) {
-                return Err(Problem::new(
-                    "migration_proxy_conflict",
-                    "An existing proxy has credentials absent from the legacy source; it was preserved",
-                    409,
-                    correlation_id,
-                ));
-            }
-            if credential_payload.is_none() && has_credential == Some(false) {
-                return Ok(());
-            }
-            if let Some(credential) = credential {
-                let username = credential
-                    .username
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_owned();
-                let password = credential
-                    .password
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_owned();
-                let encoded = serde_json::to_vec(&ProxyCredentialInput { username, password })
-                    .map_err(|_| serialization(correlation_id))?;
-                let expected =
-                    SecretValue::new(encoded).map_err(|_| serialization(correlation_id))?;
-                if has_credential == Some(true)
-                    && self
-                        .proxy_credential_vault
-                        .load(workspace_id, &proxy_id, revision, correlation_id)?
-                        .is_some_and(|stored| stored.as_bytes() == expected.as_bytes())
-                {
-                    return Ok(());
-                }
-            }
-            ("proxy_update", Some(revision))
-        } else {
-            ("proxy_create", None)
-        };
-        let digest = Sha256::digest(
-            format!(
-                "legacy-proxy:{source_instance_id}:{}:{}:{}",
-                proxy.source_ref.id,
-                workspace_id.as_str(),
-                expected_revision.unwrap_or_default()
-            )
-            .as_bytes(),
-        );
-        let idempotency_key = format!("migration_proxy_{:x}", digest);
-        let mut payload = if command == "proxy_create" {
-            json!({
-                "workspaceId": workspace_id,
-                "proxy": proxy_metadata
-            })
-        } else {
-            json!({
-                "workspaceId": workspace_id,
-                "proxyId": proxy_id,
-                "expectedRevision": expected_revision,
-                "proxy": proxy_metadata
-            })
-        };
-        if let Some(credential) = credential_payload {
-            payload["credential"] = credential.into_value();
-        }
-        let result = self
-            .invoke_proxy_mutation(command, correlation_id, Some(&idempotency_key), payload)
-            .await?;
-        if result.data.get("deduplicated").and_then(Value::as_bool) == Some(true) {
-            return Err(Problem::new(
-                "migration_proxy_conflict",
-                "A different proxy already uses the legacy proxy endpoint; the profile was not imported",
-                409,
-                correlation_id,
-            ));
-        }
-        Ok(())
-    }
-
-    async fn import_legacy_profile_data(
-        &self,
-        profile_id: ProfileId,
-        source_root: PathBuf,
-        idempotency_key: String,
-        correlation_id: String,
-    ) -> Result<Value, Problem> {
-        let local_projection = self.profile_projection(&correlation_id)?;
-        let binding = self
-            .client
-            .profile_binding(&profile_id, &correlation_id)
-            .await?;
-        if binding.archive_state != ProfileArchiveState::Active || binding.profile_id != profile_id
-        {
-            return Err(Problem::new(
-                "managed_profile_binding_required",
-                "Legacy profile import requires an active managed profile binding",
-                409,
-                &correlation_id,
-            ));
-        }
-        let profile = self.client.profile(&profile_id, &correlation_id).await?;
-        let auth = self.auth(&correlation_id)?;
-        let scope = CoordinationScope {
-            workspace_id: &binding.workspace_id,
-            auth: &auth,
-        };
-        let current = self
-            .client
-            .current_manifest(scope.clone(), &binding.resource_id)
-            .await?
-            .ok_or_else(|| {
-                Problem::new(
-                    "production_manifest_not_found",
-                    "Profile migration requires its provisioned genesis manifest",
-                    409,
-                    &correlation_id,
-                )
-            })?;
-        if manifest_has_profile_data(&current) {
-            return Ok(json!({
-                "profileId": profile_id,
-                "status": "already_imported",
-                "generation": current.generation,
-                "rootChecksum": current.root_checksum
-            }));
-        }
-        if profile.value.state != ProfileState::Created {
-            return Err(Problem::new(
-                "migration_profile_state_invalid",
-                "Only a newly imported profile without browser data can receive legacy profile files",
-                409,
-                &correlation_id,
-            ));
-        }
-        if self
-            .profile_runtime
-            .running_profiles()
-            .await?
-            .iter()
-            .any(|running| running == &profile_id)
-        {
-            return Err(Problem::new(
-                "migration_profile_running",
-                "Stop this profile before importing its legacy browser data",
-                409,
-                &correlation_id,
-            ));
-        }
-        let lease = self
-            .client
-            .acquire_lease_idempotent(
-                scope.clone(),
-                &binding.resource_id,
-                Duration::from_secs(120),
-                &lease_idempotency_key(&idempotency_key, current.generation),
-            )
-            .await?;
-        if let Err(error) =
-            local_projection.stage_legacy_profile_data(&profile_id, &current, &source_root)
-        {
-            let _ = self
-                .client
-                .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
-                .await;
-            return Err(error);
-        }
-        self.stop_profile(
-            profile_id.clone(),
-            idempotency_key,
-            correlation_id.clone(),
-            None,
-            Some(lease),
-            None,
-        )
-        .await?;
-        let active = self
-            .client
-            .current_manifest(scope, &binding.resource_id)
-            .await?
-            .ok_or_else(|| {
-                Problem::new(
-                    "production_manifest_not_found",
-                    "Profile sync did not publish an active migration manifest",
-                    503,
-                    &correlation_id,
-                )
-            })?;
-        if !manifest_has_profile_data(&active) {
-            return Err(Problem::new(
-                "migration_profile_sync_incomplete",
-                "Legacy profile data was staged but its encrypted sync manifest is not active",
-                503,
-                &correlation_id,
-            )
-            .retryable(true));
-        }
-        Ok(json!({
-            "profileId": profile_id,
-            "status": "completed",
-            "generation": active.generation,
-            "rootChecksum": active.root_checksum
-        }))
     }
 
     async fn prepare_idle_profile_for_key_rotation(
@@ -7439,12 +6688,6 @@ impl DesktopState {
         payload: Value,
     ) -> Result<CommandResult<Value>, Problem> {
         match self {
-            Self::Local(_) if invoke_name == "migration_profile_data_import" => Err(Problem::new(
-                "hosted_profile_required",
-                "Legacy profile data import requires an authenticated hosted profile",
-                409,
-                correlation_id,
-            )),
             Self::Local(_) if invoke_name == "resource_lease_get" => Err(Problem::new(
                 "hosted_coordination_required",
                 "Team lock status requires an authenticated workspace API",
@@ -7469,14 +6712,6 @@ impl DesktopState {
                     .await
             }
             Self::Production(state) => {
-                if matches!(invoke_name, "migration_inspect" | "migration_import") {
-                    return Err(Problem::new(
-                        "production_local_migration_forbidden",
-                        "Production cannot run local filesystem migration",
-                        409,
-                        correlation_id,
-                    ));
-                }
                 state
                     .invoke(invoke_name, correlation_id, idempotency_key, payload)
                     .await
@@ -7612,32 +6847,6 @@ struct ProfileLaunchInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProfileStopInput {
     profile_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MigrationProfileDataImportInput {
-    source_root: PathBuf,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyPreparedSourceVersion {
-    instance_id: String,
-}
-
-#[derive(Deserialize)]
-struct LegacyProfileDataInventory {
-    #[serde(default)]
-    profiles: Vec<LegacyProfileDataInventoryRecord>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyProfileDataInventoryRecord {
-    id: String,
-    #[serde(default)]
-    proxy_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -7840,58 +7049,6 @@ fn manifest_has_profile_data(manifest: &buglogin_sync::manifest::SyncManifest) -
                 .objects
                 .iter()
                 .any(|object| !object.key.starts_with(".buglogin/")))
-}
-
-fn read_migration_source_file(
-    source_root: &PathBuf,
-    name: &str,
-    max_bytes: u64,
-    correlation_id: &str,
-) -> Result<Vec<u8>, Problem> {
-    let missing_code = if name == "version.json" {
-        "migration_source_identity_missing"
-    } else {
-        "migration_control_export_missing"
-    };
-    let invalid_code = if name == "version.json" {
-        "migration_source_identity_invalid"
-    } else {
-        "migration_control_export_invalid"
-    };
-    let path = source_root.join(name);
-    let metadata = fs::symlink_metadata(&path).map_err(|_| {
-        Problem::new(
-            missing_code,
-            "Required prepared legacy source metadata is missing",
-            422,
-            correlation_id,
-        )
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > max_bytes {
-        return Err(Problem::new(
-            invalid_code,
-            "Prepared legacy source metadata is invalid",
-            422,
-            correlation_id,
-        ));
-    }
-    let bytes = fs::read(path).map_err(|_| {
-        Problem::new(
-            missing_code,
-            "Required prepared legacy source metadata is unavailable",
-            422,
-            correlation_id,
-        )
-    })?;
-    if bytes.len() as u64 != metadata.len() {
-        return Err(Problem::new(
-            "migration_source_changed",
-            "Prepared legacy source metadata changed while it was being read",
-            409,
-            correlation_id,
-        ));
-    }
-    Ok(bytes)
 }
 
 fn lease_idempotency_key(idempotency_key: &str, generation: u64) -> String {

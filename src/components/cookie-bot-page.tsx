@@ -156,8 +156,9 @@ export function CookieBotPage({
         setRuns(page.runs);
         setRunsError(null);
       } catch (error) {
-        // A background refresh that fails leaves the previous rows on screen.
-        if (withSpinner) setRunsError(error);
+        // Keep the last good rows visible, but do not silently present them as
+        // current when a background worker read has failed.
+        setRunsError(error);
       } finally {
         if (withSpinner) setIsLoadingRuns(false);
       }

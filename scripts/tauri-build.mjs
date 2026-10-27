@@ -2,11 +2,10 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBuildTargetDir } from "./build-target.mjs";
-import { stageTauriSidecarDirectory } from "./tauri-sidecar-staging.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const desktopRoot = resolve(repositoryRoot, "apps/desktop");
@@ -33,39 +32,12 @@ if (!targetTriple) throw new Error("Rust target triple unavailable");
 const targetRoot = resolve(cargoTargetDir, targetTriple, "release");
 const debugBuild = process.argv.includes("--debug");
 const noBundle = process.argv.includes("--no-bundle");
-const sidecarSuffix = process.platform === "win32" ? ".exe" : "";
-const sidecarName = `buglogin-migrate-${targetTriple}${sidecarSuffix}`;
-const sidecarSource = resolve(targetRoot, `buglogin-migrate${sidecarSuffix}`);
-const sidecarStage = resolve(cargoTargetDir, "tauri-sidecars");
-const sidecarStaged = resolve(sidecarStage, sidecarName);
-const sourceBinaries = resolve(desktopRoot, "src-tauri/binaries");
 const childEnv = {
   ...process.env,
   CARGO_TARGET_DIR: cargoTargetDir,
   BUGLOGIN_TAURI_FRONTEND_DIST_STAGE: frontendStagePath,
   TAURI_ENV_TARGET_TRIPLE: targetTriple,
 };
-let restoreBinariesDirectory;
-
-if (!(debugBuild && noBundle)) {
-  execFileSync(
-    process.execPath,
-    [resolve(desktopRoot, "copy-migration-binary.mjs")],
-    {
-      cwd: desktopRoot,
-      env: childEnv,
-      stdio: "inherit",
-    },
-  );
-  await mkdir(sidecarStage, { recursive: true });
-  await cp(sidecarSource, sidecarStaged, { force: true });
-
-  restoreBinariesDirectory = await stageTauriSidecarDirectory({
-    sourceBinaries,
-    sidecarStage,
-    sidecarName,
-  });
-}
 
 const child = spawn(
   process.execPath,
@@ -81,7 +53,7 @@ const child = spawn(
         // Use a relative directory so Tauri embeds frontend assets in the app.
         frontendDist: frontendStageConfigPath,
         beforeBuildCommand:
-          "pnpm copy-migration-binary && pnpm build && node ../../scripts/stage-tauri-frontend.mjs",
+          "pnpm build && node ../../scripts/stage-tauri-frontend.mjs",
       },
       ...(debugBuild && noBundle ? { bundle: { externalBin: [] } } : {}),
     }),
@@ -92,7 +64,6 @@ const child = spawn(
 
 async function finishBuild(code, signal) {
   try {
-    await restoreBinariesDirectory?.();
     const stagedPath = relative(desktopRoot, frontendStagePath);
     if (
       !stagedPath ||

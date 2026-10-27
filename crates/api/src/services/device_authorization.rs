@@ -400,7 +400,7 @@ impl DeviceAuthorizationService {
             self.persist_poll(&device_record_id, revision, record)?;
             return Ok(DevicePoll::Pending);
         }
-        let account_id = record.account_id.clone().ok_or_else(|| corrupt())?;
+        let account_id = record.account_id.clone().ok_or_else(corrupt)?;
         if consume_approved {
             self.consume_approved_record(device_record_id, record.clone(), revision)?;
         }
@@ -488,7 +488,7 @@ impl DeviceAuthorizationService {
         let (index, user_code_index_revision) = self
             .persistence
             .load_versioned::<UserCodeIndex>(TENANT, INDEX_TYPE, &user_code_index_id)?
-            .ok_or_else(|| corrupt())?;
+            .ok_or_else(corrupt)?;
         if index.device_record_id != device_record_id {
             return Err(corrupt());
         }
@@ -506,12 +506,12 @@ impl DeviceAuthorizationService {
         record: DeviceAuthorizationRecord,
         revision: u64,
     ) -> Result<(), Problem> {
-        let account_id = record.account_id.clone().ok_or_else(|| corrupt())?;
+        let account_id = record.account_id.clone().ok_or_else(corrupt)?;
         let index_id = hash_id(&record.user_code_hash);
         let (index, index_revision) = self
             .persistence
             .load_versioned::<UserCodeIndex>(TENANT, INDEX_TYPE, &index_id)?
-            .ok_or_else(|| corrupt())?;
+            .ok_or_else(corrupt)?;
         if index.device_record_id != device_record_id {
             return Err(corrupt());
         }
@@ -711,8 +711,7 @@ mod tests {
         assert_eq!(
             service
                 .start("device-5678", &"é".repeat(129), 100)
-                .err()
-                .expect("129-character client name must be rejected")
+                .expect_err("129-character client name must be rejected")
                 .code,
             "device_client_name_invalid"
         );

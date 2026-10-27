@@ -112,8 +112,16 @@ impl GroupService {
                 .any(|grant| &grant.workspace_id == workspace_id)
     }
 
-    pub(crate) fn all_share_grants(&self) -> impl Iterator<Item = &GroupShareGrant> {
-        self.share_grants.values()
+    pub(crate) fn workspace_record_count(&self, workspace_id: &WorkspaceId) -> usize {
+        self.groups
+            .values()
+            .filter(|record| &record.workspace_id == workspace_id)
+            .count()
+            + self
+                .share_grants
+                .values()
+                .filter(|grant| &grant.workspace_id == workspace_id)
+                .count()
     }
 
     pub fn import_records(
@@ -152,9 +160,9 @@ impl GroupService {
                     Action::Read | Action::Update | Action::Execute | Action::Share
                 )
                 || !matches!(grant.effect, Effect::Allow | Effect::Deny)
-                || !imported_groups
+                || imported_groups
                     .get(&grant.group_id)
-                    .is_some_and(|group| group.workspace_id == grant.workspace_id)
+                    .is_none_or(|group| group.workspace_id != grant.workspace_id)
             {
                 return Err(problem(
                     "group_share_invalid",
@@ -714,6 +722,41 @@ mod tests {
         GroupUpdateInput,
     };
     use buglogin_domain::entities::Group;
+
+    #[test]
+    fn workspace_record_count_includes_groups_and_share_records_in_scope() {
+        let workspace = WorkspaceId::from_str("wsp_alpha").unwrap();
+        let other_workspace = WorkspaceId::from_str("wsp_beta").unwrap();
+        let mut service = GroupService::default();
+        for (group_id, workspace_id) in [
+            ("group_a", &workspace),
+            ("group_b", &workspace),
+            ("group_other", &other_workspace),
+        ] {
+            let group_id = GroupId::from_str(group_id).unwrap();
+            service.groups.insert(
+                group_id.clone(),
+                GroupRecord {
+                    group: Group {
+                        id: group_id,
+                        name: "Test group".into(),
+                        appearance: None,
+                        created_at: "2026-10-27T00:00:00Z".into(),
+                        updated_at: "2026-10-27T00:00:00Z".into(),
+                    },
+                    workspace_id: workspace_id.clone(),
+                    revision: 1,
+                },
+            );
+        }
+        service.share_grants.insert(
+            GrantId::from_str("grant_a").unwrap(),
+            share_grant("grant_a", "group_a", "member_a", Action::Read),
+        );
+
+        assert_eq!(service.workspace_record_count(&workspace), 3);
+        assert_eq!(service.workspace_record_count(&other_workspace), 1);
+    }
 
     fn principal(workspaces: &[&str]) -> Principal {
         Principal {

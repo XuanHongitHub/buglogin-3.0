@@ -252,6 +252,10 @@ impl AuthService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve the device session contract"
+    )]
     pub fn issue_device_session_with_account_revision_at(
         &mut self,
         account_id: AccountId,
@@ -274,36 +278,10 @@ impl AuthService {
         )
     }
 
-    pub(crate) fn issue_device_session_with_account_revision_and_consumption(
-        &mut self,
-        account_id: AccountId,
-        access_expires_at: u64,
-        refresh_expires_at: u64,
-        device_id: String,
-        credential_version: Option<u32>,
-        account_revision: Option<u64>,
-        consumption: DeviceAuthorizationConsumption,
-    ) -> Result<DeviceSessionTokens, Problem> {
-        if self.persistence.is_none() {
-            return Err(Problem::new(
-                "auth_unavailable",
-                "Persistent authentication storage is required for device-code exchange",
-                503,
-                "identity",
-            ));
-        }
-        self.issue_device_session_inner(
-            account_id,
-            access_expires_at,
-            refresh_expires_at,
-            device_id,
-            credential_version,
-            account_revision,
-            None,
-            consumption.into_deletes(),
-        )
-    }
-
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit fields preserve the device authorization contract"
+    )]
     pub(crate) fn issue_device_session_with_account_revision_and_consumption_at(
         &mut self,
         account_id: AccountId,
@@ -335,6 +313,10 @@ impl AuthService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared session constructor keeps persistence mutations explicit"
+    )]
     fn issue_device_session_inner(
         &mut self,
         account_id: AccountId,
@@ -1221,6 +1203,7 @@ impl AuthService {
         revoked
     }
 
+    #[cfg(test)]
     pub(crate) fn revoke_account_sessions(
         &mut self,
         account_id: &AccountId,

@@ -88,6 +88,13 @@ impl ExtensionGroupService {
             .any(|record| &record.workspace_id == workspace_id)
     }
 
+    pub(crate) fn workspace_record_count(&self, workspace_id: &WorkspaceId) -> usize {
+        self.groups
+            .values()
+            .filter(|record| &record.workspace_id == workspace_id)
+            .count()
+    }
+
     pub fn create(
         &mut self,
         principal: &Principal,
@@ -346,6 +353,39 @@ fn problem(code: &'static str, title: &'static str, status: u16) -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_record_count_ignores_other_workspaces() {
+        let workspace_id = workspace("wsp_alpha");
+        let other_workspace = workspace("wsp_beta");
+        let mut service = ExtensionGroupService::default();
+        for (group_id, workspace_id) in [
+            ("extgrp_a", &workspace_id),
+            ("extgrp_b", &workspace_id),
+            ("extgrp_other", &other_workspace),
+        ] {
+            let group_id = ExtensionGroupId::from_str(group_id).unwrap();
+            service.groups.insert(
+                group_id.clone(),
+                ExtensionGroupRecord {
+                    group: ExtensionGroup {
+                        id: group_id,
+                        name: "Test extension group".into(),
+                        extension_ids: Vec::new(),
+                        extension_sources: BTreeMap::new(),
+                        sync_mode: None,
+                        created_at: "2026-10-27T00:00:00Z".into(),
+                        updated_at: "2026-10-27T00:00:00Z".into(),
+                    },
+                    workspace_id: workspace_id.clone(),
+                    revision: 1,
+                },
+            );
+        }
+
+        assert_eq!(service.workspace_record_count(&workspace_id), 2);
+        assert_eq!(service.workspace_record_count(&other_workspace), 1);
+    }
 
     #[test]
     fn git_sources_survive_persistence_and_older_clients_without_cross_workspace_access() {

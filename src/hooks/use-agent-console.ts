@@ -33,6 +33,7 @@ import { showErrorToast, showToast } from "@/lib/toast-utils";
 
 interface ConsoleData {
   loaded: boolean;
+  error: string | null;
   sessions: AgentSession[];
   activity: AgentActivity[];
   thread: AgentThreadItem[];
@@ -43,6 +44,7 @@ interface ConsoleData {
 
 const EMPTY: ConsoleData = {
   loaded: false,
+  error: null,
   sessions: [],
   activity: [],
   thread: [],
@@ -53,6 +55,7 @@ const EMPTY: ConsoleData = {
 
 export interface AgentConsole extends ConsoleData {
   openRequests: AgentThreadItem[];
+  refresh: () => Promise<void>;
   answer: (requestId: number, answer: string) => Promise<boolean>;
   dismiss: (requestId: number) => Promise<boolean>;
   sendNote: (
@@ -97,6 +100,7 @@ export function useAgentConsole({
     }
     setData((previous) => ({
       loaded: true,
+      error: null,
       sessions: snapshot.sessions,
       activity: appendActivity(snapshot.activity, previous.activity),
       thread: snapshot.thread,
@@ -113,6 +117,11 @@ export function useAgentConsole({
       applySnapshot(snapshot);
     } catch (error) {
       console.warn("Failed to read the agent console:", error);
+      setData((previous) => ({
+        ...previous,
+        loaded: true,
+        error: translateBackendError(optionsRef.current.t, error),
+      }));
     }
   }, [applySnapshot]);
 
@@ -227,7 +236,13 @@ export function useAgentConsole({
         if (!disposed) applySnapshot(snapshot);
       } catch (error) {
         console.warn("Failed to read the agent console:", error);
-        if (!disposed) setData((previous) => ({ ...previous, loaded: true }));
+        if (!disposed) {
+          setData((previous) => ({
+            ...previous,
+            loaded: true,
+            error: translateBackendError(optionsRef.current.t, error),
+          }));
+        }
       }
     })();
 
@@ -353,6 +368,7 @@ export function useAgentConsole({
     () => ({
       ...data,
       openRequests: requests,
+      refresh: refetch,
       answer,
       dismiss,
       sendNote,
@@ -365,6 +381,7 @@ export function useAgentConsole({
     [
       data,
       requests,
+      refetch,
       answer,
       dismiss,
       sendNote,

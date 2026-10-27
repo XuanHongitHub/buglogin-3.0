@@ -207,30 +207,9 @@ assert.match(String(calls[14]?.args?.idempotencyKey), /^idem_/);
 assert.equal(calls[15]?.command, "grant_revoke");
 assert.deepEqual(calls[15]?.args?.payload, { grantId: "grant_1" });
 
-await api.inspectMigration("C:/staging/legacy");
-assert.equal(calls[16]?.command, "migration_inspect");
-assert.deepEqual(calls[16]?.args?.payload, { sourceRoot: "C:/staging/legacy" });
-assert.match(String(calls[16]?.args?.correlationId), /^cor_/);
-assert.match(String(calls[16]?.args?.idempotencyKey), /^idem_/);
-
-await api.importMigration({
-  packageRoot: "C:/package",
-  stagingRoot: "C:/staging",
-  destinationRoot: "C:/repository",
-  runId: "run-1",
-  signingKeyNamespace: "migration",
-  signingKeyName: "signing",
-  migrationKeyNamespace: "migration",
-  migrationKeyName: "encryption",
-  confirmation: "CUTOVER_AND_PROMOTE",
-  dryRunApproved: true,
-});
-assert.equal(calls[17]?.command, "migration_import");
-assert.match(String(calls[17]?.args?.idempotencyKey), /^idem_/);
-
 await api.checkProxy({ workspaceId: "ws_1", proxyId: "proxy_1" });
-assert.equal(calls[18]?.command, "proxy_check");
-assert.deepEqual(calls[18]?.args?.payload, {
+assert.equal(calls[16]?.command, "proxy_check");
+assert.deepEqual(calls[16]?.args?.payload, {
   workspaceId: "ws_1",
   proxyId: "proxy_1",
 });
@@ -260,7 +239,7 @@ await api.replaceProfileGroups({
   groupIds: ["grp_1"],
 });
 assert.deepEqual(
-  calls.slice(19).map(({ command }) => command),
+  calls.slice(17).map(({ command }) => command),
   [
     "group_list",
     "group_get",
@@ -270,16 +249,16 @@ assert.deepEqual(
     "profile_groups_replace",
   ],
 );
-for (const call of calls.slice(21)) {
+for (const call of calls.slice(19)) {
   assert.match(String(call.args?.idempotencyKey), /^idem_/);
 }
-assert.deepEqual(calls[19]?.args?.payload, { workspaceId: "ws_1" });
-assert.deepEqual(calls[21]?.args?.payload, {
+assert.deepEqual(calls[17]?.args?.payload, { workspaceId: "ws_1" });
+assert.deepEqual(calls[19]?.args?.payload, {
   workspaceId: "ws_1",
   groupId: "grp_1",
   name: "North America",
 });
-assert.deepEqual(calls[24]?.args?.payload, {
+assert.deepEqual(calls[22]?.args?.payload, {
   workspaceId: "ws_1",
   profileId: "profile_1",
   expectedRevision: 4,
@@ -289,14 +268,14 @@ await api.listProfileShareRecipientDeviceKeys({
   profileId: "profile_1",
   memberId: "member_1",
 });
-assert.equal(calls[25]?.command, "profile_share_recipientdevicekeys_list");
-assert.deepEqual(calls[25]?.args?.payload, {
+assert.equal(calls[23]?.command, "profile_share_recipientdevicekeys_list");
+assert.deepEqual(calls[23]?.args?.payload, {
   profileId: "profile_1",
   memberId: "member_1",
 });
 await api.listProfileKeyRotationRecipients("profile_1");
-assert.equal(calls[26]?.command, "profile_keyrotation_recipients_list");
-assert.deepEqual(calls[26]?.args?.payload, { profileId: "profile_1" });
+assert.equal(calls[24]?.command, "profile_keyrotation_recipients_list");
+assert.deepEqual(calls[24]?.args?.payload, { profileId: "profile_1" });
 await api.executeProfileKeyRotation({
   profileId: "profile_1",
   confirmedRecipients: [
@@ -307,8 +286,8 @@ await api.executeProfileKeyRotation({
     },
   ],
 });
-assert.equal(calls[27]?.command, "profile_keyrotation_execute");
-assert.deepEqual(calls[27]?.args?.payload, {
+assert.equal(calls[25]?.command, "profile_keyrotation_execute");
+assert.deepEqual(calls[25]?.args?.payload, {
   profileId: "profile_1",
   confirmedRecipients: [
     {
@@ -318,10 +297,10 @@ assert.deepEqual(calls[27]?.args?.payload, {
     },
   ],
 });
-assert.match(String(calls[27]?.args?.idempotencyKey), /^idem_/);
+assert.match(String(calls[25]?.args?.idempotencyKey), /^idem_/);
 await api.stopProfile("profile_1");
-assert.equal(calls[28]?.command, "profile_stop");
-assert.deepEqual(calls[28]?.args?.payload, { profileId: "profile_1" });
+assert.equal(calls[26]?.command, "profile_stop");
+assert.deepEqual(calls[26]?.args?.payload, { profileId: "profile_1" });
 assert.deepEqual(await api.getIntegrationStatus(), {
   deploymentMode: "production",
   apiEndpoint: "https://api.example.test",
@@ -330,7 +309,7 @@ assert.deepEqual(await api.getIntegrationStatus(), {
   mcpEndpoint: "https://api.example.test/v1/mcp",
   mcpEnabled: false,
 });
-assert.equal(calls[29]?.command, "integrations_status_get");
+assert.equal(calls[27]?.command, "integrations_status_get");
 
 const recordCallStart = calls.length;
 await api.getOrganizationRecord({ organizationId: "org_1" });
@@ -507,6 +486,31 @@ assert.equal(calls.at(-2)?.command, "desktop_auth_sso_complete");
 assert.equal(calls.at(-2)?.args?.callbackState, "a".repeat(64));
 assert.equal(calls.at(-2)?.args?.token, "sso_test_token_123456");
 assert.equal(calls.at(-1)?.command, "desktop_deep_link_current");
+
+let identityUpdateArgs: Record<string, unknown> | undefined;
+let identityUpdateCommand = "";
+const identityApi = createTauriDesktopApi(async (_command, args) => {
+  identityUpdateCommand = _command;
+  identityUpdateArgs = args;
+  return { accountId: "account_1", revision: 2 } as never;
+});
+await identityApi.updateOwnAccountIdentity({
+  accountId: "account_1",
+  username: "admin",
+  displayName: "Admin",
+  email: "admin@example.test",
+  expectedRevision: 1,
+});
+assert.equal(identityUpdateCommand, "account_identity_update");
+assert.match(String(identityUpdateArgs?.correlationId), /^cor_/);
+assert.match(
+  String(identityUpdateArgs?.idempotencyKey),
+  /^idem_[0-9a-f-]{36}$/i,
+);
+assert.equal(
+  (identityUpdateArgs?.payload as Record<string, unknown>)?.accountId,
+  "account_1",
+);
 
 let logoutArgs: Record<string, unknown> | undefined;
 const logoutApi = createTauriDesktopApi(async (_command, args) => {

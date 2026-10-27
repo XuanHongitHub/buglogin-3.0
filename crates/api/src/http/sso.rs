@@ -282,92 +282,6 @@ fn issue_sso_session(
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use buglogin_domain::ids::AccountId;
-    use buglogin_storage::control::MemoryControlRecordStore;
-
-    use super::{SsoTransaction, SsoTransactionStatus, issue_sso_session};
-    use crate::{
-        auth::AuthService,
-        services::{
-            control_persistence::ControlPersistence, session_persistence::SessionPersistence,
-        },
-    };
-
-    fn transaction(device_id: &str) -> SsoTransaction {
-        SsoTransaction {
-            state_hash: "test-state".into(),
-            device_id: device_id.into(),
-            status: SsoTransactionStatus::Exchanging,
-            expires_at: 10_000,
-        }
-    }
-
-    #[test]
-    fn repeated_sso_login_replaces_the_same_device_session_only() {
-        let persistence =
-            SessionPersistence::new(ControlPersistence::new(MemoryControlRecordStore::default()));
-        let account_id = AccountId::new("acct_sso_device_replacement").unwrap();
-        let mut auth = AuthService::persistent(persistence).unwrap();
-
-        let first_device_session = issue_sso_session(
-            &mut auth,
-            account_id.clone(),
-            &transaction("device-sso-a"),
-            None,
-            100,
-            1_000,
-            10_000,
-        )
-        .unwrap();
-        let other_device_session = issue_sso_session(
-            &mut auth,
-            account_id.clone(),
-            &transaction("device-sso-b"),
-            None,
-            101,
-            1_000,
-            10_000,
-        )
-        .unwrap();
-        let replacement_session = issue_sso_session(
-            &mut auth,
-            account_id.clone(),
-            &transaction("device-sso-a"),
-            None,
-            200,
-            1_000,
-            10_000,
-        )
-        .unwrap();
-
-        assert_eq!(
-            auth.authenticate(&first_device_session.access_token, 201)
-                .unwrap_err()
-                .code,
-            "session_revoked"
-        );
-        assert_eq!(
-            auth.authenticate(&other_device_session.access_token, 201)
-                .unwrap(),
-            account_id
-        );
-        assert_eq!(
-            auth.authenticate(&replacement_session.access_token, 201)
-                .unwrap(),
-            account_id
-        );
-        let active = auth
-            .list_sessions(&account_id, Some(&replacement_session.access_token))
-            .unwrap()
-            .into_iter()
-            .filter(|session| session.revoked_at.is_none())
-            .count();
-        assert_eq!(active, 2, "one active SSO session per stable device ID");
-    }
-}
-
 fn resolve_or_create_identity(
     state: &ApiState,
     app_code: &str,
@@ -718,4 +632,90 @@ fn sso_mapping_invalid() -> buglogin_domain::errors::Problem {
         "BugLab ID account mapping is invalid",
         409,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use buglogin_domain::ids::AccountId;
+    use buglogin_storage::control::MemoryControlRecordStore;
+
+    use super::{SsoTransaction, SsoTransactionStatus, issue_sso_session};
+    use crate::{
+        auth::AuthService,
+        services::{
+            control_persistence::ControlPersistence, session_persistence::SessionPersistence,
+        },
+    };
+
+    fn transaction(device_id: &str) -> SsoTransaction {
+        SsoTransaction {
+            state_hash: "test-state".into(),
+            device_id: device_id.into(),
+            status: SsoTransactionStatus::Exchanging,
+            expires_at: 10_000,
+        }
+    }
+
+    #[test]
+    fn repeated_sso_login_replaces_the_same_device_session_only() {
+        let persistence =
+            SessionPersistence::new(ControlPersistence::new(MemoryControlRecordStore::default()));
+        let account_id = AccountId::new("acct_sso_device_replacement").unwrap();
+        let mut auth = AuthService::persistent(persistence).unwrap();
+
+        let first_device_session = issue_sso_session(
+            &mut auth,
+            account_id.clone(),
+            &transaction("device-sso-a"),
+            None,
+            100,
+            1_000,
+            10_000,
+        )
+        .unwrap();
+        let other_device_session = issue_sso_session(
+            &mut auth,
+            account_id.clone(),
+            &transaction("device-sso-b"),
+            None,
+            101,
+            1_000,
+            10_000,
+        )
+        .unwrap();
+        let replacement_session = issue_sso_session(
+            &mut auth,
+            account_id.clone(),
+            &transaction("device-sso-a"),
+            None,
+            200,
+            1_000,
+            10_000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            auth.authenticate(&first_device_session.access_token, 201)
+                .unwrap_err()
+                .code,
+            "session_revoked"
+        );
+        assert_eq!(
+            auth.authenticate(&other_device_session.access_token, 201)
+                .unwrap(),
+            account_id
+        );
+        assert_eq!(
+            auth.authenticate(&replacement_session.access_token, 201)
+                .unwrap(),
+            account_id
+        );
+        let active = auth
+            .list_sessions(&account_id, Some(&replacement_session.access_token))
+            .unwrap()
+            .into_iter()
+            .filter(|session| session.revoked_at.is_none())
+            .count();
+        assert_eq!(active, 2, "one active SSO session per stable device ID");
+    }
 }

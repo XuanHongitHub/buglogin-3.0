@@ -83,7 +83,6 @@ Desktop app
 │   ├── Network tests
 │   ├── Logs
 │   └── Support bundle
-├── Migration
 └── Settings
     ├── General
     ├── Storage and sync
@@ -195,7 +194,6 @@ Priority: P0 launch-critical, P1 required operational breadth, P2 conditional/la
 | WSP-28 | Retention/backup | Configure retention and recovery | P1 | Save policy / restore |
 | WSP-29 | Integrations | Manage API/webhook/external integrations | P1 | Add integration |
 | WSP-30 | Danger zone | Transfer/archive/delete workspace | P1 | Initiate guarded action |
-| WSP-31 | Reconciliation report | Resolve migration/account mappings | P0 | Confirm resolution |
 
 ### 3.4 Desktop app
 
@@ -215,16 +213,12 @@ Priority: P0 launch-critical, P1 required operational breadth, P2 conditional/la
 | DES-12 | Extensions | Install/assign approved extensions | P1 | Add/assign |
 | DES-13 | Extension groups | Apply reusable extension bundles | P1 | Create/apply group |
 | DES-14 | Runtime catalog | Install/update/verify runtimes | P0 | Install/update/verify |
-| DES-15 | Jobs center | Monitor imports, sync, migration, backup | P0 | Inspect/retry/cancel |
+| DES-15 | Jobs center | Monitor imports, sync, backup | P0 | Inspect/retry/cancel |
 | DES-16 | System health | Diagnose desktop dependencies | P0 | Run checks |
 | DES-17 | Runtime health | Diagnose installed runtime | P0 | Verify/repair |
 | DES-18 | Network tests | Diagnose proxy/VPN/DNS path | P0 | Run test |
 | DES-19 | Logs | Inspect and export local logs | P1 | Filter/export |
 | DES-20 | Support bundle | Create redacted support artifact | P1 | Review/create bundle |
-| DES-21 | Migration inspect | Select and inspect source | P0 | Inspect |
-| DES-22 | Migration mapping | Resolve entity/profile mapping | P0 | Confirm mappings |
-| DES-23 | Migration dry run/report | Prove result before writes | P0 | Run/review |
-| DES-24 | Migration execute/verify | Execute and validate migration | P0 | Execute/verify |
 | DES-25 | General settings | Configure startup/locale/defaults | P0 | Save |
 | DES-26 | Storage/sync settings | Configure local storage and sync | P0 | Test/save |
 | DES-27 | Runtime updates | Configure update channel/policy | P0 | Check/save |
@@ -254,7 +248,6 @@ Priority: P0 launch-critical, P1 required operational breadth, P2 conditional/la
 | ADM-14 | Impersonation session | Reproduce user-visible issue | P1 | Exit impersonation |
 | ADM-15 | Incidents | Coordinate operational incident | P0 | Update incident |
 | ADM-16 | Platform settings | Manage global policy/integrations | P0 | Save guarded change |
-| ADM-17 | Migration control | Monitor cutover and rollback evidence | P0 | Pause/continue/rollback |
 
 ## 4. Cross-surface ownership
 
@@ -265,7 +258,6 @@ Priority: P0 launch-critical, P1 required operational breadth, P2 conditional/la
 | Member/team/access | Consume effective access | Primary authority | Personal identity only | Cross-tenant support/security |
 | Sessions/tokens | Local automation token use | Workspace integration tokens | Personal sessions/tokens | Emergency revoke/investigate |
 | Sync/storage | Local state and transfer | Policy/health | None | Service health/repair |
-| Migration | Local source and verification | Reconciliation/report | Re-auth if needed | Cutover/rollback oversight |
 | Billing | None | Workspace/org management | Personal invoices if applicable | Support/admin |
 
 ## 5. High-risk reference flows
@@ -277,7 +269,6 @@ Prototype and approve before broad UI implementation:
 3. Import a large mixed proxy batch with partial failures and duplicates.
 4. Diagnose sync interruption, resume, then resolve a conflict without data loss.
 5. Invite member, add to team, grant resource, verify effective access, remove member.
-6. Inspect legacy source, dry-run migration, resolve unsupported profiles, verify rollback evidence.
 7. Create API/MCP token with scopes, use it, inspect audit, revoke it.
 8. Platform support investigation with reason, temporary impersonation, persistent audit.
 

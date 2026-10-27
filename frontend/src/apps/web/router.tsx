@@ -9,7 +9,6 @@ import {
   RecoveryPage,
   WebAuthGate,
 } from "./auth";
-import { MigrationPage } from "./migration";
 import { OperationsPage } from "./operations";
 import { ProfileDetailPage } from "./profile-detail";
 import { PublicPage } from "./public";
@@ -81,9 +80,6 @@ export function WebApp({
       {route.area === "operations" ? (
         <OperationsPage api={api} path={path} />
       ) : null}
-      {route.area === "migration" ? (
-        <MigrationPage api={api} path={path} />
-      ) : null}
       {route.area === "workspace" ? (
         <WorkspacePage
           api={api}
@@ -106,14 +102,9 @@ export function WebApp({
       {route.area === "profile" ? (
         <ProfileDetailPage api={api} profileId={route.profileId} />
       ) : null}
-      {[
-        "account",
-        "operations",
-        "migration",
-        "workspace",
-        "admin",
-        "device",
-      ].includes(route.area) ? (
+      {["account", "operations", "workspace", "admin", "device"].includes(
+        route.area,
+      ) ? (
         <WebAuthGate api={api} path={path}>
           {protectedContent}
         </WebAuthGate>

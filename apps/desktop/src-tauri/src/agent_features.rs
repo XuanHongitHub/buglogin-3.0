@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, params};
@@ -68,84 +67,120 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+fn agent_service_unavailable() -> String {
+    r#"{"code":"AGENT_SERVICE_UNAVAILABLE"}"#.to_owned()
 }
 
-// -------------------------------------------------------------
-// In-Memory Agent Console State
-// -------------------------------------------------------------
+fn cookie_bot_worker_unavailable() -> String {
+    r#"{"code":"COOKIE_BOT_WORKER_UNAVAILABLE"}"#.to_owned()
+}
 
-static AGENT_PAUSED: Mutex<Option<Value>> = Mutex::new(None);
-static RECORDING_STATE: Mutex<Option<(String, Vec<Value>)>> = Mutex::new(None);
+fn local_store_corrupt() -> String {
+    r#"{"code":"LOCAL_FEATURE_STORE_CORRUPT"}"#.to_owned()
+}
+
+fn new_cookie_bot_template_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| r#"{"code":"LOCAL_ID_GENERATION_FAILED"}"#.to_owned())?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "user:{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    ))
+}
+
+fn is_cookie_bot_user_template_id(id: &str) -> bool {
+    id.starts_with("user:") || id.starts_with("tmpl_")
+}
+
+fn cookie_bot_template_record(template: Value, id: &str) -> Result<Value, String> {
+    let mut record = template;
+    let object = record
+        .as_object_mut()
+        .ok_or_else(|| r#"{"code":"COOKIE_BOT_TEMPLATE_INVALID"}"#.to_owned())?;
+    object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| r#"{"code":"COOKIE_BOT_TEMPLATE_INVALID"}"#.to_owned())?;
+    let sites = object
+        .get("sites")
+        .and_then(Value::as_array)
+        .filter(|sites| sites.iter().all(Value::is_string))
+        .ok_or_else(|| r#"{"code":"COOKIE_BOT_TEMPLATE_INVALID"}"#.to_owned())?;
+    if sites.is_empty()
+        || sites
+            .iter()
+            .any(|site| site.as_str().map_or(true, |site| site.trim().is_empty()))
+    {
+        return Err(r#"{"code":"COOKIE_BOT_TEMPLATE_INVALID"}"#.to_owned());
+    }
+    object.insert("id".to_owned(), json!(id));
+    Ok(record)
+}
 
 #[tauri::command]
 pub async fn get_agent_console() -> Result<Value, String> {
-    let paused = AGENT_PAUSED.lock().unwrap().clone();
-    Ok(json!({
-        "sessions": [],
-        "activity": [],
-        "threads": [],
-        "held_profiles": [],
-        "paused": paused,
-        "remote_bridge": {
-            "status": "idle",
-            "url": "ws://127.0.0.1:8765",
-            "connected_clients": 0,
-        }
-    }))
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn answer_agent_request(_request_id: u64, _answer: String) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn dismiss_agent_request(_request_id: u64) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn send_agent_note(_session_id: Option<String>, _note: String) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn take_over_profile(_profile_id: String, _note: Option<String>) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn hand_back_profile(_profile_id: String) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn set_agents_paused(paused: bool, note: Option<String>) -> Result<(), String> {
-    let mut lock = AGENT_PAUSED.lock().unwrap();
-    if paused {
-        *lock = Some(json!({
-            "paused_at": now_millis(),
-            "note": note,
-        }));
-    } else {
-        *lock = None;
-    }
-    Ok(())
+    let _ = (paused, note);
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn clear_agent_activity() -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn show_profile_window(_profile_id: String) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 // -------------------------------------------------------------
@@ -154,45 +189,13 @@ pub async fn show_profile_window(_profile_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_cookie_bot_schedules(_scope: Option<Value>) -> Result<Value, String> {
-    let conn = init_db().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare("SELECT profile_id, schedule_json FROM cookie_bot_schedules")
-        .map_err(|e| e.to_string())?;
-
-    let rows = stmt
-        .query_map([], |r| {
-            let json_str: String = r.get(1)?;
-            let val: Value = serde_json::from_str(&json_str).unwrap_or_else(|_| json!({}));
-            Ok(val)
-        })
-        .map_err(|e| e.to_string())?;
-
-    let mut schedules = Vec::new();
-    for row in rows {
-        if let Ok(item) = row {
-            schedules.push(item);
-        }
-    }
-    Ok(json!({ "schedules": schedules }))
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn get_cookie_bot_schedule(profile_id: String) -> Result<Option<Value>, String> {
-    let conn = init_db().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare("SELECT schedule_json FROM cookie_bot_schedules WHERE profile_id = ?1")
-        .map_err(|e| e.to_string())?;
-
-    let row = stmt.query_row(params![profile_id], |r| {
-        let json_str: String = r.get(0)?;
-        let val: Value = serde_json::from_str(&json_str).unwrap_or_else(|_| json!({}));
-        Ok(val)
-    });
-
-    match row {
-        Ok(v) => Ok(Some(v)),
-        Err(_) => Ok(None),
-    }
+    let _ = profile_id;
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
@@ -200,60 +203,29 @@ pub async fn save_cookie_bot_schedule(
     profile_id: Option<String>,
     schedule: Value,
 ) -> Result<Value, String> {
-    let p_id = profile_id
-        .or_else(|| {
-            schedule
-                .get("profileId")
-                .or_else(|| schedule.get("profile_id"))
-                .and_then(Value::as_str)
-                .map(String::from)
-        })
-        .ok_or("Missing profileId in schedule")?;
-
-    let raw = serde_json::to_string(&schedule).unwrap_or_else(|_| "{}".to_string());
-    let conn = init_db().map_err(|e| e.to_string())?;
-    conn.execute(
-        r#"
-        INSERT INTO cookie_bot_schedules (profile_id, schedule_json, updated_at)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(profile_id) DO UPDATE SET
-            schedule_json = excluded.schedule_json,
-            updated_at = excluded.updated_at
-        "#,
-        params![p_id, raw, now_secs()],
-    )
-    .map_err(|e| e.to_string())?;
-
-    Ok(json!({ "saved": true, "profile_id": p_id }))
+    let _ = (profile_id, schedule);
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn delete_cookie_bot_schedule(profile_id: String) -> Result<(), String> {
-    let conn = init_db().map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM cookie_bot_schedules WHERE profile_id = ?1",
-        params![profile_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    let _ = profile_id;
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn check_cookie_bot_conflicts(_schedule: Option<Value>) -> Result<Value, String> {
-    Ok(json!({ "conflicts": [] }))
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn get_cookie_bot_runs(_profile_id: Option<String>) -> Result<Value, String> {
-    Ok(json!({ "runs": [] }))
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn run_cookie_bot_now(_profile_id: String) -> Result<Value, String> {
-    Ok(json!({
-        "status": "started",
-        "run_id": format!("cbrun_{}", now_secs()),
-    }))
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
@@ -261,67 +233,49 @@ pub async fn cancel_cookie_bot_run(
     _profile_id: String,
     _run_id: Option<String>,
 ) -> Result<(), String> {
-    Ok(())
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn get_cookie_bot_presets() -> Result<Value, String> {
-    Ok(json!({
-        "presets": [
-            {
-                "id": "ecommerce_warm",
-                "name": "E-Commerce Warming (Amazon, eBay, Walmart)",
-                "sites": ["amazon.com", "ebay.com", "walmart.com"],
-                "duration_minutes": 15,
-            },
-            {
-                "id": "social_warm",
-                "name": "Social Media Warming (Twitter, Reddit, YouTube)",
-                "sites": ["twitter.com", "reddit.com", "youtube.com"],
-                "duration_minutes": 20,
-            }
-        ]
-    }))
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn get_cookie_bot_user_templates() -> Result<Value, String> {
     let conn = init_db().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT template_json FROM cookie_bot_templates")
+        .prepare("SELECT id, template_json FROM cookie_bot_templates ORDER BY updated_at DESC, id")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
-        .query_map([], |r| {
-            let json_str: String = r.get(0)?;
-            let val: Value = serde_json::from_str(&json_str).unwrap_or_else(|_| json!({}));
-            Ok(val)
-        })
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .map_err(|e| e.to_string())?;
 
-    let mut templates = Vec::new();
+    let mut templates: Vec<Value> = Vec::new();
     for row in rows {
-        if let Ok(item) = row {
-            templates.push(item);
+        let (id, raw) = row.map_err(|_| local_store_corrupt())?;
+        let record: Value = serde_json::from_str(&raw).map_err(|_| local_store_corrupt())?;
+        if record.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+            return Err(local_store_corrupt());
         }
+        let record = cookie_bot_template_record(record, &id).map_err(|_| local_store_corrupt())?;
+        templates.push(record);
     }
     Ok(json!({ "templates": templates }))
 }
 
 #[tauri::command]
 pub async fn create_cookie_bot_user_template(template: Value) -> Result<Value, String> {
-    let id = format!("tmpl_{}", now_secs());
-    let mut record = template;
-    if let Some(obj) = record.as_object_mut() {
-        obj.insert("id".to_string(), json!(id));
-    }
-    let raw = serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string());
+    let id = new_cookie_bot_template_id()?;
+    let record = cookie_bot_template_record(template, &id)?;
+    let raw = serde_json::to_string(&record).map_err(|_| local_store_corrupt())?;
     let conn = init_db().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO cookie_bot_templates (id, template_json, updated_at) VALUES (?1, ?2, ?3)",
         params![id, raw, now_secs()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|_| local_store_corrupt())?;
     Ok(record)
 }
 
@@ -330,42 +284,47 @@ pub async fn update_cookie_bot_user_template(
     template_id: String,
     template: Value,
 ) -> Result<Value, String> {
-    let raw = serde_json::to_string(&template).unwrap_or_else(|_| "{}".to_string());
+    if !is_cookie_bot_user_template_id(&template_id) {
+        return Err(r#"{"code":"COOKIE_BOT_TEMPLATE_NOT_FOUND"}"#.to_owned());
+    }
+    let record = cookie_bot_template_record(template, &template_id)?;
+    let raw = serde_json::to_string(&record).map_err(|_| local_store_corrupt())?;
     let conn = init_db().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE cookie_bot_templates SET template_json = ?1, updated_at = ?2 WHERE id = ?3",
-        params![raw, now_secs(), template_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(template)
+    let changed = conn
+        .execute(
+            "UPDATE cookie_bot_templates SET template_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![raw, now_secs(), template_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err(r#"{"code":"COOKIE_BOT_TEMPLATE_NOT_FOUND"}"#.to_owned());
+    }
+    Ok(record)
 }
 
 #[tauri::command]
-pub async fn delete_cookie_bot_user_template(template_id: String) -> Result<(), String> {
+pub async fn delete_cookie_bot_user_template(template_id: String) -> Result<bool, String> {
+    if !is_cookie_bot_user_template_id(&template_id) {
+        return Ok(false);
+    }
     let conn = init_db().map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM cookie_bot_templates WHERE id = ?1",
-        params![template_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    let changed = conn
+        .execute(
+            "DELETE FROM cookie_bot_templates WHERE id = ?1",
+            params![template_id],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(changed > 0)
 }
 
 #[tauri::command]
 pub async fn get_remote_hours_quota() -> Result<Value, String> {
-    Ok(json!({
-        "total_hours": 100,
-        "used_hours": 0,
-        "remaining_hours": 100,
-    }))
+    Err(cookie_bot_worker_unavailable())
 }
 
 #[tauri::command]
 pub async fn get_cookie_bot_usage() -> Result<Value, String> {
-    Ok(json!({
-        "usage": [],
-        "total_runs": 0,
-    }))
+    Err(cookie_bot_worker_unavailable())
 }
 
 // -------------------------------------------------------------
@@ -383,27 +342,28 @@ pub async fn get_agent_recipes() -> Result<Vec<Value>, String> {
 
     let rows = stmt
         .query_map([], |r| {
-            let id: String = r.get(0)?;
-            let name: String = r.get(1)?;
-            let steps_raw: String = r.get(2)?;
-            let created_at: i64 = r.get(3)?;
-            let updated_at: i64 = r.get(4)?;
-            let steps: Value = serde_json::from_str(&steps_raw).unwrap_or_else(|_| json!([]));
-            Ok(json!({
-                "id": id,
-                "name": name,
-                "steps": steps,
-                "created_at": created_at,
-                "updated_at": updated_at,
-            }))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
         })
         .map_err(|e| e.to_string())?;
 
     let mut list = Vec::new();
     for row in rows {
-        if let Ok(item) = row {
-            list.push(item);
-        }
+        let (id, name, steps_raw, created_at, updated_at) =
+            row.map_err(|_| local_store_corrupt())?;
+        let steps: Value = serde_json::from_str(&steps_raw).map_err(|_| local_store_corrupt())?;
+        list.push(json!({
+            "id": id,
+            "name": name,
+            "steps": steps,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }));
     }
     Ok(list)
 }
@@ -460,35 +420,18 @@ pub async fn delete_agent_recipe(id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_recipe_recording() -> Result<Value, String> {
-    let lock = RECORDING_STATE.lock().unwrap();
-    match &*lock {
-        Some((profile_id, steps)) => Ok(json!({
-            "recording": true,
-            "profile_id": profile_id,
-            "steps": steps,
-        })),
-        None => Ok(json!({
-            "recording": false,
-            "steps": [],
-        })),
-    }
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn start_recipe_recording(profile_id: String) -> Result<(), String> {
-    let mut lock = RECORDING_STATE.lock().unwrap();
-    *lock = Some((profile_id, Vec::new()));
-    Ok(())
+    let _ = profile_id;
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn stop_recipe_recording() -> Result<Value, String> {
-    let mut lock = RECORDING_STATE.lock().unwrap();
-    let steps = match lock.take() {
-        Some((_, steps)) => steps,
-        None => Vec::new(),
-    };
-    Ok(json!({ "steps": steps }))
+    Err(agent_service_unavailable())
 }
 
 // -------------------------------------------------------------
@@ -497,33 +440,33 @@ pub async fn stop_recipe_recording() -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn list_remote_sessions() -> Result<Vec<Value>, String> {
-    Ok(Vec::new())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn get_remote_session(session_id: String) -> Result<Option<Value>, String> {
     let _ = session_id;
-    Ok(None)
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn stop_remote_session(_session_id: String) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn start_remote_session_events() -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn stop_remote_session_events() -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn get_remote_session_events_status() -> Result<Value, String> {
-    Ok(json!({ "active": false }))
+    Err(agent_service_unavailable())
 }
 
 // -------------------------------------------------------------
@@ -539,25 +482,35 @@ pub async fn list_agent_schedules() -> Result<Vec<Value>, String> {
 
     let rows = stmt
         .query_map([], |r| {
-            let p_ids: String = r.get(3)?;
-            Ok(json!({
-                "id": r.get::<_, String>(0)?,
-                "name": r.get::<_, String>(1)?,
-                "cron": r.get::<_, String>(2)?,
-                "profile_ids": serde_json::from_str::<Value>(&p_ids).unwrap_or_else(|_| json!([])),
-                "recipe_id": r.get::<_, Option<String>>(4)?,
-                "enabled": r.get::<_, i64>(5)? != 0,
-                "created_at": r.get::<_, i64>(6)?,
-                "updated_at": r.get::<_, i64>(7)?,
-            }))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
         })
         .map_err(|e| e.to_string())?;
 
     let mut list = Vec::new();
     for row in rows {
-        if let Ok(item) = row {
-            list.push(item);
-        }
+        let (id, name, cron, profile_ids, recipe_id, enabled, created_at, updated_at) =
+            row.map_err(|_| local_store_corrupt())?;
+        let profile_ids =
+            serde_json::from_str::<Value>(&profile_ids).map_err(|_| local_store_corrupt())?;
+        list.push(json!({
+            "id": id,
+            "name": name,
+            "cron": cron,
+            "profile_ids": profile_ids,
+            "recipe_id": recipe_id,
+            "enabled": enabled != 0,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }));
     }
     Ok(list)
 }
@@ -661,19 +614,61 @@ pub async fn delete_agent_schedule(id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn run_agent_schedule_now(id: String) -> Result<Value, String> {
-    Ok(json!({
-        "schedule_id": id,
-        "status": "triggered",
-        "run_id": format!("srun_{}", now_secs()),
-    }))
+    let _ = id;
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn test_agent_schedule_notice(_id: String) -> Result<(), String> {
-    Ok(())
+    Err(agent_service_unavailable())
 }
 
 #[tauri::command]
 pub async fn list_agent_schedule_runs(_schedule_id: Option<String>) -> Result<Vec<Value>, String> {
-    Ok(Vec::new())
+    Err(agent_service_unavailable())
+}
+
+#[cfg(test)]
+mod cookie_bot_template_tests {
+    use super::{
+        cookie_bot_template_record, is_cookie_bot_user_template_id, new_cookie_bot_template_id,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn generated_user_template_id_matches_the_client_contract() {
+        let first = new_cookie_bot_template_id().unwrap();
+        let second = new_cookie_bot_template_id().unwrap();
+
+        assert!(first.starts_with("user:"));
+        assert!(second.starts_with("user:"));
+        assert_ne!(first, second);
+        let uuid = first.strip_prefix("user:").unwrap();
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(uuid.as_bytes()[14], b'4');
+        assert!(matches!(uuid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+        assert!(is_cookie_bot_user_template_id(&first));
+        assert!(is_cookie_bot_user_template_id("tmpl_legacy-id"));
+        assert!(!is_cookie_bot_user_template_id("curated-template"));
+    }
+
+    #[test]
+    fn user_template_record_requires_name_and_sites_and_overwrites_client_id() {
+        let id = "user:4c5b0f2e-733e-4bcb-9a44-582fd231f0aa";
+        let record = cookie_bot_template_record(
+            json!({"id":"forged","name":"  My sites  ","sites":["https://example.test"]}),
+            id,
+        )
+        .unwrap();
+
+        assert_eq!(record["id"], id);
+        assert_eq!(record["name"], "  My sites  ");
+        assert_eq!(record["sites"][0], "https://example.test");
+        assert!(
+            cookie_bot_template_record(json!({"name":"  ","sites":["https://example.test"]}), id)
+                .is_err()
+        );
+        assert!(cookie_bot_template_record(json!({"name":"ok","sites":[]}), id).is_err());
+        assert!(cookie_bot_template_record(json!({"name":"ok","sites":[""]}), id).is_err());
+    }
 }

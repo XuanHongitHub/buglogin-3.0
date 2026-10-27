@@ -15,7 +15,6 @@ workspace = true
 buglogin-api = { path = "../../../crates/api" }
 buglogin-browser = { path = "../../../crates/browser" }
 buglogin-domain = { path = "../../../crates/domain" }
-buglogin-migration = { path = "../../../crates/migration" }
 buglogin-network = { path = "../../../crates/network" }
 buglogin-storage = { path = "../../../crates/storage" }
 buglogin-sync = { path = "../../../crates/sync" }
@@ -40,6 +39,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "=2.5.4"
+tauri-plugin-log = "2.8.0"
 tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["native-tls", "zip"] }
 image = "0.25"
 dirs = "6"

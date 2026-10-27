@@ -13,7 +13,6 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6.11", features = ["cors"] }
 buglogin-browser = { path = "../browser" }
 buglogin-domain = { path = "../domain" }
-buglogin-migration = { path = "../migration" }
 buglogin-network = { path = "../network" }
 buglogin-storage = { path = "../storage" }
 buglogin-sync = { path = "../sync" }

@@ -13,6 +13,164 @@ pub(super) struct TransferOwnerInput {
     expected_revision: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceDeleteBlocker {
+    code: &'static str,
+    count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WorkspaceDeletePreflight {
+    workspace_id: WorkspaceId,
+    revision: u64,
+    blockers: Vec<WorkspaceDeleteBlocker>,
+    can_delete: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct OrganizationDeletePreflight {
+    organization_id: OrganizationId,
+    revision: u64,
+    workspace_count: usize,
+    member_count: usize,
+    blockers: Vec<WorkspaceDeleteBlocker>,
+    can_delete: bool,
+}
+
+pub(super) async fn organization_delete_preflight(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<OrganizationDeletePreflight>, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let organization_id =
+        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let aggregate = state.control_aggregate().map_err(response_problem)?;
+    let (record, workspace_count) = aggregate
+        .workspaces
+        .organization_delete_preflight(&principal, &grants, &organization_id)
+        .map_err(response_problem)?;
+    let member_count = aggregate
+        .organization_members
+        .list_for_organization(&organization_id)
+        .into_iter()
+        .filter(|member| member.account_id != record.organization.account_id)
+        .count();
+    let mut blockers = Vec::new();
+    if workspace_count > 0 {
+        blockers.push(WorkspaceDeleteBlocker {
+            code: "organization_not_empty",
+            count: workspace_count,
+        });
+    }
+    if member_count > 0 {
+        blockers.push(WorkspaceDeleteBlocker {
+            code: "organization_has_members",
+            count: member_count,
+        });
+    }
+    Ok(Json(OrganizationDeletePreflight {
+        organization_id,
+        revision: record.revision,
+        workspace_count,
+        member_count,
+        can_delete: blockers.is_empty(),
+        blockers,
+    }))
+}
+
+pub(super) async fn workspace_delete_preflight(
+    State(state): State<ApiState>,
+    Path((organization_id, workspace_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<WorkspaceDeletePreflight>, Response> {
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let organization_id =
+        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
+    let aggregate = state.control_aggregate().map_err(response_problem)?;
+    let record = aggregate
+        .workspaces
+        .workspace_delete_preflight(&principal, &grants, &organization_id, &workspace_id)
+        .map_err(response_problem)?;
+    let organization = aggregate
+        .workspaces
+        .organization_for_workspace(&workspace_id)
+        .filter(|organization| organization.id == organization_id)
+        .ok_or_else(|| {
+            response_problem(problem("workspace_not_found", "Workspace not found", 404))
+        })?;
+
+    let members = aggregate.members.all_members();
+    let blocking_members = members
+        .iter()
+        .filter(|member| {
+            member.workspace_id == workspace_id
+                && (member.account_id != organization.account_id
+                    || member.role != buglogin_domain::member::MemberRole::Owner
+                    || member.team_id.is_some())
+        })
+        .count();
+    let mut blockers = Vec::new();
+    let mut push = |code, count| {
+        if count > 0 {
+            blockers.push(WorkspaceDeleteBlocker { code, count });
+        }
+    };
+    push(
+        "workspace_has_profiles",
+        aggregate
+            .profile_resources
+            .values()
+            .filter(|profile| profile.workspace_id == workspace_id)
+            .count(),
+    );
+    push(
+        "workspace_has_resources",
+        aggregate.resources.workspace_record_count(&workspace_id),
+    );
+    push(
+        "workspace_has_groups",
+        aggregate.groups.workspace_record_count(&workspace_id)
+            + aggregate
+                .extension_groups
+                .workspace_record_count(&workspace_id),
+    );
+    push(
+        "workspace_has_teams",
+        aggregate.teams.workspace_record_count(&workspace_id),
+    );
+    push(
+        "workspace_has_active_operations",
+        usize::from(
+            aggregate
+                .operations
+                .has_active_workspace_operations(&workspace_id),
+        ),
+    );
+    push(
+        "workspace_has_sync_reservations",
+        aggregate
+            .sync_blob_reservations
+            .values()
+            .filter(|reservation| reservation.workspace_id == workspace_id.as_str())
+            .count(),
+    );
+    push("workspace_has_members", blocking_members);
+
+    Ok(Json(WorkspaceDeletePreflight {
+        workspace_id,
+        revision: record.revision,
+        can_delete: blockers.is_empty(),
+        blockers,
+    }))
+}
+
 pub(super) async fn delete_organization(
     State(state): State<ApiState>,
     Path(organization_id): Path<String>,

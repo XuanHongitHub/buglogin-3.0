@@ -236,10 +236,12 @@ impl WayfernManager {
 
     for attempt in 0..max_attempts {
       if let Some(status) = child.try_wait()? {
-        return Err(format!(
-          "Wayfern exited before CDP became ready (pid={pid}, status={status}, port={port})"
-        )
-        .into());
+        return Err(
+          format!(
+            "Wayfern exited before CDP became ready (pid={pid}, status={status}, port={port})"
+          )
+          .into(),
+        );
       }
 
       match self.http_client.get(&url).send().await {
@@ -259,7 +261,7 @@ impl WayfernManager {
     .into())
   }
 
-  async fn terminate_failed_launch(&self, pid: u32, profile_path: &str) {
+  async fn terminate_failed_launch(&self, pid: u32, _profile_path: &str) {
     #[cfg(target_os = "windows")]
     {
       use std::os::windows::process::CommandExt;
@@ -280,20 +282,14 @@ impl WayfernManager {
       }
     }
     #[cfg(target_os = "macos")]
-    if let Err(error) = crate::platform_browser::macos::kill_browser_process_impl(
-      pid,
-      Some(profile_path),
-    )
-    .await
+    if let Err(error) =
+      crate::platform_browser::macos::kill_browser_process_impl(pid, Some(_profile_path)).await
     {
       log::error!("Failed to terminate failed Wayfern launch pid={pid}: {error}");
     }
     #[cfg(target_os = "linux")]
-    if let Err(error) = crate::platform_browser::linux::kill_browser_process_impl(
-      pid,
-      Some(profile_path),
-    )
-    .await
+    if let Err(error) =
+      crate::platform_browser::linux::kill_browser_process_impl(pid, Some(profile_path)).await
     {
       log::error!("Failed to terminate failed Wayfern launch pid={pid}: {error}");
     }

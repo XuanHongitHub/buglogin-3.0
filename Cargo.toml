@@ -6,7 +6,6 @@ members = [
   "crates/browser",
   "crates/control",
   "crates/domain",
-  "crates/migration",
   "crates/network",
   "crates/storage",
   "crates/sync",
@@ -17,7 +16,12 @@ resolver = "2"
 edition = "2024"
 license = "AGPL-3.0"
 rust-version = "1.95"
-version = "3.0.20"
+version = "3.0.21"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# `Problem` is the shared serialized HTTP error envelope; its size is part of
+# the existing public contract and is returned directly throughout the domain.
+result_large_err = "allow"

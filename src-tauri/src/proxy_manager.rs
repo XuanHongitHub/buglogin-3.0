@@ -2310,11 +2310,17 @@ mod tests {
     } else {
       "donut-proxy"
     };
-    let proxy_binary = project_root
-      .join("src-tauri")
-      .join("target")
-      .join("debug")
-      .join(proxy_binary_name);
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+      .map(PathBuf::from)
+      .map(|path| {
+        if path.is_absolute() {
+          path
+        } else {
+          project_root.join(path)
+        }
+      })
+      .unwrap_or_else(|| project_root.join("src-tauri").join("target"));
+    let proxy_binary = target_dir.join("debug").join(proxy_binary_name);
 
     // Check if binary already exists
     if proxy_binary.exists() {

@@ -285,6 +285,7 @@ impl<V: OsVault> CookieService<V> {
         fs::create_dir_all(&metadata_root).map_err(|_| CookieError::Storage)?;
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(metadata_root.join(".cookie-authority.lock"))
@@ -298,10 +299,6 @@ impl<V: OsVault> CookieService<V> {
             authority_state,
             _lock: Some(lock),
         })
-    }
-
-    pub(crate) fn metadata_root(&self) -> Option<&Path> {
-        self.metadata_root.as_deref()
     }
 
     pub(crate) fn authority_state(&self) -> &PersistedCookieAuthorityState {
@@ -902,15 +899,12 @@ fn cleanup_staged<V: OsVault>(
     Ok(())
 }
 
-fn load_ledger(
-    root: &Path,
-) -> Result<
-    (
-        BTreeMap<CookieScope, BTreeMap<CookieIdentity, CookieRecord>>,
-        PersistedCookieAuthorityState,
-    ),
-    CookieError,
-> {
+type LoadedCookieLedger = (
+    BTreeMap<CookieScope, BTreeMap<CookieIdentity, CookieRecord>>,
+    PersistedCookieAuthorityState,
+);
+
+fn load_ledger(root: &Path) -> Result<LoadedCookieLedger, CookieError> {
     let Some(path) = latest_ledger_path(root)? else {
         return Ok((BTreeMap::new(), default_authority_state()));
     };

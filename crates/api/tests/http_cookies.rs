@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use axum::{Router, body::Body, http::Request};
+use axum::{body::Body, http::Request};
 use buglogin_api::http::{ApiState, router};
 use buglogin_browser::profile::ProfileService;
 use buglogin_domain::{
@@ -59,7 +59,7 @@ async fn cookie_list_rest_returns_metadata_envelope_without_values() {
         effect: Effect::Allow,
     });
 
-    let response = Router::from(router(state))
+    let response = router(state)
         .oneshot(
             Request::builder()
                 .method("GET")

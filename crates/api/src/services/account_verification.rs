@@ -77,7 +77,7 @@ impl AccountVerificationService {
     ) -> Result<AccountVerificationDelivery, Problem> {
         let expires_at = now
             .checked_add(TOKEN_TTL_SECONDS)
-            .ok_or_else(|| invalid_time())?;
+            .ok_or_else(invalid_time)?;
         let (account, account_revision) = self
             .store
             .load_versioned::<Account>(CONTROL_TENANT, "account", account_id.as_str())?
@@ -497,6 +497,23 @@ mod tests {
     };
     use buglogin_storage::control::MemoryControlRecordStore;
 
+    fn retry_if_password_capacity_is_busy<T>(
+        mut authenticate: impl FnMut() -> Result<T, Problem>,
+    ) -> Result<T, Problem> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match authenticate() {
+                Err(error)
+                    if error.code == "credential_capacity_exhausted"
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => return result,
+            }
+        }
+    }
+
     fn fixture() -> (
         ControlPersistence,
         AccountVerificationService,
@@ -530,14 +547,15 @@ mod tests {
         let (store, verification, account_id, actor) = fixture();
         let credentials = CredentialService::new(store.clone()).unwrap();
         assert_eq!(
-            credentials
-                .authenticate(
+            retry_if_password_capacity_is_busy(|| {
+                credentials.authenticate(
                     "verify-user@example.com",
                     "correct horse battery staple",
-                    10
+                    10,
                 )
-                .unwrap_err()
-                .code,
+            })
+            .unwrap_err()
+            .code,
             "invalid_credentials"
         );
 
@@ -554,13 +572,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            credentials
-                .authenticate(
+            retry_if_password_capacity_is_busy(|| {
+                credentials.authenticate(
                     "verify-user@example.com",
                     "correct horse battery staple",
-                    102
+                    102,
                 )
-                .unwrap(),
+            })
+            .unwrap(),
             account_id
         );
         let identity = store
@@ -630,20 +649,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            credentials
-                .authenticate("verify-user@example.com", "user-chosen-password-456", 103)
-                .unwrap(),
+            retry_if_password_capacity_is_busy(|| {
+                credentials.authenticate("verify-user@example.com", "user-chosen-password-456", 103)
+            })
+            .unwrap(),
             account_id
         );
         assert_eq!(
-            credentials
-                .authenticate(
+            retry_if_password_capacity_is_busy(|| {
+                credentials.authenticate(
                     "verify-user@example.com",
                     "admin-provided-password-123",
-                    104
+                    104,
                 )
-                .unwrap_err()
-                .code,
+            })
+            .unwrap_err()
+            .code,
             "invalid_credentials"
         );
         assert_eq!(
@@ -800,10 +821,11 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            credentials
-                .authenticate("verify-user@example.com", "existing password phrase", 103)
-                .unwrap_err()
-                .code,
+            retry_if_password_capacity_is_busy(|| {
+                credentials.authenticate("verify-user@example.com", "existing password phrase", 103)
+            })
+            .unwrap_err()
+            .code,
             "invalid_credentials"
         );
     }

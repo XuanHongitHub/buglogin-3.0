@@ -300,6 +300,7 @@ impl SyncManifest {
         Ok(manifest)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_chunked(
         workspace_id: WorkspaceId,
         resource_id: ResourceId,

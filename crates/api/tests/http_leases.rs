@@ -99,7 +99,7 @@ impl CoordinationBackend for FakeCoordination {
         _idempotency_key: &str,
     ) -> Result<LeaseGrant, Problem> {
         let mut lease = self.lease.lock().unwrap();
-        let current = lease.as_mut().ok_or_else(|| lease_missing())?;
+        let current = lease.as_mut().ok_or_else(lease_missing)?;
         if current.owner_token != owner_token {
             return Err(Problem::new(
                 "lease_not_owner",
@@ -138,15 +138,15 @@ impl CoordinationBackend for FakeCoordination {
             return Ok(());
         }
         let mut lease = self.lease.lock().unwrap();
-        if let Some(current) = lease.as_ref() {
-            if current.owner_token != owner_token {
-                return Err(Problem::new(
-                    "lease_not_owner",
-                    "Lease owner mismatch",
-                    409,
-                    "test",
-                ));
-            }
+        if let Some(current) = lease.as_ref()
+            && current.owner_token != owner_token
+        {
+            return Err(Problem::new(
+                "lease_not_owner",
+                "Lease owner mismatch",
+                409,
+                "test",
+            ));
         }
         *lease = None;
         receipts.insert(idempotency_key.to_owned(), fingerprint);
@@ -263,6 +263,10 @@ impl CoordinationBackend for FakeCoordination {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the test drops its setup guard before the first request"
+)]
 async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
     let root = std::env::temp_dir().join(format!("buglogin-http-lease-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
@@ -1299,6 +1303,10 @@ async fn hosted_lease_http_flow_is_acl_scoped_and_retry_safe() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the test drops its setup guard before the first request"
+)]
 async fn proxy_update_is_rejected_while_bound_profile_is_launching() {
     let root = std::env::temp_dir().join(format!(
         "buglogin-http-proxy-launching-{}",
@@ -1427,6 +1435,10 @@ async fn proxy_update_is_rejected_while_bound_profile_is_launching() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the test drops its setup guard before the first request"
+)]
 async fn hosted_manifest_http_flow_requires_fencing_and_uses_managed_keys() {
     let root = std::env::temp_dir().join(format!("buglogin-http-manifest-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);

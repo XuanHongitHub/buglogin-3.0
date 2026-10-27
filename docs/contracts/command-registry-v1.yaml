@@ -452,90 +452,6 @@ commands:
     input: ProxyDeleteInput
     output: ProxyRecord
     idempotency: required
-  - id: migration.inspect
-    kind: operation
-    capability: migration.read
-    action: read
-    adapters: [tauri, rest]
-    input: MigrationInspectInput
-    output: OperationAccepted
-    timeoutMs: 300000
-    idempotency: required
-    events: [operation.updated]
-  - id: migration.import
-    kind: operation
-    capability: migration.write
-    action: execute
-    adapters: [tauri, rest]
-    input: MigrationImportInput
-    output: OperationAccepted
-    timeoutMs: 0
-    idempotency: required
-    preconditions: [source-read-only, snapshot-present, dry-run-approved]
-    events: [operation.updated, migration.item.updated]
-  - id: migration.profile.data.import
-    kind: operation
-    capability: profile.update
-    action: update
-    adapters: [tauri]
-    input: MigrationProfileDataImportInput
-    output: OperationAccepted
-    timeoutMs: 0
-    idempotency: required
-    preconditions: [profile-update-authorized, active-profile-resource-binding, empty-genesis-manifest, local-profile-source-verified]
-    events: [operation.updated, migration.item.updated]
-  - id: migration.control.import
-    kind: command
-    capability: migration.write
-    action: execute
-    adapters: [rest]
-    input: ControlImportInput
-    output: ControlImportResult
-    idempotency: required
-    preconditions: [verified-control-graph, package-identity-bound, dry-run-before-activation]
-  - id: migration.control.rollback
-    kind: command
-    capability: migration.write
-    action: execute
-    adapters: [rest]
-    input: ControlRollbackInput
-    output: ControlImportReceipt
-    idempotency: required
-    preconditions: [exact-rollback-confirmation, imported-graph-unchanged]
-  - id: migration.sync.import
-    kind: operation
-    capability: migration.write
-    action: execute
-    adapters: [rest]
-    input: SyncImportInput
-    output: SyncImportReceipt
-    timeoutMs: 0
-    idempotency: required
-    preconditions: [active-profile-resource-binding, destination-lease, verified-sync-export]
-  - id: migration.package.file.put
-    kind: command
-    capability: migration.write
-    action: execute
-    adapters: [rest]
-    input: MigrationPackageFileInput
-    output: MigrationPackageFileReceipt
-    idempotency: required
-  - id: migration.package.verify
-    kind: command
-    capability: migration.write
-    action: execute
-    adapters: [rest]
-    input: Empty
-    output: MigrationPackageVerifyReceipt
-    idempotency: required
-  - id: migration.package.activate
-    kind: command
-    capability: migration.write
-    action: execute
-    adapters: [rest, mcp]
-    input: MigrationPackageActivationInput
-    output: MigrationPackageActivationReceipt
-    idempotency: required
   - id: auth.device.start
     kind: command
     capability: CAP-ID-001
@@ -788,6 +704,7 @@ commands:
     input: AccountPasswordChangeInput
     output: AccountPasswordChangeReceipt
     idempotency: required
+    preconditions: [self-change-requires-current-password, target-account-change-requires-platform-admin, password-meets-policy, revokes-target-sessions-and-api-tokens]
   - id: account.sessions.list
     kind: query
     capability: CAP-ID-001
@@ -875,6 +792,13 @@ commands:
     adapters: [tauri, rest, mcp]
     input: OrganizationIdInput
     output: OrganizationRecord
+  - id: organization.delete.preflight
+    kind: query
+    capability: CAP-ORG-001
+    action: delete
+    adapters: [tauri, rest]
+    input: OrganizationIdInput
+    output: OrganizationDeletePreflight
   - id: organization.create
     kind: command
     capability: CAP-ORG-001
@@ -962,6 +886,13 @@ commands:
     adapters: [tauri, rest, mcp]
     input: WorkspaceIdInput
     output: WorkspaceRecord
+  - id: workspace.delete.preflight
+    kind: query
+    capability: CAP-WS-001
+    action: delete
+    adapters: [tauri, rest]
+    input: WorkspaceIdInput
+    output: WorkspaceDeletePreflight
   - id: workspace.create
     kind: command
     capability: CAP-WS-001

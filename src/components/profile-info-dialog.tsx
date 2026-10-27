@@ -2,8 +2,6 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import Color from "color";
 import { motion, useReducedMotion } from "motion/react";
 import { Dialog as DialogPrimitive } from "radix-ui";
@@ -73,12 +71,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { SoftFields } from "@/components/ui/field-variant";
 import { Input } from "@/components/ui/input";
 import {
@@ -2527,38 +2519,6 @@ function CookiesSectionInline({
     };
   }, [profile.id, isRunning, t]);
 
-  const [isExporting, setIsExporting] = React.useState(false);
-
-  const handleExport = React.useCallback(
-    async (format: "json" | "netscape") => {
-      setIsExporting(true);
-      try {
-        const content = await invoke<string>("export_profile_cookies", {
-          profileId: profile.id,
-          format,
-        });
-        const ext = format === "json" ? "json" : "txt";
-        const filePath = await save({
-          defaultPath: `${profile.name}_cookies.${ext}`,
-          filters: [
-            {
-              name: format === "json" ? "JSON" : "Text",
-              extensions: [ext],
-            },
-          ],
-        });
-        if (!filePath) return;
-        await writeTextFile(filePath, content);
-        showSuccessToast(t("cookies.export.success"));
-      } catch (e) {
-        showErrorToast(translateBackendError(t as never, e));
-      } finally {
-        setIsExporting(false);
-      }
-    },
-    [profile.id, profile.name, t],
-  );
-
   const domains = stats?.domains ?? [];
 
   return (
@@ -2569,41 +2529,6 @@ function CookiesSectionInline({
           {t("profileInfo.sections.cookies")}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="soft"
-                size="sm"
-                className="h-7 gap-1.5"
-                disabled={
-                  isDisabled ||
-                  isRunning ||
-                  isExporting ||
-                  !stats ||
-                  stats.total_count === 0
-                }
-              >
-                <LuDownload className="size-3.5" />
-                {t("common.buttons.export")}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                onClick={() => {
-                  void handleExport("json");
-                }}
-              >
-                {t("cookies.export.json")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  void handleExport("netscape");
-                }}
-              >
-                {t("cookies.export.netscape")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
           {onManageCookies && (
             <Button
               variant="soft"
@@ -2613,7 +2538,7 @@ function CookiesSectionInline({
               onClick={onManageCookies}
             >
               <LuUpload className="size-3.5" />
-              {t("common.buttons.import")}
+              {t("profileInfo.actions.manageCookies")}
             </Button>
           )}
           {onCopyCookies && (
@@ -2653,13 +2578,6 @@ function CookiesSectionInline({
                   : "—"}
             </p>
           </div>
-          {profile.ephemeral !== true && !profile.password_protected && (
-            <StorageStateBlock
-              profile={profile}
-              isDisabled={isDisabled}
-              t={t}
-            />
-          )}
           {domains.length > 0 && (
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg bg-foreground/4">
               <p className="shrink-0 border-b border-foreground/6 px-3 py-2 text-xs font-medium text-muted-foreground">
@@ -2685,170 +2603,6 @@ function CookiesSectionInline({
           {error && <p className="text-xs text-destructive-text">{error}</p>}
         </>
       )}
-    </div>
-  );
-}
-
-/**
- * The profile's Local Storage with its cookies, as one Playwright
- * `storageState` file: export it to an automation tool, or import one.
- */
-function StorageStateBlock({
-  profile,
-  isDisabled,
-  t,
-}: {
-  profile: BrowserProfile;
-  isDisabled: boolean;
-  t: (key: string, options?: Record<string, unknown>) => string;
-}) {
-  const [stats, setStats] = React.useState<{
-    origins: number;
-    items: number;
-  } | null>(null);
-  const [busy, setBusy] = React.useState(false);
-  const [withIndexedDb, setWithIndexedDb] = React.useState(false);
-
-  const loadStats = React.useCallback(async () => {
-    try {
-      setStats(
-        await invoke<{ origins: number; items: number }>(
-          "get_profile_local_storage_stats",
-          { profileId: profile.id },
-        ),
-      );
-    } catch {
-      setStats(null);
-    }
-  }, [profile.id]);
-
-  React.useEffect(() => {
-    void loadStats();
-  }, [loadStats]);
-
-  const handleExport = async () => {
-    setBusy(true);
-    try {
-      const content = await invoke<string>("export_profile_storage_state", {
-        profileId: profile.id,
-        includeCookies: true,
-        includeIndexedDb: withIndexedDb,
-      });
-      const filePath = await save({
-        defaultPath: `${profile.name}_storage_state.json`,
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (!filePath) return;
-      await writeTextFile(filePath, content);
-      showSuccessToast(t("profileInfo.localStorage.exported"));
-    } catch (e) {
-      showErrorToast(translateBackendError(t as never, e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleImport = async () => {
-    setBusy(true);
-    try {
-      const selected = await openDialog({
-        multiple: false,
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (!selected || typeof selected !== "string") return;
-      const content = await readTextFile(selected);
-      const result = await invoke<{
-        origins: number;
-        items: number;
-        cookies_imported: number;
-        indexed_db_records: number;
-      }>("import_profile_storage_state", { profileId: profile.id, content });
-      showSuccessToast(
-        t(
-          result.indexed_db_records > 0
-            ? "profileInfo.localStorage.importedWithIndexedDb"
-            : "profileInfo.localStorage.imported",
-          {
-            items: result.items,
-            origins: result.origins,
-            cookies: result.cookies_imported,
-            records: result.indexed_db_records,
-          },
-        ),
-      );
-      void loadStats();
-    } catch (e) {
-      showErrorToast(translateBackendError(t as never, e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div
-      data-slot="profile-storage-state"
-      className="flex items-center justify-between gap-3 rounded-lg bg-foreground/4 px-3 py-2"
-    >
-      <div className="min-w-0">
-        <p className="text-xs font-medium text-muted-foreground">
-          {t("profileInfo.localStorage.title")}
-        </p>
-        <p className="mt-0.5 text-sm" data-slot="profile-local-storage-stats">
-          {stats
-            ? t("profileInfo.localStorage.stats", {
-                origins: stats.origins,
-                items: stats.items,
-              })
-            : "—"}
-        </p>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          {t("profileInfo.localStorage.hint")}
-        </p>
-        <label
-          htmlFor={`storage-indexed-db-${profile.id}`}
-          className="mt-1.5 flex cursor-pointer items-start gap-2 text-xs"
-        >
-          <Checkbox
-            id={`storage-indexed-db-${profile.id}`}
-            checked={withIndexedDb}
-            disabled={isDisabled || busy}
-            onCheckedChange={(checked) => setWithIndexedDb(checked === true)}
-            data-slot="storage-state-indexed-db"
-          />
-          <span>
-            <span className="block">
-              {t("profileInfo.localStorage.includeIndexedDb")}
-            </span>
-            <span className="block text-muted-foreground">
-              {t("profileInfo.localStorage.indexedDbHint")}
-            </span>
-          </span>
-        </label>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <Button
-          variant="soft"
-          size="sm"
-          className="h-7 gap-1.5"
-          data-slot="storage-state-export"
-          disabled={isDisabled || busy}
-          onClick={() => void handleExport()}
-        >
-          <LuDownload className="size-3.5" />
-          {t("common.buttons.export")}
-        </Button>
-        <Button
-          variant="soft"
-          size="sm"
-          className="h-7 gap-1.5"
-          data-slot="storage-state-import"
-          disabled={isDisabled || busy}
-          onClick={() => void handleImport()}
-        >
-          <LuUpload className="size-3.5" />
-          {t("common.buttons.import")}
-        </Button>
-      </div>
     </div>
   );
 }

@@ -1831,6 +1831,10 @@ pub async fn kill_browser_profile(
     if process_stopped {
         emit_profile_stopped(&app, &profile_id)?;
     }
+    let _ = app.emit(
+        "profile-sync-status",
+        json!({ "profile_id": profile_id, "status": "syncing" }),
+    );
     if let Err(problem) =
         run_operation(&state, "profile_stop", json!({ "profileId": profile_id })).await
     {
@@ -1841,11 +1845,19 @@ pub async fn kill_browser_profile(
             "profile.stop",
             problem.clone(),
         );
+        let _ = app.emit(
+            "profile-sync-status",
+            json!({ "profile_id": profile_id, "status": "error", "error": problem.code }),
+        );
         return Err(problem);
     }
     if !process_stopped {
         emit_profile_stopped(&app, &profile_id)?;
     }
+    let _ = app.emit(
+        "profile-sync-status",
+        json!({ "profile_id": profile_id, "status": "synced" }),
+    );
     Ok(())
 }
 

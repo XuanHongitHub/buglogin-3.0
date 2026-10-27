@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   tauriCargoEnvironment,
-  tauriCargoNeedsDesktopSidecar,
 } from "../../scripts/tauri-cargo.mjs";
 
 test("Tauri Cargo keeps build outputs on target and embeds via a relative asset path", () => {
@@ -64,26 +63,6 @@ test("Tauri Cargo rejects malformed existing Tauri config overrides", () => {
   assert.throws(
     () => tauriCargoEnvironment({ TAURI_CONFIG: "not json" }, "win32"),
     /TAURI_CONFIG must be valid JSON/,
-  );
-});
-
-test("Tauri Cargo stages the migration sidecar only for desktop builds", () => {
-  assert.equal(tauriCargoNeedsDesktopSidecar(["test", "--workspace"]), true);
-  assert.equal(
-    tauriCargoNeedsDesktopSidecar(["check", "-p", "buglogin-desktop-app"]),
-    true,
-  );
-  assert.equal(
-    tauriCargoNeedsDesktopSidecar(["test", "-p=buglogin-desktop-app"]),
-    true,
-  );
-  assert.equal(
-    tauriCargoNeedsDesktopSidecar(["test", "-p", "buglogin-api"]),
-    false,
-  );
-  assert.equal(
-    tauriCargoNeedsDesktopSidecar(["test", "-p", "buglogin-browser"]),
-    false,
   );
 });
 

@@ -70,6 +70,29 @@ pub fn router_with_startup_config(
     }
 }
 
+pub fn default_data_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("BUGLOGIN_DATA_DIR") {
+        return PathBuf::from(path);
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(path).join("BugLogin");
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(path) = std::env::var_os("HOME") {
+        return PathBuf::from(path).join("Library/Application Support/BugLogin");
+    }
+    std::env::temp_dir().join("buglogin-data")
+}
+
+async fn health() -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        service: "buglogin-control",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::router_with_startup_config;
@@ -101,27 +124,4 @@ mod tests {
             "invalid_environment"
         );
     }
-}
-
-pub fn default_data_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("BUGLOGIN_DATA_DIR") {
-        return PathBuf::from(path);
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(path).join("BugLogin");
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(path) = std::env::var_os("HOME") {
-        return PathBuf::from(path).join("Library/Application Support/BugLogin");
-    }
-    std::env::temp_dir().join("buglogin-data")
-}
-
-async fn health() -> Json<Health> {
-    Json(Health {
-        status: "ok",
-        service: "buglogin-control",
-        version: env!("CARGO_PKG_VERSION"),
-    })
 }

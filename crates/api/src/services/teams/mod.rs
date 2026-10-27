@@ -60,6 +60,13 @@ impl TeamService {
             .any(|record| &record.team.workspace_id == workspace_id)
     }
 
+    pub(crate) fn workspace_record_count(&self, workspace_id: &WorkspaceId) -> usize {
+        self.teams
+            .values()
+            .filter(|record| &record.team.workspace_id == workspace_id)
+            .count()
+    }
+
     pub fn create(
         &mut self,
         principal: &Principal,
@@ -468,6 +475,35 @@ mod tests {
         permissions::{Action, Capability, Effect, Grant, Principal, ResourceScope, Role},
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn workspace_record_count_counts_teams_only_in_scope() {
+        let workspace_a = WorkspaceId::new("wsp_team_count_a").unwrap();
+        let workspace_b = WorkspaceId::new("wsp_team_count_b").unwrap();
+        let mut service = TeamService::default();
+        for (id, workspace_id) in [
+            ("team_count_a", &workspace_a),
+            ("team_count_b", &workspace_a),
+            ("team_other", &workspace_b),
+        ] {
+            let id = TeamId::new(id).unwrap();
+            service.teams.insert(
+                id.clone(),
+                TeamRecord {
+                    team: Team {
+                        id,
+                        workspace_id: workspace_id.clone(),
+                        name: "Test team".into(),
+                        member_ids: Vec::new(),
+                    },
+                    revision: 1,
+                },
+            );
+        }
+
+        assert_eq!(service.workspace_record_count(&workspace_a), 2);
+        assert_eq!(service.workspace_record_count(&workspace_b), 1);
+    }
 
     fn platform_admin() -> Principal {
         Principal {

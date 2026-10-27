@@ -6,7 +6,7 @@
 
 ## Owners
 
-`IO-ARCH` architecture/domain/contracts; `IO-CORE` desktop/browser/network; `IO-CONTROL` identity/control/ACL/audit; `IO-DATA` storage/sync/migration; `IO-UI` frontend/design; `IO-AUTO` REST/OpenAPI/MCP; `IO-RELEASE` OS/CI/signing/updater; `IO-QA` E2E/security/performance/release evidence.
+`IO-ARCH` architecture/domain/contracts; `IO-CORE` desktop/browser/network; `IO-CONTROL` identity/control/ACL/audit; `IO-DATA` storage/sync; `IO-UI` frontend/design; `IO-AUTO` REST/OpenAPI/MCP; `IO-RELEASE` OS/CI/signing/updater; `IO-QA` E2E/security/performance/release evidence.
 
 ## Acceptance Commands
 
@@ -19,7 +19,6 @@
 | `C-STORAGE` | `cargo test -p buglogin-storage` |
 | `C-SYNC` | `cargo test -p buglogin-sync` |
 | `C-API` | `cargo test -p buglogin-api` |
-| `C-MIGRATION` | `cargo test -p buglogin-migration` |
 | `C-CONTROL` | `cargo test -p buglogin-control-app` |
 | `C-DESKTOP` | `pnpm --filter @buglogin/desktop test && pnpm --filter @buglogin/desktop typecheck` |
 | `C-WEB` | `pnpm --filter @buglogin/web test && pnpm --filter @buglogin/web typecheck` |
@@ -31,7 +30,6 @@
 | `C-E2E-WEB` | `pnpm e2e --project=web` |
 | `C-E2E-ROLES` | `pnpm e2e --project=role-matrix` |
 | `C-E2E-SYNC` | `pnpm e2e --project=sync-interruption` |
-| `C-E2E-MIGRATION` | `pnpm e2e --project=migration-rollback` |
 | `C-E2E-WIN` | `pnpm e2e --project=windows-smoke` |
 | `C-E2E-MAC` | `pnpm e2e --project=macos-smoke` |
 | `C-A11Y` | `pnpm test:a11y` |
@@ -90,9 +88,7 @@ Stop on missing authority, overlapping writer, duplicate DTO/permission/type, mo
 | `WP-35` | `CAP-AUD-001` audit/support | `crates/domain/src/audit/**`; `crates/api/src/services/audit/**`; `apps/control/tests/audit.rs` | WP-02, WP-13, WP-33 | G3 → append-only/redacted/expiring support | `C-DOMAIN`, `C-API`, `C-SECURITY` | missing actor/resource/command correlation | IO-CONTROL |
 | `WP-36` | `CAP-SYNC-001` manifests/conflicts | `crates/sync/src/manifest/**`; `crates/sync/src/conflict/**`; `crates/sync/tests/manifests.rs` | WP-06, WP-07, WP-33 | G3 → versions/conflicts/idempotent retry | `C-SYNC`, `C-E2E-SYNC` | silent last-write data loss | IO-DATA |
 | `WP-37` | `CAP-SYNC-002/STOR-002` encrypted chunks | `crates/sync/src/crypto/**`; `crates/sync/src/chunks/**`; `crates/storage/src/remote/**`; `crates/sync/tests/encryption.rs` | WP-32, WP-36 | G3 → client keys/checksums/recovery | `C-SYNC`, `C-STORAGE`, `C-SECURITY` | server derives plaintext key | IO-DATA |
-| `WP-38` | `CAP-STOR-002/DIAG-001` backup | `crates/storage/src/backup/**`; `crates/storage/tests/backup_restore.rs` | WP-07, WP-32, WP-37 | G3 → immutable verified restore | `C-STORAGE`, `C-E2E-MIGRATION` | overwrite without snapshot/confirm | IO-DATA |
-| `WP-39` | `CAP-MIG-001` inspect/snapshot | `crates/migration/src/inspect/**`; `crates/migration/src/snapshot/**`; `crates/migration/src/package/**`; `crates/migration/tests/inspect.rs` | WP-01, WP-06, WP-07, WP-11 | G3 → read-only deterministic package | `C-MIGRATION`, `C-SECURITY` | source mutation/guessed path/secret report | IO-DATA |
-| `WP-40` | `CAP-MIG-002` cutover/rollback | `crates/migration/src/transform/**`; `crates/migration/src/verify/**`; `crates/migration/src/cutover/**`; `crates/migration/src/rollback/**`; `crates/migration/tests/cutover.rs` | WP-23, WP-25, WP-28..39 | G3 → classify all; rehearse rollback twice | `C-MIGRATION`, `C-E2E-MIGRATION` | any registry migration stop | IO-DATA |
+| `WP-38` | `CAP-STOR-002/DIAG-001` backup | `crates/storage/src/backup/**`; `crates/storage/tests/backup_restore.rs` | WP-07, WP-32, WP-37 | G3 → immutable verified restore | `C-STORAGE`, `C-SECURITY` | overwrite without snapshot/confirm | IO-DATA |
 | `WP-41` | Desktop breadth UI | `frontend/src/apps/desktop/features/profiles/**`; `resources/**`; `jobs/**`; `settings/**` under desktop | WP-21..40, WP-10 | G3 → real states for all desktop jobs | `C-DESKTOP`, `C-A11Y`, `C-VISUAL` | hidden errors/unhandled offline/partial | IO-UI |
 | `WP-42` | `CAP-WEB-002/003` account/workspace UI | `frontend/src/apps/web/account/**`; `frontend/src/apps/web/workspace/**`; `frontend/src/apps/web/router.tsx` | WP-13, WP-14, WP-31..37, WP-09, WP-10 | G3 → generated client, real operations | `C-WEB`, `C-E2E-WEB`, `C-E2E-ROLES`, `C-A11Y` | mutation lacks server ACL/audit | IO-UI |
 | `WP-43` | `CAP-WEB-001/004/ADM-001` public/admin UI | `frontend/src/apps/web/public/**`; `frontend/src/apps/web/admin/**`; `frontend/src/apps/web/shells/**` | WP-10, WP-23, WP-35, WP-42 | G3 → public/download/status + isolated admin | `C-WEB`, `C-E2E-WEB`, `C-A11Y`, `C-VISUAL` | billing/HR smuggled or admin leak | IO-UI |
@@ -100,9 +96,9 @@ Stop on missing authority, overlapping writer, duplicate DTO/permission/type, mo
 | `WP-45` | `CAP-REL-002` release catalogs | `crates/domain/src/release/**`; `crates/api/src/services/releases/**`; `apps/control/tests/releases.rs` | WP-02, WP-35, WP-44 | G4 → dual-controlled signed publish/rollback | `C-DOMAIN`, `C-API`, `C-SECURITY` | one actor publishes unverified artifact | IO-RELEASE |
 | `WP-46` | `CAP-REL-001/003` signing/updater | `.github/workflows/release.yml`; `.github/workflows/signing.yml`; `scripts/release/**`; `apps/desktop/src-tauri/src/updater/**`; `tests/release/**` | WP-12, WP-23, WP-44, WP-45 | G4 → SBOM/provenance/interruption/rollback | `C-RELEASE`, `C-E2E-WIN`, `C-E2E-MAC`, `C-SECURITY` | secret in PR job/data-mutating rollback | IO-RELEASE |
 | `WP-47` | API/MCP compatibility | `tests/contracts/**`; `crates/api/tests/compatibility/**`; `frontend/src/generated/**`; `docs/contracts/compatibility.md` | WP-19, WP-20, all domain packets | G4 breadth freeze → interface parity | `C-OPENAPI`, `C-MCP`, `C-CLIENT`, `C-E2E-VERTICAL` | duplicate DTO/command bypass | IO-AUTO |
-| `WP-48` | Full E2E/visual QA | `tests/e2e/specs/**`; `tests/e2e/pages/**`; `tests/visual/**`; `artifacts/e2e/.gitkeep` | WP-40..47 | G4 feature freeze → full journeys pass | `C-E2E-DESKTOP`, `C-E2E-WEB`, `C-E2E-ROLES`, `C-E2E-SYNC`, `C-E2E-MIGRATION`, `C-A11Y`, `C-VISUAL` | breadth changes while failures remain | IO-QA |
+| `WP-48` | Full E2E/visual QA | `tests/e2e/specs/**`; `tests/e2e/pages/**`; `tests/visual/**`; `artifacts/e2e/.gitkeep` | WP-46, WP-47 | G4 feature freeze → full journeys pass | `C-E2E-DESKTOP`, `C-E2E-WEB`, `C-E2E-ROLES`, `C-E2E-SYNC`, `C-A11Y`, `C-VISUAL` | breadth changes while failures remain | IO-QA |
 | `WP-49` | Security/performance review | `tests/security/**`; `tests/performance/**`; `docs/reviews/security/**`; `docs/reviews/performance/**` | WP-47, WP-48 | G5 → threats/ACL/load/residual risks approved | `C-SECURITY`, `C-PERF`, `C-E2E-ROLES` | reviewer patches foreign code | IO-QA |
-| `WP-50` | Migration/release readiness | `docs/runbooks/**`; `docs/release/**`; `docs/migration/**`; `tests/rehearsal/**` | WP-40, WP-46, WP-48, WP-49 | G5 → two rehearsals, rollback, support, signed risks | `C-E2E-MIGRATION`, `C-RELEASE`, `C-DOCS` | source/hash/ACL/secret/old-write/rollback/critical launch failure | IO-QA |
+| `WP-50` | Release readiness | `docs/runbooks/**`; `docs/release/**`; `tests/rehearsal/**` | WP-46, WP-48, WP-49 | G5 → rollback, support, signed risks | `C-RELEASE`, `C-DOCS` | source/hash/ACL/secret/old-write/rollback/critical launch failure | IO-QA |
 
 ## Handoff
 

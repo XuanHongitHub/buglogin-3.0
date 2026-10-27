@@ -563,6 +563,25 @@ export function AgentPage({
 
             <PausedBanner agentConsole={agentConsole} />
 
+            {agentConsole.error && (
+              <div
+                role="alert"
+                data-testid="agent-service-error"
+                className="flex shrink-0 flex-wrap items-center gap-3 rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+              >
+                <span className="min-w-0 flex-1">{agentConsole.error}</span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="soft"
+                  className="h-8 rounded-lg text-xs"
+                  onClick={() => void agentConsole.refresh()}
+                >
+                  {t("common.buttons.retry")}
+                </Button>
+              </div>
+            )}
+
             <AnimatedTabs
               value={activeTab}
               onValueChange={(value) => {

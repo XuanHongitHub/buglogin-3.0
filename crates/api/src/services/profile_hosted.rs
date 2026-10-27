@@ -325,9 +325,9 @@ impl HostedProfileService {
                 continue;
             };
             if binding.workspace_id != *workspace_id
-                || !state
+                || state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
-                    .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                    .is_none_or(|manifest| manifest.payload_encryption.is_none())
                 || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
@@ -372,9 +372,9 @@ impl HostedProfileService {
                 continue;
             };
             if binding.workspace_id != *workspace_id
-                || !state
+                || state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
-                    .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                    .is_none_or(|manifest| manifest.payload_encryption.is_none())
                 || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
@@ -412,9 +412,9 @@ impl HostedProfileService {
                 continue;
             };
             if binding.workspace_id != *workspace_id
-                || !state
+                || state
                     .current_sync_manifest(&binding.workspace_id, &binding.resource_id)?
-                    .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                    .is_none_or(|manifest| manifest.payload_encryption.is_none())
                 || has_managed_profile_key(state, &profile.value.id, &binding)?
             {
                 continue;
@@ -732,7 +732,7 @@ impl HostedProfileService {
             .profile_resource_record(profile_id)?
             .ok_or_else(|| problem("binding_not_found", "Profile binding not found", 404))?;
         if !state.resource_key_rotation_pending(&binding.workspace_id, &binding.resource_id)? {
-            return Self::initial_owner_key_envelope_recipient(
+            return Self::initial_member_key_envelope_recipient(
                 state,
                 principal,
                 grants,
@@ -744,7 +744,7 @@ impl HostedProfileService {
         Self::resolve_profile_key_rotation_recipient_devices(state, profile_id, &binding, true)
     }
 
-    fn initial_owner_key_envelope_recipient(
+    fn initial_member_key_envelope_recipient(
         state: &ApiState,
         principal: &Principal,
         grants: &[Grant],
@@ -775,23 +775,7 @@ impl HostedProfileService {
                 409,
             ));
         }
-        let account_id = principal
-            .account_id
-            .as_ref()
-            .ok_or_else(profile_key_distribution_not_ready)?;
-        let members = state
-            .members
-            .read()
-            .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
-            .active_for_account(account_id);
-        let member = members
-            .into_iter()
-            .find(|member| {
-                member.account_id == *account_id
-                    && member.workspace_id == binding.workspace_id
-                    && member.role == MemberRole::Owner
-            })
-            .ok_or_else(profile_key_enrollment_required)?;
+        let member = initial_profile_key_member(state, principal, &binding.workspace_id)?;
         let now = unix_time_seconds("initial-profile-key-envelope")?;
         let active_devices = state
             .auth
@@ -819,7 +803,7 @@ impl HostedProfileService {
         }])
     }
 
-    pub fn activate_initial_owner_key_envelope(
+    pub fn activate_initial_member_key_envelope(
         state: &ApiState,
         principal: &Principal,
         profile_id: &ProfileId,
@@ -848,23 +832,7 @@ impl HostedProfileService {
         if updates.len() != 1 {
             return Err(profile_key_distribution_not_ready());
         }
-        let account_id = principal
-            .account_id
-            .as_ref()
-            .ok_or_else(profile_key_distribution_not_ready)?;
-        let active_members = state
-            .members
-            .read()
-            .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
-            .active_for_account(account_id);
-        let member = active_members
-            .into_iter()
-            .find(|member| {
-                member.account_id == *account_id
-                    && member.workspace_id == binding.workspace_id
-                    && member.role == MemberRole::Owner
-            })
-            .ok_or_else(profile_key_enrollment_required)?;
+        let member = initial_profile_key_member(state, principal, &binding.workspace_id)?;
         let update = &updates[0];
         if update.member_id != member.id || update.recipient_key_envelopes.len() != 1 {
             return Err(profile_key_distribution_not_ready());
@@ -981,9 +949,9 @@ impl HostedProfileService {
         let current_manifest =
             state.current_sync_manifest(&binding.workspace_id, &binding.resource_id)?;
         if capability_allowed
-            && !current_manifest
+            && current_manifest
                 .as_ref()
-                .is_some_and(|manifest| manifest.payload_encryption.is_some())
+                .is_none_or(|manifest| manifest.payload_encryption.is_none())
         {
             return Ok(true);
         }
@@ -1040,6 +1008,17 @@ impl HostedProfileService {
             &[action],
             grants,
         )?;
+        if has_managed_profile_key(state, profile_id, &binding)?
+            && (capability_allowed
+                || active_members
+                    .iter()
+                    .any(|member| share_members.contains(&member.id)))
+        {
+            // Managed keys are unwrapped only after this ACL check and an
+            // authenticated device-session check in the key-delivery route.
+            // A recipient envelope is no longer an additional role gate.
+            return Ok(true);
+        }
         if let Some(manifest) = current_manifest
             && let Some(encryption) = manifest.payload_encryption.as_ref()
         {
@@ -2059,10 +2038,44 @@ fn profile_key_distribution_not_ready() -> Problem {
     )
 }
 
+fn initial_profile_key_member(
+    state: &ApiState,
+    principal: &Principal,
+    workspace_id: &WorkspaceId,
+) -> Result<Member, Problem> {
+    let account_id = principal
+        .account_id
+        .as_ref()
+        .ok_or_else(profile_key_distribution_not_ready)?;
+    let members = state
+        .members
+        .read()
+        .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
+        .active_for_account(account_id)
+        .into_iter()
+        .filter(|member| {
+            member.workspace_id == *workspace_id
+                && principal
+                    .member_id
+                    .as_ref()
+                    .is_none_or(|member_id| member.id == *member_id)
+        })
+        .collect::<Vec<_>>();
+    match members.as_slice() {
+        [member] => Ok(member.clone()),
+        [] => Err(profile_key_enrollment_required()),
+        _ => Err(problem(
+            "profile_key_member_context_required",
+            "An active workspace membership is required to initialize profile encryption",
+            409,
+        )),
+    }
+}
+
 fn profile_key_enrollment_required() -> Problem {
     Problem::new(
         "profile_key_enrollment_required",
-        "The first encrypted manifest requires a current key envelope for the workspace owner device",
+        "The first encrypted manifest requires a current key envelope for the authorized workspace member device",
         409,
         "profile",
     )
@@ -2159,8 +2172,7 @@ mod authorization_tests {
         )
         .unwrap();
         let error = HostedProfileService::provision(&state, &Principal::default(), &[], &plan)
-            .err()
-            .expect("provision must not trust a hand-built plan");
+            .expect_err("provision must not trust a hand-built plan");
         assert_eq!(error.code, "profile_groups_mutation_required");
         assert!(state.get_profile_record(&profile.id).unwrap().is_none());
     }
@@ -2210,6 +2222,59 @@ mod authorization_tests {
                 2,
             )
             .unwrap();
+    }
+
+    fn seed_active_workspace_member(
+        state: &ApiState,
+        account_id: &AccountId,
+        workspace_id: &WorkspaceId,
+        role: MemberRole,
+    ) -> MemberId {
+        let principal = Principal {
+            roles: [Role::PlatformAdmin].into_iter().collect(),
+            ..Principal::default()
+        };
+        let member_id = MemberId::new(format!(
+            "mem_{}_{}",
+            account_id.as_str(),
+            workspace_id.as_str()
+        ))
+        .unwrap();
+        state
+            .members
+            .write()
+            .unwrap()
+            .invite(
+                &principal,
+                &[],
+                Member {
+                    id: member_id.clone(),
+                    account_id: account_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    team_id: None,
+                    role,
+                    status: MemberStatus::Invited,
+                    invite_expires_at: Some(u64::MAX),
+                },
+                1,
+            )
+            .unwrap();
+        state
+            .members
+            .write()
+            .unwrap()
+            .activate(
+                &Principal {
+                    account_id: Some(account_id.clone()),
+                    ..Principal::default()
+                },
+                &[],
+                workspace_id,
+                &member_id,
+                2,
+            )
+            .unwrap();
+        member_id
     }
 
     #[test]
@@ -2465,7 +2530,7 @@ mod authorization_tests {
     }
 
     #[test]
-    fn initial_encrypted_manifest_enrolls_only_the_authenticated_owner_device() {
+    fn initial_encrypted_manifest_enrolls_only_the_authenticated_member_device() {
         use buglogin_sync::crypto::{
             ClientKey, DevicePrivateKey, RecoveryKey, seal_profile_key_share,
         };
@@ -2604,7 +2669,7 @@ mod authorization_tests {
             ],
         };
         assert_eq!(
-            HostedProfileService::activate_initial_owner_key_envelope(
+            HostedProfileService::activate_initial_member_key_envelope(
                 &state,
                 &owner,
                 &profile_id,
@@ -2621,7 +2686,7 @@ mod authorization_tests {
             .envelope
             .recipient_device_id = "device_other_owner".into();
         assert_eq!(
-            HostedProfileService::activate_initial_owner_key_envelope(
+            HostedProfileService::activate_initial_member_key_envelope(
                 &state,
                 &owner,
                 &profile_id,
@@ -2638,7 +2703,7 @@ mod authorization_tests {
             .envelope
             .key_version = "0".repeat(64);
         assert_eq!(
-            HostedProfileService::activate_initial_owner_key_envelope(
+            HostedProfileService::activate_initial_member_key_envelope(
                 &state,
                 &owner,
                 &profile_id,
@@ -2651,7 +2716,7 @@ mod authorization_tests {
             "profile_key_distribution_not_ready"
         );
         assert_eq!(
-            HostedProfileService::activate_initial_owner_key_envelope(
+            HostedProfileService::activate_initial_member_key_envelope(
                 &state,
                 &owner,
                 &profile_id,
@@ -2663,7 +2728,7 @@ mod authorization_tests {
             .code,
             "profile_key_distribution_not_ready"
         );
-        HostedProfileService::activate_initial_owner_key_envelope(
+        HostedProfileService::activate_initial_member_key_envelope(
             &state,
             &owner,
             &profile_id,
@@ -2717,6 +2782,159 @@ mod authorization_tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn initial_encrypted_manifest_key_enrollment_supports_every_authorized_workspace_role() {
+        use buglogin_sync::crypto::{
+            ClientKey, DevicePrivateKey, RecoveryKey, seal_profile_key_share,
+        };
+        use buglogin_sync::manifest::SyncManifest;
+
+        let workspace_id = WorkspaceId::new("ws_initial_key_roles").unwrap();
+        let profile_id = ProfileId::new("prf_initial_key_roles").unwrap();
+        let resource_id = ResourceId::new("res_initial_key_roles").unwrap();
+        let state = crate::http::ApiState::hosted_with_control_store(
+            buglogin_browser::profile::ProfileService::disabled(),
+            buglogin_storage::control::MemoryControlRecordStore::default(),
+        )
+        .unwrap()
+        .with_profile_resource(ProfileResource {
+            profile_id: profile_id.clone(),
+            resource_id: resource_id.clone(),
+            workspace_id: workspace_id.clone(),
+            archive_state: ProfileArchiveState::Active,
+        });
+        state
+            .replace_sync_manifest(
+                SyncManifest::new(
+                    workspace_id.clone(),
+                    resource_id.clone(),
+                    1,
+                    1,
+                    None,
+                    b"initial-role-genesis",
+                    Vec::new(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let cases = [
+            ("owner", MemberRole::Owner),
+            ("admin", MemberRole::Admin),
+            ("lead", MemberRole::Lead),
+            ("operator", MemberRole::Operator),
+            ("member", MemberRole::Member),
+        ];
+        for (suffix, role) in cases {
+            let account_id = AccountId::new(format!("acct_initial_role_{suffix}")).unwrap();
+            let member_id = seed_active_workspace_member(&state, &account_id, &workspace_id, role);
+            let device_id = format!("device_initial_role_{suffix}");
+            let principal = Principal {
+                account_id: Some(account_id.clone()),
+                member_id: Some(member_id.clone()),
+                workspace_ids: [workspace_id.clone()].into_iter().collect(),
+                ..Principal::default()
+            };
+            let grants = [capability_grant(
+                &format!("grant_initial_role_{suffix}_update"),
+                &account_id,
+                "profile.update",
+                Action::Update,
+                ResourceScope::resource(workspace_id.clone(), resource_id.clone()),
+            )];
+            let now = unix_time_seconds("initial-role-key-test").unwrap();
+            state
+                .auth
+                .write()
+                .unwrap()
+                .issue_device_session(
+                    account_id.clone(),
+                    now + 3_600,
+                    now + 7_200,
+                    device_id.clone(),
+                    None,
+                )
+                .unwrap();
+            let device_private = DevicePrivateKey::generate().unwrap();
+            let device_public = device_private.public_key().unwrap();
+            let public_key_hex = device_public
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let device_key = state
+                .device_key_directory
+                .register(
+                    &account_id,
+                    &device_id,
+                    &public_key_hex,
+                    &format!("initial-role-key-{suffix}"),
+                    now,
+                )
+                .unwrap();
+
+            let recipients = HostedProfileService::list_profile_key_rotation_recipients(
+                &state,
+                &principal,
+                &grants,
+                &profile_id,
+                &device_id,
+            )
+            .unwrap();
+            assert_eq!(recipients.len(), 1, "role {suffix}");
+            assert_eq!(recipients[0].member_id, member_id, "role {suffix}");
+            assert_eq!(
+                recipients[0].device_keys[0].device_id, device_id,
+                "role {suffix}"
+            );
+
+            let client_key = ClientKey::from_bytes([suffix.as_bytes()[0]; 32]);
+            let recovery_key = RecoveryKey::from_bytes([0x72; 32]);
+            let key_version = format!("{:x}", Sha256::digest(client_key.as_bytes()));
+            let update = ProfileKeyRotationEnvelopeUpdate {
+                member_id: member_id.clone(),
+                recipient_key_envelopes: vec![
+                    buglogin_domain::profile::ConfirmedProfileKeyShareEnvelope {
+                        envelope: seal_profile_key_share(
+                            workspace_id.clone(),
+                            resource_id.clone(),
+                            device_id.clone(),
+                            key_version.clone(),
+                            &device_public,
+                            &client_key,
+                            &recovery_key,
+                        )
+                        .unwrap(),
+                        confirmed_fingerprint: device_key.fingerprint,
+                    },
+                ],
+            };
+            HostedProfileService::activate_initial_member_key_envelope(
+                &state,
+                &principal,
+                &profile_id,
+                &device_id,
+                &key_version,
+                &[update],
+            )
+            .unwrap_or_else(|error| {
+                panic!("role {suffix} must initialize its authorized device: {error}")
+            });
+            assert!(
+                state
+                    .has_profile_key_share_envelope_for_member(
+                        &profile_id,
+                        &workspace_id,
+                        &resource_id,
+                        &member_id,
+                        &key_version,
+                    )
+                    .unwrap(),
+                "role {suffix} should receive its own key envelope"
+            );
+        }
     }
 
     #[test]
@@ -3733,7 +3951,7 @@ mod authorization_tests {
             .unwrap()
             .grant(
                 &owner,
-                &[direct_share_manager.clone()],
+                std::slice::from_ref(&direct_share_manager),
                 ResourceGrant {
                     id: direct_deny_id.clone(),
                     workspace_id: workspace_id.clone(),

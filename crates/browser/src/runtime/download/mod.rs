@@ -70,15 +70,17 @@ pub fn install(
         .file
         .take()
         .ok_or_else(|| problem("runtime_install_failed", "Runtime install failed"))?;
-    let mut bounded = BoundedWriter::new(&mut file, release.size_bytes);
-    source.fetch_to(&release.source, release.size_bytes, &mut bounded)?;
-    bounded
-        .flush()
-        .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
-    if bounded.written != release.size_bytes {
+    let written = {
+        let mut bounded = BoundedWriter::new(&mut file, release.size_bytes);
+        source.fetch_to(&release.source, release.size_bytes, &mut bounded)?;
+        bounded
+            .flush()
+            .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
+        bounded.written
+    };
+    if written != release.size_bytes {
         return Err(problem("runtime_size_mismatch", "Runtime size mismatch"));
     }
-    drop(bounded);
     file.sync_all()
         .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
     drop(file);
@@ -110,7 +112,7 @@ pub fn install(
         fs::rename(&target, &backup)
             .map_err(|_| problem("runtime_backup_failed", "Runtime backup failed"))?;
     }
-    if let Err(_) = fs::rename(&staged.path, &target) {
+    if fs::rename(&staged.path, &target).is_err() {
         if had_existing {
             let _ = fs::rename(&backup, &target);
         }
@@ -143,15 +145,17 @@ fn install_zip(
         .file
         .take()
         .ok_or_else(|| problem("runtime_install_failed", "Runtime install failed"))?;
-    let mut bounded = BoundedWriter::new(&mut file, release.size_bytes);
-    source.fetch_to(&release.source, release.size_bytes, &mut bounded)?;
-    bounded
-        .flush()
-        .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
-    if bounded.written != release.size_bytes {
+    let written = {
+        let mut bounded = BoundedWriter::new(&mut file, release.size_bytes);
+        source.fetch_to(&release.source, release.size_bytes, &mut bounded)?;
+        bounded
+            .flush()
+            .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
+        bounded.written
+    };
+    if written != release.size_bytes {
         return Err(problem("runtime_size_mismatch", "Runtime size mismatch"));
     }
-    drop(bounded);
     file.sync_all()
         .map_err(|_| problem("runtime_install_failed", "Runtime install failed"))?;
     drop(file);
@@ -487,7 +491,7 @@ fn extract_zip(
         .map_err(|_| problem("runtime_archive_invalid", "Runtime archive invalid"))?;
     let mut archive = zip::ZipArchive::new(archive_file)
         .map_err(|_| problem("runtime_archive_invalid", "Runtime archive invalid"))?;
-    if archive.len() == 0 || archive.len() > MAX_ARCHIVE_FILES {
+    if archive.is_empty() || archive.len() > MAX_ARCHIVE_FILES {
         return Err(problem(
             "runtime_archive_limits_exceeded",
             "Runtime archive limits exceeded",

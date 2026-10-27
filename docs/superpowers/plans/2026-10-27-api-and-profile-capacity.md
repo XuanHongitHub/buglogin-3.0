@@ -1,0 +1,84 @@
+# API and Profile Capacity Plan
+
+Status: implementation in progress; do not repeat the existing async aggregate refresh change without verifying the deployed artifact. No production resource policy has been applied.
+
+## Goal
+
+Keep profile listing, status refresh, launch, stop, and sync responsive as the number of teams and active clients grows. Use a 60/40 BugLogin/BugIdea resource policy only after accounting for PostgreSQL and operating-system headroom.
+
+## Root-cause evidence
+
+- Production had a full API accept backlog and many `CLOSE-WAIT` sockets while the API process was not CPU- or memory-saturated.
+- Control-backed HTTP reads refreshed the aggregate by calling the synchronous PostgreSQL revision path. PostgreSQL operations pass through a single worker and synchronous reply wait.
+- The status UI can fan out reads; blocking Tokio workers on that path made unrelated requests, including health checks, wait behind control-store work.
+- The API refresh was moved to `spawn_blocking` and coalesced for 100 ms in the current local worktree. The next release must verify whether this exact code shipped before implementing the same behavior again.
+- Production host inventory: 2 vCPU, about 3.8 GiB RAM. PostgreSQL is shared by BugLogin and BugIdea and was using about 1.6 GiB at inspection. Treat that DB and the OS as shared budget, not as free capacity for either app.
+
+## Implementation plan and code locations
+
+### 0. Reconcile with the active release
+
+- Inspect the deployed commit/artifact and the current `main` diff after the active release completes.
+- Do not reapply code already included in the active artifact. Preserve unrelated work from other sessions.
+
+### 1. Measure the request and database bottlenecks
+
+- `crates/api/src/http/mod.rs`: instrument request duration/status at the existing router middleware boundary.
+- `crates/storage/src/control/mod.rs`: record PostgreSQL worker queue occupancy, enqueue failures, and time spent waiting for the worker/reply.
+- Add focused load scenarios under `tests/performance/` for profile-list/status polling, concurrent launch/stop, and sync; use the existing `pnpm test:performance` entry point where compatible.
+- Never log bearer tokens, cookies, profile data, or SQL parameters.
+
+### 2. Remove repeated synchronous control-store work from async requests
+
+- `crates/api/src/http/mod.rs`: replace the per-request durable revision read in `refresh_control_aggregate_locked` with a documented freshness/invalidation policy. Keep local writes immediately reflected in the local revision.
+- `crates/api/src/services/control_persistence.rs`: introduce the async persistence boundary needed by HTTP handlers; retain a narrowly scoped sync boundary only for non-async startup/operator paths.
+- `crates/storage/src/control/mod.rs`: replace or redesign the single serial PostgreSQL worker only after measuring it. Use bounded concurrency and bounded wait; return an explicit retryable overload response instead of blocking runtime threads or building an unbounded queue.
+- `crates/api/src/http/control.rs` and `crates/api/src/http/sync_import.rs`: migrate remaining async handler paths that call synchronous control persistence, while preserving mutation locks, authorization snapshots, idempotency, and revision fencing.
+- Multi-instance freshness: add transactional PostgreSQL invalidation (`LISTEN/NOTIFY` or an equivalent committed invalidation mechanism) with a reconnect/full-refresh fallback. Do not serve stale ACL state as authorized when invalidation health is unknown.
+
+### 3. Keep profile status batched and truthful
+
+- Follow `docs/superpowers/specs/2026-10-27-authoritative-profile-status-design.md`; check the current implementation before editing.
+- `crates/api/src/http/control.rs`: preserve the authorized `GET /v1/workspaces/{workspaceId}/profile-runtime-status` batch route, per-profile access checks, 250-profile cap, and 32-way coordination-read cap.
+- `apps/desktop/src-tauri/src/remote_api.rs` and `apps/desktop/src-tauri/src/lib.rs`: keep one batch transport/command for the visible workspace profile set.
+- `src/hooks/use-profile-events.ts` and `src/app/desktop-home.tsx`: avoid per-profile request fan-out; pause polling when the page is hidden, batch visible profiles, and back off when state is stable or the API is degraded.
+- Preserve the status contract: atomic lease acquisition remains the Start authority; a failed status read never clears a confirmed lock; show `running`, `syncing`, or `stopped` only when the corresponding server/device evidence supports it.
+
+### 4. Bound profile launch preparation
+
+- `apps/desktop/src-tauri/src/desktop_state.rs`: keep independent launch preflight requests concurrent and record per-step duration so slow dependencies are identifiable.
+- `apps/desktop/src-tauri/src/extension_features.rs`: keep GitHub extension refresh optional and bounded; use the installed package when available and report a warning rather than holding browser lifecycle open.
+- `apps/desktop/src-tauri/src/profile_runtime.rs` and `apps/desktop/src-tauri/src/sync_features.rs`: verify launch/stop/sync state transitions and that sync failure cannot leave a false `stopped`/synced state.
+
+### 5. Apply the 60/40 resource policy through versioned deployment config
+
+- BugLogin repo: add owned systemd slice/unit configuration under `scripts/systemd/`; update `scripts/release/deploy-api-systemd.ps1` and `scripts/release/deploy-api-systemd-remote.sh` to stage, verify, activate, and roll back those exact files with the API artifact.
+- BugIdea repo: update `F:/Herd/bugideas/scripts/setup-server.sh`, `F:/Herd/bugideas/scripts/deploy.sh`, and versioned config under `F:/Herd/bugideas/scripts/systemd/` so Supervisor/PHP-FPM/Nginx workload limits are deployed from source.
+- Put BugLogin and BugIdea app processes in separate cgroup slices. Put shared PostgreSQL and the OS in an explicitly measured shared budget. Use CPU weights for the 60/40 contention target; do not claim CPU reservation from quota ceilings alone.
+- Derive `MemoryHigh`/`MemoryMax` only after measuring app RSS, PostgreSQL working set, and OS headroom. Do not set raw 60/40 limits of physical RAM while also leaving shared PostgreSQL outside that budget. If both app budgets plus DB/OS headroom do not fit, resize the VPS before enforcing hard limits.
+- Deploy each repo only through its documented commit/push/deploy workflow. No direct production edits over SSH.
+
+## Verification and acceptance
+
+- Run a staged load matrix with 2, 10, and 20 teams, then increase active clients independently (for example 2, 10, 25, and 50); team count is not treated as concurrent-user count.
+- Exercise status polling with the profile page visible/hidden, simultaneous launch attempts, stop during sync, transient PostgreSQL delay, worker saturation, and API restart/reconnect.
+- Proposed gates: status-batch p95 under 250 ms and p99 under 750 ms at target load; no health/readiness timeout; no unbounded queue growth; no `CLOSE-WAIT`/accept-backlog growth; no false lock release, false synced state, or lost authorization update; zero OOM/restart during the run.
+- Verify PostgreSQL connection/queue wait, API CPU/RAM, BugIdea worker CPU/RAM, and shared DB/OS headroom before and after applying the systemd policy.
+- Release only after targeted Rust/API/desktop checks, performance runs, and rollback rehearsal pass. The production 20-team capacity claim remains unproven until this gate passes.
+
+## Production boundary
+
+- This plan may include source instrumentation and local/staged load work. It does not authorize direct production edits, unmeasured CPU/memory limits, database changes, or promotion without the stated snapshot, rehearsal, verification, and rollback gates.
+
+## Implementation progress — 2026-10-27
+
+- Source inspection confirms `refresh_control_aggregate_async()` already offloads and coalesces aggregate refresh, and the batch profile runtime status path is present. `cargo check -p buglogin-api --lib` passes on the current tree.
+- Added API request latency/error logging using matched route templates (no identifiers/query/body) and PostgreSQL control-queue wait/service timing with pending-depth visibility. `cargo check -p buglogin-api --lib` passes.
+- Added a read-only authenticated profile-status load harness at `scripts/performance/profile-runtime-status.mjs` and the `pnpm test:performance:profile-status` entry point. It accepts a bounded 1–250 profile batch through `BUGLOGIN_PROFILE_IDS`, uses `BUGLOGIN_API_BASE_URL`, `BUGLOGIN_BEARER_TOKEN`, and `BUGLOGIN_WORKSPACE_ID`, has configurable request count/concurrency and p95/p99 thresholds (250/750 ms by default), prints p50/p95/p99/max and status-only failures, and never prints the bearer token or profile IDs. Production/staging load measurements still need real credentials and a representative dataset.
+- The new harness passes `node --check` and focused Biome syntax/style checks. No live load results have been recorded.
+- The focused `cargo test --locked -p buglogin-api --test http_control` passes all four integration tests when built with an isolated `CARGO_TARGET_DIR`; the shared target's API executable was held open by the running local API on the first attempt.
+- Sync-import async handler paths now also acquire the journal/idempotency advisory locks and claim idempotency on `spawn_blocking`; the lock guards own the persistence handle and dispatch unlock work to the blocking pool. `cargo check --locked -p buglogin-api --lib`, `cargo test --locked -p buglogin-api --test http_sync_migration` (2/2), Rust format check, and `git diff --check` pass. The focused lib unit-test binary could not link because D: ran out of space; the temporary target `D:\buglogin-target-sync-import-capacity-20261027` remains because automatic review rejected its removal. Remaining sync-import persistence edges and control mutation helpers still require audit.
+- The deployed artifact/commit has not been compared with this local source. Load matrix, multi-instance invalidation, remaining synchronous-handler audit, deployment resource policy, measurement-driven cgroup limits, and rollback rehearsal remain unverified/not implemented. No production capacity claim is made.
+- Follow-up after the production accept backlog incident: the profile runtime status route now admits at most four concurrent requests at the outer snapshot-refresh middleware, before it can enter the serialized refresh path, and fails fast with a logged retryable 503 when saturated. Its synchronous profile authorization/binding and runtime identity lookups run on Tokio's blocking pool. Desktop profile lock polling now runs every 15 seconds and pauses while hidden. Initial `cargo check --locked -p buglogin-api --lib`, `cargo test --locked -p buglogin-api --test http_control` (4/4), and Biome passed before moving the admission gate outward; rerun verification is pending. This reduces the most likely status-poll pressure but does not establish the original caller; no controlled load run or deployment has been performed.
+- Reran the final status-admission change on 2026-10-27 using an isolated C: target because D: is full: `cargo check --locked -p buglogin-api --lib` passes and `cargo test --locked -p buglogin-api --test http_control` passes (4/4). Existing dead-code warnings remain. This verifies the local handler behavior only; it does not identify the production backlog caller or replace staged load evidence.
+- The authorized mutation-replay receipt path now runs its aggregate refresh, fresh principal/grant check, lease authorization, and durable receipt lookup on Tokio's blocking pool while retaining the snapshot and mutation locks for the full sequence. Reverified with `cargo check --locked -p buglogin-api --lib` and `cargo test --locked -p buglogin-api --test http_control` (4/4). Other specialized mutation callbacks still contain synchronous control persistence and remain in the async-handler audit.

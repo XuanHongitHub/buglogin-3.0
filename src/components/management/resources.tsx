@@ -57,7 +57,6 @@ import type {
 import {
   changeGroupAssignment,
   type GroupAssignmentMode,
-  groupNameRows,
 } from "./resource-input";
 import "./resource-i18n";
 
@@ -101,10 +100,14 @@ function memberLabel(member: Member | undefined, fallback: string): string {
 }
 
 export function ManagementResources({
+  organizationName,
+  workspaceName,
   workspaceId,
   kind,
   initialGroupId,
 }: {
+  organizationName: string;
+  workspaceName: string;
   workspaceId: string;
   kind: "groups" | "profiles";
   initialGroupId?: string;
@@ -130,7 +133,7 @@ export function ManagementResources({
   const [results, setResults] = useState<OperationResult[]>([]);
   const [commands, setCommands] = useState<Command[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
-  const [createNames, setCreateNames] = useState("");
+  const [createName, setCreateName] = useState("");
   const [prefix, setPrefix] = useState("");
   const [suffix, setSuffix] = useState("");
   const [note, setNote] = useState("");
@@ -180,34 +183,56 @@ export function ManagementResources({
           api.listMembers(workspaceId),
         ]);
       if (version !== requestVersion.current) return;
+      const warnings: string[] = [];
       if (groupResult.status === "fulfilled") setGroups(groupResult.value);
       else if (kind === "groups") throw groupResult.reason;
-      else setAccessWarning(errorMessage(groupResult.reason));
+      else warnings.push(errorMessage(groupResult.reason));
       if (profileResult.status === "fulfilled")
         setProfiles(profileResult.value);
       else if (kind === "profiles") throw profileResult.reason;
-      else setAccessWarning(errorMessage(profileResult.reason));
+      else warnings.push(errorMessage(profileResult.reason));
       if (memberResult.status === "fulfilled")
         setMembers(memberResult.value.items);
-      else {
-        setMembers([]);
-        setAccessWarning(errorMessage(memberResult.reason));
-      }
+      else warnings.push(errorMessage(memberResult.reason));
       if (groupResult.status === "fulfilled") {
-        const grants = await Promise.allSettled(
-          groupResult.value.map((record) =>
-            api.listGroupShares({ workspaceId, groupId: record.group.id }),
+        const grants: PromiseSettledResult<GroupShareGrant[]>[] = [];
+        for (let offset = 0; offset < groupResult.value.length; offset += 8) {
+          const batch = groupResult.value.slice(offset, offset + 8);
+          grants.push(
+            ...(await Promise.allSettled(
+              batch.map((record) =>
+                api.listGroupShares({ workspaceId, groupId: record.group.id }),
+              ),
+            )),
+          );
+        }
+        if (version !== requestVersion.current) return;
+        const failedGroupIds = new Set(
+          grants.flatMap((result, index) =>
+            result.status === "rejected"
+              ? [groupResult.value[index].group.id]
+              : [],
           ),
         );
-        if (version !== requestVersion.current) return;
-        setShares(
-          grants.flatMap((result) =>
+        const failedGroupNames = grants.flatMap((result, index) =>
+          result.status === "rejected"
+            ? [groupResult.value[index].group.name]
+            : [],
+        );
+        setShares((previous) => [
+          ...previous.filter((grant) => failedGroupIds.has(grant.groupId)),
+          ...grants.flatMap((result) =>
             result.status === "fulfilled" ? result.value : [],
           ),
-        );
-        if (grants.some((result) => result.status === "rejected"))
-          setAccessWarning(t("permissionError"));
+        ]);
+        if (failedGroupNames.length)
+          warnings.push(
+            t("permissionErrorGroups", {
+              groups: failedGroupNames.join(", "),
+            }),
+          );
       }
+      setAccessWarning(warnings.join(" "));
     } catch (reason) {
       if (version === requestVersion.current)
         setLoadError(errorMessage(reason));
@@ -258,6 +283,36 @@ export function ManagementResources({
   }, [kind, groups, profiles, query, groupFilter]);
   const visible = filtered.slice(page * 25, (page + 1) * 25);
   const pages = Math.max(1, Math.ceil(filtered.length / 25));
+  const assignmentPreview = useMemo(() => {
+    if (kind !== "profiles" || pending?.action !== "assign") return [];
+    return pending.ids.flatMap((id) => {
+      const profile = profiles.find((value) => value.id === id);
+      if (!profile) return [];
+      const nextGroupIds = changeGroupAssignment(
+        profile.groupIds,
+        chosenGroups,
+        assignment,
+      );
+      const changed =
+        JSON.stringify([...nextGroupIds].sort()) !==
+        JSON.stringify([...profile.groupIds].sort());
+      const namesForGroups = (ids: string[]) =>
+        ids.map(
+          (groupId) =>
+            groups.find((record) => record.group.id === groupId)?.group.name ??
+            t("unavailableGroupName"),
+        );
+      return [
+        {
+          id: profile.id,
+          name: profile.name,
+          current: namesForGroups(profile.groupIds),
+          next: namesForGroups(nextGroupIds),
+          changed,
+        },
+      ];
+    });
+  }, [assignment, chosenGroups, groups, kind, pending, profiles, t]);
   const toggle = (
     id: string,
     chosen: string[],
@@ -283,7 +338,7 @@ export function ManagementResources({
     setRevokeIds([]);
     setPrefix("");
     setSuffix("");
-    setCreateNames("");
+    setCreateName("");
     setAssignment("add");
     setChosenGroups([]);
     setChosenMembers([]);
@@ -339,21 +394,20 @@ export function ManagementResources({
       labels[key] = label;
     }
     if (pending.action === "create") {
-      const parsed = groupNameRows(createNames);
-      if (!parsed.length) throw new Error(t("invalidName"));
-      if (parsed.some((row) => row.duplicate)) throw new Error(t("duplicate"));
-      for (const row of parsed)
-        add(
-          "group.create",
-          `create:${row.line}`,
-          {
-            workspaceId,
-            groupId: `grp_${crypto.randomUUID().replaceAll("-", "")}`,
-            name: row.name,
-            appearance: null,
-          },
-          row.name,
-        );
+      const name = createName.trim();
+      if (!name) throw new Error(t("invalidName"));
+      if (name.length > 120) throw new Error(t("groupNameTooLong"));
+      add(
+        "group.create",
+        "create",
+        {
+          workspaceId,
+          groupId: `grp_${crypto.randomUUID().replaceAll("-", "")}`,
+          name,
+          appearance: null,
+        },
+        name,
+      );
     } else if (pending.action === "edit") {
       for (const id of pending.ids) {
         if (changeName && !names[id]?.trim()) throw new Error(t("missingName"));
@@ -552,6 +606,10 @@ export function ManagementResources({
       if (!next.length) throw new Error(t("noChanges"));
       setCommands(next);
       operationKey.current = crypto.randomUUID();
+      if (pending?.action === "create") {
+        void execute(next);
+        return;
+      }
       setStep("review");
     } catch (reason) {
       setError(errorMessage(reason));
@@ -995,8 +1053,22 @@ export function ManagementResources({
       >
         <DialogContent className="flex max-h-5/6 w-full max-w-3xl flex-col overflow-hidden">
           <DialogHeader>
-            <DialogTitle>{step === "result" ? t("result") : title}</DialogTitle>
-            <DialogDescription>{t("scopeWarning")}</DialogDescription>
+            <DialogTitle>
+              {step === "result"
+                ? t("result")
+                : pending?.action === "create"
+                  ? t("createOne")
+                  : title}
+            </DialogTitle>
+            <DialogDescription className="space-y-1">
+              <span className="block">
+                {organizationName} / {workspaceName}
+                {pending?.ids.length
+                  ? ` · ${t("selected", { count: pending.ids.length })}`
+                  : ""}
+              </span>
+              <span className="block">{t("scopeWarning")}</span>
+            </DialogDescription>
           </DialogHeader>
           <ScrollArea className="min-h-0 flex-1">
             <div className="space-y-4 pr-3">
@@ -1010,15 +1082,18 @@ export function ManagementResources({
               )}
               {step === "edit" && pending?.action === "create" && (
                 <div className="space-y-2">
-                  <Label htmlFor="management-group-names">{t("name")}</Label>
-                  <Textarea
-                    id="management-group-names"
-                    value={createNames}
-                    onChange={(event) => setCreateNames(event.target.value)}
-                    rows={5}
+                  <Label htmlFor="management-group-name">{t("name")}</Label>
+                  <Input
+                    id="management-group-name"
+                    value={createName}
+                    onChange={(event) => setCreateName(event.target.value)}
+                    maxLength={120}
                     autoFocus
+                    disabled={busy}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !busy) review();
+                    }}
                   />
-                  <p className="text-xs text-muted-foreground">{t("names")}</p>
                   <p className="text-xs text-muted-foreground">
                     {t("createHint")}
                   </p>
@@ -1214,6 +1289,38 @@ export function ManagementResources({
                       </div>
                     ))}
                   </div>
+                  <section
+                    className="space-y-2 rounded-md border border-border bg-muted/20 p-3"
+                    aria-live="polite"
+                  >
+                    <p className="text-sm font-medium">
+                      {t("assignmentImpact", {
+                        changed: assignmentPreview.filter(
+                          (item) => item.changed,
+                        ).length,
+                        unchanged: assignmentPreview.filter(
+                          (item) => !item.changed,
+                        ).length,
+                      })}
+                    </p>
+                    <ScrollArea className="max-h-40">
+                      <ul className="space-y-2 pr-3">
+                        {assignmentPreview.map((item) => (
+                          <li
+                            key={item.id}
+                            className="grid gap-0.5 border-b border-border pb-2 text-xs last:border-0 last:pb-0"
+                          >
+                            <span className="font-medium">{item.name}</span>
+                            <span className="text-muted-foreground">
+                              {item.current.join(", ") || t("noAssignedGroups")}{" "}
+                              → {item.next.join(", ") || t("noAssignedGroups")}
+                              {!item.changed ? ` · ${t("unchanged")}` : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </ScrollArea>
+                  </section>
                 </>
               )}
               {step === "edit" && pending?.action === "delete" && (
@@ -1469,9 +1576,18 @@ export function ManagementResources({
               {t(step === "review" ? "back" : "close")}
             </Button>
             {step === "edit" && (
-              <Button disabled={busy} onClick={review}>
-                {busy && <LuLoaderCircle className="size-4 animate-spin" />}
-                {t("preview")}
+              <Button
+                disabled={
+                  busy || (pending?.action === "create" && !createName.trim())
+                }
+                onClick={review}
+              >
+                {busy ? (
+                  <LuLoaderCircle className="size-4 animate-spin" />
+                ) : pending?.action === "create" ? (
+                  <LuPlus className="size-4" />
+                ) : null}
+                {pending?.action === "create" ? t("createOne") : t("preview")}
               </Button>
             )}
             {step === "review" && (

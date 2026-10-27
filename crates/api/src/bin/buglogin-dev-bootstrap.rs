@@ -91,10 +91,10 @@ fn local_data_root(configured: Option<std::ffi::OsString>) -> Result<PathBuf, &'
     }
     #[cfg(target_os = "windows")]
     {
-        return env::var_os("LOCALAPPDATA")
+        env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .map(|path| path.join("BugLogin").join("API"))
-            .ok_or("local_data_root_unavailable");
+            .ok_or("local_data_root_unavailable")
     }
     #[cfg(target_os = "macos")]
     {

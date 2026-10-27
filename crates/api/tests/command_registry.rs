@@ -80,15 +80,6 @@ fn every_registered_command_has_canonical_action() {
         ("proxy.update", Action::Update),
         ("proxy.delete", Action::Delete),
         ("proxy.check", Action::Read),
-        ("migration.inspect", Action::Read),
-        ("migration.import", Action::Execute),
-        ("migration.profile.data.import", Action::Update),
-        ("migration.sync.import", Action::Execute),
-        ("migration.control.import", Action::Execute),
-        ("migration.control.rollback", Action::Execute),
-        ("migration.package.file.put", Action::Execute),
-        ("migration.package.verify", Action::Execute),
-        ("migration.package.activate", Action::Execute),
         ("auth.device.start", Action::Create),
         ("auth.sso.buglab.start", Action::Create),
         ("auth.sso.buglab.complete", Action::Create),
@@ -139,6 +130,7 @@ fn every_registered_command_has_canonical_action() {
         ("organization.list", Action::Read),
         ("organization.get", Action::Read),
         ("organization.record.get", Action::Read),
+        ("organization.delete.preflight", Action::Delete),
         ("organization.create", Action::Create),
         ("organization.update", Action::Update),
         ("organization.members.list", Action::Read),
@@ -150,6 +142,7 @@ fn every_registered_command_has_canonical_action() {
         ("workspace.list", Action::Read),
         ("workspace.get", Action::Read),
         ("workspace.record.get", Action::Read),
+        ("workspace.delete.preflight", Action::Delete),
         ("workspace.create", Action::Create),
         ("workspace.update", Action::Update),
         ("workspace.delete", Action::Delete),
@@ -378,12 +371,6 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
     assert_eq!(delete.output_schema.as_str(), "TeamRecord");
     assert_eq!(delete.adapters, &[Adapter::Rest]);
 
-    let profile_data_import =
-        CommandRegistry::get("migration.profile.data.import").expect("profile data import");
-    assert_eq!(profile_data_import.capability, "profile.update");
-    assert_eq!(profile_data_import.action, Action::Update);
-    assert_eq!(profile_data_import.adapters, &[Adapter::Tauri]);
-
     let legacy_grant_list = CommandRegistry::get("grant.list.legacy").expect("legacy grant list");
     assert_eq!(legacy_grant_list.input_schema.as_str(), "GrantListInput");
     assert_eq!(legacy_grant_list.output_schema.as_str(), "GrantList");
@@ -460,10 +447,6 @@ fn every_mutation_is_audited_authenticated_and_idempotent() {
 
 #[test]
 fn adapters_match_contract_boundaries() {
-    let migration = CommandRegistry::get("migration.import").expect("migration command");
-    assert!(migration.adapters.contains(&Adapter::Tauri));
-    assert!(migration.adapters.contains(&Adapter::Rest));
-    assert!(!migration.adapters.contains(&Adapter::Mcp));
     assert!(
         CommandRegistry::get("profile.launch")
             .expect("profile launch")

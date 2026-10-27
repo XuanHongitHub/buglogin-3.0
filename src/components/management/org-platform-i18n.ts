@@ -10,6 +10,8 @@ const en = {
   directory: "Account directory",
   settings: "Settings",
   platform: "Platform Admin",
+  management: "Management",
+  organizationManagement: "Organization management",
   accounts: "Accounts",
   quotas: "Quota allocation",
   audit: "Audit log",
@@ -115,6 +117,29 @@ const en = {
     "An organization can be deleted only after its members and workspaces are removed.",
   deleteDependencies: "Items that must be removed first",
   checkingDependencies: "Checking organization members and workspaces…",
+  checkingWorkspaceDependencies:
+    "Checking workspace resources and active work…",
+  workspaceDeleteReady:
+    "No blocking dependencies found. The server checks again before deletion.",
+  manageProfiles: "Review profiles",
+  manageResources: "Review resources and access",
+  resources: "Resources",
+  resourceIntro: "Review workspace resources and their direct access grants.",
+  manageGroups: "Review groups",
+  manageMembers: "Review members and teams",
+  deleteBlocker_workspace_has_profiles:
+    "{{count}} profile(s) are assigned to this workspace.",
+  deleteBlocker_workspace_has_resources:
+    "{{count}} workspace resource or access record(s) must be removed first.",
+  deleteBlocker_workspace_has_groups:
+    "{{count}} group, extension group, or group access record(s) must be removed first.",
+  deleteBlocker_workspace_has_teams: "{{count}} team(s) must be removed first.",
+  deleteBlocker_workspace_has_active_operations:
+    "Active operations must finish first.",
+  deleteBlocker_workspace_has_sync_reservations:
+    "{{count}} pending sync upload(s) must finish or expire first.",
+  deleteBlocker_workspace_has_members:
+    "{{count}} workspace member(s) must be removed first.",
   organizationMemberCount: "{{count}} organization members",
   organizationWorkspaceCount: "{{count}} workspaces",
   deleteWorkspaceHelp:
@@ -122,7 +147,9 @@ const en = {
   confirmName: "Type the exact name to confirm",
   delete: "Delete permanently",
   transferHelp:
-    "Choose an existing organization account. The server checks eligibility and the effect on existing access.",
+    "Choose an active organization member. The server rechecks eligibility and the current revision before transfer.",
+  transferImpact:
+    "Only organization ownership changes. Existing workspace memberships and explicit grants stay unchanged; this does not grant Platform Admin access.",
   newOwner: "New owner",
   transfer: "Transfer ownership",
   noEligibleAccounts: "No eligible account is available.",
@@ -181,6 +208,8 @@ const vi: typeof en = {
   directory: "Danh bạ tài khoản",
   settings: "Cài đặt",
   platform: "Platform Admin",
+  management: "Quản lý",
+  organizationManagement: "Quản lý tổ chức",
   accounts: "Tài khoản",
   quotas: "Phân bổ hạn mức",
   audit: "Audit log",
@@ -286,6 +315,30 @@ const vi: typeof en = {
   deleteOrgHelp: "Chỉ xóa được tổ chức sau khi gỡ hết thành viên và workspace.",
   deleteDependencies: "Các mục cần xử lý trước",
   checkingDependencies: "Đang kiểm tra thành viên và workspace…",
+  checkingWorkspaceDependencies:
+    "Đang kiểm tra tài nguyên và tác vụ đang chạy…",
+  workspaceDeleteReady:
+    "Không có phụ thuộc nào đang chặn. Máy chủ sẽ kiểm tra lại trước khi xóa.",
+  manageProfiles: "Kiểm tra profiles",
+  manageResources: "Kiểm tra tài nguyên và quyền truy cập",
+  resources: "Tài nguyên",
+  resourceIntro:
+    "Kiểm tra tài nguyên workspace và các quyền truy cập trực tiếp.",
+  manageGroups: "Kiểm tra nhóm",
+  manageMembers: "Kiểm tra thành viên và team",
+  deleteBlocker_workspace_has_profiles:
+    "Có {{count}} profile thuộc workspace này.",
+  deleteBlocker_workspace_has_resources:
+    "Cần gỡ {{count}} bản ghi tài nguyên hoặc quyền truy cập của workspace.",
+  deleteBlocker_workspace_has_groups:
+    "Cần gỡ {{count}} bản ghi nhóm, nhóm tiện ích hoặc quyền nhóm.",
+  deleteBlocker_workspace_has_teams: "Cần gỡ {{count}} team trước.",
+  deleteBlocker_workspace_has_active_operations:
+    "Cần đợi các tác vụ đang chạy hoàn tất.",
+  deleteBlocker_workspace_has_sync_reservations:
+    "Cần hoàn tất hoặc hết hạn {{count}} lượt tải đồng bộ đang chờ.",
+  deleteBlocker_workspace_has_members:
+    "Cần gỡ {{count}} thành viên khỏi workspace trước.",
   organizationMemberCount: "{{count}} thành viên tổ chức",
   organizationWorkspaceCount: "{{count}} workspace",
   deleteWorkspaceHelp:
@@ -293,7 +346,9 @@ const vi: typeof en = {
   confirmName: "Nhập chính xác tên để xác nhận",
   delete: "Xóa vĩnh viễn",
   transferHelp:
-    "Chọn tài khoản đã có trong tổ chức. Máy chủ kiểm tra điều kiện và ảnh hưởng tới quyền truy cập.",
+    "Chọn thành viên tổ chức đang hoạt động. Máy chủ sẽ kiểm tra lại điều kiện và phiên bản hiện tại trước khi chuyển.",
+  transferImpact:
+    "Chỉ quyền sở hữu tổ chức thay đổi. Membership workspace và grant tường minh được giữ nguyên; thao tác này không cấp quyền Platform Admin.",
   newOwner: "Chủ sở hữu mới",
   transfer: "Chuyển quyền sở hữu",
   noEligibleAccounts:

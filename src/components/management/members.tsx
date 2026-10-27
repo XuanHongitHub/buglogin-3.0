@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuChevronDown,
@@ -45,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { showSuccessToast } from "@/lib/toast-utils";
+import { previewDirectGroupGrants } from "../../../apps/desktop/src/member-group-grants";
 import type {
   AccountView,
   GroupRecord,
@@ -53,6 +54,7 @@ import type {
   MemberInvitationCreateReceipt,
   MemberRole,
   OrganizationMemberView,
+  TeamRecord,
 } from "../../../frontend/src/generated/command-registry";
 import {
   AccountError,
@@ -77,11 +79,19 @@ export function WorkspaceMembers({
   onDataChanged?: () => void;
 }) {
   const { t } = useTranslation("managementAccounts");
+  const hasSnapshot = useRef(false);
+  const workspaceScope = useRef(workspaceId);
+  const loadSequence = useRef(0);
   const [members, setMembers] = useState<Member[]>([]);
   const [groups, setGroups] = useState<GroupRecord[]>([]);
+  const [teams, setTeams] = useState<TeamRecord[]>([]);
+  const [teamLoadError, setTeamLoadError] = useState(false);
   const [shares, setShares] = useState<GroupShareGrant[]>([]);
+  const [sharesLoading, setSharesLoading] = useState(true);
+  const [sharesIncomplete, setSharesIncomplete] = useState(true);
   const [actor, setActor] = useState<AccountView>();
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -92,10 +102,15 @@ export function WorkspaceMembers({
   const [editRole, setEditRole] = useState<MemberRole>("member");
   const [changeRole, setChangeRole] = useState(true);
   const [replaceGroups, setReplaceGroups] = useState(false);
+  const [groupGrantMode, setGroupGrantMode] = useState<
+    "add" | "replace" | "remove"
+  >("add");
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
   const [operation, setOperation] = useState<
     "activate" | "suspend" | "remove"
   >();
+  const [retryingFailedMemberships, setRetryingFailedMemberships] =
+    useState(false);
   const [outcomes, setOutcomes] = useState<MemberResult[]>([]);
   const [adding, setAdding] = useState(false);
   const [directory, setDirectory] = useState<OrganizationMemberView[]>([]);
@@ -109,8 +124,29 @@ export function WorkspaceMembers({
     (MemberResult & { receipt?: MemberInvitationCreateReceipt })[]
   >([]);
 
-  const reload = useCallback(async () => {
+  useEffect(() => {
+    if (workspaceScope.current === workspaceId) return;
+    workspaceScope.current = workspaceId;
+    loadSequence.current += 1;
+    hasSnapshot.current = false;
+    setMembers([]);
+    setGroups([]);
+    setShares([]);
+    setSharesLoading(true);
+    setSharesIncomplete(true);
+    setActor(undefined);
+    setSelected([]);
+    setOutcomes([]);
+    setError("");
     setLoading(true);
+  }, [workspaceId]);
+
+  const reload = useCallback(async () => {
+    const sequence = ++loadSequence.current;
+    setLoading(!hasSnapshot.current);
+    setRefreshing(hasSnapshot.current);
+    setSharesLoading(true);
+    setSharesIncomplete(true);
     setError("");
     try {
       const [memberPage, groupItems, viewer] = await Promise.all([
@@ -118,31 +154,75 @@ export function WorkspaceMembers({
         api.listGroups(workspaceId),
         api.getAccount(),
       ]);
+      if (sequence !== loadSequence.current) return;
       setMembers(memberPage.items);
       setGroups(groupItems);
       setActor(viewer);
-      const grantResults = await Promise.allSettled(
-        groupItems.map((group) =>
-          api.listGroupShares({ workspaceId, groupId: group.group.id }),
+      hasSnapshot.current = true;
+      setLoading(false);
+      setSharesLoading(true);
+      const grantResults: PromiseSettledResult<GroupShareGrant[]>[] = [];
+      for (let offset = 0; offset < groupItems.length; offset += 8) {
+        const batch = groupItems.slice(offset, offset + 8);
+        grantResults.push(
+          ...(await Promise.allSettled(
+            batch.map((group) =>
+              api.listGroupShares({ workspaceId, groupId: group.group.id }),
+            ),
+          )),
+        );
+      }
+      if (sequence !== loadSequence.current) return;
+      const failedGroupIds = new Set(
+        grantResults.flatMap((result, index) =>
+          result.status === "rejected" ? [groupItems[index].group.id] : [],
         ),
       );
-      setShares(
-        grantResults.flatMap((result) =>
-          result.status === "fulfilled" ? result.value : [],
-        ),
+      const failedNames = grantResults.flatMap((result, index) =>
+        result.status === "rejected" ? [groupItems[index].group.name] : [],
       );
-      if (grantResults.some((result) => result.status === "rejected"))
-        setError(t("partial"));
+      const loadedShares = grantResults.flatMap((result) =>
+        result.status === "fulfilled" ? result.value : [],
+      );
+      setShares((previous) => [
+        ...previous.filter((share) => failedGroupIds.has(share.groupId)),
+        ...loadedShares,
+      ]);
+      setSharesIncomplete(failedGroupIds.size > 0);
+      setSharesLoading(false);
+      if (failedNames.length)
+        setError(t("partialGroups", { groups: failedNames.join(", ") }));
       setSelected([]);
     } catch (reason) {
-      setError(accountError(reason));
+      if (sequence === loadSequence.current) setError(accountError(reason));
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) {
+        setLoading(false);
+        setRefreshing(false);
+        setSharesLoading(false);
+      }
     }
   }, [workspaceId, t]);
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    let current = true;
+    setTeams([]);
+    setTeamLoadError(false);
+    void api
+      .listTeams(workspaceId)
+      .then((items) => {
+        if (current) setTeams(items);
+      })
+      .catch(() => {
+        if (current) setTeamLoadError(true);
+      });
+    return () => {
+      current = false;
+    };
+  }, [workspaceId]);
 
   const visible = useMemo(
     () =>
@@ -156,11 +236,49 @@ export function WorkspaceMembers({
     [members, query, roleFilter],
   );
   const chosen = members.filter((member) => selected.includes(member.id));
+  const groupAccessPreview = editing.map((member) => {
+    const current = shares
+      .filter(
+        (share) =>
+          share.memberId === member.id &&
+          share.effect === "allow" &&
+          !share.revokedAt,
+      )
+      .map((share) => ({ groupId: share.groupId, action: share.action }));
+    const next = previewDirectGroupGrants(
+      current,
+      replaceGroups ? groupGrantMode : "add",
+      replaceGroups ? selectedGroups : [],
+    );
+    const signature = (grants: typeof current) =>
+      grants.map((grant) => `${grant.groupId}:${grant.action}`).sort();
+    return {
+      member,
+      current,
+      next,
+      changed:
+        JSON.stringify(signature(current)) !== JSON.stringify(signature(next)),
+    };
+  });
+  const groupPreviewNames = (grants: { groupId: string; action: string }[]) => {
+    const grouped = new Map<string, string[]>();
+    for (const grant of grants) {
+      const actions = grouped.get(grant.groupId) ?? [];
+      actions.push(t(grant.action));
+      grouped.set(grant.groupId, actions);
+    }
+    return [...grouped].map(([groupId, actions]) => {
+      const name =
+        groups.find((group) => group.group.id === groupId)?.group.name ??
+        t("unavailableGroupName");
+      return `${name} (${actions.join(", ")})`;
+    });
+  };
   const label = (member: Member) =>
     member.identity?.username || member.identity?.email || t("members");
-  const effectiveGroups = (member: Member) =>
-    member.role === "owner" || member.role === "admin"
-      ? t("inherited")
+  const directGroupsForMember = (member: Member) =>
+    sharesLoading
+      ? t("loading")
       : groups
           .filter((group) =>
             shares.some(
@@ -171,23 +289,33 @@ export function WorkspaceMembers({
                 !share.revokedAt,
             ),
           )
-          .map((group) => group.group.name)
+          .map((group) => {
+            const actions = shares
+              .filter(
+                (share) =>
+                  share.groupId === group.group.id &&
+                  share.memberId === member.id &&
+                  share.effect === "allow" &&
+                  !share.revokedAt,
+              )
+              .map((share) => t(share.action));
+            return `${group.group.name} (${[...new Set(actions)].join(", ")})`;
+          })
           .join(", ") || "—";
+  const teamForMember = (member: Member) =>
+    member.teamId
+      ? (teams.find((record) => record.team.id === member.teamId)?.team.name ??
+        (teamLoadError ? t("teamLoadFailed") : t("teamUnavailable")))
+      : "—";
   const mayManage =
-    actor?.platformAdmin ||
-    actor?.managedWorkspaceIds.includes(workspaceId) ||
-    members.some(
-      (member) =>
-        member.accountId === actor?.accountId &&
-        member.status === "active" &&
-        ["owner", "admin", "lead"].includes(member.role),
-    );
+    actor?.platformAdmin || actor?.manageableWorkspaceIds.includes(workspaceId);
 
   function openEdit(items: Member[], groupsOnly = false) {
     setEditing(items);
     setEditRole(items.length === 1 ? items[0].role : "member");
     setChangeRole(!groupsOnly);
     setReplaceGroups(groupsOnly);
+    setGroupGrantMode(groupsOnly ? "replace" : "add");
     setSelectedGroups(
       items.length === 1
         ? [
@@ -206,6 +334,13 @@ export function WorkspaceMembers({
     );
     setOutcomes([]);
     setError("");
+  }
+
+  function beginMembershipOperation(next: "activate" | "suspend" | "remove") {
+    setOutcomes([]);
+    setRetryingFailedMemberships(false);
+    setError("");
+    setOperation(next);
   }
 
   async function editAccess() {
@@ -232,7 +367,12 @@ export function WorkspaceMembers({
               !share.revokedAt,
           );
           for (const share of direct)
-            if (!selectedGroups.includes(share.groupId))
+            if (
+              (groupGrantMode === "replace" &&
+                !selectedGroups.includes(share.groupId)) ||
+              (groupGrantMode === "remove" &&
+                selectedGroups.includes(share.groupId))
+            )
               items.push({
                 key: `${member.id}:revoke:${share.id}`,
                 commandId: "group.share.revoke",
@@ -243,7 +383,9 @@ export function WorkspaceMembers({
                   expectedRevision: share.revision,
                 },
               });
-          for (const groupId of selectedGroups)
+          for (const groupId of groupGrantMode === "remove"
+            ? []
+            : selectedGroups)
             for (const action of ["read", "execute"])
               if (
                 !direct.some(
@@ -326,8 +468,16 @@ export function WorkspaceMembers({
               : (item.error?.title ?? t("failed")),
         })),
       );
-      setOperation(undefined);
+      const failedMemberIds = receipt.items
+        .filter((item) => item.status === "failed")
+        .map((item) => item.key);
       await reload();
+      setSelected(failedMemberIds);
+      if (failedMemberIds.length) setRetryingFailedMemberships(true);
+      else {
+        setRetryingFailedMemberships(false);
+        setOperation(undefined);
+      }
       onDataChanged?.();
     } catch (reason) {
       setError(accountError(reason));
@@ -453,10 +603,12 @@ export function WorkspaceMembers({
             variant="ghost"
             size="icon"
             aria-label={t("refresh")}
-            disabled={loading}
+            disabled={refreshing || loading}
             onClick={() => void reload()}
           >
-            <LuRefreshCw className={loading ? "animate-spin" : ""} />
+            <LuRefreshCw
+              className={loading || refreshing ? "animate-spin" : ""}
+            />
           </Button>
           {mayManage ? (
             <DropdownMenu>
@@ -528,6 +680,7 @@ export function WorkspaceMembers({
           </SelectContent>
         </Select>
       </div>
+      <p className="text-xs text-muted-foreground">{t("teamAccessHint")}</p>
       {selected.length && mayManage ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 p-2">
           <span className="px-1 text-xs font-medium">
@@ -539,6 +692,7 @@ export function WorkspaceMembers({
           <Button
             variant="outline"
             size="sm"
+            disabled={sharesLoading || sharesIncomplete || pending}
             onClick={() => openEdit(chosen, true)}
           >
             {t("editGroups")}
@@ -546,21 +700,21 @@ export function WorkspaceMembers({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setOperation("suspend")}
+            onClick={() => beginMembershipOperation("suspend")}
           >
             {t("suspend")}
           </Button>
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setOperation("activate")}
+            onClick={() => beginMembershipOperation("activate")}
           >
             {t("activate")}
           </Button>
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setOperation("remove")}
+            onClick={() => beginMembershipOperation("remove")}
           >
             <LuTrash2 />
             {t("removeMember")}
@@ -596,7 +750,12 @@ export function WorkspaceMembers({
               </th>
               <th className={th}>{t("members")}</th>
               <th className={`${th} w-36`}>{t("role")}</th>
-              <th className={`${th} hidden lg:table-cell`}>{t("groups")}</th>
+              <th className={`${th} hidden lg:table-cell`}>
+                {t("directGroups")}
+              </th>
+              <th className={`${th} hidden xl:table-cell`}>
+                {t("teamMembership")}
+              </th>
               <th className={`${th} w-28`}>{t("membership")}</th>
               <th className={`${th} w-24 text-right`}>{t("actions")}</th>
             </tr>
@@ -605,7 +764,7 @@ export function WorkspaceMembers({
             {loading
               ? Array.from({ length: 4 }, (_, index) => (
                   <tr key={index}>
-                    <td colSpan={6} className="px-3 py-3">
+                    <td colSpan={7} className="px-3 py-3">
                       <div className="h-5 animate-pulse rounded bg-muted" />
                     </td>
                   </tr>
@@ -639,7 +798,12 @@ export function WorkspaceMembers({
                     <td
                       className={`${td} hidden truncate text-xs text-muted-foreground lg:table-cell`}
                     >
-                      {effectiveGroups(member)}
+                      {directGroupsForMember(member)}
+                    </td>
+                    <td
+                      className={`${td} hidden truncate text-xs text-muted-foreground xl:table-cell`}
+                    >
+                      {teamForMember(member)}
                     </td>
                     <td className={td}>
                       <Badge variant="outline">{t(member.status)}</Badge>
@@ -667,7 +831,7 @@ export function WorkspaceMembers({
                             <DropdownMenuItem
                               onSelect={() => {
                                 setSelected([member.id]);
-                                setOperation(
+                                beginMembershipOperation(
                                   member.status === "active"
                                     ? "suspend"
                                     : "activate",
@@ -686,7 +850,7 @@ export function WorkspaceMembers({
                               className="text-destructive"
                               onSelect={() => {
                                 setSelected([member.id]);
-                                setOperation("remove");
+                                beginMembershipOperation("remove");
                               }}
                             >
                               <LuTrash2 />
@@ -782,11 +946,21 @@ export function WorkspaceMembers({
             </div>
             {groups.length ? (
               <div className="space-y-3">
+                {sharesLoading || sharesIncomplete ? (
+                  <p className="text-xs text-muted-foreground" role="status">
+                    {t(
+                      sharesLoading
+                        ? "loadingGroupGrants"
+                        : "groupsReadOnlyUnavailable",
+                    )}
+                  </p>
+                ) : null}
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Checkbox
                     id="member-replace-groups"
                     aria-label={t("replaceGroups")}
                     checked={replaceGroups}
+                    disabled={pending || sharesLoading || sharesIncomplete}
                     onCheckedChange={(checked) =>
                       setReplaceGroups(checked === true)
                     }
@@ -795,9 +969,33 @@ export function WorkspaceMembers({
                     htmlFor="member-replace-groups"
                     className="cursor-pointer"
                   >
-                    {t("replaceGroups")}
+                    {t("editDirectGroupGrants")}
                   </Label>
                 </div>
+                {replaceGroups ? (
+                  <Select
+                    value={groupGrantMode}
+                    onValueChange={(value) => {
+                      const mode = value as "add" | "replace" | "remove";
+                      setGroupGrantMode(mode);
+                      if (mode === "remove") setSelectedGroups([]);
+                    }}
+                    disabled={pending || sharesLoading || sharesIncomplete}
+                  >
+                    <SelectTrigger aria-label={t("groupGrantMode")}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="add">{t("addGroupGrants")}</SelectItem>
+                      <SelectItem value="replace">
+                        {t("replaceGroupGrants")}
+                      </SelectItem>
+                      <SelectItem value="remove">
+                        {t("removeGroupGrants")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                ) : null}
                 <div className="max-h-64 space-y-1 overflow-auto rounded-md border border-border p-2">
                   {groups.map((group) => (
                     <div
@@ -807,7 +1005,12 @@ export function WorkspaceMembers({
                       <Checkbox
                         id={`member-group-${group.group.id}`}
                         aria-label={group.group.name}
-                        disabled={!replaceGroups}
+                        disabled={
+                          !replaceGroups ||
+                          pending ||
+                          sharesLoading ||
+                          sharesIncomplete
+                        }
                         checked={selectedGroups.includes(group.group.id)}
                         onCheckedChange={(checked) =>
                           setSelectedGroups((items) =>
@@ -829,6 +1032,36 @@ export function WorkspaceMembers({
                 <p className="text-xs leading-5 text-muted-foreground">
                   {t("permissionChanges")}
                 </p>
+                {replaceGroups ? (
+                  <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3 text-xs">
+                    <p className="font-medium">
+                      {t("groupGrantImpact", {
+                        changed: groupAccessPreview.filter(
+                          (item) => item.changed,
+                        ).length,
+                        unchanged: groupAccessPreview.filter(
+                          (item) => !item.changed,
+                        ).length,
+                      })}
+                    </p>
+                    <div className="max-h-32 space-y-2 overflow-auto">
+                      {groupAccessPreview.map((item) => (
+                        <div className="grid gap-0.5" key={item.member.id}>
+                          <span className="font-medium">
+                            {label(item.member)}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {groupPreviewNames(item.current).join(", ") ||
+                              t("noDirectGroupGrants")}{" "}
+                            →{" "}
+                            {groupPreviewNames(item.next).join(", ") ||
+                              t("noDirectGroupGrants")}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -843,6 +1076,7 @@ export function WorkspaceMembers({
             <Button
               disabled={
                 pending ||
+                (replaceGroups && (sharesLoading || sharesIncomplete)) ||
                 (!changeRole && !(replaceGroups && groups.length > 0))
               }
               onClick={() => void editAccess()}
@@ -885,7 +1119,10 @@ export function WorkspaceMembers({
             <Button
               variant="outline"
               disabled={pending}
-              onClick={() => setOperation(undefined)}
+              onClick={() => {
+                setRetryingFailedMemberships(false);
+                setOperation(undefined);
+              }}
             >
               {t("cancel")}
             </Button>
@@ -894,7 +1131,9 @@ export function WorkspaceMembers({
               disabled={pending}
               onClick={() => void executeMembership()}
             >
-              {pending ? t("processing") : t("confirm")}
+              {pending
+                ? t("processing")
+                : t(retryingFailedMemberships ? "retryFailed" : "confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -917,6 +1156,7 @@ export function WorkspaceMembers({
             onChange={(event) => setAddQuery(event.target.value)}
           />
           <RolePicker value={addRole} onChange={setAddRole} />
+          <p className="text-xs text-muted-foreground">{t(`${addRole}Help`)}</p>
           <div className="max-h-72 divide-y divide-border overflow-auto rounded-lg border border-border">
             {directory
               .filter(
@@ -1001,6 +1241,9 @@ export function WorkspaceMembers({
             placeholder="name@company.com"
           />
           <RolePicker value={inviteRole} onChange={setInviteRole} />
+          <p className="text-xs text-muted-foreground">
+            {t(`${inviteRole}Help`)}
+          </p>
           <div className="max-h-64 space-y-2 overflow-auto">
             {invitationResults.map((result) => (
               <div
