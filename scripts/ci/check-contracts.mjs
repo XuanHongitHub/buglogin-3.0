@@ -151,7 +151,9 @@ const openapiOperationIds = openapiOperations
   .filter((operation) => operation["x-buglogin-internal"] !== true)
   .map((operation) => operation.operationId)
   .filter((operationId) => typeof operationId === "string");
-const allOpenapiOperationIds = openapiOperations.map((operation) => operation.operationId);
+const allOpenapiOperationIds = openapiOperations.map(
+  (operation) => operation.operationId,
+);
 if (new Set(allOpenapiOperationIds).size !== allOpenapiOperationIds.length)
   fail("OpenAPI operation IDs must be unique");
 const restCommandsMissingFromOpenapi = commands.commands
