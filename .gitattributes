@@ -1,2 +1,3 @@
 /scripts/release/deploy-api-systemd-remote.sh text eol=lf
 /scripts/release/deploy-web-systemd-remote.sh text eol=lf
+/fixtures/migration/** -text whitespace=cr-at-eol

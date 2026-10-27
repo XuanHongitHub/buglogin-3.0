@@ -2904,30 +2904,56 @@ impl ProductionDesktopState {
         key_version: &str,
         correlation_id: &str,
     ) -> Result<crate::sync_key_vault::ResourceKeys, Problem> {
-        match self.client.fetch_profile_managed_key(profile_id, correlation_id).await {
+        match self
+            .client
+            .fetch_profile_managed_key(profile_id, correlation_id)
+            .await
+        {
             Ok(mut managed) => {
                 let mut raw = decode_profile_key_hex(&managed.resource_key).ok_or_else(|| {
-                    Problem::new("managed_profile_key_invalid", "Managed profile key is invalid", 502, correlation_id)
+                    Problem::new(
+                        "managed_profile_key_invalid",
+                        "Managed profile key is invalid",
+                        502,
+                        correlation_id,
+                    )
                 })?;
                 managed.resource_key.zeroize();
                 let client = buglogin_sync::crypto::ClientKey::from_bytes(raw);
                 raw.zeroize();
                 if format!("{:x}", Sha256::digest(client.as_bytes())) != key_version {
-                    return Err(Problem::new("profile_key_version_mismatch", "Managed profile key does not match the active manifest", 409, correlation_id));
+                    return Err(Problem::new(
+                        "profile_key_version_mismatch",
+                        "Managed profile key does not match the active manifest",
+                        409,
+                        correlation_id,
+                    ));
                 }
                 let recovery = buglogin_sync::crypto::RecoveryKey::generate()?;
                 self.sync_key_vault.replace_recovered_for_manifest(
-                    &binding.workspace_id, &binding.resource_id, client, recovery,
-                    key_version, correlation_id,
-                )?;
-                return self.sync_key_vault.load_for_manifest(
-                    &binding.workspace_id, &binding.resource_id, key_version, correlation_id,
-                )?.ok_or_else(|| Problem::new(
-                    "sync_key_vault_unavailable",
-                    "Managed profile key was not persisted on this device",
-                    503,
+                    &binding.workspace_id,
+                    &binding.resource_id,
+                    client,
+                    recovery,
+                    key_version,
                     correlation_id,
-                ));
+                )?;
+                return self
+                    .sync_key_vault
+                    .load_for_manifest(
+                        &binding.workspace_id,
+                        &binding.resource_id,
+                        key_version,
+                        correlation_id,
+                    )?
+                    .ok_or_else(|| {
+                        Problem::new(
+                            "sync_key_vault_unavailable",
+                            "Managed profile key was not persisted on this device",
+                            503,
+                            correlation_id,
+                        )
+                    });
             }
             Err(error) if error.code == "managed_profile_key_not_enrolled" => {}
             Err(error) => return Err(error),
@@ -2942,7 +2968,7 @@ impl ProductionDesktopState {
             Err(error) if error.code == "profile_key_envelope_not_found" => {
                 return Err(Problem::new(
                     "sync_key_recovery_required",
-                    "Enter this profile's recovery code on this device to open it",
+                    "This legacy profile key is not enrolled on the server; sync the profile once from a device that can already open it",
                     409,
                     correlation_id,
                 ));
@@ -3022,14 +3048,21 @@ impl ProductionDesktopState {
                         correlation_id,
                     )
                 })?;
-            let keys = match self
-                .sync_key_vault
-                .load(&binding.workspace_id, &binding.resource_id, correlation_id)?
-            {
+            let keys = match self.sync_key_vault.load(
+                &binding.workspace_id,
+                &binding.resource_id,
+                correlation_id,
+            )? {
                 Some(keys) => keys,
-                None => self.recover_profile_key_envelope(
-                    &binding, &request.profile_id, key_version, correlation_id,
-                ).await?,
+                None => {
+                    self.recover_profile_key_envelope(
+                        &binding,
+                        &request.profile_id,
+                        key_version,
+                        correlation_id,
+                    )
+                    .await?
+                }
             };
             let actual_key_version = format!("{:x}", Sha256::digest(keys.client.as_bytes()));
             if actual_key_version != key_version {
@@ -3041,11 +3074,13 @@ impl ProductionDesktopState {
                 ));
             }
 
-            self.client.enroll_profile_managed_key(
-                &request.profile_id,
-                &encode_hex(keys.client.as_bytes()),
-                correlation_id,
-            ).await?;
+            self.client
+                .enroll_profile_managed_key(
+                    &request.profile_id,
+                    &encode_hex(keys.client.as_bytes()),
+                    correlation_id,
+                )
+                .await?;
             request.recipient_key_envelopes.clear();
         } else {
             request.recipient_key_envelopes.clear();
@@ -4043,27 +4078,66 @@ impl ProductionDesktopState {
         };
         // Optional extension preparation never changes profile authorization or sync authority.
         // Read group sources through the authenticated API, then install on this device in Rust.
-        let extension_preparation: Result<crate::extension_features::PreparedExtensions, Problem> = async {
-            let Some(group_id) = profile.value.extension_group_id.as_ref() else {
-                return Ok(crate::extension_features::PreparedExtensions::default());
-            };
-            let response = self.client.invoke("extension_group_get", &correlation_id, None,
-                json!({"workspaceId": binding.workspace_id, "extensionGroupId": group_id})).await?;
-            let group: buglogin_domain::entities::ExtensionGroup = serde_json::from_value(response.data["group"].clone())
-                .map_err(|_| serialization(&correlation_id))?;
-            crate::extension_features::prepare_for_profile(profile_id.as_str(), &group.extension_ids, &group.extension_sources).await
-                .map_err(|message| Problem::new("extension_prepare_failed", "Extensions could not be prepared", 503, &correlation_id).with_detail(message))
-        }.await;
+        let extension_preparation: Result<crate::extension_features::PreparedExtensions, Problem> =
+            async {
+                let Some(group_id) = profile.value.extension_group_id.as_ref() else {
+                    return Ok(crate::extension_features::PreparedExtensions::default());
+                };
+                let response = self
+                    .client
+                    .invoke(
+                        "extension_group_get",
+                        &correlation_id,
+                        None,
+                        json!({"workspaceId": binding.workspace_id, "extensionGroupId": group_id}),
+                    )
+                    .await?;
+                let group: buglogin_domain::entities::ExtensionGroup =
+                    serde_json::from_value(response.data["group"].clone())
+                        .map_err(|_| serialization(&correlation_id))?;
+                crate::extension_features::prepare_for_profile(
+                    profile_id.as_str(),
+                    &group.extension_ids,
+                    &group.extension_sources,
+                )
+                .await
+                .map_err(|message| {
+                    Problem::new(
+                        "extension_prepare_failed",
+                        "Extensions could not be prepared",
+                        503,
+                        &correlation_id,
+                    )
+                    .with_detail(message)
+                })
+            }
+            .await;
         let prepared_extensions = match extension_preparation {
             Ok(prepared) => prepared,
             Err(error) => {
-                crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.extensions.prepare", error.clone());
-                crate::extension_features::PreparedExtensions { paths: Vec::new(), warnings: vec![error.title] }
+                crate::diagnostics::report_problem_failure(
+                    DesktopState::Production(self.clone()),
+                    "profile.extensions.prepare",
+                    error.clone(),
+                );
+                crate::extension_features::PreparedExtensions {
+                    paths: Vec::new(),
+                    warnings: vec![error.title],
+                }
             }
         };
         for warning in &prepared_extensions.warnings {
-            crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.extensions.update",
-                Problem::new("extension_update_deferred", "Extension update deferred", 503, &correlation_id).with_detail(warning.clone()));
+            crate::diagnostics::report_problem_failure(
+                DesktopState::Production(self.clone()),
+                "profile.extensions.update",
+                Problem::new(
+                    "extension_update_deferred",
+                    "Extension update deferred",
+                    503,
+                    &correlation_id,
+                )
+                .with_detail(warning.clone()),
+            );
         }
         let (mut manifest, manifest_proxy_stale) = match self
             .client
@@ -4374,7 +4448,12 @@ impl ProductionDesktopState {
                 }
             };
             if !prepared_extensions.paths.is_empty() {
-                let paths = prepared_extensions.paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>().join(",");
+                let paths = prepared_extensions
+                    .paths
+                    .iter()
+                    .map(|path| path.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 push_or_replace_arg(&mut specification.args, format!("--load-extension={paths}"));
             }
             let mut proxy_bridge = None;
@@ -4541,49 +4620,32 @@ impl ProductionDesktopState {
             };
             let mut fingerprint_warning = None;
             if let Some(target) = fingerprint_target.as_ref() {
-                let cdp_port = match fingerprint_cdp_port {
-                    Some(port) => port,
-                    None => {
-                        if let Err(mut cleanup_error) =
-                            self.profile_runtime.stop(profile_id.clone()).await
-                        {
-                            cleanup_error.correlation_id = correlation_id.clone();
-                            return Err(cleanup_error);
-                        }
-                        let _ = self.projection.clear_active_session_marker(&profile_id);
-                        return Err(Problem::new(
-                            "wayfern_cdp_unavailable",
-                            "Wayfern local control port was not configured",
-                            503,
+                let fingerprint_result = match fingerprint_cdp_port {
+                    Some(cdp_port) => {
+                        apply_wayfern_fingerprint(
+                            &profile_path,
+                            target,
+                            profile.value.runtime_version.as_deref().unwrap_or_default(),
+                            cdp_port,
                             &correlation_id,
-                        ));
+                        )
+                        .await
                     }
+                    None => Err(Problem::new(
+                        "wayfern_cdp_unavailable",
+                        "Wayfern local control port was not configured",
+                        503,
+                        &correlation_id,
+                    )),
                 };
-                match apply_wayfern_fingerprint(
-                    &profile_path,
-                    target,
-                    profile.value.runtime_version.as_deref().unwrap_or_default(),
-                    cdp_port,
-                    &correlation_id,
-                )
-                .await
-                {
-                    Ok(warning) => {
-                        if let Some(warning) = warning {
-                            crate::diagnostics::report_problem_failure(DesktopState::Production(self.clone()), "profile.fingerprint.default", warning.clone());
-                            fingerprint_warning = Some(warning);
-                        }
-                    }
-                    Err(error) => {
-                    if let Err(mut cleanup_error) =
-                        self.profile_runtime.stop(profile_id.clone()).await
-                    {
-                        cleanup_error.correlation_id = correlation_id.clone();
-                        return Err(cleanup_error);
-                    }
-                    let _ = self.projection.clear_active_session_marker(&profile_id);
-                    return Err(error);
-                    }
+                let warning = fingerprint_apply_warning(fingerprint_result);
+                if let Some(warning) = warning {
+                    crate::diagnostics::report_problem_failure(
+                        DesktopState::Production(self.clone()),
+                        "profile.fingerprint.default",
+                        warning.clone(),
+                    );
+                    fingerprint_warning = Some(warning);
                 }
             }
             if let Err(error) = self
@@ -7726,6 +7788,10 @@ fn launch_state_allows_start(state: &ProfileState, archived: bool, locally_runni
     matches!(state, ProfileState::Ready | ProfileState::Running)
 }
 
+fn fingerprint_apply_warning(result: Result<Option<Problem>, Problem>) -> Option<Problem> {
+    result.unwrap_or_else(Some)
+}
+
 fn result(command_id: &str, correlation_id: &str, data: Value) -> CommandResult<Value> {
     CommandResult {
         command_id: command_id.to_owned(),
@@ -7820,9 +7886,10 @@ fn production_sync_not_ready() -> Problem {
 mod tests {
     use super::{
         ConfirmedKeyRotationRecipient, DesktopState, ProxyCredentialInput, ProxyImportInput,
-        WorkspaceSelectionStore, launch_state_allows_start, local_proxy_parse,
-        production_sync_not_ready, production_transport, runtime_dispatch_operation_key,
-        shutdown_idempotency_key, validate_key_rotation_confirmation,
+        WorkspaceSelectionStore, fingerprint_apply_warning, launch_state_allows_start,
+        local_proxy_parse, production_sync_not_ready, production_transport,
+        runtime_dispatch_operation_key, shutdown_idempotency_key,
+        validate_key_rotation_confirmation,
     };
     use buglogin_api::services::{
         device_key_directory::DeviceEncryptionKey,
@@ -7866,6 +7933,19 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn fingerprint_failure_is_a_launch_warning_not_a_lifecycle_error() {
+        let error = Problem::new(
+            "wayfern_fingerprint_provider_unavailable",
+            "Wayfern fingerprint provider unavailable",
+            409,
+            "test-correlation",
+        );
+        let warning = fingerprint_apply_warning(Err(error));
+        assert!(warning.is_some());
+        assert!(fingerprint_apply_warning(Ok(None)).is_none());
     }
 
     #[test]

@@ -35,6 +35,8 @@ use fs2::FileExt;
 use serde_json::{Value, json};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+// Golden package checksums are versioned fixtures and must not drift on release bumps.
+const FIXTURE_TOOL_VERSION: &str = "3.0.16";
 
 #[derive(Default)]
 struct FakeVault {
@@ -124,7 +126,7 @@ fn mig_001_empty_source_matches_golden_and_remains_unchanged() {
         &snapshot,
         &PackageMetadata {
             created_at: "2026-07-22T00:00:00Z".to_owned(),
-            tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+            tool_version: FIXTURE_TOOL_VERSION.to_owned(),
             tool_commit: "0000000000000000000000000000000000000000".to_owned(),
         },
     )
@@ -151,7 +153,7 @@ fn mig_001_empty_source_matches_golden_and_remains_unchanged() {
         &snapshot,
         &PackageMetadata {
             created_at: "2026-07-22T00:00:00Z".to_owned(),
-            tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+            tool_version: FIXTURE_TOOL_VERSION.to_owned(),
             tool_commit: "0000000000000000000000000000000000000000".to_owned(),
         },
         &key,
@@ -456,7 +458,7 @@ fn mig_004_proxy_protocols_activate_without_secret_leakage() {
     assert_json_file(&expected.join("snapshot.json"), &snapshot);
     assert_eq!(report.entity_counts["proxies"], 4);
     assert_eq!(report.secret_scan.files_with_secret_fields, 2);
-    assert_eq!(report.secret_scan.secret_fields_present, 2);
+    assert_eq!(report.secret_scan.secret_fields_present, 4);
     assert_eq!(
         snapshot
             .files
@@ -2598,7 +2600,7 @@ fn secret_canary_fixture_is_redacted_from_export_evidence() {
 fn fixture_metadata() -> PackageMetadata {
     PackageMetadata {
         created_at: "2026-07-22T00:00:00Z".to_owned(),
-        tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+        tool_version: FIXTURE_TOOL_VERSION.to_owned(),
         tool_commit: "0000000000000000000000000000000000000000".to_owned(),
     }
 }

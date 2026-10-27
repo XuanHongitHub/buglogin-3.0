@@ -162,6 +162,9 @@ pub(super) async fn provision_managed_profile(
         &resource_id,
     )
     .map_err(response_problem)?;
+    let mut profile = profile;
+    HostedProfileService::apply_workspace_extension_default(&state, &workspace_id, &mut profile)
+        .map_err(response_problem)?;
     let plan = HostedProfileService::prepare_provision(profile, workspace_id.clone())
         .map_err(response_problem)?;
     let input = json!({
@@ -1117,7 +1120,9 @@ fn routes_core() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}",
-            get(get_organization).patch(update_organization).delete(management_tenancy::delete_organization),
+            get(get_organization)
+                .patch(update_organization)
+                .delete(management_tenancy::delete_organization),
         )
         .route(
             "/v1/organizations/{organization_id}/owner",
@@ -1149,7 +1154,9 @@ fn routes_core() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}",
-            get(get_workspace).patch(update_workspace).delete(management_tenancy::delete_workspace),
+            get(get_workspace)
+                .patch(update_workspace)
+                .delete(management_tenancy::delete_workspace),
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}/record",
@@ -1906,7 +1913,11 @@ async fn create_scoped_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
-            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
+            management::set_provisioned_display_name(
+                &mut pending.identity,
+                &mut account_puts,
+                &input.display_name,
+            )?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -3665,7 +3676,11 @@ async fn create_organization_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
-            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
+            management::set_provisioned_display_name(
+                &mut pending.identity,
+                &mut account_puts,
+                &input.display_name,
+            )?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -3980,6 +3995,36 @@ async fn update_organization(
     let grants = grants(&state)?;
     let organization_id =
         OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    authorize_organization_management(
+        &state,
+        &principal,
+        &grants,
+        &organization_id,
+        Action::Update,
+    )?;
+    for (workspace_id, group_id) in &input.policy.default_extension_groups_by_workspace {
+        let workspace = state
+            .workspaces
+            .read()
+            .map_err(|_| service_unavailable("workspace"))?
+            .workspace_for_policy(workspace_id)
+            .map_err(response_problem)?;
+        if workspace.organization_id != organization_id {
+            return Err(response_problem(buglogin_domain::errors::Problem::new(
+                "tenant_mismatch",
+                "Default extension group references a workspace outside this organization",
+                403,
+                "organization.update",
+            ))
+            .into());
+        }
+        state
+            .extension_groups
+            .read()
+            .map_err(|_| service_unavailable("extension_group"))?
+            .get_in_workspace(workspace_id, group_id)
+            .map_err(response_problem)?;
+    }
     let value = serde_json::to_value(&input).map_err(internal)?;
     mutate(
         &state,
@@ -4037,6 +4082,14 @@ async fn update_workspace(
     let organization_id =
         OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
+    if let Some(group_id) = input.workspace.default_extension_group_id.as_ref() {
+        state
+            .extension_groups
+            .read()
+            .map_err(|_| service_unavailable("extension group"))?
+            .get_in_workspace(&workspace_id, group_id)
+            .map_err(response_problem)?;
+    }
     let value = serde_json::to_value(&input).map_err(internal)?;
     mutate(
         &state,
@@ -10180,6 +10233,7 @@ mod tests {
             buglogin_domain::organization::OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -10199,6 +10253,7 @@ mod tests {
                         offline_entitled: false,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
+                    default_extension_group_id: None,
                 },
             )
             .unwrap();
@@ -10296,6 +10351,7 @@ mod tests {
             buglogin_domain::organization::OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
+                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -10315,6 +10371,7 @@ mod tests {
                         offline_entitled: false,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
+                    default_extension_group_id: None,
                 },
             )
             .unwrap();
@@ -10438,6 +10495,7 @@ mod tests {
                             offline_entitled: false,
                         },
                         created_at: "2026-10-15T00:00:00Z".into(),
+                        default_extension_group_id: None,
                     },
                     expected_revision: 1,
                 },

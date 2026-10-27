@@ -1,4 +1,4 @@
-use crate::ids::{OrganizationId, WorkspaceId};
+use crate::ids::{ExtensionGroupId, OrganizationId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -18,6 +18,8 @@ pub struct Workspace {
     pub name: String,
     pub policy: WorkspacePolicy,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_extension_group_id: Option<ExtensionGroupId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -1,1 +1,1 @@
-{"status":"blocked","code":"migration_activation_collision","foreignRevision":1,"foreignUnchanged":true,"profileDataUnchanged":true,"journalCreated":false,"stagingMarkerCreated":false,"sourceUnchanged":true}
+{"code":"migration_activation_collision","foreignRevision":1,"foreignUnchanged":true,"journalCreated":false,"profileDataUnchanged":true,"sourceUnchanged":true,"stagingMarkerCreated":false,"status":"blocked"}

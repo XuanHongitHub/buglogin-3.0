@@ -454,14 +454,9 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [resourceKey]
-              properties:
-                resourceKey: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
-              additionalProperties: false
+            schema: { $ref: '#/components/schemas/ProfileManagedKeyEnrollBody' }
       responses:
-        "200": { description: Key envelope enrolled, content: { application/json: { schema: { type: object, required: [enrolled, keyVersion], properties: { enrolled: { type: boolean }, keyVersion: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } } }
+        "200": { description: Key envelope enrolled, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileManagedKeyEnrollReceipt' } } } }
         "403": { $ref: '#/components/responses/Problem' }
         "409": { $ref: '#/components/responses/Problem' }
         "503": { $ref: '#/components/responses/Problem' }
@@ -469,7 +464,7 @@ paths:
       operationId: profile.sync.managedkey.fetch
       description: Rust desktop device session only. Requires current profile.read authorization; returns the active resource key for OS-vault persistence. Never call from React, web, or MCP clients.
       responses:
-        "200": { description: Active resource key delivered to the Rust desktop, content: { application/json: { schema: { type: object, required: [resourceKey], properties: { resourceKey: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } } }
+        "200": { description: Active resource key delivered to the Rust desktop, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileManagedKeyEnvelope' } } } }
         "403": { $ref: '#/components/responses/Problem' }
         "409": { $ref: '#/components/responses/Problem' }
         "503": { $ref: '#/components/responses/Problem' }
@@ -1622,6 +1617,10 @@ components:
     EventFilterInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, after: { type: [string, "null"], minLength: 1 }, limit: { type: integer, minimum: 1, maximum: 1000, default: 100 } }, additionalProperties: false }
     ProfileListInput: { type: object, properties: { includeArchived: { type: boolean, default: false }, limit: { type: integer, minimum: 1, maximum: 100, default: 100 }, cursor: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     ProfileIdInput: { type: object, required: [profileId], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
+    ProfileManagedKeyEnrollInput: { type: object, required: [profileId, resourceKey], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, resourceKey: { type: string, pattern: '^[0-9a-fA-F]{64}$', writeOnly: true } }, additionalProperties: false, description: Rust desktop device only; the resource key is never returned to UI clients. }
+    ProfileManagedKeyEnrollBody: { type: object, required: [resourceKey], properties: { resourceKey: { type: string, pattern: '^[0-9a-fA-F]{64}$', writeOnly: true } }, additionalProperties: false }
+    ProfileManagedKeyEnrollReceipt: { type: object, required: [enrolled, keyVersion], properties: { enrolled: { type: boolean }, keyVersion: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
+    ProfileManagedKeyEnvelope: { type: object, required: [resourceKey], properties: { resourceKey: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false, description: Rust desktop device only; persist immediately in the OS vault and never expose to web, React, or MCP clients. }
     ProfileDeleteInput: { type: object, required: [profileId, revision, confirmation], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, confirmation: { const: QUARANTINE_PROFILE_DATA } }, additionalProperties: false }
     ProfileRevisionInput: { type: object, required: [profileId, revision], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     ProfileDeleteBody: { type: object, required: [revision, confirmation], properties: { revision: { type: integer, minimum: 1 }, confirmation: { const: QUARANTINE_PROFILE_DATA } }, additionalProperties: false }
@@ -1634,7 +1633,7 @@ components:
     OrganizationAccountCreateInput: { type: object, required: [organizationId, accountId, username, email, initialPassword], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, displayName: { type: string, maxLength: 120 }, email: { type: string, maxLength: 254 }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Directly creates a login-enabled account and active organization membership. This is distinct from invitation and does not assign a workspace role or access. Email verification remains pending. The password is never returned or retained as plaintext. }
     OrganizationMemberStatusUpdateInput: { type: object, required: [organizationId, accountId, status, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     OrganizationMemberWorkspaceAssignInput: { type: object, required: [organizationId, workspaceId, organizationMemberId, organizationMemberRevision, role], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberRevision: { type: integer, minimum: 1 }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false }
-    OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
+    OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean }, defaultExtensionGroupsByWorkspace: { type: object, description: 'Organization defaults keyed by workspace; each extension group remains workspace-owned.', propertyNames: { $ref: '#/components/schemas/CanonicalId' }, additionalProperties: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
     OrganizationRecord: { type: object, required: [organization, policy, revision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     WorkspaceRecord: { type: object, required: [workspace, revision], properties: { workspace: { $ref: '#/components/schemas/Workspace' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     OrganizationCreateInput: { type: object, required: [organization, policy], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' } }, additionalProperties: false }
@@ -1643,7 +1642,7 @@ components:
     OrganizationUpdateInput: { type: object, required: [organizationId, update], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, update: { $ref: '#/components/schemas/OrganizationUpdate' } }, additionalProperties: false }
     OrganizationUpdate: { type: object, required: [organization, policy, expectedRevision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     WorkspacePolicy: { type: object, required: [maxProfiles, maxMembers, maxStorageBytes, offlineEntitled], properties: { maxProfiles: { type: integer, minimum: 0 }, maxMembers: { type: integer, minimum: 0 }, maxStorageBytes: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
-    Workspace: { type: object, required: [id, organizationId, name, policy, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, policy: { $ref: '#/components/schemas/WorkspacePolicy' }, createdAt: { type: string, format: date-time } }, additionalProperties: false }
+    Workspace: { type: object, required: [id, organizationId, name, policy, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, policy: { $ref: '#/components/schemas/WorkspacePolicy' }, createdAt: { type: string, format: date-time }, defaultExtensionGroupId: { $ref: '#/components/schemas/CanonicalId', description: 'Workspace-owned extension group automatically assigned to new profiles.' } }, additionalProperties: false }
     WorkspaceCreateInput: { type: object, required: [organizationId, workspace], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspace: { $ref: '#/components/schemas/Workspace' } }, additionalProperties: false }
     WorkspaceIdInput: { type: object, required: [organizationId, workspaceId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     WorkspaceListInput: { type: object, required: [organizationId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }

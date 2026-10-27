@@ -58,7 +58,7 @@ if (-not (Test-Path -LiteralPath $buildSignaturePath -PathType Leaf)) {
 if (-not (Get-Command "cosign.exe" -ErrorAction SilentlyContinue)) {
     throw "Cosign is required to verify native API build provenance."
 }
-& cosign.exe verify-blob $buildManifestPath --bundle $buildSignaturePath --certificate-identity-regexp '^https://github\.com/keyduc91/Malvanut-Login/\.github/workflows/native-api-artifact\.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com | Out-Null
+& cosign.exe verify-blob $buildManifestPath --bundle $buildSignaturePath --certificate-identity-regexp '^https://github\.com/(?:keyduc91/Malvanut-Login|XuanHongitHub/buglogin-3\.0)/\.github/workflows/native-api-artifact\.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Sigstore build provenance verification failed for release-manifest.json."
 }

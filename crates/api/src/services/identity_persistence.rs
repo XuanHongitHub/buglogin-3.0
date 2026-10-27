@@ -60,7 +60,9 @@ impl IdentityPersistence {
     }
 
     pub fn find_by_email(&self, canonical: &str) -> Result<Option<AccountIdentity>, Problem> {
-        if canonical.is_empty() { return Ok(None); }
+        if canonical.is_empty() {
+            return Ok(None);
+        }
         self.find(EMAIL_INDEX, canonical)
     }
 
@@ -77,18 +79,58 @@ impl IdentityPersistence {
         idempotency_key: &str,
         updated_at: &str,
     ) -> Result<AccountIdentity, Problem> {
-        let command_key = format!("identity-update-{:x}", Sha256::digest(format!("{}:{}:{}", actor_id.as_str(), account_id.as_str(), idempotency_key)));
+        let command_key = format!(
+            "identity-update-{:x}",
+            Sha256::digest(format!(
+                "{}:{}:{}",
+                actor_id.as_str(),
+                account_id.as_str(),
+                idempotency_key
+            ))
+        );
         if let Some(replayed) = self.store.replay(TENANT, &command_key)? {
-            let identity: AccountIdentity = serde_json::from_value(replayed.response.body).map_err(|_|corrupt())?;
-            if identity.username == username.trim() && identity.email == email.trim() && identity.display_name == display_name.trim() && identity.revision == expected_revision.saturating_add(1) { return Ok(identity); }
-            return Err(Problem::new("idempotency_conflict", "Identity update key was reused with different input",409,"identity"));
+            let identity: AccountIdentity =
+                serde_json::from_value(replayed.response.body).map_err(|_| corrupt())?;
+            if identity.username == username.trim()
+                && identity.email == email.trim()
+                && identity.display_name == display_name.trim()
+                && identity.revision == expected_revision.saturating_add(1)
+            {
+                return Ok(identity);
+            }
+            return Err(Problem::new(
+                "idempotency_conflict",
+                "Identity update key was reused with different input",
+                409,
+                "identity",
+            ));
         }
-        let (current, revision) = self.store.load_versioned::<AccountIdentity>(TENANT, IDENTITY, account_id.as_str())?.ok_or_else(|| Problem::new("account_identity_not_found", "Account identity was not found", 404, "identity"))?;
+        let (current, revision) = self
+            .store
+            .load_versioned::<AccountIdentity>(TENANT, IDENTITY, account_id.as_str())?
+            .ok_or_else(|| {
+                Problem::new(
+                    "account_identity_not_found",
+                    "Account identity was not found",
+                    404,
+                    "identity",
+                )
+            })?;
         if current.revision != expected_revision || revision != expected_revision {
-            return Err(Problem::new("revision_conflict", "Identity has changed; refresh before saving", 409, "identity"));
+            return Err(Problem::new(
+                "revision_conflict",
+                "Identity has changed; refresh before saving",
+                409,
+                "identity",
+            ));
         }
         if display_name.trim().chars().count() > 120 || display_name.chars().any(char::is_control) {
-            return Err(Problem::new("invalid_display_name", "Display name must be at most 120 characters", 400, "identity"));
+            return Err(Problem::new(
+                "invalid_display_name",
+                "Display name must be at most 120 characters",
+                400,
+                "identity",
+            ));
         }
         let mut next = current.clone();
         next.username = username.trim().into();
@@ -99,20 +141,52 @@ impl IdentityPersistence {
         next.revision = current.revision.checked_add(1).ok_or_else(corrupt)?;
         next.updated_at = updated_at.into();
         validate_identity_for_write(&next)?;
-        let mut puts = vec![ControlPut { tenant_id: TENANT.into(), record_type: IDENTITY.into(), record_id: account_id.as_str().into(), expected_revision: Some(revision), value: serde_json::to_value(&next).map_err(|_| corrupt())? }];
+        let mut puts = vec![ControlPut {
+            tenant_id: TENANT.into(),
+            record_type: IDENTITY.into(),
+            record_id: account_id.as_str().into(),
+            expected_revision: Some(revision),
+            value: serde_json::to_value(&next).map_err(|_| corrupt())?,
+        }];
         let mut deletes = Vec::new();
         for (kind, old, new, code) in [
-            (USERNAME_INDEX, &current.canonical_username, &next.canonical_username, "username_taken"),
-            (EMAIL_INDEX, &current.canonical_email, &next.canonical_email, "email_taken"),
+            (
+                USERNAME_INDEX,
+                &current.canonical_username,
+                &next.canonical_username,
+                "username_taken",
+            ),
+            (
+                EMAIL_INDEX,
+                &current.canonical_email,
+                &next.canonical_email,
+                "email_taken",
+            ),
         ] {
-            if old == new { continue; }
+            if old == new {
+                continue;
+            }
             if !new.is_empty() {
                 self.assert_available(kind, new, code)?;
-                puts.push(put(kind, &index_id(new), &IdentityIndex { account_id: account_id.clone() })?);
+                puts.push(put(
+                    kind,
+                    &index_id(new),
+                    &IdentityIndex {
+                        account_id: account_id.clone(),
+                    },
+                )?);
             }
             if !old.is_empty() {
-                let (_, old_revision) = self.store.load_versioned::<IdentityIndex>(TENANT, kind, &index_id(old))?.ok_or_else(corrupt)?;
-                deletes.push(ControlDelete { tenant_id: TENANT.into(), record_type: kind.into(), record_id: index_id(old), expected_revision: Some(old_revision) });
+                let (_, old_revision) = self
+                    .store
+                    .load_versioned::<IdentityIndex>(TENANT, kind, &index_id(old))?
+                    .ok_or_else(corrupt)?;
+                deletes.push(ControlDelete {
+                    tenant_id: TENANT.into(),
+                    record_type: kind.into(),
+                    record_id: index_id(old),
+                    expected_revision: Some(old_revision),
+                });
             }
         }
         self.store.execute(ExecuteControlCommand {
@@ -150,22 +224,24 @@ impl IdentityPersistence {
             expected_revisions: Default::default(),
             puts: {
                 let mut puts = vec![
-                put(IDENTITY, identity.account_id.as_str(), identity)?,
-                put(
-                    USERNAME_INDEX,
-                    &index_id(&identity.canonical_username),
-                    &IdentityIndex {
-                        account_id: identity.account_id.clone(),
-                    },
-                )?,
+                    put(IDENTITY, identity.account_id.as_str(), identity)?,
+                    put(
+                        USERNAME_INDEX,
+                        &index_id(&identity.canonical_username),
+                        &IdentityIndex {
+                            account_id: identity.account_id.clone(),
+                        },
+                    )?,
                 ];
-                if !identity.canonical_email.is_empty() { puts.push(put(
-                    EMAIL_INDEX,
-                    &index_id(&identity.canonical_email),
-                    &IdentityIndex {
-                        account_id: identity.account_id.clone(),
-                    },
-                )?); }
+                if !identity.canonical_email.is_empty() {
+                    puts.push(put(
+                        EMAIL_INDEX,
+                        &index_id(&identity.canonical_email),
+                        &IdentityIndex {
+                            account_id: identity.account_id.clone(),
+                        },
+                    )?);
+                }
                 puts
             },
             deletes: vec![],
@@ -233,13 +309,15 @@ impl IdentityPersistence {
                 },
             )?,
         ];
-        if !identity.canonical_email.is_empty() { puts.push(put(
+        if !identity.canonical_email.is_empty() {
+            puts.push(put(
                 EMAIL_INDEX,
                 &index_id(&identity.canonical_email),
                 &IdentityIndex {
                     account_id: identity.account_id.clone(),
                 },
-            )?); }
+            )?);
+        }
         Ok(puts)
     }
 
@@ -309,7 +387,8 @@ fn validate_identity_for_write(identity: &AccountIdentity) -> Result<(), Problem
 }
 
 fn canonical_identity_email(identity: &AccountIdentity) -> Result<String, Problem> {
-    if identity.email.is_empty() && identity.verification == IdentityVerification::AdminProvisioned {
+    if identity.email.is_empty() && identity.verification == IdentityVerification::AdminProvisioned
+    {
         Ok(String::new())
     } else {
         canonical_email(&identity.email)
