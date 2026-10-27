@@ -2714,14 +2714,12 @@ impl ProductionDesktopState {
                 });
                 let local_changes_pending = manifest
                     .as_ref()
-                    .map(|manifest| {
-                        match self.profile_projection(correlation_id) {
-                            Ok(projection) => projection
-                                .dirty_local_generation(&profile_id, manifest)
-                                .map(|path| path.is_some()),
-                            Err(error) if error.code == "profile_projection_in_use" => Ok(true),
-                            Err(error) => Err(error),
-                        }
+                    .map(|manifest| match self.profile_projection(correlation_id) {
+                        Ok(projection) => projection
+                            .dirty_local_generation(&profile_id, manifest)
+                            .map(|path| path.is_some()),
+                        Err(error) if error.code == "profile_projection_in_use" => Ok(true),
+                        Err(error) => Err(error),
                     })
                     .transpose()?
                     .unwrap_or(false);
@@ -4296,8 +4294,7 @@ impl ProductionDesktopState {
         let stale_proxy_dependency = manifest_proxy_stale || pending_proxy_assignment.is_some();
         let recovery_path = local_projection
             .active_session_recovery_path(&profile_id, &manifest)?
-            .or(local_projection
-                .dirty_local_generation(&profile_id, &manifest)?);
+            .or(local_projection.dirty_local_generation(&profile_id, &manifest)?);
         let mut deferred_recovery_error = None;
         let mut local_recovery_receipt = None;
         if recovery_path.is_some() || stale_proxy_dependency {
@@ -4358,8 +4355,8 @@ impl ProductionDesktopState {
                     if current != manifest {
                         return Err(error);
                     }
-                    local_recovery_receipt = local_projection
-                        .verified_local_recovery_receipt(&profile_id, &current)?;
+                    local_recovery_receipt =
+                        local_projection.verified_local_recovery_receipt(&profile_id, &current)?;
                     let Some(_) = local_recovery_receipt else {
                         return Err(error);
                     };
@@ -5140,8 +5137,7 @@ impl ProductionDesktopState {
         let dirty_local_path = if browser_was_running {
             None
         } else {
-            local_projection
-                .dirty_local_generation(&profile_id, &previous)?
+            local_projection.dirty_local_generation(&profile_id, &previous)?
         };
         let proxy_refresh_required = stale_proxy_dependency || pending_proxy_assignment.is_some();
         if preheld_stop.is_some()
@@ -5475,8 +5471,7 @@ impl ProductionDesktopState {
                 &correlation_id,
             )
             .await?;
-            local_projection
-                .prepare_sync_commit(&profile_id, &previous, &manifest)?;
+            local_projection.prepare_sync_commit(&profile_id, &previous, &manifest)?;
             if let Some(envelopes) = rotation_envelopes.as_ref() {
                 self.client
                     .commit_manifest_with_key_rotation_reconciliation(

@@ -1280,11 +1280,7 @@ impl RemoteApiClient {
         Ok(token)
     }
 
-    pub async fn logout(
-        &self,
-        correlation: &str,
-        idempotency_key: &str,
-    ) -> Result<(), Problem> {
+    pub async fn logout(&self, correlation: &str, idempotency_key: &str) -> Result<(), Problem> {
         let _: Value = self
             .send(
                 Method::POST,

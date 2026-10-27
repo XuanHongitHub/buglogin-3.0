@@ -352,21 +352,25 @@ fn safe_problem_failure_context(
         && route
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"/_:-".contains(&byte))
-        && route.split('/').collect::<Vec<_>>().windows(2).all(|segments| {
-            !matches!(
-                segments[0],
-                "accounts"
-                    | "workspaces"
-                    | "profiles"
-                    | "resources"
-                    | "members"
-                    | "groups"
-                    | "extensions"
-                    | "proxies"
-                    | "devices"
-                    | "sessions"
-            ) || segments[1] == ":id"
-        })
+        && route
+            .split('/')
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|segments| {
+                !matches!(
+                    segments[0],
+                    "accounts"
+                        | "workspaces"
+                        | "profiles"
+                        | "resources"
+                        | "members"
+                        | "groups"
+                        | "extensions"
+                        | "proxies"
+                        | "devices"
+                        | "sessions"
+                ) || segments[1] == ":id"
+            })
     {
         context.insert("apiRoute".into(), Value::String(route.clone()));
     }
