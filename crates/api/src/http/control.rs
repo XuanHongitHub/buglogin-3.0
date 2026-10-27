@@ -5982,10 +5982,8 @@ async fn commit_resource_manifest(
         }
     };
     let principal = authenticate(&state, &headers)?;
-    let initial_envelope_device_id = if key_share_envelope_updates.is_empty() {
-        None
-    } else {
-        let (device_account, device_id) = state
+    if !key_share_envelope_updates.is_empty() {
+        let (device_account, _device_id) = state
             .auth
             .read()
             .map_err(|_| service_unavailable("authentication"))?
@@ -6185,15 +6183,16 @@ async fn commit_resource_manifest(
                     encryption.algorithm
                         == buglogin_sync::manifest::PayloadEncryptionAlgorithm::Aes256GcmChunkV2
                 });
-            if is_initial_encrypted_manifest && key_share_envelope_updates.is_empty() {
-                return Err(response_problem(Problem::new(
-                    "profile_key_enrollment_required",
-                    "The first encrypted manifest requires an envelope for the authenticated workspace owner device",
-                    409,
-                    correlation(&headers),
-                )));
+            if is_initial_encrypted_manifest {
+                // New encrypted profiles use the service-managed KEK path. The
+                // desktop enrolls the resource key immediately after this
+                // manifest commit; legacy per-device envelopes are not needed
+                // to bootstrap a new profile.
+                let _wrapping_key = state
+                    .profile_key_wrapping_key()
+                    .map_err(response_problem)?;
             }
-            if manifest.payload_encryption.is_some() {
+            if manifest.payload_encryption.is_some() && !is_initial_encrypted_manifest {
                 crate::services::profile_hosted::HostedProfileService::ensure_encrypted_manifest_share_compatible(
                     &state,
                     &binding.profile_id,
@@ -6237,7 +6236,7 @@ async fn commit_resource_manifest(
                 .resource_key_rotation_pending(&workspace_id, &resource_id)
                 .map_err(response_problem)?;
             if is_initial_encrypted_manifest {
-                let key_version = manifest
+                manifest
                     .payload_encryption
                     .as_ref()
                     .and_then(|encryption| encryption.key_version.as_deref())
@@ -6249,23 +6248,10 @@ async fn commit_resource_manifest(
                             correlation(&headers),
                         ))
                     })?;
-                let device_id = initial_envelope_device_id.as_deref().ok_or_else(|| {
-                    response_problem(Problem::new(
-                        "device_session_required",
-                        "A connected device session is required for initial key enrollment",
-                        403,
-                        correlation(&headers),
-                    ))
-                })?;
-                HostedProfileService::activate_initial_owner_key_envelope(
-                    &state,
-                    &principal,
-                    &binding.profile_id,
-                    device_id,
-                    key_version,
-                    &key_share_envelope_updates,
-                )
-                .map_err(response_problem)?;
+                // Older clients may still include a per-device envelope in
+                // this request. Ignore it for initial enrollment; the KEK
+                // envelope is persisted by profile.sync.key.enroll after the
+                // manifest commit, before the stop/sync operation completes.
             } else if rotation_pending {
                 let key_version = manifest
                     .payload_encryption

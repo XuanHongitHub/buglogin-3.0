@@ -961,7 +961,7 @@ impl ApiState {
             }))
     }
 
-    fn profile_key_wrapping_key(&self) -> Result<ClientKey, Problem> {
+    pub(crate) fn profile_key_wrapping_key(&self) -> Result<ClientKey, Problem> {
         self.profile_key_wrapping_key
             .read()
             .map_err(|_| {

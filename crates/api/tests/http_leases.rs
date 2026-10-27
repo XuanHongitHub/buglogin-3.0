@@ -1427,10 +1427,11 @@ async fn proxy_update_is_rejected_while_bound_profile_is_launching() {
 }
 
 #[tokio::test]
-async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
+async fn hosted_manifest_http_flow_requires_fencing_and_uses_managed_keys() {
     let root = std::env::temp_dir().join(format!("buglogin-http-manifest-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
-    let state = ApiState::new(ProfileService::new(LocalRepository::open(&root).unwrap()));
+    let state = ApiState::new(ProfileService::new(LocalRepository::open(&root).unwrap()))
+        .with_profile_key_wrapping_key(ClientKey::from_bytes([0x42; 32]));
     let token = state.issue_token("acct_manifest").unwrap();
     let account = AccountId::new("acct_manifest").unwrap();
     let workspace = WorkspaceId::new("ws_manifest").unwrap();
@@ -1729,14 +1730,7 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
         ))
         .unwrap();
     let chunked_commit = app.clone().oneshot(chunked_commit_request).await.unwrap();
-    assert_eq!(chunked_commit.status(), StatusCode::CONFLICT);
-    let chunked_commit: Value = serde_json::from_slice(
-        &to_bytes(chunked_commit.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(chunked_commit["code"], "profile_key_enrollment_required");
+    assert_eq!(chunked_commit.status(), StatusCode::OK);
 
     let get = Request::builder()
         .method("GET")
@@ -1750,8 +1744,8 @@ async fn hosted_manifest_http_flow_requires_fencing_and_owner_headers() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: SyncManifest =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(body.generation, manifest.generation);
-    assert_eq!(body.objects, manifest.objects);
+    assert_eq!(body.generation, chunked_manifest.generation);
+    assert_eq!(body.objects, chunked_manifest.objects);
     let _ = fs::remove_dir_all(root);
 }
 
