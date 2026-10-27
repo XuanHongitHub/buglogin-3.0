@@ -1,4 +1,4 @@
-{"createProfiles":1,"destinationChanged":false,"status":"planned"}
-{"cookieBytesPreserved":true,"createdProfiles":1,"markerRemoved":true,"status":"activated"}
-{"reusedProfiles":1,"status":"repeated"}
-{"cookieBytesPreserved":true,"quarantinedProfiles":1,"status":"rolledBack"}
+{"status":"planned","createProfiles":1,"destinationChanged":false}
+{"status":"activated","createdProfiles":1,"cookieBytesPreserved":true,"markerRemoved":true}
+{"status":"repeated","reusedProfiles":1}
+{"status":"rolledBack","quarantinedProfiles":1,"cookieBytesPreserved":true}

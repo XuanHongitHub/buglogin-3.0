@@ -1,4 +1,4 @@
-{"createProfiles":1,"createVpnConfigs":1,"createVpns":1,"destinationChanged":false,"status":"planned"}
-{"createdProfiles":1,"createdVpnConfigs":1,"createdVpns":1,"profileProxyAbsent":true,"profileVpnBound":true,"status":"activated"}
-{"reusedProfiles":1,"reusedVpnConfigs":1,"reusedVpns":1,"status":"repeated"}
-{"quarantinedProfiles":1,"quarantinedVpns":1,"removedVpnConfigs":1,"status":"rolledBack","vaultEmpty":true}
+{"status":"planned","createProfiles":1,"createVpns":1,"createVpnConfigs":1,"destinationChanged":false}
+{"status":"activated","createdProfiles":1,"createdVpns":1,"createdVpnConfigs":1,"profileVpnBound":true,"profileProxyAbsent":true}
+{"status":"repeated","reusedProfiles":1,"reusedVpns":1,"reusedVpnConfigs":1}
+{"status":"rolledBack","quarantinedProfiles":1,"quarantinedVpns":1,"removedVpnConfigs":1,"vaultEmpty":true}

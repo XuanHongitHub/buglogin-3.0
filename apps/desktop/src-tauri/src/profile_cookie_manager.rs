@@ -120,6 +120,13 @@ pub fn find_cookie_db(profile_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+fn open_cookie_db_readonly(path: &Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
 fn read_os_crypt_key(profile_dir: &Path) -> Option<[u8; KEY_LEN]> {
     let candidates = [
         profile_dir.join("os_crypt_key"),
@@ -158,14 +165,7 @@ pub async fn get_profile_cookie_stats(
         }));
     };
 
-    let uri = format!("file:{}?mode=ro&immutable=1", db_path.to_string_lossy());
-    let conn = Connection::open_with_flags(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| {
+    let conn = open_cookie_db_readonly(&db_path).map_err(|e| {
         Problem::new(
             "cookie_db_error",
             format!("Failed to open cookies database: {e}"),
@@ -231,14 +231,7 @@ pub async fn export_profile_cookies(
 
     let encryption_key = read_os_crypt_key(&profile_dir);
 
-    let uri = format!("file:{}?mode=ro&immutable=1", db_path.to_string_lossy());
-    let conn = Connection::open_with_flags(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| {
+    let conn = open_cookie_db_readonly(&db_path).map_err(|e| {
         Problem::new(
             "cookie_db_error",
             format!("Failed to open cookies database: {e}"),
@@ -786,4 +779,35 @@ pub async fn import_profile_storage_state(
         "cookies_imported": cookies_imported,
         "indexed_db_records": 0
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_cookie_db_readonly;
+    use rusqlite::Connection;
+
+    #[test]
+    fn readonly_cookie_database_opens_canonical_windows_path() {
+        let path = std::env::temp_dir().join(format!(
+            "buglogin-cookie-db-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("CREATE TABLE cookies (name TEXT); INSERT INTO cookies VALUES ('qa');").unwrap();
+        drop(writer);
+
+        let canonical_path = std::fs::canonicalize(&path).unwrap();
+        let reader = open_cookie_db_readonly(&canonical_path).unwrap();
+        let count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM cookies", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        drop(reader);
+        std::fs::remove_file(path).unwrap();
+    }
 }

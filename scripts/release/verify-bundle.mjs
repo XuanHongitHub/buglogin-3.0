@@ -45,7 +45,7 @@ export async function verifyBundle(
     await verifyUpdater(root, sums, trustedUpdaterPublicKeyBase64?.trim());
   }
 
-  const ignored = new Set(["SHA256SUMS.txt", "provenance.json", "provenance.sigstore.json", "updater-manifest.sig.json"]);
+  const ignored = new Set(["SHA256SUMS.txt", "provenance.json", "updater-manifest.sig.json"]);
   const subjectNames = [...names].filter((name) => !ignored.has(name)).sort();
   for (const name of subjectNames) {
     if (!sums.has(name)) throw new Error(`[release-bundle] unsigned bundle file: ${name}`);

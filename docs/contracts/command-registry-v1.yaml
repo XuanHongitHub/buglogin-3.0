@@ -269,26 +269,6 @@ commands:
     audit: required
     idempotency: required
     preconditions: [active-profile-binding, recovery-code-valid, local-vault-write]
-  - id: profile.sync.managedkey.enroll
-    kind: command
-    capability: profile.update
-    action: update
-    adapters: [rest]
-    input: ProfileManagedKeyEnrollInput
-    output: ProfileManagedKeyEnrollReceipt
-    audit: required
-    idempotency: required
-    preconditions: [authenticated-desktop-device, current-profile-update-authorization, service-key-configured]
-  - id: profile.sync.managedkey.fetch
-    kind: query
-    capability: profile.read
-    action: read
-    adapters: [rest]
-    input: ProfileIdInput
-    output: ProfileManagedKeyEnvelope
-    audit: metadata-only
-    idempotency: none
-    preconditions: [authenticated-desktop-device, current-profile-read-authorization, os-vault-persistence]
   - id: profile.runtime.get
     kind: query
     capability: profile.read
@@ -296,6 +276,13 @@ commands:
     adapters: [tauri, rest]
     input: ProfileIdInput
     output: OptionalRuntimeProjection
+  - id: profile.runtime.status.batch
+    kind: query
+    capability: profile.read
+    action: read
+    adapters: [tauri, rest]
+    input: ProfileRuntimeStatusBatchInput
+    output: ProfileRuntimeStatusBatch
   - id: profile.runtime.started
     kind: command
     capability: profile.update
@@ -311,6 +298,15 @@ commands:
     adapters: [rest]
     input: RuntimeProjectionInput
     output: RuntimeProjection
+    idempotency: required
+  - id: profile.runtime.syncing
+    kind: command
+    capability: profile.stop
+    action: execute
+    adapters: [rest]
+    input: RuntimeProjectionInput
+    output: RuntimeProjection
+    audit: required
     idempotency: required
   - id: profile.delete
     kind: command

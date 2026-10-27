@@ -55,9 +55,7 @@ impl TeamService {
     }
 
     pub(crate) fn has_workspace_records(&self, workspace_id: &WorkspaceId) -> bool {
-        self.teams
-            .values()
-            .any(|record| &record.team.workspace_id == workspace_id)
+        self.teams.values().any(|record| &record.team.workspace_id == workspace_id)
     }
 
     pub fn create(

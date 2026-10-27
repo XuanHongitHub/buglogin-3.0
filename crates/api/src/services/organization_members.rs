@@ -21,17 +21,10 @@ impl OrganizationMemberService {
         organization_id: &OrganizationId,
         owner_id: &AccountId,
     ) -> Result<(), Problem> {
-        if self.members.values().any(|member| {
-            &member.organization_id == organization_id && &member.account_id != owner_id
-        }) {
-            return Err(problem(
-                "organization_has_members",
-                "Remove organization members before deleting the organization",
-                409,
-            ));
+        if self.members.values().any(|member| &member.organization_id == organization_id && &member.account_id != owner_id) {
+            return Err(problem("organization_has_members", "Remove organization members before deleting the organization", 409));
         }
-        self.members
-            .retain(|_, member| &member.organization_id != organization_id);
+        self.members.retain(|_, member| &member.organization_id != organization_id);
         Ok(())
     }
 

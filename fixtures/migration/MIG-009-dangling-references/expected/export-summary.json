@@ -1,6 +1,1 @@
-{
-  "code": "migration_cutover_blocked",
-  "optionalReferencesDropped": 4,
-  "requiredDanglingReferences": 1,
-  "status": "blocked"
-}
+{"status":"blocked","code":"migration_cutover_blocked","optionalReferencesDropped":4,"requiredDanglingReferences":1}

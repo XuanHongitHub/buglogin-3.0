@@ -21,55 +21,21 @@ pub(super) async fn delete_organization(
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
-    let organization_id =
-        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let organization_id = OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
     mutate(
-        &state,
-        &headers,
-        &principal,
-        &grants,
-        organization_id.as_str(),
-        "organization.delete",
-        json!({"organizationId": organization_id, "expectedRevision": input.expected_revision}),
-        ResourceScope {
-            organization_id: Some(organization_id.clone()),
-            ..ResourceScope::default()
-        },
-        organization_id.as_str(),
+        &state, &headers, &principal, &grants, organization_id.as_str(),
+        "organization.delete", json!({"organizationId": organization_id, "expectedRevision": input.expected_revision}),
+        ResourceScope { organization_id: Some(organization_id.clone()), ..ResourceScope::default() }, organization_id.as_str(),
         || {
             let mut aggregate = state.control_aggregate().map_err(response_problem)?;
-            let organization = aggregate
-                .workspaces
-                .authorize_organization_management(
-                    &principal,
-                    &grants,
-                    &organization_id,
-                    Action::Delete,
-                )
-                .map_err(response_problem)?;
-            aggregate
-                .organization_members
-                .remove_owned_organization_memberships(&organization_id, &organization.account_id)
-                .map_err(response_problem)?;
-            aggregate
-                .workspaces
-                .delete_organization(
-                    &principal,
-                    &grants,
-                    &organization_id,
-                    input.expected_revision,
-                )
-                .map_err(response_problem)?;
-            aggregate
-                .grants
-                .retain(|grant| grant.scope.organization_id.as_ref() != Some(&organization_id));
-            state
-                .replace_control_aggregate(aggregate)
-                .map_err(response_problem)?;
+            let organization = aggregate.workspaces.authorize_organization_management(&principal, &grants, &organization_id, Action::Delete).map_err(response_problem)?;
+            aggregate.organization_members.remove_owned_organization_memberships(&organization_id, &organization.account_id).map_err(response_problem)?;
+            aggregate.workspaces.delete_organization(&principal, &grants, &organization_id, input.expected_revision).map_err(response_problem)?;
+            aggregate.grants.retain(|grant| grant.scope.organization_id.as_ref() != Some(&organization_id));
+            state.replace_control_aggregate(aggregate).map_err(response_problem)?;
             Ok(json!({"organizationId": organization_id, "deleted": true}))
         },
-    )
-    .await
+    ).await
 }
 
 pub(super) async fn delete_workspace(
@@ -80,8 +46,7 @@ pub(super) async fn delete_workspace(
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
-    let organization_id =
-        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let organization_id = OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
     mutate(
         &state, &headers, &principal, &grants, workspace_id.as_str(), "workspace.delete",
@@ -131,8 +96,7 @@ pub(super) async fn transfer_owner(
 ) -> Result<Response, Response> {
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
-    let organization_id =
-        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let organization_id = OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
     mutate(
         &state, &headers, &principal, &grants, organization_id.as_str(), "organization.owner.transfer",
         json!({"organizationId": organization_id, "accountId": input.account_id, "expectedRevision": input.expected_revision}),

@@ -1,5 +1,5 @@
-{"createPreservedProfiles":1,"createProfiles":0,"destinationChanged":false,"status":"planned"}
-{"bytesPreserved":true,"createdPreservedProfiles":1,"createdProfiles":0,"launchBlocked":true,"status":"activated"}
-{"reusedPreservedProfiles":1,"status":"repeated"}
-{"activeProfiles":0,"preservedProfiles":1,"result":"passed","status":"reconciled"}
-{"bytesPreserved":true,"quarantinedPreservedProfiles":1,"quarantinedProfiles":0,"status":"rolledBack"}
+{"status":"planned","createProfiles":0,"createPreservedProfiles":1,"destinationChanged":false}
+{"status":"activated","createdProfiles":0,"createdPreservedProfiles":1,"launchBlocked":true,"bytesPreserved":true}
+{"status":"repeated","reusedPreservedProfiles":1}
+{"status":"reconciled","result":"passed","activeProfiles":0,"preservedProfiles":1}
+{"status":"rolledBack","quarantinedProfiles":0,"quarantinedPreservedProfiles":1,"bytesPreserved":true}

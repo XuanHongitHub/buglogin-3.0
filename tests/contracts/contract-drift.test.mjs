@@ -56,7 +56,7 @@ function openApiOperationIds(document) {
       Object.entries(path ?? {})
         .filter(
           ([method, operation]) =>
-            methods.has(method) && operation?.operationId,
+            methods.has(method) && operation?.operationId && !operation["x-buglogin-internal"],
         )
         .map(([, operation]) => operation.operationId),
     )
@@ -254,7 +254,9 @@ test("REST query ID parameters reuse canonical domain ID components", () => {
         if (parameter?.in !== "query" || !/(?:Id|ID)$/.test(parameter.name)) continue;
         assert.ok(reference.$ref, `${method.toUpperCase()} ${path} ${parameter.name} must reuse a parameter component`);
         assert.equal(
-          parameter.schema?.$ref,
+          parameter.schema?.type === "array"
+            ? parameter.schema.items?.$ref
+            : parameter.schema?.$ref,
           "#/components/schemas/CanonicalId",
           `${method.toUpperCase()} ${path} ${parameter.name} must use CanonicalId`,
         );

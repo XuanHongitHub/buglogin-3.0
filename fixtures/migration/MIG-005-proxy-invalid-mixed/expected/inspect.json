@@ -8,28 +8,14 @@
     "architecture": "x86_64",
     "root": "."
   },
-  "entityCounts": {
-    "proxies": 5
-  },
+  "entityCounts": {"proxies": 5},
   "totalBytes": 636,
   "runtimeFindings": [],
-  "secretScan": {
-    "filesWithSecretFields": 0,
-    "secretFieldsPresent": 0
-  },
+  "secretScan": {"filesWithSecretFields": 0, "secretFieldsPresent": 0},
   "invalidRecords": [
-    {
-      "sourceRef": "proxies/invalid-json.json",
-      "code": "migration_proxy_json_invalid"
-    },
-    {
-      "sourceRef": "proxies/invalid-port.json",
-      "code": "migration_proxy_port_invalid"
-    },
-    {
-      "sourceRef": "proxies/invalid-protocol.json",
-      "code": "migration_proxy_protocol_invalid"
-    }
+    {"sourceRef":"proxies/invalid-json.json","code":"migration_proxy_json_invalid"},
+    {"sourceRef":"proxies/invalid-port.json","code":"migration_proxy_port_invalid"},
+    {"sourceRef":"proxies/invalid-protocol.json","code":"migration_proxy_protocol_invalid"}
   ],
   "danglingReferences": [],
   "sourceTreeSha256": "8ebdf48fceca944f183840e9b409a7a96104817a69e996cf914b185b0b20bbc3",

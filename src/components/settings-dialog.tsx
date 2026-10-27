@@ -1,7 +1,6 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Color from "color";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -1283,7 +1282,7 @@ export function SettingsDialog({
                     onClick={async () => {
                       try {
                         const content = await invoke<string>("read_log_files");
-                        await writeClipboardText(content);
+                        await navigator.clipboard.writeText(content);
                         showSuccessToast(
                           t("settings.advanced.copyLogsSuccess"),
                         );

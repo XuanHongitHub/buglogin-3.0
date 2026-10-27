@@ -1326,10 +1326,7 @@ impl AdapterState {
         )?;
         let workspace_id = parse_workspace_id(input.workspace_id.as_str(), correlation_id)?;
         validate_extension_group_fields(&input.name, &input.extension_ids, correlation_id)?;
-        buglogin_api::services::extension_groups::validate_sources(
-            &input.extension_ids,
-            &input.extension_sources,
-        )?;
+        buglogin_api::services::extension_groups::validate_sources(&input.extension_ids, &input.extension_sources)?;
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|_| {
@@ -1389,20 +1386,11 @@ impl AdapterState {
             })?;
         current.value.name = input.name.trim().to_owned();
         if let Some(sources) = input.extension_sources {
-            buglogin_api::services::extension_groups::validate_sources(
-                &input.extension_ids,
-                &sources,
-            )?;
+            buglogin_api::services::extension_groups::validate_sources(&input.extension_ids, &sources)?;
             current.value.extension_sources = sources;
         }
-        current
-            .value
-            .extension_sources
-            .retain(|id, _| input.extension_ids.contains(id));
-        buglogin_api::services::extension_groups::validate_sources(
-            &input.extension_ids,
-            &current.value.extension_sources,
-        )?;
+        current.value.extension_sources.retain(|id, _| input.extension_ids.contains(id));
+        buglogin_api::services::extension_groups::validate_sources(&input.extension_ids, &current.value.extension_sources)?;
         current.value.extension_ids = input.extension_ids;
         current.value.sync_mode = input.sync_mode;
         current.value.updated_at = now;

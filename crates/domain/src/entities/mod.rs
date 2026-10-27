@@ -375,56 +375,30 @@ pub struct GitExtensionSource {
 impl GitExtensionSource {
     pub fn extension_id(&self) -> String {
         use sha2::{Digest, Sha256};
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(self).unwrap_or_default())
-        );
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(self).unwrap_or_default()));
         format!("ext_git_{}", &digest[..24])
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        let url =
-            url::Url::parse(&self.repository_url).map_err(|_| "Invalid Git repository URL")?;
+        let url = url::Url::parse(&self.repository_url).map_err(|_| "Invalid Git repository URL")?;
         let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
-        if self.repository_url.len() > 512
-            || url.scheme() != "https"
-            || url.host_str() != Some("github.com")
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.port().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || parts.len() != 2
-            || parts.iter().any(|part| {
-                part.is_empty()
-                    || *part == "."
-                    || *part == ".."
-                    || !part
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-            })
+        if self.repository_url.len() > 512 || url.scheme() != "https" || url.host_str() != Some("github.com")
+            || !url.username().is_empty() || url.password().is_some() || url.port().is_some()
+            || url.query().is_some() || url.fragment().is_some() || parts.len() != 2
+            || parts.iter().any(|part| part.is_empty() || *part == "." || *part == ".."
+                || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)))
         {
             return Err("Use an HTTPS GitHub owner/repository URL");
         }
-        if self.reference.is_empty()
-            || self.reference.len() > 200
-            || self.reference.starts_with('/')
-            || self.reference.contains("..")
-            || !self
-                .reference
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'/' | b'.'))
+        if self.reference.is_empty() || self.reference.len() > 200
+            || self.reference.starts_with('/') || self.reference.contains("..")
+            || !self.reference.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'/' | b'.'))
         {
             return Err("Invalid Git branch, tag or commit");
         }
-        if self.subdirectory.len() > 240
-            || self.subdirectory.starts_with('/')
-            || self.subdirectory.contains('\\')
-            || self.subdirectory.contains(':')
-            || self
-                .subdirectory
-                .split('/')
-                .any(|part| part == ".." || part == ".")
+        if self.subdirectory.len() > 240 || self.subdirectory.starts_with('/')
+            || self.subdirectory.contains('\\') || self.subdirectory.contains(':')
+            || self.subdirectory.split('/').any(|part| part == ".." || part == ".")
             || self.subdirectory.chars().any(char::is_control)
         {
             return Err("Invalid extension subdirectory");

@@ -8,9 +8,7 @@
     "architecture": "x86_64",
     "root": "."
   },
-  "entityCounts": {
-    "profiles": 6
-  },
+  "entityCounts": { "profiles": 6 },
   "totalBytes": 774,
   "runtimeFindings": [
     {
@@ -50,10 +48,7 @@
       "records": 1
     }
   ],
-  "secretScan": {
-    "filesWithSecretFields": 0,
-    "secretFieldsPresent": 0
-  },
+  "secretScan": { "filesWithSecretFields": 0, "secretFieldsPresent": 0 },
   "invalidRecords": [],
   "danglingReferences": [],
   "sourceTreeSha256": "f771adf42c5599bab649ba30b70a315a835a05ca4c24709d01a177575e0addc5",

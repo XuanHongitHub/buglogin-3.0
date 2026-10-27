@@ -970,7 +970,6 @@ async fn control_http_flow_enforces_acl_replay_audit_and_redaction() {
             OrganizationPolicy {
                 max_workspaces: 2,
                 offline_entitled: true,
-                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -991,9 +990,9 @@ async fn control_http_flow_enforces_acl_replay_audit_and_redaction() {
                     max_members: 10,
                     max_storage_bytes: 1_048_576,
                     offline_entitled: true,
+                    default_extension_group_id: None,
                 },
                 created_at: "2026-07-20T00:00:00Z".into(),
-                default_extension_group_id: None,
             },
         )
         .unwrap();

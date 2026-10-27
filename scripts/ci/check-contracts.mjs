@@ -143,12 +143,16 @@ if (
 )
   fail("generated Rust registry command drift");
 if (openapi.openapi !== "3.1.0") fail("OpenAPI version drift");
-const openapiOperationIds = Object.values(openapi.paths ?? {})
+const openapiOperations = Object.values(openapi.paths ?? {})
   .flatMap((path) => Object.values(path ?? {}))
   .filter((operation) => operation && typeof operation === "object")
+  .filter((operation) => typeof operation.operationId === "string");
+const openapiOperationIds = openapiOperations
+  .filter((operation) => operation["x-buglogin-internal"] !== true)
   .map((operation) => operation.operationId)
   .filter((operationId) => typeof operationId === "string");
-if (new Set(openapiOperationIds).size !== openapiOperationIds.length)
+const allOpenapiOperationIds = openapiOperations.map((operation) => operation.operationId);
+if (new Set(allOpenapiOperationIds).size !== allOpenapiOperationIds.length)
   fail("OpenAPI operation IDs must be unique");
 const restCommandsMissingFromOpenapi = commands.commands
   .filter(

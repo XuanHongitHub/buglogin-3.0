@@ -41,6 +41,16 @@ function sign(payload: jwt.JwtPayload, options: jwt.SignOptions = {}): string {
   });
 }
 
+function signWithoutClaim(
+  payload: jwt.JwtPayload,
+  claim: "sub" | "exp",
+): string {
+  const options: jwt.SignOptions = { algorithm: "RS256", issuer, audience };
+  if (claim !== "sub") options.subject = "user-1";
+  if (claim !== "exp") options.expiresIn = "5m";
+  return jwt.sign(payload, privateKey, options);
+}
+
 describe("AuthGuard JWT claims", () => {
   const createGuard = () =>
     new AuthGuard(
@@ -79,7 +89,11 @@ describe("AuthGuard JWT claims", () => {
     [string, jwt.JwtPayload, jwt.SignOptions]
   >)("rejects a JWT without a valid %s claim", async (_claim, payload, options) => {
     const guard = createGuard();
-    const { context: executionContext } = context(sign(payload, options));
+    const token =
+      _claim === "sub" || _claim === "exp"
+        ? signWithoutClaim(payload, _claim)
+        : sign(payload, options);
+    const { context: executionContext } = context(token);
 
     await expect(guard.canActivate(executionContext)).rejects.toBeInstanceOf(
       UnauthorizedException,

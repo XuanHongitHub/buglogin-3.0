@@ -39,10 +39,11 @@ use buglogin_sync::{
     },
     manifest::{MAX_PROFILE_SYNC_OBJECT_BYTES, ManifestDependency, ManifestObject, SyncManifest},
 };
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{convert::Infallible, time::Duration};
+use std::{collections::BTreeSet, convert::Infallible, time::Duration};
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(test)]
@@ -162,9 +163,6 @@ pub(super) async fn provision_managed_profile(
         &resource_id,
     )
     .map_err(response_problem)?;
-    let mut profile = profile;
-    HostedProfileService::apply_workspace_extension_default(&state, &workspace_id, &mut profile)
-        .map_err(response_problem)?;
     let plan = HostedProfileService::prepare_provision(profile, workspace_id.clone())
         .map_err(response_problem)?;
     let input = json!({
@@ -1120,9 +1118,7 @@ fn routes_core() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}",
-            get(get_organization)
-                .patch(update_organization)
-                .delete(management_tenancy::delete_organization),
+            get(get_organization).patch(update_organization).delete(management_tenancy::delete_organization),
         )
         .route(
             "/v1/organizations/{organization_id}/owner",
@@ -1154,9 +1150,7 @@ fn routes_core() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}",
-            get(get_workspace)
-                .patch(update_workspace)
-                .delete(management_tenancy::delete_workspace),
+            get(get_workspace).patch(update_workspace).delete(management_tenancy::delete_workspace),
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}/record",
@@ -1312,12 +1306,20 @@ fn routes_core() -> Router<ApiState> {
             get(get_runtime_projection),
         )
         .route(
+            "/v1/workspaces/{workspace_id}/profile-runtime-status",
+            get(get_profile_runtime_status_batch),
+        )
+        .route(
             "/v1/profiles/{profile_id}/runtime/started",
             put(runtime_started),
         )
         .route(
             "/v1/profiles/{profile_id}/runtime/stopped",
             put(runtime_stopped),
+        )
+        .route(
+            "/v1/profiles/{profile_id}/runtime/syncing",
+            put(runtime_syncing),
         )
         .route(
             "/v1/profiles/{profile_id}/groups",
@@ -1913,11 +1915,7 @@ async fn create_scoped_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
-            management::set_provisioned_display_name(
-                &mut pending.identity,
-                &mut account_puts,
-                &input.display_name,
-            )?;
+            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -3676,11 +3674,7 @@ async fn create_organization_account(
                     &crate::clock::rfc3339(&correlation(&headers)).map_err(response_problem)?,
                 )
                 .map_err(response_problem)?;
-            management::set_provisioned_display_name(
-                &mut pending.identity,
-                &mut account_puts,
-                &input.display_name,
-            )?;
+            management::set_provisioned_display_name(&mut pending.identity, &mut account_puts, &input.display_name)?;
             let credential_put = crate::services::credentials::CredentialService::new(
                 state.control_persistence.clone(),
             )
@@ -3995,36 +3989,6 @@ async fn update_organization(
     let grants = grants(&state)?;
     let organization_id =
         OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
-    authorize_organization_management(
-        &state,
-        &principal,
-        &grants,
-        &organization_id,
-        Action::Update,
-    )?;
-    for (workspace_id, group_id) in &input.policy.default_extension_groups_by_workspace {
-        let workspace = state
-            .workspaces
-            .read()
-            .map_err(|_| service_unavailable("workspace"))?
-            .workspace_for_policy(workspace_id)
-            .map_err(response_problem)?;
-        if workspace.organization_id != organization_id {
-            return Err(response_problem(buglogin_domain::errors::Problem::new(
-                "tenant_mismatch",
-                "Default extension group references a workspace outside this organization",
-                403,
-                "organization.update",
-            ))
-            .into());
-        }
-        state
-            .extension_groups
-            .read()
-            .map_err(|_| service_unavailable("extension_group"))?
-            .get_in_workspace(workspace_id, group_id)
-            .map_err(response_problem)?;
-    }
     let value = serde_json::to_value(&input).map_err(internal)?;
     mutate(
         &state,
@@ -4082,14 +4046,7 @@ async fn update_workspace(
     let organization_id =
         OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
-    if let Some(group_id) = input.workspace.default_extension_group_id.as_ref() {
-        state
-            .extension_groups
-            .read()
-            .map_err(|_| service_unavailable("extension group"))?
-            .get_in_workspace(&workspace_id, group_id)
-            .map_err(response_problem)?;
-    }
+    let default_extension_group_id = input.workspace.policy.default_extension_group_id.clone();
     let value = serde_json::to_value(&input).map_err(internal)?;
     mutate(
         &state,
@@ -4102,6 +4059,14 @@ async fn update_workspace(
         ResourceScope::workspace(workspace_id.clone()),
         workspace_id.as_str(),
         || {
+            if let Some(extension_group_id) = &default_extension_group_id {
+                state
+                    .extension_groups
+                    .read()
+                    .map_err(|_| service_unavailable("extension_group"))?
+                    .get(&principal, &grants, &workspace_id, extension_group_id)
+                    .map_err(response_problem)?;
+            }
             state
                 .workspaces
                 .write()
@@ -5278,6 +5243,153 @@ async fn get_runtime_projection(
     Ok(Json(projection))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileRuntimeStatusBatchQuery {
+    #[serde(default)]
+    profile_id: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileRuntimeStatusSnapshot {
+    profile_id: ProfileId,
+    lease: Option<buglogin_sync::coordination::LeaseStatus>,
+    runtime: Option<RuntimeProjectionView>,
+}
+
+async fn get_profile_runtime_status_batch(
+    State(state): State<ApiState>,
+    Path(workspace_path): Path<String>,
+    Query(query): Query<ProfileRuntimeStatusBatchQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProfileRuntimeStatusSnapshot>>, Response> {
+    const MAX_PROFILE_STATUS_BATCH: usize = 250;
+    if query.profile_id.is_empty() || query.profile_id.len() > MAX_PROFILE_STATUS_BATCH {
+        return Err(problem_response(
+            if query.profile_id.is_empty() {
+                "profile_status_batch_empty"
+            } else {
+                "profile_status_batch_too_large"
+            },
+            "A status request must include between 1 and 250 profiles",
+            if query.profile_id.is_empty() { 400 } else { 413 },
+            correlation(&headers),
+        ));
+    }
+    let principal = authenticate(&state, &headers)?;
+    let grants = grants(&state)?;
+    let workspace_id = WorkspaceId::from_str(&workspace_path)
+        .map_err(|_| bad_id("workspace_id"))?;
+    let actor_id = principal.account_id.as_ref().ok_or_else(|| {
+        problem_response(
+            "account_missing",
+            "Authenticated account is missing",
+            401,
+            correlation(&headers),
+        )
+    })?;
+    let auth = CoordinationAuth::new(actor_id.as_str(), bearer_token(&headers).to_owned())
+        .map_err(response_problem)?;
+    let coordination = state.coordination().map_err(response_problem)?;
+    let mut authorized = Vec::with_capacity(query.profile_id.len());
+    let mut seen = BTreeSet::new();
+    for raw_profile_id in query.profile_id {
+        let profile_id =
+            ProfileId::from_str(&raw_profile_id).map_err(|_| bad_id("profile_id"))?;
+        if !seen.insert(profile_id.clone()) {
+            continue;
+        }
+        // Do not disclose whether an inaccessible profile is bound to this workspace.
+        if let Err(response) = authorize_action(
+            &state,
+            &principal,
+            &grants,
+            &profile_id,
+            Action::Read,
+            "profile.read",
+        ) {
+            if matches!(response.status(), StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) {
+                continue;
+            }
+            return Err(response);
+        }
+        let binding = match active_profile_binding(&state, &profile_id) {
+            Ok(binding) if binding.workspace_id == workspace_id => binding,
+            Ok(_) => continue,
+            Err(response)
+                if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::CONFLICT) =>
+            {
+                continue;
+            }
+            Err(response) => return Err(response),
+        };
+        authorize_lease(
+            &state,
+            &principal,
+            &grants,
+            &workspace_id,
+            &binding.resource_id,
+            "profile.read",
+            Action::Read,
+        )?;
+        authorized.push((profile_id, binding.resource_id));
+    }
+    let mut lease_results = futures_util::stream::iter(authorized.into_iter().map(
+        |(profile_id, resource_id)| {
+            let coordination = &coordination;
+            let workspace_id = &workspace_id;
+            let auth = &auth;
+            async move {
+                coordination
+                    .lease_status(
+                        CoordinationScope { workspace_id, auth },
+                        &resource_id,
+                    )
+                    .await
+                    .map(|lease| (profile_id, lease))
+                    .map_err(response_problem)
+            }
+        },
+    ))
+    .buffer_unordered(32)
+    .try_collect::<Vec<_>>()
+    .await?;
+    lease_results.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut snapshots = Vec::with_capacity(lease_results.len());
+    for (profile_id, lease) in lease_results {
+        let runtime = state
+            .runtime_projection(&profile_id)
+            .map_err(response_problem)?
+            .map(|projection| {
+                let owner_id = AccountId::from_str(&projection.owner_id).map_err(|_| {
+                    problem_response(
+                        "runtime_owner_invalid",
+                        "Runtime owner identity is invalid",
+                        500,
+                        correlation(&headers),
+                    )
+                })?;
+                let owner_email = state
+                    .identity_persistence
+                    .load(&owner_id)
+                    .map_err(response_problem)?
+                    .map(|identity| identity.email);
+                Ok::<_, Response>(RuntimeProjectionView {
+                    projection,
+                    owner_email,
+                })
+            })
+            .transpose()?;
+        snapshots.push(ProfileRuntimeStatusSnapshot {
+            profile_id,
+            lease,
+            runtime,
+        });
+    }
+    Ok(Json(snapshots))
+}
+
 async fn runtime_started(
     State(state): State<ApiState>,
     Path(profile_id): Path<String>,
@@ -5310,6 +5422,24 @@ async fn runtime_stopped(
         "stopped",
         "profile.stop",
         "profile.runtime.stopped",
+    )
+    .await
+}
+
+async fn runtime_syncing(
+    State(state): State<ApiState>,
+    Path(profile_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<RuntimeProjectionInput>,
+) -> Result<Response, Response> {
+    set_runtime_projection(
+        state,
+        profile_id,
+        headers,
+        input,
+        "syncing",
+        "profile.stop",
+        "profile.runtime.syncing",
     )
     .await
 }
@@ -10233,7 +10363,6 @@ mod tests {
             buglogin_domain::organization::OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
-                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -10251,9 +10380,9 @@ mod tests {
                         max_members: 10,
                         max_storage_bytes: 10,
                         offline_entitled: false,
+                        default_extension_group_id: None,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
-                    default_extension_group_id: None,
                 },
             )
             .unwrap();
@@ -10351,7 +10480,6 @@ mod tests {
             buglogin_domain::organization::OrganizationPolicy {
                 max_workspaces: 1,
                 offline_entitled: false,
-                default_extension_groups_by_workspace: Default::default(),
             },
         )
         .unwrap();
@@ -10369,9 +10497,9 @@ mod tests {
                         max_members: 10,
                         max_storage_bytes: 10,
                         offline_entitled: false,
+                        default_extension_group_id: None,
                     },
                     created_at: "2026-10-15T00:00:00Z".into(),
-                    default_extension_group_id: None,
                 },
             )
             .unwrap();
@@ -10493,9 +10621,9 @@ mod tests {
                             max_members: 10,
                             max_storage_bytes: 6,
                             offline_entitled: false,
+                            default_extension_group_id: None,
                         },
                         created_at: "2026-10-15T00:00:00Z".into(),
-                        default_extension_group_id: None,
                     },
                     expected_revision: 1,
                 },

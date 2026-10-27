@@ -85,6 +85,7 @@ import { MOTION_EASE_OUT } from "@/lib/motion";
 import { showErrorToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import type { WayfernConfig, WayfernOS } from "@/types";
+import { createTauriDesktopApi } from "../../apps/desktop/src/bridge";
 
 const PASSWORD_MIN_LEN = 8;
 type BrowserKernel = "wayfern";
@@ -110,6 +111,7 @@ interface CreateProfileDialogProps {
   isOpen: boolean;
   onClose: () => void;
   workspaceId: string | null;
+  organizationId?: string | null;
   onCreateProfile: (profileData: {
     name: string;
     idempotencyKey: string;
@@ -134,6 +136,7 @@ export function CreateProfileDialog({
   isOpen,
   onClose,
   workspaceId,
+  organizationId,
   onCreateProfile,
   selectedGroupId,
 }: CreateProfileDialogProps) {
@@ -192,6 +195,10 @@ export function CreateProfileDialog({
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [selectedExtensionGroupId, setSelectedExtensionGroupId] =
     useState<string>();
+  const [isLoadingExtensionConfig, setIsLoadingExtensionConfig] =
+    useState(false);
+  const [extensionConfigLoadFailed, setExtensionConfigLoadFailed] =
+    useState(false);
   const [extensionGroups, setExtensionGroups] = useState<
     { id: string; name: string; extension_ids: string[] }[]
   >([]);
@@ -274,24 +281,53 @@ export function CreateProfileDialog({
       .then(setProfileGroups)
       .catch(() => setProfileGroups([]));
 
+    let active = true;
+    setExtensionConfigLoadFailed(false);
     if (!workspaceId) {
       setExtensionGroups([]);
+      setSelectedExtensionGroupId(undefined);
+      setIsLoadingExtensionConfig(false);
     } else {
-      void invoke<{ id: string; name: string; extension_ids: string[] }[]>(
-        "list_extension_groups",
-        { workspaceId },
-      )
-        .then(setExtensionGroups)
-        .catch((error) => {
-          console.error("Failed to load extension groups:", error);
-          setExtensionGroups([]);
-        });
+      setIsLoadingExtensionConfig(true);
+      void (async () => {
+        try {
+          const groups = await invoke<
+            { id: string; name: string; extension_ids: string[] }[]
+          >("list_extension_groups", { workspaceId });
+          if (!active) return;
+          setExtensionGroups(groups);
+          const record = organizationId
+            ? await createTauriDesktopApi().getWorkspaceRecord({
+                organizationId,
+                workspaceId,
+              })
+            : null;
+          if (!active) return;
+          const defaultGroupId =
+            record?.workspace.policy.defaultExtensionGroupId;
+          setSelectedExtensionGroupId(
+            defaultGroupId &&
+              groups.some((group) => group.id === defaultGroupId)
+              ? defaultGroupId
+              : undefined,
+          );
+        } catch (error) {
+          console.error("Failed to load workspace extension defaults:", error);
+          if (active) {
+            setExtensionGroups([]);
+            setExtensionConfigLoadFailed(true);
+          }
+        } finally {
+          if (active) setIsLoadingExtensionConfig(false);
+        }
+      })();
     }
 
     return () => {
+      active = false;
       versionRequestRef.current += 1;
     };
-  }, [isOpen, workspaceId, loadReleaseTypes]);
+  }, [isOpen, workspaceId, organizationId, loadReleaseTypes]);
 
   useEffect(() => {
     if (selectedGroupId && selectedGroupId !== "__all__") {
@@ -328,7 +364,11 @@ export function CreateProfileDialog({
     !downloadedVersions.includes(creatableVersion);
   // A profile is metadata; the selected browser runtime is needed only when
   // launching it. Let users save profiles while that runtime downloads.
-  const isCreateDisabled = !profileName.trim() || isCreating;
+  const isCreateDisabled =
+    !profileName.trim() ||
+    isCreating ||
+    isLoadingExtensionConfig ||
+    extensionConfigLoadFailed;
   const hostOs = getCurrentOS();
   const selectedOs = wayfernConfig.os ?? hostOs;
   const crossOs = selectedOs !== hostOs;
@@ -1335,6 +1375,14 @@ export function CreateProfileDialog({
 
         {/* Footer */}
         <DialogFooter className="items-center justify-between pt-2 border-t border-border/50 shrink-0">
+          {extensionConfigLoadFailed ? (
+            <p
+              role="alert"
+              className="mr-auto max-w-64 text-xs text-destructive"
+            >
+              {t("createProfile.extensionGroupsLoadFailed")}
+            </p>
+          ) : null}
           <Button
             variant="subtle"
             size="sm"

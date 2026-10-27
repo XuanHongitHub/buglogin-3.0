@@ -33,17 +33,13 @@ fn wayfern_validates_checksum_and_builds_launch_specification() {
     let spec = adapter
         .launch_specification(&binary, &profile_path, &["--headless".into()])
         .unwrap();
-    let profile_data_dir = profile_path.to_string_lossy();
-    let profile_data_dir = profile_data_dir
-        .strip_prefix(r"\\?\")
-        .unwrap_or(profile_data_dir.as_ref());
     assert_eq!(adapter.runtime(), Runtime::Wayfern);
     assert!(adapter.capabilities().contains(&RuntimeCapability::Proxy));
     assert_eq!(spec.executable, binary_path);
     assert_eq!(
         spec.args,
         vec![
-            format!("--user-data-dir={profile_data_dir}"),
+            format!("--user-data-dir={}", profile_path.to_string_lossy()),
             "--headless".to_owned(),
         ]
     );

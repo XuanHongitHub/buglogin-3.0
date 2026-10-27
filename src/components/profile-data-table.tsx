@@ -1949,6 +1949,10 @@ export function ProfilesDataTable({
       }
     >
   >({});
+  const syncStatusesRef = React.useRef(syncStatuses);
+  syncStatusesRef.current = syncStatuses;
+  const syncStatusRequests = React.useRef(new Set<string>());
+  const syncStatusRevisions = React.useRef(new Map<string, number>());
 
   // Country proxy creation state (for inline proxy creation in dropdown)
   const [countries, setCountries] = React.useState<LocationItem[]>([]);
@@ -2122,9 +2126,12 @@ export function ProfilesDataTable({
         profile.sync_mode === "Encrypted" ||
         profile.sync_mode === "Regular";
       if (!managed) return;
-      const current = syncStatuses[profileId];
+      const current = syncStatusesRef.current[profileId];
       if (
-        current?.status === "syncing" ||
+        syncStatusRequests.current.has(profileId) ||
+        (!force &&
+          current?.status === "syncing" &&
+          runningProfiles.has(profileId)) ||
         (!force &&
           current?.source === "api" &&
           current.checkedAt &&
@@ -2132,7 +2139,8 @@ export function ProfilesDataTable({
       ) {
         return;
       }
-      if (runningProfiles.has(profileId)) {
+      if (!force && runningProfiles.has(profileId)) {
+        if (current?.status === "waiting") return;
         setSyncStatuses((previous) => ({
           ...previous,
           [profileId]: {
@@ -2142,6 +2150,8 @@ export function ProfilesDataTable({
         }));
         return;
       }
+      syncStatusRequests.current.add(profileId);
+      const revision = syncStatusRevisions.current.get(profileId) ?? 0;
       try {
         const remote = await invoke<{
           status: string;
@@ -2149,6 +2159,8 @@ export function ProfilesDataTable({
           can_open: boolean;
           can_open_error?: string | null;
         }>("profile_sync_status_get", { profileId });
+        if ((syncStatusRevisions.current.get(profileId) ?? 0) !== revision)
+          return;
         setSyncStatuses((previous) => ({
           ...previous,
           [profileId]: {
@@ -2164,6 +2176,8 @@ export function ProfilesDataTable({
           },
         }));
       } catch (error) {
+        if ((syncStatusRevisions.current.get(profileId) ?? 0) !== revision)
+          return;
         console.error("Failed to refresh profile sync status:", error);
         setSyncStatuses((previous) => ({
           ...previous,
@@ -2174,22 +2188,29 @@ export function ProfilesDataTable({
             source: "api",
           },
         }));
+      } finally {
+        syncStatusRequests.current.delete(profileId);
       }
     },
-    [profiles, runningProfiles, syncStatuses],
+    [profiles, runningProfiles],
   );
 
   React.useEffect(() => {
     if (!browserState.isClient) return;
-    for (const profile of profiles) {
-      if (
-        profile.sync_mode === "managed" ||
-        profile.sync_mode === "Encrypted" ||
-        profile.sync_mode === "Regular"
-      ) {
-        void refreshProfileSyncStatus(profile.id);
+    const refresh = () => {
+      for (const profile of profiles) {
+        if (
+          profile.sync_mode === "managed" ||
+          profile.sync_mode === "Encrypted" ||
+          profile.sync_mode === "Regular"
+        ) {
+          void refreshProfileSyncStatus(profile.id);
+        }
       }
-    }
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 10_000);
+    return () => window.clearInterval(interval);
   }, [browserState.isClient, profiles, refreshProfileSyncStatus]);
 
   // Listen for sync status events
@@ -2232,9 +2253,13 @@ export function ProfilesDataTable({
           error?: string;
         }>("profile-sync-status", (event) => {
           const { profile_id, status, error } = event.payload;
+          syncStatusRevisions.current.set(
+            profile_id,
+            (syncStatusRevisions.current.get(profile_id) ?? 0) + 1,
+          );
           setSyncStatuses((prev) => ({
             ...prev,
-            [profile_id]: { status, error },
+            [profile_id]: { status, error, checkedAt: Date.now() },
           }));
           if (status !== "syncing") {
             void refreshProfileSyncStatus(profile_id, true);
@@ -2877,7 +2902,6 @@ export function ProfilesDataTable({
             : meta.browserState.canLaunchProfile(profile) &&
               !isPendingRemotePull &&
               !isLockedByAnother &&
-              !isLockUnknown &&
               !isSyncing;
           const lockEmail = meta.getProfileLockEmail(profile.id);
           const lockInfo = meta.getProfileLockInfo(profile.id);
@@ -2887,21 +2911,26 @@ export function ProfilesDataTable({
               })
             : "";
           const lockOwnerLabel = `${lockEmail ?? ""}${expiryLabel}`;
-          const tooltipContent = isRunningRemotely
-            ? lockEmail
-              ? meta.t("profiles.remote.runningTooltipOwner", {
-                  owner: lockEmail,
+          const tooltipContent =
+            lockInfo?.activity === "syncing"
+              ? meta.t("sync.team.remoteSyncing", {
+                  owner: lockEmail || meta.t("sync.team.anotherDevice"),
                 })
-              : meta.t("profiles.remote.runningTooltip")
-            : isPendingRemotePull
-              ? meta.t("profiles.remote.pendingSyncTooltip")
-              : isLockedByAnother
-                ? meta.t("sync.team.cannotLaunchLocked", {
-                    owner: lockOwnerLabel,
-                  })
-                : isLockUnknown
-                  ? meta.t("sync.team.leaseUnknown")
-                  : meta.browserState.getLaunchTooltipContent(profile);
+              : isRunningRemotely
+                ? lockEmail
+                  ? meta.t("profiles.remote.runningTooltipOwner", {
+                      owner: lockEmail,
+                    })
+                  : meta.t("profiles.remote.runningTooltip")
+                : isPendingRemotePull
+                  ? meta.t("profiles.remote.pendingSyncTooltip")
+                  : isLockedByAnother
+                    ? meta.t("sync.team.cannotLaunchLocked", {
+                        owner: lockOwnerLabel,
+                      })
+                    : isLockUnknown
+                      ? meta.t("sync.team.leaseUnknown")
+                      : meta.browserState.getLaunchTooltipContent(profile);
           const openTooltipContent =
             syncEntry?.can_open === false
               ? formatError(
@@ -3013,7 +3042,7 @@ export function ProfilesDataTable({
                           ? tooltipContent
                           : isRunning
                             ? meta.t("profiles.actions.stop")
-                            : isLockedByAnother || isLockUnknown
+                            : isLockedByAnother
                               ? tooltipContent
                               : meta.t("profiles.actions.launch")
                       }
@@ -3036,24 +3065,12 @@ export function ProfilesDataTable({
                       <span className="grid place-items-center">
                         {isLaunching || isStopping ? (
                           <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
-                        ) : isRunningRemotely ||
-                          isLockedByAnother ||
-                          isLockUnknown ? (
-                          <LuLock
-                            className={cn(
-                              "size-3.5",
-                              isLockUnknown && "text-warning",
-                            )}
-                          />
+                        ) : isRunningRemotely || isLockedByAnother ? (
+                          <LuLock className={cn("size-3.5")} />
                         ) : isRunning ? (
                           <LuSquare className="size-3 fill-current" />
-                        ) : isLockedByAnother || isLockUnknown ? (
-                          <LuLock
-                            className={cn(
-                              "size-3.5",
-                              isLockUnknown && "text-warning",
-                            )}
-                          />
+                        ) : isLockedByAnother ? (
+                          <LuLock className="size-3.5" />
                         ) : (
                           <LuPlay className="size-3 translate-x-px fill-current" />
                         )}

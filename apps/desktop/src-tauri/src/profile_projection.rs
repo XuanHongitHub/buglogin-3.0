@@ -792,13 +792,10 @@ impl ProfileProjection {
         } else {
             None
         };
-        let key = client_key
-            .or(unwrapped_key.as_ref())
-            .ok_or_else(|| problem("profile_key_unavailable", "Profile key is unavailable"))?;
-        if unwrapped_key
-            .as_ref()
-            .is_some_and(|unwrapped| client_key != Some(unwrapped))
-        {
+        let key = client_key.or(unwrapped_key.as_ref()).ok_or_else(|| {
+            problem("profile_key_unavailable", "Profile key is unavailable")
+        })?;
+        if unwrapped_key.as_ref().is_some_and(|unwrapped| client_key != Some(unwrapped)) {
             return Err(problem(
                 "workspace_key_vault_mismatch",
                 "Stored profile key does not match the active manifest",

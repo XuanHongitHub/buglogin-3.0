@@ -770,9 +770,9 @@ export function ManagementResources({
                           if (kind === "groups") {
                             setDetailGroup(item.id);
                             setDetailTab("members");
-                          } else {
-                            void open("edit", [item.id]);
+                            return;
                           }
+                          void open("edit", [item.id]);
                         }}
                       >
                         {item.name}
@@ -1063,13 +1063,19 @@ export function ManagementResources({
                   {kind === "profiles" && (
                     <div className="flex items-center gap-2 text-sm">
                       <Checkbox
+                        id="resource-change-name"
                         aria-label={t("changeName")}
                         checked={changeName}
                         onCheckedChange={(value) =>
                           setChangeName(value === true)
                         }
                       />
-                      <span>{t("changeName")}</span>
+                      <Label
+                        htmlFor="resource-change-name"
+                        className="cursor-pointer"
+                      >
+                        {t("changeName")}
+                      </Label>
                     </div>
                   )}
                   {(kind === "groups" || changeName) && (
@@ -1112,13 +1118,19 @@ export function ManagementResources({
                       </p>
                       <div className="flex items-center gap-2 text-sm">
                         <Checkbox
+                          id="resource-change-note"
                           aria-label={t("changeNote")}
                           checked={changeNote}
                           onCheckedChange={(value) =>
                             setChangeNote(value === true)
                           }
                         />
-                        <span>{t("changeNote")}</span>
+                        <Label
+                          htmlFor="resource-change-note"
+                          className="cursor-pointer"
+                        >
+                          {t("changeNote")}
+                        </Label>
                       </div>
                       {changeNote && (
                         <Textarea
@@ -1130,13 +1142,19 @@ export function ManagementResources({
                       )}
                       <div className="flex items-center gap-2 text-sm">
                         <Checkbox
+                          id="resource-change-tags"
                           aria-label={t("changeTags")}
                           checked={changeTags}
                           onCheckedChange={(value) =>
                             setChangeTags(value === true)
                           }
                         />
-                        <span>{t("changeTags")}</span>
+                        <Label
+                          htmlFor="resource-change-tags"
+                          className="cursor-pointer"
+                        >
+                          {t("changeTags")}
+                        </Label>
                       </div>
                       {changeTags && (
                         <Input
@@ -1176,6 +1194,7 @@ export function ManagementResources({
                         className="flex items-center gap-2 py-1 text-sm"
                       >
                         <Checkbox
+                          id={`group-${record.group.id}`}
                           aria-label={record.group.name}
                           checked={chosenGroups.includes(record.group.id)}
                           onCheckedChange={() =>
@@ -1186,7 +1205,12 @@ export function ManagementResources({
                             )
                           }
                         />
-                        {record.group.name}
+                        <Label
+                          htmlFor={`group-${record.group.id}`}
+                          className="cursor-pointer"
+                        >
+                          {record.group.name}
+                        </Label>
                       </div>
                     ))}
                   </div>
@@ -1272,6 +1296,7 @@ export function ManagementResources({
                                 className="flex items-center gap-2 py-1 text-sm"
                               >
                                 <Checkbox
+                                  id={`member-${member.id}`}
                                   aria-label={memberLabel(
                                     member,
                                     t("unknownIdentity"),
@@ -1285,9 +1310,12 @@ export function ManagementResources({
                                     )
                                   }
                                 />
-                                <span className="truncate">
+                                <Label
+                                  htmlFor={`member-${member.id}`}
+                                  className="truncate cursor-pointer"
+                                >
                                   {memberLabel(member, t("unknownIdentity"))}
-                                </span>
+                                </Label>
                               </div>
                             ))}
                           {!members.length && (

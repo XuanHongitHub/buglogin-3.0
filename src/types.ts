@@ -176,6 +176,7 @@ export interface ProfileLockInfo {
   ownerLabel?: string;
   lockedAt: string;
   expiresAt?: string;
+  activity?: "running" | "syncing" | "locked";
 }
 
 export interface CloudAuthState {

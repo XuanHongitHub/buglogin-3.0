@@ -1,32 +1,12 @@
 {
-  "snapshotId": "sha256:cc138682541897f50d5c1763d9a9180b22c833139adbf1a52f3af8dd5dca9590",
-  "sourceTreeSha256": "cc138682541897f50d5c1763d9a9180b22c833139adbf1a52f3af8dd5dca9590",
-  "totalBytes": 419,
-  "files": [
-    {
-      "path": "profiles-deleted/13dead00-0000-4000-8000-000000000013/metadata.json",
-      "bytes": 101,
-      "sha256": "7fded9423a45ca01ecbdcc5df93ef82257eaad5defe82eece6553dd49dceb6c1"
-    },
-    {
-      "path": "profiles-deleted/13dead00-0000-4000-8000-000000000013/profile/Preferences",
-      "bytes": 49,
-      "sha256": "dfde01ac4c848e3dda9534dbe943bb6c7eeb987a063ecc6fe6b01aa8eb2cc56a"
-    },
-    {
-      "path": "profiles/13000000-0000-4000-8000-000000000013/metadata.json",
-      "bytes": 90,
-      "sha256": "1a69df177226fc72cf569fc74ae33e548b47edecbff5d02e5afd788b20a5e350"
-    },
-    {
-      "path": "profiles/13000000-0000-4000-8000-000000000013/profile/Preferences",
-      "bytes": 56,
-      "sha256": "6c8b6d22fd0cf71ac1607dbfdef49411ef362a670a905e7542ffaa51f82224e0"
-    },
-    {
-      "path": "version.json",
-      "bytes": 123,
-      "sha256": "d9cce0c756b643e67ab47da27969a5dc46aa83456adfc319b8100623a38b18c3"
-    }
+  "snapshotId":"sha256:cc138682541897f50d5c1763d9a9180b22c833139adbf1a52f3af8dd5dca9590",
+  "sourceTreeSha256":"cc138682541897f50d5c1763d9a9180b22c833139adbf1a52f3af8dd5dca9590",
+  "totalBytes":419,
+  "files":[
+    {"path":"profiles-deleted/13dead00-0000-4000-8000-000000000013/metadata.json","bytes":101,"sha256":"7fded9423a45ca01ecbdcc5df93ef82257eaad5defe82eece6553dd49dceb6c1"},
+    {"path":"profiles-deleted/13dead00-0000-4000-8000-000000000013/profile/Preferences","bytes":49,"sha256":"dfde01ac4c848e3dda9534dbe943bb6c7eeb987a063ecc6fe6b01aa8eb2cc56a"},
+    {"path":"profiles/13000000-0000-4000-8000-000000000013/metadata.json","bytes":90,"sha256":"1a69df177226fc72cf569fc74ae33e548b47edecbff5d02e5afd788b20a5e350"},
+    {"path":"profiles/13000000-0000-4000-8000-000000000013/profile/Preferences","bytes":56,"sha256":"6c8b6d22fd0cf71ac1607dbfdef49411ef362a670a905e7542ffaa51f82224e0"},
+    {"path":"version.json","bytes":123,"sha256":"d9cce0c756b643e67ab47da27969a5dc46aa83456adfc319b8100623a38b18c3"}
   ]
 }

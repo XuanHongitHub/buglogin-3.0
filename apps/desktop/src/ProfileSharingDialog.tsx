@@ -369,7 +369,7 @@ export function ProfileSharingDialog({
   return (
     <Dialog open={open} onOpenChange={close}>
       <DialogContent
-        className="max-h-[85vh] sm:max-w-2xl p-5 flex flex-col overflow-hidden"
+        className="flex max-h-[min(88vh,56rem)] max-w-[min(64rem,calc(100%-2rem))] flex-col overflow-hidden p-4 sm:p-5"
         aria-describedby="profile-sharing-description"
       >
         <DialogHeader className="border-b border-border/50 pb-3 shrink-0">
@@ -477,11 +477,11 @@ export function ProfileSharingDialog({
         {activeTab === "grant" && (
           <div className="flex flex-col flex-1 min-h-0 space-y-3 overflow-y-auto pr-1 pt-1">
             <section
-              className="space-y-3 rounded-xl border border-border/70 bg-card/60 p-3 shadow-2xs"
+              className="grid min-w-0 gap-4 rounded-xl border border-border/70 bg-card/60 p-3 shadow-2xs lg:grid-cols-[minmax(0,1.1fr)_minmax(19rem,0.9fr)] lg:gap-5 lg:p-4"
               aria-labelledby="profile-sharing-grant-heading"
             >
               {/* Searchable Member Picker */}
-              <div className="space-y-2">
+              <div className="min-w-0 space-y-2 lg:row-span-2">
                 <div className="flex items-center justify-between">
                   <Label className="text-xs font-semibold text-foreground">
                     {t("profileSharing.member", {
@@ -521,16 +521,24 @@ export function ProfileSharingDialog({
                       Lọc:
                     </span>
                     {(
-                      ["all", "admin", "lead", "operator", "member"] as const
+                      [
+                        "all",
+                        "owner",
+                        "admin",
+                        "lead",
+                        "operator",
+                        "member",
+                      ] as const
                     ).map((r) => {
-                      const label =
-                        r === "all"
-                          ? "Tất cả"
-                          : r === "admin"
-                            ? "Admin"
-                            : r === "operator"
-                              ? "Lead"
-                              : "Member";
+                      const labels = {
+                        all: "Tất cả",
+                        owner: "Owner",
+                        admin: "Admin",
+                        lead: "Lead",
+                        operator: "Operator",
+                        member: "Member",
+                      };
+                      const label = labels[r];
                       const active = roleFilter === r;
                       return (
                         <button
@@ -552,7 +560,7 @@ export function ProfileSharingDialog({
                 </div>
 
                 {/* Member Selection List */}
-                <div className="max-h-36 overflow-y-auto rounded-lg border border-border/70 bg-background/50 divide-y divide-border/40 p-1 space-y-0.5">
+                <div className="max-h-[min(48vh,28rem)] min-h-32 overflow-y-auto rounded-lg border border-border/70 bg-background/50 divide-y divide-border/40 p-1 space-y-0.5">
                   {filteredActiveMembers.length === 0 ? (
                     <div className="py-5 text-center text-xs text-muted-foreground">
                       Không tìm thấy thành viên phù hợp
@@ -639,13 +647,13 @@ export function ProfileSharingDialog({
               </div>
 
               {/* Permission Selector */}
-              <div className="space-y-1.5">
+              <div className="min-w-0 space-y-1.5">
                 <Label className="text-xs font-medium text-foreground">
                   {t("profileSharing.permission", {
                     defaultValue: "Mức quyền truy cập",
                   })}
                 </Label>
-                <div className="grid grid-cols-2 gap-2.5">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <button
                     type="button"
                     onClick={() => setPermission("read")}
@@ -697,8 +705,8 @@ export function ProfileSharingDialog({
               </div>
 
               {/* Action Button */}
-              <div className="flex items-center justify-between pt-2 border-t border-border/40">
-                <span className="text-xs text-muted-foreground truncate max-w-[320px]">
+              <div className="flex min-w-0 flex-col gap-3 border-t border-border/40 pt-3 sm:flex-row sm:items-center sm:justify-between">
+                <span className="min-w-0 text-xs text-muted-foreground sm:line-clamp-2">
                   {selectedMember && selectedResolved ? (
                     <span>
                       Sẽ cấp quyền{" "}

@@ -656,7 +656,31 @@ impl RemoteApiClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().await.map_err(|error| {
+        let mut attempt = 0;
+        let response = loop {
+            let next = request
+                .try_clone()
+                .ok_or_else(|| client_problem("api_request_invalid", 400))?;
+            match next.send().await {
+                Ok(response)
+                    if retry_safe
+                        && attempt == 0
+                        && matches!(response.status().as_u16(), 502 | 503 | 504) =>
+                {
+                    attempt += 1;
+                    drop(response);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(error)
+                    if retry_safe && attempt == 0 && (error.is_connect() || error.is_timeout()) =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                outcome => break outcome,
+            }
+        }
+        .map_err(|error| {
             Problem::new(
                 "api_unavailable",
                 "BugLogin API is unavailable",
@@ -667,7 +691,11 @@ impl RemoteApiClient {
         })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(read_problem(response, correlation, retry_safe).await);
+            let mut problem = read_problem(response, correlation, retry_safe).await;
+            if status == StatusCode::NOT_FOUND {
+                problem = problem.with_field("apiRoute", api_route_template(path));
+            }
+            return Err(problem);
         }
         if status == StatusCode::NO_CONTENT {
             return serde_json::from_value(Value::Null)
@@ -720,8 +748,13 @@ impl RemoteApiClient {
             )
             .retryable(error.is_connect() || error.is_timeout())
         })?;
-        if !response.status().is_success() {
-            return Err(read_problem(response, correlation, true).await);
+        let status = response.status();
+        if !status.is_success() {
+            let mut problem = read_problem(response, correlation, true).await;
+            if status == StatusCode::NOT_FOUND {
+                problem = problem.with_field("apiRoute", api_route_template(path));
+            }
+            return Err(problem);
         }
         response.json().await.map_err(|_| {
             Problem::new(
@@ -813,8 +846,13 @@ impl RemoteApiClient {
                 )
                 .retryable(error.is_connect() || error.is_timeout())
             })?;
-        if !response.status().is_success() {
-            return Err(read_problem(response, correlation, true).await);
+        let status = response.status();
+        if !status.is_success() {
+            let mut problem = read_problem(response, correlation, true).await;
+            if status == StatusCode::NOT_FOUND {
+                problem = problem.with_field("apiRoute", api_route_template(path));
+            }
+            return Err(problem);
         }
         if response
             .content_length()
@@ -2002,6 +2040,28 @@ impl RemoteApiClient {
         )
         .await
     }
+    pub async fn runtime_syncing(
+        &self,
+        profile: &ProfileId,
+        device_id: &str,
+        generation: u64,
+        checksum: &str,
+        lease: &LeaseGrant,
+        idem: &str,
+        correlation: &str,
+    ) -> Result<(), Problem> {
+        self.runtime_projection(
+            "syncing",
+            profile,
+            device_id,
+            generation,
+            checksum,
+            lease,
+            idem,
+            correlation,
+        )
+        .await
+    }
     async fn runtime_projection(
         &self,
         state: &str,
@@ -2332,6 +2392,27 @@ impl RemoteApiClient {
                     correlation,
                 )
                 .await?
+            }
+            "profile_runtime_status_batch" => {
+                let workspace_id = path_arg(&payload, "workspaceId", correlation)?;
+                let profile_ids = payload
+                    .get("profileIds")
+                    .and_then(Value::as_array)
+                    .filter(|ids| !ids.is_empty() && ids.len() <= 250)
+                    .ok_or_else(|| bad_input("profileIds", correlation))?;
+                let mut path = format!("/v1/workspaces/{workspace_id}/profile-runtime-status?");
+                for (index, profile_id) in profile_ids.iter().enumerate() {
+                    let profile_id = profile_id
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| bad_input("profileIds", correlation))?;
+                    if index > 0 {
+                        path.push('&');
+                    }
+                    path.push_str("profileId=");
+                    path.push_str(&urlencoding(profile_id));
+                }
+                self.get::<Value>(&path, correlation).await?
             }
             "resource_register" => { let resource=payload.get("resource").cloned().ok_or_else(||bad_input("resource",correlation))?; let ws=resource.get("workspaceId").and_then(Value::as_str).filter(|value|!value.is_empty()).ok_or_else(||bad_input("resource.workspaceId",correlation))?; let ws=path_arg(&json!({"workspaceId":ws}),"workspaceId",correlation)?; self.send::<Value>(Method::POST,&format!("/v1/workspaces/{ws}/resources"),Some(resource),correlation,idem,None,&[]).await? },
             "cookie_list" => { let id=path_arg(&payload,"profileId",correlation)?; let ws=path_arg(&payload,"workspaceId",correlation)?; self.get::<Value>(&format!("/v1/profiles/{id}/cookies?workspaceId={ws}"),correlation).await? },
@@ -2829,6 +2910,26 @@ fn request_retry_safe(method: &Method, path: &str, has_idempotency_key: bool) ->
         || matches!(path, "/v1/auth/device/token" | "/v1/proxies/parse")
 }
 
+fn api_route_template(path: &str) -> String {
+    let path = path.split('?').next().unwrap_or_default();
+    let mut redact_next = false;
+    path.split('/')
+        .map(|segment| {
+            if redact_next {
+                redact_next = false;
+                return ":id";
+            }
+            redact_next = matches!(
+                segment,
+                "accounts" | "workspaces" | "profiles" | "resources" | "members"
+                    | "groups" | "extensions" | "proxies" | "devices" | "sessions"
+            );
+            segment
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 async fn parse_response(response: reqwest::Response, correlation: &str) -> Result<Value, Problem> {
     let status = response.status();
     if !status.is_success() {
@@ -2992,6 +3093,7 @@ fn legacy_workspace_update(
                 }
                 "maxStorageBytes" => value.as_u64().is_some(),
                 "offlineEntitled" => value.is_boolean(),
+                "defaultExtensionGroupId" => value.is_null() || value.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 128),
                 _ => false,
             };
             if !valid {
@@ -3147,6 +3249,7 @@ fn command_id(name: &str) -> &str {
         "resource_get" => "resource.get",
         "resource_lease_get" => "resource.lease.get",
         "profile_runtime_get" => "profile.runtime.get",
+        "profile_runtime_status_batch" => "profile.runtime.status.batch",
         "resource_register" => "resource.register",
         "grant_list" => "grant.list.legacy",
         "grant_list_page" => "grant.list.page",
@@ -3177,8 +3280,8 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::{
         FeedbackSubmission, MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, canonical_workspace_update,
-        legacy_workspace_update, manifest_commit_idempotency_key, optional_bool, optional_cursor,
-        optional_page_limit, request_retry_safe,
+        api_route_template, legacy_workspace_update, manifest_commit_idempotency_key, optional_bool,
+        optional_cursor, optional_page_limit, request_retry_safe,
     };
     use crate::clock::unix_time_seconds_at;
     use crate::profile_runtime::DesktopSyncBackend;
@@ -3195,6 +3298,16 @@ mod tests {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn api_route_template_redacts_resource_ids_and_query_values() {
+        assert_eq!(
+            api_route_template(
+                "/v1/workspaces/ws_sensitive/resources/res_sensitive/manifest?repairStaleProxy=true"
+            ),
+            "/v1/workspaces/:id/resources/:id/manifest"
+        );
+    }
 
     #[test]
     fn legacy_workspace_patch_is_merged_with_scoped_record_revision() {
@@ -3578,6 +3691,56 @@ mod tests {
             "/v1/auth/device/refresh",
             false
         ));
+    }
+
+    #[tokio::test]
+    async fn transport_retries_transient_safe_requests_without_replaying_unsafe_posts() {
+        for (method, key, expected_requests) in [
+            (reqwest::Method::GET, None, 2),
+            (reqwest::Method::POST, None, 1),
+            (reqwest::Method::POST, Some("transport-retry-test"), 2),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for attempt in 0..expected_requests {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let _ = read_http_request(&mut stream).await;
+                    let (status, body) = if attempt == 0 {
+                        ("502 Bad Gateway", "upstream temporarily unavailable")
+                    } else {
+                        ("200 OK", r#"{"ok":true}"#)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            let client =
+                RemoteApiClient::new_unauthenticated(&format!("http://{address}")).unwrap();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.send::<Value>(
+                    method,
+                    "/v1/profiles",
+                    None,
+                    "cor_transport_retry",
+                    key,
+                    None,
+                    &[],
+                ),
+            )
+            .await
+            .unwrap();
+            if expected_requests == 2 {
+                assert_eq!(result.unwrap(), json!({"ok": true}));
+            } else {
+                assert_eq!(result.unwrap_err().status, 502);
+            }
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

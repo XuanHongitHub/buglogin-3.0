@@ -448,23 +448,30 @@ paths:
     parameters: [{ $ref: '#/components/parameters/ProfileId' }]
     post:
       operationId: profile.sync.managedkey.enroll
+      x-buglogin-internal: true
       description: Rust desktop device session only. Wraps the resource data key using the configured service key; requires current profile.update authorization. The submitted key is never returned to application UI.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/ProfileManagedKeyEnrollBody' }
+            schema:
+              type: object
+              required: [resourceKey]
+              properties:
+                resourceKey: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+              additionalProperties: false
       responses:
-        "200": { description: Key envelope enrolled, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileManagedKeyEnrollReceipt' } } } }
+        "200": { description: Key envelope enrolled, content: { application/json: { schema: { type: object, required: [enrolled, keyVersion], properties: { enrolled: { type: boolean }, keyVersion: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } } }
         "403": { $ref: '#/components/responses/Problem' }
         "409": { $ref: '#/components/responses/Problem' }
         "503": { $ref: '#/components/responses/Problem' }
     get:
       operationId: profile.sync.managedkey.fetch
+      x-buglogin-internal: true
       description: Rust desktop device session only. Requires current profile.read authorization; returns the active resource key for OS-vault persistence. Never call from React, web, or MCP clients.
       responses:
-        "200": { description: Active resource key delivered to the Rust desktop, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileManagedKeyEnvelope' } } } }
+        "200": { description: Active resource key delivered to the Rust desktop, content: { application/json: { schema: { type: object, required: [resourceKey], properties: { resourceKey: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false } } } }
         "403": { $ref: '#/components/responses/Problem' }
         "409": { $ref: '#/components/responses/Problem' }
         "503": { $ref: '#/components/responses/Problem' }
@@ -485,6 +492,18 @@ paths:
       operationId: profile.runtime.get
       parameters: [{ $ref: '#/components/parameters/ProfileId' }]
       responses: { "200": { description: Runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } } }
+  /v1/workspaces/{workspaceId}/profile-runtime-status:
+    get:
+      operationId: profile.runtime.status.batch
+      parameters:
+        - { $ref: '#/components/parameters/WorkspaceId' }
+        - { $ref: '#/components/parameters/ProfileIdBatch' }
+      responses:
+        "200": { description: Runtime and coordination status for authorized profiles, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileRuntimeStatusBatch' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
   /v1/profiles/{profileId}/runtime/started:
     put:
       operationId: profile.runtime.started
@@ -497,6 +516,12 @@ paths:
       parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjectionInput' } } } }
       responses: { "200": { description: Stopped runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } }, "409": { $ref: '#/components/responses/Problem' } }
+  /v1/profiles/{profileId}/runtime/syncing:
+    put:
+      operationId: profile.runtime.syncing
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjectionInput' } } } }
+      responses: { "200": { description: Syncing runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } }, "409": { $ref: '#/components/responses/Problem' } }
   /v1/profiles/{profileId}/groups:
     put:
       operationId: profile.groups.replace
@@ -1534,6 +1559,7 @@ components:
     WorkspaceId: { name: workspaceId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     ExtensionGroupId: { name: extensionGroupId, in: path, required: true, schema: { $ref: '#/components/schemas/CanonicalId' } }
     ProfileId: { name: profileId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    ProfileIdBatch: { name: profileId, in: query, required: true, style: form, explode: true, schema: { type: array, minItems: 1, maxItems: 250, items: { $ref: '#/components/schemas/CanonicalId' } } }
     MemberId: { name: memberId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     MemberInvitationId: { name: invitationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     ResourceId: { name: resourceId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
@@ -1617,10 +1643,6 @@ components:
     EventFilterInput: { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, after: { type: [string, "null"], minLength: 1 }, limit: { type: integer, minimum: 1, maximum: 1000, default: 100 } }, additionalProperties: false }
     ProfileListInput: { type: object, properties: { includeArchived: { type: boolean, default: false }, limit: { type: integer, minimum: 1, maximum: 100, default: 100 }, cursor: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     ProfileIdInput: { type: object, required: [profileId], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
-    ProfileManagedKeyEnrollInput: { type: object, required: [profileId, resourceKey], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, resourceKey: { type: string, pattern: '^[0-9a-fA-F]{64}$', writeOnly: true } }, additionalProperties: false, description: Rust desktop device only; the resource key is never returned to UI clients. }
-    ProfileManagedKeyEnrollBody: { type: object, required: [resourceKey], properties: { resourceKey: { type: string, pattern: '^[0-9a-fA-F]{64}$', writeOnly: true } }, additionalProperties: false }
-    ProfileManagedKeyEnrollReceipt: { type: object, required: [enrolled, keyVersion], properties: { enrolled: { type: boolean }, keyVersion: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false }
-    ProfileManagedKeyEnvelope: { type: object, required: [resourceKey], properties: { resourceKey: { type: string, pattern: '^[0-9a-f]{64}$' } }, additionalProperties: false, description: Rust desktop device only; persist immediately in the OS vault and never expose to web, React, or MCP clients. }
     ProfileDeleteInput: { type: object, required: [profileId, revision, confirmation], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, confirmation: { const: QUARANTINE_PROFILE_DATA } }, additionalProperties: false }
     ProfileRevisionInput: { type: object, required: [profileId, revision], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     ProfileDeleteBody: { type: object, required: [revision, confirmation], properties: { revision: { type: integer, minimum: 1 }, confirmation: { const: QUARANTINE_PROFILE_DATA } }, additionalProperties: false }
@@ -1633,7 +1655,7 @@ components:
     OrganizationAccountCreateInput: { type: object, required: [organizationId, accountId, username, email, initialPassword], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, username: { type: string, minLength: 3, maxLength: 64 }, displayName: { type: string, maxLength: 120 }, email: { type: string, maxLength: 254 }, initialPassword: { type: string, minLength: 12, maxLength: 256, writeOnly: true } }, additionalProperties: false, description: Directly creates a login-enabled account and active organization membership. This is distinct from invitation and does not assign a workspace role or access. Email verification remains pending. The password is never returned or retained as plaintext. }
     OrganizationMemberStatusUpdateInput: { type: object, required: [organizationId, accountId, status, expectedRevision], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, accountId: { $ref: '#/components/schemas/CanonicalId' }, status: { $ref: '#/components/schemas/OrganizationMemberStatus' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
     OrganizationMemberWorkspaceAssignInput: { type: object, required: [organizationId, workspaceId, organizationMemberId, organizationMemberRevision, role], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberId: { $ref: '#/components/schemas/CanonicalId' }, organizationMemberRevision: { type: integer, minimum: 1 }, role: { $ref: '#/components/schemas/MemberRole' } }, additionalProperties: false }
-    OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean }, defaultExtensionGroupsByWorkspace: { type: object, description: 'Organization defaults keyed by workspace; each extension group remains workspace-owned.', propertyNames: { $ref: '#/components/schemas/CanonicalId' }, additionalProperties: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
+    OrganizationPolicy: { type: object, required: [maxWorkspaces, offlineEntitled], properties: { maxWorkspaces: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
     OrganizationRecord: { type: object, required: [organization, policy, revision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     WorkspaceRecord: { type: object, required: [workspace, revision], properties: { workspace: { $ref: '#/components/schemas/Workspace' }, revision: { type: integer, minimum: 1 } }, additionalProperties: false }
     OrganizationCreateInput: { type: object, required: [organization, policy], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' } }, additionalProperties: false }
@@ -1641,8 +1663,8 @@ components:
     OrganizationListInput: { type: object, properties: {}, additionalProperties: false }
     OrganizationUpdateInput: { type: object, required: [organizationId, update], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, update: { $ref: '#/components/schemas/OrganizationUpdate' } }, additionalProperties: false }
     OrganizationUpdate: { type: object, required: [organization, policy, expectedRevision], properties: { organization: { $ref: '#/components/schemas/Organization' }, policy: { $ref: '#/components/schemas/OrganizationPolicy' }, expectedRevision: { type: integer, minimum: 1 } }, additionalProperties: false }
-    WorkspacePolicy: { type: object, required: [maxProfiles, maxMembers, maxStorageBytes, offlineEntitled], properties: { maxProfiles: { type: integer, minimum: 0 }, maxMembers: { type: integer, minimum: 0 }, maxStorageBytes: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean } }, additionalProperties: false }
-    Workspace: { type: object, required: [id, organizationId, name, policy, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, policy: { $ref: '#/components/schemas/WorkspacePolicy' }, createdAt: { type: string, format: date-time }, defaultExtensionGroupId: { $ref: '#/components/schemas/CanonicalId', description: 'Workspace-owned extension group automatically assigned to new profiles.' } }, additionalProperties: false }
+    WorkspacePolicy: { type: object, required: [maxProfiles, maxMembers, maxStorageBytes, offlineEntitled], properties: { maxProfiles: { type: integer, minimum: 0 }, maxMembers: { type: integer, minimum: 0 }, maxStorageBytes: { type: integer, minimum: 0 }, offlineEntitled: { type: boolean }, defaultExtensionGroupId: { type: [string, 'null'], maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }, additionalProperties: false }
+    Workspace: { type: object, required: [id, organizationId, name, policy, createdAt], properties: { id: { $ref: '#/components/schemas/CanonicalId' }, organizationId: { $ref: '#/components/schemas/CanonicalId' }, name: { type: string, minLength: 1, maxLength: 200 }, policy: { $ref: '#/components/schemas/WorkspacePolicy' }, createdAt: { type: string, format: date-time } }, additionalProperties: false }
     WorkspaceCreateInput: { type: object, required: [organizationId, workspace], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspace: { $ref: '#/components/schemas/Workspace' } }, additionalProperties: false }
     WorkspaceIdInput: { type: object, required: [organizationId, workspaceId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' }, workspaceId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
     WorkspaceListInput: { type: object, required: [organizationId], properties: { organizationId: { $ref: '#/components/schemas/CanonicalId' } }, additionalProperties: false }
@@ -1835,8 +1857,11 @@ components:
     ProfileShareRevocationReceipt: { type: object, required: [profileId, memberId, revision, revoked], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, memberId: { $ref: '#/components/schemas/CanonicalId' }, revision: { type: integer, minimum: 1 }, revoked: { const: true } }, additionalProperties: false }
     ProfileLaunchInput: { type: object, required: [profilesRoot, extraArgs], properties: { profilesRoot: { type: string, minLength: 1 }, extraArgs: { type: array, items: { type: string } } }, additionalProperties: false }
     RuntimeProjectionInput: { type: object, required: [deviceId, generation, rootChecksum], properties: { deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }, additionalProperties: false }
-    RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, ownerId: { $ref: '#/components/schemas/CoordinationOwnerIdentifier' }, ownerEmail: { type: [string, "null"] }, state: { enum: [running, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
+    RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, ownerId: { $ref: '#/components/schemas/CoordinationOwnerIdentifier' }, ownerEmail: { type: [string, "null"] }, state: { enum: [running, syncing, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
     OptionalRuntimeProjection: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] }
+    ProfileRuntimeStatusBatchInput: { type: object, required: [workspaceId, profileId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { type: array, minItems: 1, maxItems: 250, items: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
+    ProfileRuntimeStatusSnapshot: { type: object, required: [profileId, lease, runtime], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, lease: { oneOf: [{ $ref: '#/components/schemas/LeaseStatus' }, { type: "null" }] }, runtime: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] } }, additionalProperties: false }
+    ProfileRuntimeStatusBatch: { type: array, items: { $ref: '#/components/schemas/ProfileRuntimeStatusSnapshot' } }
     SyncManifest: { type: object, required: [schemaVersion, workspaceId, resourceId, fencingToken, generation, parentGeneration, rootChecksum, objects, tombstones], properties: { schemaVersion: { enum: [2, 3] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, fencingToken: { type: integer, minimum: 1 }, generation: { type: integer, minimum: 1 }, parentGeneration: { type: [integer, "null"], minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-f]{64}$' }, objects: { type: array, items: { $ref: '#/components/schemas/ManifestObject' } }, tombstones: { type: array, items: { $ref: '#/components/schemas/ManifestTombstone' } }, dependencies: { type: array, items: { $ref: '#/components/schemas/ManifestDependency' } }, payloadEncryption: { oneOf: [{ $ref: '#/components/schemas/ManifestPayloadEncryption' }, { type: "null" }] }, fileChunks: { type: array, items: { $ref: '#/components/schemas/ManifestFileChunks' } } }, additionalProperties: false }
     ResourceManifestKeyRotationInput: { type: object, required: [manifest], properties: { manifest: { $ref: '#/components/schemas/SyncManifest' }, keyShareEnvelopeUpdates: { type: array, maxItems: 256, items: { $ref: '#/components/schemas/ProfileKeyRotationEnvelopeUpdate' } } }, additionalProperties: false }
     ProfileKeyRotationEnvelopeUpdate: { type: object, required: [memberId, recipientKeyEnvelopes], properties: { memberId: { $ref: '#/components/schemas/CanonicalId' }, recipientKeyEnvelopes: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ConfirmedProfileKeyShareEnvelope' } } }, additionalProperties: false }

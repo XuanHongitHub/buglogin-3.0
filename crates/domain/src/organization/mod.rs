@@ -1,6 +1,5 @@
-use crate::ids::{AccountId, ExtensionGroupId, OrganizationId, OrganizationMemberId, WorkspaceId};
+use crate::ids::{AccountId, OrganizationId, OrganizationMemberId, WorkspaceId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,9 +83,6 @@ pub fn organization_member_id(
 pub struct OrganizationPolicy {
     pub max_workspaces: u32,
     pub offline_entitled: bool,
-    /// Workspace-scoped default extension groups selected by this organization.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub default_extension_groups_by_workspace: BTreeMap<WorkspaceId, ExtensionGroupId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

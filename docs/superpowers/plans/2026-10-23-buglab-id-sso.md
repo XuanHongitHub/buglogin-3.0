@@ -1,18 +1,18 @@
-# BugLab ID SSO implementation plan — 3.0.4
+# BugLab ID SSO implementation plan — 3.0.19
 
-## Status
+## Status (updated 2026-10-27)
 
-Backend broker and desktop callback flow are implemented and compile; no production provider call has been made. SSO is off unless explicitly enabled. Provider-side app/callback/state configuration is not documented in the supplied guide and remains a real external dependency.
+Provider login and exchange passed using the documented QA identity. The provider's returned state is carried in the registered callback URI, and the desktop now requires a matching, unexpired in-app sign-in nonce. The API production feature flag and callback configuration are enabled. Provider exchange success is verified; packaged Windows/macOS callback and final BugLogin session issuance still need release QA.
 
 ## Ordered work
 
-1. **Provider contract (blocking external input)** — confirm the seven items in `docs/superpowers/specs/2026-10-23-buglab-id-sso-design.md`. The guide omits callback/state support and the production app code.
+1. **Provider contract** — real login, callback-state return, exchange, active status, and BugLogin mapping were verified on 2026-10-27. Continue tracking remaining provider questions in the design spec.
 2. **Identity and protocol contract** — SSO start/complete API and OpenAPI schemas are implemented; identity mapping remains role-neutral and ambiguity fails closed.
 3. **Backend broker** — implemented: expiring single-use state, bounded HTTPS exchange, active-status/app checks, subject mapping, session issue, and redacted audit.
 4. **Desktop flow** — implemented: system-browser launch, strict custom-scheme callback parsing, and device-session persistence through the existing OS credential vault.
-5. **Rollout gate** — implemented: API requires `BUGLAB_SSO_ENABLED=true`, app code, and callback URI. Keep disabled until provider contract is confirmed.
+5. **Rollout gate** — implemented: API requires `BUGLAB_SSO_ENABLED=true`, app code, and callback URI; the production BugLogin API is configured for BugLab ID.
 6. **Logout** — BugLogin session revocation uses existing logout. BugLab ID logout redirect is pending exact allowlisted return URI/provider behavior.
-7. **Verification and 3.0.4 release** — Rust check and frontend typecheck pass. Tests, generated contract parity, Windows/macOS callback smoke, logout integration, and real provider verification remain outstanding.
+7. **Verification and 3.0.19 release** — provider login/exchange and focused nonce tests pass. Packaged Windows/macOS callback, complete session issuance, logout integration, and installed-user acceptance still require verification.
 
 ## Repository gates
 

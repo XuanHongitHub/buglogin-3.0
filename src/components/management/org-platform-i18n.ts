@@ -1,6 +1,8 @@
 import i18n from "@/i18n";
 
 const en = {
+  defaultExtensionGroup: "Default extension group for new profiles",
+  noDefaultExtensionGroup: "No automatic extension group",
   organizations: "Organizations",
   organization: "Organization",
   workspaces: "Workspaces",
@@ -34,19 +36,6 @@ const en = {
   unavailable: "Unavailable",
   profileLimit: "Profile limit",
   memberLimit: "Member seats",
-  defaultExtensionGroup: "Default extension group for new profiles",
-  noDefaultExtensionGroup: "No default extension group",
-  defaultExtensionGroupHint:
-    "New profiles in this workspace will inherit this group. Git sources update when the profile opens.",
-  extensionGroupsUnavailable:
-    "Extension groups could not be loaded; the default was not changed.",
-  organizationDefaultExtensionGroups: "Organization defaults for new profiles",
-  organizationDefaultExtensionGroupsHint:
-    "Choose a default group for each workspace. A workspace-level choice takes priority.",
-  unavailableDefaultExtensionGroup:
-    "Saved group is unavailable — choose another group or clear it",
-  organizationExtensionGroupsUnavailable:
-    "Some workspace groups could not be loaded. Their saved choices are preserved while you edit other workspaces.",
   currentUsage: "Usage / limit",
   profiles: "Profiles",
   members: "Members",
@@ -179,6 +168,8 @@ const en = {
 };
 
 const vi: typeof en = {
+  defaultExtensionGroup: "Nhóm tiện ích mặc định cho profile mới",
+  noDefaultExtensionGroup: "Không tự gán nhóm tiện ích",
   organizations: "Tổ chức",
   organization: "Tổ chức",
   workspaces: "Workspaces",
@@ -213,20 +204,6 @@ const vi: typeof en = {
   unavailable: "Chưa có thông tin",
   profileLimit: "Hạn mức profile",
   memberLimit: "Ghế thành viên",
-  defaultExtensionGroup: "Nhóm tiện ích mặc định cho profile mới",
-  noDefaultExtensionGroup: "Không dùng nhóm mặc định",
-  defaultExtensionGroupHint:
-    "Profile mới trong workspace này tự nhận nhóm; nguồn Git được cập nhật khi mở profile.",
-  extensionGroupsUnavailable:
-    "Không tải được nhóm tiện ích; chưa thay đổi mặc định.",
-  organizationDefaultExtensionGroups:
-    "Nhóm mặc định cho profile mới trong tổ chức",
-  organizationDefaultExtensionGroupsHint:
-    "Chọn nhóm cho từng workspace. Cấu hình riêng của workspace được ưu tiên.",
-  unavailableDefaultExtensionGroup:
-    "Nhóm đã lưu không còn khả dụng — hãy chọn nhóm khác hoặc xóa",
-  organizationExtensionGroupsUnavailable:
-    "Không tải được nhóm tiện ích của một số workspace. Lựa chọn đã lưu vẫn được giữ khi bạn sửa workspace khác.",
   currentUsage: "Đang dùng / hạn mức",
   profiles: "Profiles",
   members: "Thành viên",
