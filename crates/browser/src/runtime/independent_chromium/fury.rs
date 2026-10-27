@@ -30,7 +30,7 @@ use crate::{
     },
 };
 
-use super::{CAPABILITIES, native_path_argument, protected_argument, validate_profile_directory};
+use super::{native_path_argument, protected_argument, validate_profile_directory, CAPABILITIES};
 
 const IDENTITY: &str = "BugLogin/fury-identity.json";
 const CONFIG: &str = "BugLogin/fury-fingerprint.json";

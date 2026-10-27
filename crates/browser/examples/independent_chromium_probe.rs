@@ -2,9 +2,9 @@
 use buglogin_browser::{
     process::{ApprovedExecutable, ProcessController, ProcessStatus, SystemProcessController},
     runtime::{
-        RuntimeAdapter, RuntimeBinary,
         independent_chromium::fury::{FuryChromiumAdapter, FuryIdentity, FuryProcessController},
         independent_chromium::{ChromiumIdentity, IndependentChromiumAdapter},
+        RuntimeAdapter, RuntimeBinary,
     },
 };
 use buglogin_domain::entities::{FingerprintOperatingSystem, ProfileFingerprintTarget};
