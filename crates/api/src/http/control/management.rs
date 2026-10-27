@@ -890,7 +890,33 @@ mod batch_route_tests {
 
         assert_eq!(audit.command_id, command_id);
         assert_eq!(audit.detail["itemCommandId"], item_command_id);
-        assert_eq!(audit.allowed, true);
+
+        let mut store = buglogin_storage::control::MemoryControlRecordStore::default();
+        buglogin_storage::control::ControlRecordStore::execute(
+            &mut store,
+            ExecuteControlCommand {
+                tenant_id: "management".into(),
+                command_id,
+                idempotency_key: "batch-receipt-regression-0001".into(),
+                expected_revisions: Default::default(),
+                puts: vec![],
+                deletes: vec![],
+                audit,
+                response: HttpResponse {
+                    status: StatusCode::OK.as_u16(),
+                    headers: Default::default(),
+                    body: json!({"stored": true}),
+                },
+            },
+        )
+        .expect("batch receipt audit must pass storage scope validation");
+
+        let audits = buglogin_storage::control::ControlRecordStore::audit(&mut store, "management")
+            .expect("receipt audit is readable");
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].command_id, BATCH_ITEM_COMMAND_ID);
+        assert_eq!(audits[0].detail["itemCommandId"], item_command_id);
+        assert!(audits[0].allowed);
     }
 
     #[test]
