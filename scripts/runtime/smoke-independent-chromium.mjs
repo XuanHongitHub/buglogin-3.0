@@ -36,7 +36,9 @@ const evidence = {
 };
 let cookieSeen = "";
 let proxyRequests = 0;
+let observedHeaders = {};
 const fixture = http.createServer((request, response) => {
+  observedHeaders = request.headers;
   cookieSeen = request.headers.cookie ?? "";
   response.writeHead(200, {
     "content-type": "text/html",
@@ -293,6 +295,14 @@ async function fingerprint(cdp) {
     return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : null;
   })()`,
   );
+  observed.gpuVendor = await evaluate(
+    cdp,
+    `(() => {
+    const gl=document.createElement('canvas').getContext('webgl');
+    const info=gl?.getExtension('WEBGL_debug_renderer_info');
+    return info ? gl.getParameter(info.UNMASKED_VENDOR_WEBGL) : null;
+  })()`,
+  );
   console.error("Native fingerprint: audio/worker");
   const audio = await evaluate(
     cdp,
@@ -364,6 +374,50 @@ try {
   await navigate(first.cdp, `${origin}/first`);
   console.error("Native stage: fingerprint and extension");
   const firstIdentity = await fingerprint(first.cdp);
+  if (process.env.BUGLOGIN_SMOKE_FURY === "1") {
+    const capture = JSON.parse(
+      await fs.readFile(
+        new URL(
+          `../../crates/browser/tests/fixtures/fury-smoke-${process.platform === "win32" ? "windows" : "macos"}.json`,
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    assert.equal(firstIdentity.platform, capture.navigator.platform);
+    assert.equal(firstIdentity.userAgent, capture.navigator.userAgent);
+    assert.equal(firstIdentity.cores, capture.navigator.hardwareConcurrency);
+    assert.equal(firstIdentity.memory, capture.navigator.deviceMemory);
+    assert.equal(firstIdentity.width, capture.screen.width);
+    assert.equal(firstIdentity.height, capture.screen.height);
+    assert.equal(
+      firstIdentity.gpu,
+      capture.gpu.webglParams.UNMASKED_RENDERER_WEBGL,
+    );
+    assert.equal(
+      firstIdentity.gpuVendor,
+      capture.gpu.webglParams.UNMASKED_VENDOR_WEBGL,
+    );
+    assert.equal(observedHeaders["user-agent"], capture.navigator.userAgent);
+    const hints = await evaluate(
+      first.cdp,
+      "navigator.userAgentData.getHighEntropyValues(['platformVersion','architecture','bitness','uaFullVersion'])",
+    );
+    assert.equal(hints.platform, capture.clientHints.platform);
+    assert.equal(hints.platformVersion, capture.clientHints.platformVersion);
+    assert.equal(hints.architecture, capture.clientHints.architecture);
+    assert.equal(hints.bitness, capture.clientHints.bitness);
+    assert.equal(hints.uaFullVersion, capture.clientHints.fullVersion);
+    assert.equal(
+      await evaluate(
+        first.cdp,
+        "Intl.DateTimeFormat().resolvedOptions().timeZone",
+      ),
+      capture.locale.timezone,
+    );
+    evidence.checks.nativeConfigApplied = "pass";
+    evidence.checks.clientHintsConsistency = "pass";
+  }
   assert.equal(
     await evaluate(
       first.cdp,

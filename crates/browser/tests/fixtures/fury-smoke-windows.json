@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "navigator": {
+    "platform": "Win32",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+    "hardwareConcurrency": 12,
+    "deviceMemory": 8,
+    "maxTouchPoints": 0,
+    "languages": ["en-US", "en"]
+  },
+  "clientHints": {
+    "platform": "Windows",
+    "platformVersion": "15.0.0",
+    "architecture": "x86",
+    "bitness": "64",
+    "fullVersion": "155.0.8059.39",
+    "model": "",
+    "mobile": false,
+    "wow64": false,
+    "formFactors": ["Desktop"],
+    "brands": [
+      { "brand": "Not_A Brand", "version": "99" },
+      { "brand": "Chromium", "version": "155" },
+      { "brand": "Google Chrome", "version": "155" }
+    ],
+    "fullVersionList": [
+      { "brand": "Not_A Brand", "version": "99.0.0.0" },
+      { "brand": "Chromium", "version": "155.0.8059.39" },
+      { "brand": "Google Chrome", "version": "155.0.8059.39" }
+    ]
+  },
+  "screen": {
+    "width": 1920,
+    "height": 1080,
+    "availWidth": 1920,
+    "availHeight": 1032,
+    "availLeft": 0,
+    "availTop": 0,
+    "colorDepth": 24,
+    "devicePixelRatio": 1,
+    "chromeHeightDelta": 139,
+    "chromeWidthDelta": 0,
+    "scrollbarWidth": 15
+  },
+  "gpu": {
+    "webglParams": {
+      "VENDOR": "WebKit",
+      "RENDERER": "WebKit WebGL",
+      "UNMASKED_VENDOR_WEBGL": "Google Inc. (Intel)",
+      "UNMASKED_RENDERER_WEBGL": "ANGLE (Intel, Intel(R) UHD Graphics (0x00009A68) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      "MAX_TEXTURE_SIZE": 16384
+    },
+    "webglExtensions": ["ANGLE_instanced_arrays", "OES_element_index_uint"]
+  },
+  "audio": { "sampleRate": 48000, "baseLatency": 0.01, "outputLatency": 0.02 },
+  "fonts": [
+    "Arial",
+    "Calibri",
+    "Consolas",
+    "Segoe UI",
+    "Tahoma",
+    "Times New Roman"
+  ],
+  "fontsHidden": [],
+  "locale": { "timezone": "America/New_York", "locale": "en-US" },
+  "webrtc": { "ipHandlingPolicy": "disable_non_proxied_udp" },
+  "automation": { "hideTraces": true },
+  "battery": {
+    "charging": true,
+    "chargingTime": 0,
+    "dischargingTime": -1,
+    "level": 1
+  },
+  "permissions": { "notifications": "prompt", "geolocation": "prompt" },
+  "engine": { "jsHeapSizeLimit": 4294705152 }
+}

@@ -3,6 +3,7 @@ use buglogin_browser::{
     process::{ApprovedExecutable, ProcessController, ProcessStatus, SystemProcessController},
     runtime::{
         RuntimeAdapter, RuntimeBinary,
+        independent_chromium::fury::{FuryChromiumAdapter, FuryIdentity, FuryProcessController},
         independent_chromium::{ChromiumIdentity, IndependentChromiumAdapter},
     },
 };
@@ -22,23 +23,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checksum = args.next().ok_or("missing executable checksum")?;
     let profile_path = PathBuf::from(args.next().ok_or("missing disposable profile path")?);
     fs::create_dir_all(&profile_path)?;
-    let identity = match ChromiumIdentity::load(&profile_path)? {
-        Some(identity) => identity,
-        None => ChromiumIdentity::generate(
-            version.clone(),
-            ProfileFingerprintTarget {
-                operating_system: if cfg!(target_os = "windows") {
-                    FingerprintOperatingSystem::Windows
-                } else if cfg!(target_os = "macos") {
-                    FingerprintOperatingSystem::Macos
-                } else {
-                    FingerprintOperatingSystem::Linux
-                },
-                operating_system_version: None,
-            },
-        )?,
+    let target = ProfileFingerprintTarget {
+        operating_system: if cfg!(target_os = "windows") {
+            FingerprintOperatingSystem::Windows
+        } else if cfg!(target_os = "macos") {
+            FingerprintOperatingSystem::Macos
+        } else {
+            FingerprintOperatingSystem::Linux
+        },
+        operating_system_version: None,
     };
-    let adapter = IndependentChromiumAdapter::new(identity)?;
+    let approved = ApprovedExecutable::new(&binary_path)?;
+    let (adapter, controller): (Box<dyn RuntimeAdapter>, Box<dyn ProcessController>) =
+        if std::env::var("BUGLOGIN_SMOKE_FURY").as_deref() == Ok("1") {
+            let identity = match FuryIdentity::load(&profile_path)? {
+                Some(identity) => identity,
+                None => FuryIdentity::generate(
+                    version.clone(),
+                    checksum.clone(),
+                    target,
+                    serde_json::from_str(if cfg!(target_os = "windows") {
+                        include_str!("../tests/fixtures/fury-smoke-windows.json")
+                    } else {
+                        include_str!("../tests/fixtures/fury-smoke-macos.json")
+                    })?,
+                )?,
+            };
+            (
+                Box::new(FuryChromiumAdapter::new(identity)?),
+                Box::new(FuryProcessController::new([approved])),
+            )
+        } else {
+            let identity = match ChromiumIdentity::load(&profile_path)? {
+                Some(identity) => identity,
+                None => ChromiumIdentity::generate(version.clone(), target)?,
+            };
+            (
+                Box::new(IndependentChromiumAdapter::new(identity)?),
+                Box::new(SystemProcessController::new([approved])),
+            )
+        };
     let binary = adapter.validate_binary(&RuntimeBinary {
         path: binary_path.clone(),
         version,
@@ -46,7 +70,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let specification =
         adapter.launch_specification(&binary, &profile_path, &args.collect::<Vec<_>>())?;
-    let controller = SystemProcessController::new([ApprovedExecutable::new(&binary_path)?]);
     let mut child = controller.launch(&specification)?;
     let initial_status = child.status()?;
     #[cfg(target_os = "macos")]

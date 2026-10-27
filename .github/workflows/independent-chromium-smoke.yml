@@ -2,6 +2,23 @@ name: Independent Chromium Adapter Native Smoke
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "crates/browser/**"
+      - "scripts/runtime/fetch-independent-chromium.mjs"
+      - "scripts/runtime/smoke-independent-chromium.mjs"
+      - "crates/browser/examples/independent_chromium_probe.rs"
+      - ".github/workflows/independent-chromium-smoke.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "crates/browser/**"
+      - "scripts/runtime/fetch-independent-chromium.mjs"
+      - "scripts/runtime/smoke-independent-chromium.mjs"
+      - "crates/browser/examples/independent_chromium_probe.rs"
+      - ".github/workflows/independent-chromium-smoke.yml"
 
 permissions:
   contents: read
@@ -16,6 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2022, macos-15]
+        engine: [adryfish, fury]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -29,12 +47,14 @@ jobs:
         with:
           shared-key: independent-chromium-native
       - name: Verify adapter and existing Wayfern contract
-        run: cargo test --locked -p buglogin-browser --test independent_chromium --test runtime_contract
+        run: cargo test --locked -p buglogin-browser --test fury_chromium --test independent_chromium --test runtime_contract --test lifecycle --lib
       - name: Build native process probe
         run: cargo build --locked -p buglogin-browser --example independent_chromium_probe
       - name: Fetch checksum-pinned upstream test package
-        run: node scripts/runtime/fetch-independent-chromium.mjs --directory .adapter-smoke-engine
+        run: node scripts/runtime/fetch-independent-chromium.mjs --directory .adapter-smoke-engine --engine ${{ matrix.engine }}
       - name: Exercise native fingerprint, cookies, extensions, proxy and process stop
+        env:
+          BUGLOGIN_SMOKE_FURY: ${{ matrix.engine == 'fury' && '1' || '0' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -56,7 +76,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: independent-chromium-${{ matrix.os }}-${{ github.sha }}
+          name: independent-chromium-${{ matrix.engine }}-${{ matrix.os }}-${{ github.sha }}
           if-no-files-found: warn
           path: |
             independent-chromium-native-evidence.json

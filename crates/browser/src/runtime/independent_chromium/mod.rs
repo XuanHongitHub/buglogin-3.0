@@ -1,6 +1,8 @@
 //! Chromium fingerprint engine integration without Wayfern provider services.
 //! This does not change the production runtime approval/catalog policy.
 
+pub mod fury;
+
 use std::{
     fs,
     fs::OpenOptions,

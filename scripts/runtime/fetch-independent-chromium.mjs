@@ -7,25 +7,49 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ options: { directory: { type: "string" } } });
+const { values } = parseArgs({
+  options: {
+    directory: { type: "string" },
+    engine: { type: "string", default: "adryfish" },
+  },
+});
 assert.ok(values.directory, "--directory is required");
 const directory = path.resolve(values.directory);
-const version = "148.0.7778.215";
-const releases = {
-  win32: {
-    name: "ungoogled-chromium_148.0.7778.215-1.1_windows_x64.zip",
-    sha256: "9ef3f471b7a6641b4224532522b29141ce3746e27d55788d88e2fd951f362579",
-  },
-  darwin: {
-    name: "ungoogled-chromium_148.0.7778.215-1.1_macos.dmg",
-    sha256: "b72f091e2e1a7583eed389c4b8e3534ed355e568af8c8bbf8fc30a25e23ca679",
-  },
-};
+assert.ok(["adryfish", "fury"].includes(values.engine), "known test engine");
+const fury = values.engine === "fury";
+const version = fury ? "155.0.8059.39" : "148.0.7778.215";
+const releases = fury
+  ? {
+      win32: {
+        name: "fury-core-0.4.16-windows-x64.tar.xz",
+        sha256:
+          "3918ae93063bcbc20ab60b176230e11f8f7d762be3460a8f50f935f92beb91ad",
+      },
+      darwin: {
+        name: "fury-core-0.4.16-macos-arm64.tar.xz",
+        sha256:
+          "2c63b05cc9f95a11bcf0cccf893f29bdee35b8d2ff306a683261fba7a7ef14f6",
+      },
+    }
+  : {
+      win32: {
+        name: "ungoogled-chromium_148.0.7778.215-1.1_windows_x64.zip",
+        sha256:
+          "9ef3f471b7a6641b4224532522b29141ce3746e27d55788d88e2fd951f362579",
+      },
+      darwin: {
+        name: "ungoogled-chromium_148.0.7778.215-1.1_macos.dmg",
+        sha256:
+          "b72f091e2e1a7583eed389c4b8e3534ed355e568af8c8bbf8fc30a25e23ca679",
+      },
+    };
 const release = releases[process.platform];
 assert.ok(release, `No approved native smoke package for ${process.platform}`);
 await fs.mkdir(directory, { recursive: true });
 const archive = path.join(directory, release.name);
-const url = `https://github.com/adryfish/fingerprint-chromium/releases/download/${version}/${release.name}`;
+const url = fury
+  ? `https://github.com/furyteamtop/fury-antidetect-browser/releases/download/v0.4.16/${release.name}`
+  : `https://github.com/adryfish/fingerprint-chromium/releases/download/${version}/${release.name}`;
 const response = await fetch(url);
 assert.equal(response.status, 200, "official engine package download");
 await pipeline(
@@ -45,7 +69,29 @@ assert.equal(
 const extracted = path.join(directory, "engine");
 await fs.mkdir(extracted);
 let binary;
-if (process.platform === "win32") {
+if (fury) {
+  execFileSync("tar", ["-xf", archive, "-C", extracted]);
+  if (process.platform === "win32") {
+    binary = path.join(extracted, "Fury", "chrome.exe");
+  } else {
+    const apps = (await fs.readdir(extracted)).filter((entry) =>
+      entry.endsWith(".app"),
+    );
+    assert.equal(apps.length, 1, "expected one core app");
+    const app = path.join(extracted, apps[0]);
+    const executable = execFileSync(
+      "/usr/libexec/PlistBuddy",
+      [
+        "-c",
+        "Print :CFBundleExecutable",
+        path.join(app, "Contents", "Info.plist"),
+      ],
+      { encoding: "utf8" },
+    ).trim();
+    assert.ok(executable && path.basename(executable) === executable);
+    binary = path.join(app, "Contents", "MacOS", executable);
+  }
+} else if (process.platform === "win32") {
   // Paths travel via environment variables, never interpolated as shell code.
   execFileSync(
     "powershell.exe",
@@ -109,6 +155,7 @@ if (process.platform === "win32") {
   }
 }
 const metadata = {
+  engine: values.engine,
   version,
   binary,
   sha256: await sha256(binary),
