@@ -358,3 +358,15 @@
 - Workflow `BugLogin CI` (`40597976989`) và `Lint Rust` (`40597976893`) trên commit keychain fix `428c268f` vẫn in progress ở lần kiểm tra cuối; macOS Intel bước tạo/mở keychain tạm đã pass. Cần lấy kết luận cuối khi chạy xong.
 - Google Sheets/Excel connection discovery trả về không có connected session. Chưa đọc/ghi account credentials hay thay dữ liệu prod. Đã yêu cầu kết nối Google Sheets hoặc tải CSV an toàn; tiếp tục các phần độc lập trong lúc chờ.
 - Không xác nhận tất cả kế hoạch sản phẩm xong: cross-org/workspace profile transfer chưa implement; BugLab login chưa E2E trên packaged app; Cookie Bot/Agent worker thực vẫn đang unavailable theo plan; account-sheet import còn chờ nguồn dữ liệu truy cập được. Stable 3.0.21 đã ship, các sửa tiếp theo cần candidate/version mới và release mới.
+
+## Điều phối 65: Native BugLab callback không bị rơi trước khi UI sẵn sàng
+- Đính chính ghi chú cũ: BugLab SSO state đã được persist trong OS credential vault từ nhánh code 3.0.21; không còn chỉ giữ trong RAM.
+- Native deep-link/single-instance handlers nay giữ callback `buglogin://` trong inbox có giới hạn 8 URL, loại URL ngoài scheme và dedupe, sau đó frontend đọc/drain inbox qua `desktop_deep_link_current`. Vẫn emit event cho UI đang mở; đường get-current/inbox bù cho callback đến trước listener.
+- Verification local Windows: `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check`, hai test `single_instance_deep_link_tests`, `git diff --check` PASS.
+- Chưa xác nhận callback packaged qua provider. QA A/B đặt `BUGLOGIN_INSTANCE_ID` có vault/device identity riêng và cố ý tắt single-instance guard; callback process OS mở không kế thừa instance ID, nên inbox đơn thuần chưa route callback về đúng instance A/B. Không đánh dấu vấn đề “callback mở app khác” đã xong và chưa phát hành bản sửa này.
+- Stable 3.0.21 đã publish trước đó. Thay đổi inbox local chưa commit/push ở thời điểm ghi mục này.
+
+## Điều phối 66: Rà soát an toàn roster trước khi provision
+- Không có Codex Google Sheets session; link export CSV công khai tải được nên đã đọc metadata trực tiếp. Không in/ghi credential values vào chat hoặc log.
+- CSV có 59 dòng; 41 dòng đủ Team + Mail Login mới + Password; 41 login không trùng; 22 Team khác nhau theo chữ thường; 18 dòng thiếu ít nhất một trường. Trong 41 dòng đủ, 25 login trông như email, 16 không đúng định dạng email; 20 password đạt API min 12 ký tự, 21 ngắn hơn.
+- API organization account create yêu cầu email và password tối thiểu 12 ký tự. Không tự bịa email, nới policy mật khẩu, hay đổi password nguồn; production account write chưa thực hiện. Cần xử lý dữ liệu đầu vào theo API contract trước khi provision.

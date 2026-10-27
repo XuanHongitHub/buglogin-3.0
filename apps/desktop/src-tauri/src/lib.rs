@@ -38,6 +38,7 @@ use buglogin_api::commands::CommandResult;
 use buglogin_domain::errors::Problem;
 use desktop_state::{DesktopAuthStatus, DesktopState};
 use serde_json::{Value, json};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
@@ -79,7 +80,7 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    let mut builder = tauri::Builder::default();
+    let mut builder = tauri::Builder::default().manage(DeepLinkInbox::default());
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     if app_instance.uses_single_instance_guard() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -89,6 +90,7 @@ pub fn run() {
                     // callback. Forward the URL to the authenticated app before
                     // focusing it; otherwise the SSO state stays in the first
                     // process and the callback is silently discarded.
+                    app.state::<DeepLinkInbox>().enqueue(argument);
                     let _ = app.emit("buglogin://deep-link", argument.clone());
                 }
             }
@@ -182,7 +184,9 @@ pub fn run() {
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
-                    let _ = handle.emit("buglogin://deep-link", url.to_string());
+                    let url = url.to_string();
+                    handle.state::<DeepLinkInbox>().enqueue(&url);
+                    let _ = handle.emit("buglogin://deep-link", url);
                 }
             });
 
@@ -606,9 +610,37 @@ fn is_buglogin_deep_link_argument(argument: &str) -> bool {
     Url::parse(argument).is_ok_and(|url| url.scheme() == "buglogin")
 }
 
+#[derive(Default)]
+struct DeepLinkInbox(Mutex<Vec<String>>);
+
+impl DeepLinkInbox {
+    fn enqueue(&self, argument: &str) {
+        if !is_buglogin_deep_link_argument(argument) {
+            return;
+        }
+        let Ok(mut queued) = self.0.lock() else {
+            return;
+        };
+        if queued.iter().any(|item| item == argument) {
+            return;
+        }
+        if queued.len() == 8 {
+            queued.remove(0);
+        }
+        queued.push(argument.to_owned());
+    }
+
+    fn drain(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|mut queued| std::mem::take(&mut *queued))
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod single_instance_deep_link_tests {
-    use super::is_buglogin_deep_link_argument;
+    use super::{DeepLinkInbox, is_buglogin_deep_link_argument};
 
     #[test]
     fn single_instance_forwards_only_buglogin_protocol_arguments() {
@@ -618,6 +650,19 @@ mod single_instance_deep_link_tests {
         assert!(is_buglogin_deep_link_argument("buglogin://invite/abc"));
         assert!(!is_buglogin_deep_link_argument("https://example.com/"));
         assert!(!is_buglogin_deep_link_argument("not a url"));
+    }
+
+    #[test]
+    fn callback_arriving_before_frontend_listener_is_queued_once() {
+        let inbox = DeepLinkInbox::default();
+        let callback = "buglogin://sso/callback?state=one-time&token=secret";
+
+        inbox.enqueue(callback);
+        inbox.enqueue(callback);
+        inbox.enqueue("https://example.com/");
+
+        assert_eq!(inbox.drain(), [callback]);
+        assert!(inbox.drain().is_empty());
     }
 }
 
@@ -1223,23 +1268,29 @@ async fn desktop_auth_sso_complete(
 }
 
 #[tauri::command]
-fn desktop_deep_link_current(app: tauri::AppHandle) -> Result<Vec<String>, Problem> {
-    app.deep_link()
-        .get_current()
-        .map(|urls| {
-            urls.unwrap_or_default()
-                .into_iter()
-                .map(|url| url.to_string())
-                .collect()
-        })
-        .map_err(|_| {
-            Problem::new(
-                "deep_link_unavailable",
-                "Could not read the sign-in callback",
-                503,
-                "desktop-deep-link",
-            )
-        })
+fn desktop_deep_link_current(
+    app: tauri::AppHandle,
+    inbox: State<'_, DeepLinkInbox>,
+) -> Result<Vec<String>, Problem> {
+    let mut queued = inbox.drain();
+    match app.deep_link().get_current() {
+        Ok(Some(urls)) => {
+            for url in urls.into_iter().map(|url| url.to_string()) {
+                if !queued.iter().any(|existing| existing == &url) {
+                    queued.push(url);
+                }
+            }
+            Ok(queued)
+        }
+        Ok(None) => Ok(queued),
+        Err(_) if !queued.is_empty() => Ok(queued),
+        Err(_) => Err(Problem::new(
+            "deep_link_unavailable",
+            "Could not read the sign-in callback",
+            503,
+            "desktop-deep-link",
+        )),
+    }
 }
 
 #[tauri::command]
