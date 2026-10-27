@@ -81,7 +81,7 @@ jobs:
             -p 8987:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1 server /data
+            docker.io/pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7 server /data
 
           # Wait for MinIO to be ready
           for i in {1..30}; do
