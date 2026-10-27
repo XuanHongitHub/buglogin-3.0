@@ -47,7 +47,7 @@ use super::{
 
 const JOURNAL_TYPE: &str = "migration_import";
 const COMMAND: &str = "migration.control.import";
-pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 15] = [
+pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 16] = [
     "CAP-WS-001",
     "CAP-TEAM-001",
     "CAP-MEM-001",
@@ -63,6 +63,7 @@ pub(super) const MEMBERSHIP_CAPABILITIES: [&str; 15] = [
     "events.read",
     "operation.read",
     "profile.read",
+    "profile.create",
 ];
 const ALL_ACTIONS: [Action; 7] = [
     Action::Read,
@@ -1862,7 +1863,7 @@ fn materialized_grants(
         .iter()
         .flat_map(|capability| ALL_ACTIONS.map(|action| ((*capability).to_owned(), action)))
         .collect::<BTreeSet<_>>();
-    let allowed = if override_value.is_null() {
+    let mut allowed = if override_value.is_null() {
         role_default_pairs(role)
     } else {
         override_value
@@ -1877,6 +1878,11 @@ fn materialized_grants(
             })
             .collect::<Result<BTreeSet<_>, _>>()?
     };
+    // `profile.create` is the command permission checked by REST/MCP. Legacy
+    // custom roles express this operation as `create_profile`.
+    if allowed.contains(&("CAP-PROF-001".to_owned(), Action::Create)) {
+        allowed.insert(("profile.create".to_owned(), Action::Create));
+    }
     let explicit = !override_value.is_null();
     universe
         .into_iter()
@@ -2662,9 +2668,10 @@ mod tests {
     use buglogin_migration::package::NeutralPackage;
 
     use super::{
-        changed_group_share_key_rotation_groups, control_import_lock_id, migrated_profile_runtime,
-        pending_group_share_resource_keys, reject_unorchestrated_sync_package,
-        requires_group_share_key_rotation, role_default_pairs,
+        changed_group_share_key_rotation_groups, control_import_lock_id, materialized_grants,
+        migrated_profile_runtime, pending_group_share_resource_keys,
+        reject_unorchestrated_sync_package, requires_group_share_key_rotation,
+        role_default_pairs,
     };
 
     #[test]
@@ -2695,6 +2702,33 @@ mod tests {
         let operator = role_default_pairs(&MemberRole::Operator);
         assert!(!operator.contains(&("CAP-WS-001".into(), Action::Update)));
         assert!(!operator.contains(&("CAP-MEM-001".into(), Action::Create)));
+    }
+
+    #[test]
+    fn workspace_owner_can_create_profiles_but_member_cannot() {
+        let owner = role_default_pairs(&MemberRole::Owner);
+        assert!(owner.contains(&("profile.create".into(), Action::Create)));
+
+        let member = role_default_pairs(&MemberRole::Member);
+        assert!(!member.contains(&("profile.create".into(), Action::Create)));
+    }
+
+    #[test]
+    fn imported_custom_profile_create_grant_materializes_command_permission() {
+        let grants = materialized_grants(
+            &MemberId::from_str("mem_profile_create_import").unwrap(),
+            &buglogin_domain::ids::AccountId::from_str("acct_profile_create_import").unwrap(),
+            &WorkspaceId::from_str("ws_profile_create_import").unwrap(),
+            &MemberRole::Admin,
+            &serde_json::json!(["create_profile"]),
+        )
+        .unwrap();
+
+        assert!(grants.iter().any(|grant| {
+            grant.capability.as_str() == "profile.create"
+                && grant.action == Action::Create
+                && grant.effect == Effect::Allow
+        }));
     }
 
     #[test]

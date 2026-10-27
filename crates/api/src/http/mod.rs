@@ -5775,6 +5775,44 @@ impl ApiAuthorizationAuthority {
             .clone();
         for member in members {
             if materialized.contains(&member.id) {
+                // Older imports materialized CAP-PROF grants before the
+                // profile.create command permission was part of the role
+                // grant universe. Derive the command grant from the exact
+                // workspace-scoped profile-create grant, including DENY.
+                let metadata_capability = Capability::new("CAP-PROF-001").map_err(|_| {
+                    Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
+                })?;
+                let create_capability = Capability::new("profile.create").map_err(|_| {
+                    Problem::new("invalid_capability", "Invalid capability", 500, "mcp")
+                })?;
+                let workspace_scope = ResourceScope::workspace(member.workspace_id.clone());
+                let aliases = grants
+                    .iter()
+                    .filter(|grant| {
+                        grant.account_id.as_ref() == Some(&member.account_id)
+                            && grant.member_id.is_none()
+                            && grant.capability == metadata_capability
+                            && grant.action == Action::Create
+                            && grant.scope == workspace_scope
+                    })
+                    .map(|grant| {
+                        let effect_name = match grant.effect {
+                            Effect::Allow => "allow",
+                            Effect::Deny => "deny",
+                        };
+                        let mut alias = grant.clone();
+                        alias.id = GrantId::new(format!(
+                            "membership:{}:profile.create:create:{effect_name}",
+                            member.id.as_str()
+                        ))
+                        .map_err(|_| {
+                            Problem::new("invalid_grant", "Invalid derived grant", 500, "mcp")
+                        })?;
+                        alias.capability = create_capability.clone();
+                        Ok(alias)
+                    })
+                    .collect::<Result<Vec<_>, Problem>>()?;
+                grants.extend(aliases);
                 continue;
             }
             for (capability_name, action) in control_import::role_default_pairs(&member.role) {
@@ -11533,6 +11571,7 @@ mod persistence_tests {
     use super::*;
     use buglogin_browser::profile::ProfileService;
     use buglogin_storage::local::LocalRepository;
+    use buglogin_domain::member::{Member, MemberRole, MemberStatus};
     use buglogin_storage::{
         blob::checksum,
         control::{
@@ -11555,6 +11594,81 @@ mod persistence_tests {
         },
         time::Duration,
     };
+
+    #[test]
+    fn materialized_owner_grants_keep_profile_create_command_permission() {
+        let state = ApiState::new(ProfileService::disabled());
+        let workspace_id = WorkspaceId::new("ws_materialized_profile_create").unwrap();
+        let member_id = MemberId::new("mem_materialized_profile_create").unwrap();
+        let account_id = AccountId::new("acct_materialized_profile_create").unwrap();
+        state
+            .members
+            .write()
+            .unwrap()
+            .backfill_workspace_owners(vec![Member {
+                id: member_id.clone(),
+                account_id: account_id.clone(),
+                workspace_id: workspace_id.clone(),
+                team_id: None,
+                role: MemberRole::Owner,
+                status: MemberStatus::Active,
+                invite_expires_at: None,
+            }]);
+        state
+            .materialized_member_grants
+            .write()
+            .unwrap()
+            .insert(member_id);
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::new("legacy_profile_create_allow").unwrap(),
+            account_id: Some(account_id.clone()),
+            member_id: None,
+            capability: Capability::new("CAP-PROF-001").unwrap(),
+            action: Action::Create,
+            scope: ResourceScope::workspace(workspace_id.clone()),
+            effect: Effect::Allow,
+        });
+
+        let grants = state.grants().unwrap();
+        assert!(grants.iter().any(|grant| {
+            grant.capability.as_str() == "profile.create"
+                && grant.action == Action::Create
+                && grant.effect == Effect::Allow
+        }));
+        let principal = Principal {
+            account_id: Some(account_id),
+            workspace_ids: [workspace_id.clone()].into_iter().collect(),
+            roles: [Role::Account].into_iter().collect(),
+            ..Principal::default()
+        };
+        let create_profile = Capability::new("profile.create").unwrap();
+        let scope = ResourceScope::workspace(workspace_id.clone());
+        assert!(is_allowed(
+            &principal,
+            &create_profile,
+            Action::Create,
+            &scope,
+            &grants,
+        ));
+
+        state.grants.write().unwrap().push(Grant {
+            id: GrantId::new("legacy_profile_create_deny").unwrap(),
+            account_id: principal.account_id.clone(),
+            member_id: None,
+            capability: Capability::new("CAP-PROF-001").unwrap(),
+            action: Action::Create,
+            scope: ResourceScope::workspace(workspace_id),
+            effect: Effect::Deny,
+        });
+        let denied_grants = state.grants().unwrap();
+        assert!(!is_allowed(
+            &principal,
+            &create_profile,
+            Action::Create,
+            &scope,
+            &denied_grants,
+        ));
+    }
 
     #[test]
     fn startup_backfills_and_persists_organization_members_from_legacy_workspace_state() {
