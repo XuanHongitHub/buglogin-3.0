@@ -1497,6 +1497,93 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_same_device_sign_ins_leave_only_one_active_family() {
+        use std::sync::{Arc, Barrier};
+
+        const SIGN_INS: usize = 2;
+        let store = MemoryControlRecordStore::default();
+        let persistence = Arc::new(SessionPersistence::new(ControlPersistence::new(store)));
+        let account_id = AccountId::new("acct_device_head_race").unwrap();
+        let device_id = "device-head-race";
+        let start = Arc::new(Barrier::new(SIGN_INS));
+
+        let pairs: Vec<_> = (0..SIGN_INS)
+            .map(|index| {
+                let issued_at = 10_000 + index as u64;
+                let mut issued = issue_for_device(
+                    account_id.clone(),
+                    issued_at + 3_600,
+                    Some(device_id.to_owned()),
+                )
+                .unwrap();
+                issued.record.created_at = Some(issued_at);
+                issued.record.last_seen_at = Some(issued_at);
+                let family_id = issued.record.family_id.clone().unwrap();
+                let refresh = DeviceRefreshRecord {
+                    account_id: account_id.clone(),
+                    token_hash: Sha256::digest(format!("device-head-race-{index}").as_bytes())
+                        .into(),
+                    access_token_hash: issued.record.token_hash,
+                    device_id: device_id.to_owned(),
+                    family_id,
+                    expires_at: issued_at + 86_400,
+                    consumed_at: None,
+                    credential_version: None,
+                    refresh_replay: None,
+                };
+                (issued.record.clone(), refresh)
+            })
+            .collect();
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = pairs
+                .into_iter()
+                .map(|(session, refresh)| {
+                    let persistence = Arc::clone(&persistence);
+                    let start = Arc::clone(&start);
+                    scope.spawn(move || {
+                        start.wait();
+                        persistence.create_device_session_with_account_revision_and_mutations(
+                            &session,
+                            &refresh,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                        )
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap().unwrap();
+            }
+        });
+
+        let sessions = persistence
+            .store
+            .list_versioned_for_account::<SessionRecord>(TENANT, RECORD_TYPE, account_id.as_str())
+            .unwrap();
+        assert_eq!(sessions.len(), SIGN_INS);
+        let family_revocations = persistence.family_revocations(&account_id).unwrap();
+        let active_families = sessions
+            .iter()
+            .filter_map(|(_, session, _)| {
+                let family_id = session.family_id.as_deref()?;
+                (!family_revocations.contains_key(family_id) && session.revoked_at.is_none())
+                    .then_some(session.family_id.clone())
+            })
+            .count();
+        assert_eq!(active_families, 1);
+
+        let head_id = device_session_head_id(&account_id, device_id);
+        let (_, head_revision) = persistence
+            .store
+            .load_versioned::<DeviceSessionHead>(TENANT, DEVICE_HEAD_RECORD_TYPE, &head_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(head_revision, SIGN_INS as u64);
+    }
+
+    #[test]
     fn device_issue_and_rotation_are_fenced_by_durable_account_status_revision() {
         let mut store = MemoryControlRecordStore::default();
         let persistence = SessionPersistence::new(ControlPersistence::new(store.clone()));

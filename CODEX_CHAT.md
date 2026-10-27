@@ -377,3 +377,8 @@
 - Khi CAS head thua race, reload/recompute revoke và retry tối đa 3 lần; account revision stale và conflict ở delete/device-code giữ nguyên lỗi gốc. Sau 3 race trả lỗi retryable `device_session_issue_conflict`.
 - Regression head/revocation và login replacement same-device pass; `cargo test --locked -p buglogin-api --lib` PASS 279/279; `cargo fmt`/`git diff --check` pass. Đây là fix race có thể tái hiện ở kiến trúc multi-instance, chưa chứng minh toàn bộ lịch sử 108 session production do race này gây ra.
 - Chưa commit/push hoặc release. Stable hiện là 3.0.21; session mới cần đồng bộ source/action repo và đi qua candidate gates trước khi promote stable.
+
+## Điều phối 68: Regression race đăng nhập cùng thiết bị
+- Bổ sung test chạy đồng thời hai lần cấp session cho cùng account/device trên cùng control store; cả hai request hoàn tất, durable head revision lên 2 và chỉ còn đúng một session family active.
+- Test tập trung `concurrent_same_device_sign_ins_leave_only_one_active_family` PASS; thay đổi test và cập nhật plan là WIP trên `main`, chưa push riêng.
+- Thử nghiệm 8 request đồng thời vượt giới hạn retry hữu hạn và có thể trả conflict retryable; gate giữ ở race hai API instance đúng kịch bản cần xử lý, không tăng retry không giới hạn.
