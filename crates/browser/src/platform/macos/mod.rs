@@ -66,18 +66,51 @@ impl MacOsProcessGroupController {
     }
 
     pub fn launch(&self, executable: &Path, args: &[String]) -> Result<MacOsProcessGroup, Problem> {
+        self.launch_inner(executable, args, None)
+    }
+
+    pub(crate) fn launch_with_fingerprint(
+        &self,
+        executable: &Path,
+        args: &[String],
+        fingerprint: &Path,
+    ) -> Result<MacOsProcessGroup, Problem> {
+        self.launch_inner(executable, args, Some(fingerprint))
+    }
+
+    fn launch_inner(
+        &self,
+        executable: &Path,
+        args: &[String],
+        fingerprint: Option<&Path>,
+    ) -> Result<MacOsProcessGroup, Problem> {
         let executable = executable
             .canonicalize()
             .map_err(|_| executable_invalid())?;
         let owner_pid = std::process::id();
         let owner_start = process_start(owner_pid).ok_or_else(identity_unverified)?;
+        let configured_helper = fingerprint.map(|_| {
+            GROUP_HELPER.replacen(
+                "\"$@\" &",
+                "exec 3< \"$BUGLOGIN_FINGERPRINT_FILE\" || exit 1\n\"$@\" --fury-fp-fd=3 3<&3 &",
+                1,
+            )
+        });
         let mut command = Command::new("/bin/sh");
         command
-            .args(["-c", GROUP_HELPER, "buglogin-process-group"])
+            .args([
+                "-c",
+                configured_helper.as_deref().unwrap_or(GROUP_HELPER),
+                "buglogin-process-group",
+            ])
             .arg(&executable)
             .args(args)
             .env("BUGLOGIN_OWNER_PID", owner_pid.to_string())
             .env("BUGLOGIN_OWNER_START", owner_start)
+            .env(
+                "BUGLOGIN_FINGERPRINT_FILE",
+                fingerprint.unwrap_or(Path::new("")),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

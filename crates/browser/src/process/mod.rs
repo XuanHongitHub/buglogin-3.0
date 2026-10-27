@@ -151,6 +151,56 @@ impl SystemProcessController {
         }
         Ok(executable)
     }
+
+    /// Opt-in descriptor transport for the separate Fury-compatible adapter.
+    /// Existing `ProcessController::launch` keeps its original launch path.
+    pub(crate) fn launch_with_fingerprint(
+        &self,
+        specification: &LaunchSpecification,
+        fingerprint: &Path,
+    ) -> Result<Box<dyn ManagedProcess>, Problem> {
+        let executable = self.approved_executable(specification)?;
+        let expected = buglogin_storage::paths::confined_path(
+            &specification.profile_path,
+            Path::new("BugLogin/fury-fingerprint.json"),
+        )?;
+        if fingerprint != expected
+            || !std::fs::symlink_metadata(fingerprint).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= 1024 * 1024
+            })
+        {
+            return Err(invalid_profile_path());
+        }
+        #[cfg(target_os = "windows")]
+        return Ok(Box::new(PlatformManagedProcess::new(
+            WindowsJobController::system()?.launch_with_fingerprint(
+                &executable,
+                &specification.args,
+                &specification.profile_path,
+                fingerprint,
+            )?,
+        )));
+        #[cfg(target_os = "macos")]
+        return Ok(Box::new(PlatformManagedProcess::new(
+            MacOsProcessGroupController::system().launch_with_fingerprint(
+                &executable,
+                &specification.args,
+                fingerprint,
+            )?,
+        )));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = executable;
+            Err(Problem::new(
+                "fingerprint_transport_unsupported",
+                "Native fingerprint transport is not supported on this platform",
+                409,
+                "browser-process",
+            ))
+        }
+    }
 }
 impl ProcessController for SystemProcessController {
     fn launch(

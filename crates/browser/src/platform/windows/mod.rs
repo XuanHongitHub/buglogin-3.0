@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use crate::platform::{OwnedProcessTree, ProcessTreeIdentity, ProcessTreeStatus};
 use crate::process::ProcessIdentity;
 
+mod fingerprint_carrier;
+
 const JOB_HELPER: &str = r#"
 $ErrorActionPreference = 'Stop'
 $process = $null
@@ -361,6 +363,33 @@ impl WindowsJobController {
         use_buglogin_window_icon: bool,
         profile_path: &Path,
     ) -> Result<WindowsJobProcess, Problem> {
+        self.launch_inner(
+            executable,
+            args,
+            use_buglogin_window_icon,
+            profile_path,
+            None,
+        )
+    }
+
+    pub(crate) fn launch_with_fingerprint(
+        &self,
+        executable: &Path,
+        args: &[String],
+        profile_path: &Path,
+        fingerprint: &Path,
+    ) -> Result<WindowsJobProcess, Problem> {
+        self.launch_inner(executable, args, false, profile_path, Some(fingerprint))
+    }
+
+    fn launch_inner(
+        &self,
+        executable: &Path,
+        args: &[String],
+        use_buglogin_window_icon: bool,
+        profile_path: &Path,
+        fingerprint: Option<&Path>,
+    ) -> Result<WindowsJobProcess, Problem> {
         let executable = executable
             .canonicalize()
             .map_err(|_| executable_invalid())?;
@@ -370,16 +399,23 @@ impl WindowsJobController {
             .map(|(_, ticks)| ticks)
             .ok_or_else(identity_unverified)?;
         let apply_window_identity = if use_buglogin_window_icon { "1" } else { "" };
+        let configured_helper = fingerprint
+            .map(|_| fingerprint_carrier::configured_helper(JOB_HELPER))
+            .transpose()?;
         let mut helper = Command::new(&self.powershell)
             .args([
                 "-NoLogo",
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                JOB_HELPER,
+                configured_helper.as_deref().unwrap_or(JOB_HELPER),
             ])
             .env("BUGLOGIN_EXECUTABLE", executable_value)
             .env("BUGLOGIN_ARGUMENTS", windows_command_line(args))
+            .env(
+                "BUGLOGIN_FINGERPRINT_FILE",
+                fingerprint.unwrap_or(Path::new("")),
+            )
             .env("BUGLOGIN_OWNER_PID", owner_pid.to_string())
             .env("BUGLOGIN_OWNER_TICKS", owner_ticks)
             .env("BUGLOGIN_APPLY_WINDOW_IDENTITY", apply_window_identity)
