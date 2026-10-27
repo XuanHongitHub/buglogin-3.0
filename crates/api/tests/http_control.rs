@@ -842,7 +842,11 @@ async fn extension_group_rest_crud_is_workspace_scoped_versioned_and_authorized(
         .unwrap();
     let deleted_status = deleted.status();
     let deleted_body = json_body(deleted).await;
-    assert_eq!(deleted_status, StatusCode::OK, "delete response: {deleted_body}");
+    assert_eq!(
+        deleted_status,
+        StatusCode::OK,
+        "delete response: {deleted_body}"
+    );
 
     let deleted_group = app
         .clone()
