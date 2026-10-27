@@ -203,7 +203,15 @@ impl OwnedProcessTree for MacOsProcessGroup {
                     thread::sleep(self.stop_policy.poll_interval);
                 }
             }
-            ProcessTreeStatus::Unknown => return Err(identity_unverified()),
+            ProcessTreeStatus::Unknown => {
+                // The supervisor is a child process we created in its own
+                // process group. If macOS cannot resolve the browser's
+                // executable (for example, lsof is unavailable), stop that
+                // owned group directly instead of leaving the lifecycle stuck.
+                signal_group(self.helper.id(), "KILL")?;
+                self.helper.wait().map_err(|_| stop_failed())?;
+                return Ok(());
+            }
         }
         let _ = signal_group(self.identity.tree_id, "KILL");
         self.helper.wait().map_err(|_| stop_failed())?;
@@ -226,13 +234,13 @@ fn inspect_process(identity: &ProcessTreeIdentity) -> ProcessTreeStatus {
     };
     if pgid == identity.tree_id
         && identity.root.token.strip_prefix("macos:") == Some(start.as_str())
-        && process_executable(identity.root.pid).as_deref()
-            == Some(identity.root.executable.as_path())
     {
-        ProcessTreeStatus::Running
-    } else {
-        ProcessTreeStatus::Unknown
+        return match process_executable_matches(identity.root.pid, &identity.root.executable) {
+            Some(true) => ProcessTreeStatus::Running,
+            Some(false) | None => ProcessTreeStatus::Unknown,
+        };
     }
+    ProcessTreeStatus::Unknown
 }
 
 fn process_start(pid: u32) -> Option<String> {
@@ -256,7 +264,7 @@ fn process_group_fingerprint(pid: u32) -> Option<(u32, String)> {
     ))
 }
 
-fn process_executable(pid: u32) -> Option<PathBuf> {
+fn process_executable_matches(pid: u32, expected: &Path) -> Option<bool> {
     let output = Command::new("/usr/sbin/lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "txt", "-Fn"])
         .output()
@@ -264,12 +272,19 @@ fn process_executable(pid: u32) -> Option<PathBuf> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8(output.stdout)
-        .ok()?
+    let output = String::from_utf8(output.stdout).ok()?;
+    Some(lsof_reports_executable(&output, expected))
+}
+
+fn lsof_reports_executable(output: &str, expected: &Path) -> bool {
+    output
         .lines()
-        .find_map(|line| line.strip_prefix('n'))
-        .map(PathBuf::from)
-        .and_then(|path| path.canonicalize().ok())
+        .filter_map(|line| line.strip_prefix('n'))
+        .any(|name| {
+            PathBuf::from(name)
+                .canonicalize()
+                .is_ok_and(|path| path == expected)
+        })
 }
 
 fn signal_process(pid: u32, signal: &str) -> Result<(), Problem> {
@@ -359,4 +374,24 @@ fn stop_failed() -> Problem {
 }
 fn problem(code: &str, title: &str, status: u16) -> Problem {
     Problem::new(code, title, status, "browser")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lsof_reports_executable;
+    use std::path::Path;
+
+    #[test]
+    fn lsof_identity_matches_the_executable_among_all_text_mappings() {
+        let executable = Path::new("/bin/bash").canonicalize().unwrap();
+        let output = format!(
+            "p123\nftxt\nn/usr/lib/dyld\nftxt\nn{}\n",
+            executable.display()
+        );
+        assert!(lsof_reports_executable(&output, &executable));
+        assert!(!lsof_reports_executable(
+            "p123\nftxt\nn/usr/lib/dyld\n",
+            &executable
+        ));
+    }
 }
