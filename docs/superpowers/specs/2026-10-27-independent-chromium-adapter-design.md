@@ -110,11 +110,16 @@ without native Windows/macOS evidence.
   explicitly identify Firefox/Juggler behavior. It is a reference for surface
   coverage and consistency, but requires a separate browser-family adapter.
 - [Chrome 156 stable release notes](https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02018666648.html)
-  put Windows/macOS at 156.0.8078.47/.48 on Oct 20, 2026. Fury [v0.4.16](https://github.com/furyteamtop/fury-antidetect-browser/releases/tag/v0.4.16)
-  ships 155.0.8059.39, so it is one major version behind at research time and
-  fails the production currency gate even though its Windows adapter smoke
-  passes. Refreshing it requires a new pinned binary, native readback and
-  artifact/license review; a version-string edit is not sufficient.
+  put Windows/macOS at 156.0.8078.47/.48 on Oct 20, 2026. Google's [Oct 22
+  early stable notice](https://chromereleases.googleblog.com/2026/10/early-stable-update-for-desktop_02123641300.html)
+  reports 157.0.8103.15/.16 on Windows and says macOS rollout is still pending.
+  Fury [v0.4.16](https://github.com/furyteamtop/fury-antidetect-browser/releases/tag/v0.4.16)
+  remains the latest published release as of Oct 28 and ships Chromium
+  155.0.8059.39. It is therefore one major behind macOS stable and two behind
+  Windows early stable; it fails the production currency gate even though its
+  native adapter smoke passes on both supported CI platforms. Refreshing it
+  requires a newly pinned binary, native readback, and artifact/license review;
+  a version-string edit is not sufficient.
 - The upstream [Fury licensing map](https://github.com/furyteamtop/fury-antidetect-browser/blob/main/docs/10-legal-licensing.md)
   separates BSD Chromium patches from AGPL launcher/agent/server/tooling and
   Apache persona schemas. This adapter only implements the published persona
@@ -142,6 +147,21 @@ undetectable or universally compatible. Vendor detection-test claims are not an
 acceptance signal.
 
 ### Required parity evidence before considering default replacement
+
+### Beta parity snapshot (2026-10-28)
+
+| Capability | Beta evidence | Result / boundary |
+| --- | --- | --- |
+| Persistent engine-bound identity | Schema-v3 identity is immutable and binds profile seed, exact engine version, OS, and executable SHA-256; regression tests cover substitution. | Pass for local identity and restart. Cross-device portability is not established. |
+| Native surface coherence | Native readback covers main frame/worker, UA and Client Hints, canvas, audio, and the pinned core's config. | Pass for the tested pinned Fury build on Windows x64 and macOS arm64. It is not evidence of parity with every Wayfern or reference-browser surface. |
+| Profile isolation and data | Smoke checks separate profiles and retain cookies across restart; unpacked extension execution and proxy routing are exercised. | Pass for isolated native smoke. Production storage paths and extension/proxy management remain under existing Wayfern lifecycle. |
+| Runtime process lifecycle | Existing Rust process controller launches, reports, and stops the child tree; Windows and macOS native evidence includes stop behavior. | Pass as an adapter/example vertical slice. Product UI, runtime catalog, and profile lifecycle do not select Fury. |
+| Sync, locks, and recovery | Identity/config are not wired into the encrypted profile snapshot, remote conflict resolution, or device locks. | Not implemented in this beta; mandatory before product lifecycle use or default replacement. |
+| Security updates and distribution | Artifact/version are pinned and checksum-verified for tests; Fury v0.4.16 is based on Chromium 155. | Test-only package passes integrity checks. Security currency, signing, distribution notices, update/rollback are not approved. |
+
+This snapshot defines “beta complete” as an isolated adapter and two-platform
+native test path. Unintegrated product capabilities remain explicit promotion
+gates and must not be described as completed or enabled in BugLogin.
 
 - A versioned, persistent identity is derived from one measured/coherent device
   persona. It remains byte-stable across restarts and encrypted sync; it is never

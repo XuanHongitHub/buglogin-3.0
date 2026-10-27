@@ -101,16 +101,21 @@ for the current comparison and parity bar. Primary references include:
   and multiple-profile isolation on Windows x64.
 - [x] Verify checksum-pinned install and keep the
   candidate outside the production runtime catalog.
-- [ ] Run the native matrix on macOS arm64; Windows x64 passed locally.
-- [ ] Compare results with the Phase 1 parity bar; do not claim feature parity
-  from launch smoke alone.
-- [ ] Verify that identity and fingerprint config are included only in the
+- [x] Run the native matrix on macOS arm64; Fury and adryfish CI jobs pass on
+  `macos-15-arm64` for commit `1b43358f` (run 40556330808). Windows x64 Fury
+  was separately verified by local native smoke; Windows Actions result is
+  tracked below and must be closed before calling this cross-platform CI green.
+- [x] Compare measured results with the Phase 1 parity bar. The capability-by-
+  capability evidence and the explicit gaps are in the design spec's Beta
+  parity snapshot; no feature-parity claim is made.
+- [ ] Promotion gate: verify that identity and fingerprint config are included only in the
   existing encrypted profile snapshot, then prove Windows-to-Windows restart
   and conflict behavior on two devices. The adapter is not connected to product
   sync/lifecycle yet, so this remains open.
-- [ ] Rebase the candidate onto a supported security-current Chromium revision
-  and rerun both native platform matrices; Fury v0.4.16 is on Chromium 155 while
-  Chrome 156 is stable.
+- [ ] Promotion gate: rebase the candidate onto a supported security-current
+  Chromium revision and rerun both native platform matrices. Fury v0.4.16 is
+  on Chromium 155 while Chrome 156 is stable on macOS and 157 is in early stable
+  rollout on Windows.
 
 ### Phase 4 — Closeout
 
@@ -122,13 +127,13 @@ for the current comparison and parity bar. Primary references include:
 
 ## Current status
 
-Windows x64 implementation and native smoke are complete for the pinned Fury
-core 0.4.16 artifact. The adapter remains an isolated beta candidate: it is not
-selectable in the product, has no lifecycle UI/API wiring, and has no macOS
-native result in this checkout. It does not meet the bar for replacing Wayfern.
-The pinned core reports Chromium 155.0.8059.39; Chrome 156.0.8078.47/.48 became
-stable on Oct 20, 2026. The candidate is therefore a full major version behind
-and must be refreshed/revalidated before any production consideration.
+The isolated adapter implementation and focused Rust contract are complete.
+Native Windows x64 and macOS arm64 Fury smoke have both produced 10/10 passing
+checks. It remains a beta candidate: no product UI/API/catalog or encrypted
+sync/lifecycle integration selects it. It is not eligible to replace Wayfern.
+Fury v0.4.16 reports Chromium 155.0.8059.39; Chrome 156 is stable on macOS and
+157 is in early stable rollout on Windows, so engine currency is also a
+promotion gate.
 
 ### Verification evidence (2026-10-27)
 
@@ -160,7 +165,17 @@ and must be refreshed/revalidated before any production consideration.
   identifies cross-origin correlation and different threat models; the design
   gate is coherent native behavior and measured compatibility, not a vendor
   “undetectable” claim. Chrome UA changes must keep Client Hints consistent.
-- The research-time Chrome stable is 156.0.8078.47/.48 while Fury v0.4.16 ships
-  155.0.8059.39. This beta is for adapter engineering and local evaluation only;
-  its engine is not eligible for production/default use until rebased to a
-  supported security-current revision and the native matrix is rerun.
+- Chrome's Oct 20 stable was 156.0.8078.47/.48; its Oct 22 early stable update
+  put Windows at 157.0.8103.15/.16 while Mac rollout was still pending. Fury
+  v0.4.16 ships 155.0.8059.39. This beta is for adapter engineering and local
+  evaluation only; its engine is not eligible for production/default use until
+  rebased to a supported security-current revision and both native matrices rerun.
+- GitHub Actions run 40556330808 on commit `1b43358f` passed both macOS arm64
+  jobs. Fury's uploaded native evidence reports 10/10 checks passing with
+  Chromium 155.0.8059.39, including native config/client-hints readback,
+  worker consistency, canvas, extension, cookie restart, profile isolation,
+  proxy routing, and process-tree stop. Windows adryfish passed, but the Windows
+  Fury job spent 19 minutes in the silent package fetch and was canceled before
+  native smoke. Run 40559937116 reruns the matrix with byte-progress output, a
+  120-second no-data timeout, and a bounded extraction step; no result is
+  inferred until that run completes.
