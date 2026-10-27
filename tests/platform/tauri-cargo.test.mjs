@@ -86,3 +86,39 @@ test("Tauri Cargo stages the migration sidecar only for desktop builds", () => {
     false,
   );
 });
+
+test("Tauri JavaScript plugins use the Rust plugin API major version", async () => {
+  const manifest = JSON.parse(await readFile("package.json", "utf8"));
+  const lockfile = (await readFile("Cargo.lock", "utf8")).replaceAll(
+    "\r\n",
+    "\n",
+  );
+
+  for (const [jsName, rustName] of [
+    ["@tauri-apps/plugin-dialog", "tauri-plugin-dialog"],
+    ["@tauri-apps/plugin-fs", "tauri-plugin-fs"],
+  ]) {
+    const jsVersion = manifest.dependencies[jsName].match(
+      /\d+\.\d+\.\d+/,
+    )?.[0];
+    const rustVersion = lockfile.match(
+      new RegExp(
+        `\\[\\[package\\]\\]\\nname = "${rustName}"\\nversion = "([^"]+)"`,
+      ),
+    )?.[1];
+
+    assert.ok(
+      jsVersion,
+      `missing JavaScript dependency version for ${jsName}`,
+    );
+    assert.ok(
+      rustVersion,
+      `missing Rust lockfile version for ${rustName}`,
+    );
+    assert.equal(
+      jsVersion.split(".")[0],
+      rustVersion.split(".")[0],
+      `${jsName} ${jsVersion} must use the same API major as ${rustName} ${rustVersion}`,
+    );
+  }
+});
