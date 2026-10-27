@@ -172,7 +172,7 @@ fn known_canvas_crashing_engine_cannot_be_selected() {
 fn existing_wayfern_and_untracked_chromium_profiles_are_never_reidentified() {
     for marker in ["BugLogin/fingerprint.json", "Local State"] {
         let fixture = Fixture::new();
-        fs::create_dir_all(fixture.0.join("BugLogin")).unwrap();
+        fs::create_dir_all(fixture.0.join(marker).parent().unwrap()).unwrap();
         fs::write(fixture.0.join(marker), b"existing-profile-data").unwrap();
         let adapter = IndependentChromiumAdapter::new(identity()).unwrap();
         let binary = adapter.validate_binary(&fixture.binary()).unwrap();
@@ -191,6 +191,12 @@ fn existing_wayfern_and_untracked_chromium_profiles_are_never_reidentified() {
             !fixture
                 .0
                 .join("BugLogin/independent-chromium.json")
+                .exists()
+        );
+        assert!(
+            !fixture
+                .0
+                .join("BugLogin/.independent-chromium.lock")
                 .exists()
         );
     }

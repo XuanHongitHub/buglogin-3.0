@@ -153,6 +153,9 @@ impl ChromiumIdentity {
 
     fn ensure_persisted(&self, profile_path: &Path) -> Result<(), Problem> {
         let destination = confined_path(profile_path, Path::new(IDENTITY_FILE))?;
+        if Self::load(profile_path)?.is_none() {
+            reject_untracked_profile(profile_path)?;
+        }
         let parent = destination.parent().expect("identity has a parent");
         fs::create_dir_all(parent).map_err(storage_error)?;
         let lock_path = confined_path(
@@ -177,15 +180,7 @@ impl ChromiumIdentity {
             }
             return Ok(());
         }
-        if confined_path(profile_path, Path::new("BugLogin/fingerprint.json"))?.exists()
-            || confined_path(profile_path, Path::new("Local State"))?.exists()
-        {
-            return Err(problem(
-                "chromium_profile_engine_conflict",
-                "This browser profile requires an explicit identity migration before using this adapter",
-                409,
-            ));
-        }
+        reject_untracked_profile(profile_path)?;
         let temporary = confined_path(
             profile_path,
             Path::new("BugLogin/.independent-chromium.json.tmp"),
@@ -379,6 +374,19 @@ fn validate_profile_directory(profile_path: &Path) -> Result<(), Problem> {
             "runtime_profile_path_invalid",
             "An existing isolated profile directory is required",
             400,
+        ));
+    }
+    Ok(())
+}
+
+fn reject_untracked_profile(profile_path: &Path) -> Result<(), Problem> {
+    if confined_path(profile_path, Path::new("BugLogin/fingerprint.json"))?.exists()
+        || confined_path(profile_path, Path::new("Local State"))?.exists()
+    {
+        return Err(problem(
+            "chromium_profile_engine_conflict",
+            "This browser profile requires an explicit identity migration before using this adapter",
+            409,
         ));
     }
     Ok(())
