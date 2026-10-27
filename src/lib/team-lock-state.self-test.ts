@@ -73,10 +73,10 @@ assert.deepEqual(
   {
     unknown: false,
     lockedRemotely: true,
-    runningRemotely: false,
+    runningRemotely: true,
     syncingRemotely: false,
   },
-  "the UI trusts the server-filtered lease instead of comparing client clocks",
+  "a lease returned by the server remains authoritative despite client clock skew",
 );
 
 assert.deepEqual(

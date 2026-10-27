@@ -492,6 +492,18 @@ paths:
       operationId: profile.runtime.get
       parameters: [{ $ref: '#/components/parameters/ProfileId' }]
       responses: { "200": { description: Runtime projection, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeProjection' } } } } }
+  /v1/workspaces/{workspaceId}/profile-runtime-status:
+    get:
+      operationId: profile.runtime.status.batch
+      parameters:
+        - { $ref: '#/components/parameters/WorkspaceId' }
+        - { $ref: '#/components/parameters/ProfileIdBatch' }
+      responses:
+        "200": { description: Runtime and coordination status for authorized profiles, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileRuntimeStatusBatch' } } } }
+        "400": { $ref: '#/components/responses/Problem' }
+        "401": { $ref: '#/components/responses/Problem' }
+        "403": { $ref: '#/components/responses/Problem' }
+        "413": { $ref: '#/components/responses/Problem' }
   /v1/profiles/{profileId}/runtime/started:
     put:
       operationId: profile.runtime.started
@@ -1547,6 +1559,7 @@ components:
     WorkspaceId: { name: workspaceId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     ExtensionGroupId: { name: extensionGroupId, in: path, required: true, schema: { $ref: '#/components/schemas/CanonicalId' } }
     ProfileId: { name: profileId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
+    ProfileIdBatch: { name: profileId, in: query, required: true, style: form, explode: true, schema: { type: array, minItems: 1, maxItems: 250, items: { $ref: '#/components/schemas/CanonicalId' } } }
     MemberId: { name: memberId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     MemberInvitationId: { name: invitationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
     ResourceId: { name: resourceId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' } }
@@ -1846,6 +1859,9 @@ components:
     RuntimeProjectionInput: { type: object, required: [deviceId, generation, rootChecksum], properties: { deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-fA-F]{64}$' } }, additionalProperties: false }
     RuntimeProjection: { type: object, required: [profileId, deviceId, ownerId, state, generation, rootChecksum, updatedAtMs], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, deviceId: { $ref: '#/components/schemas/RuntimeDeviceIdentifier' }, ownerId: { $ref: '#/components/schemas/CoordinationOwnerIdentifier' }, ownerEmail: { type: [string, "null"] }, state: { enum: [running, syncing, stopped] }, generation: { type: integer, minimum: 1 }, rootChecksum: { type: string }, updatedAtMs: { type: integer, minimum: 0 } }, additionalProperties: false }
     OptionalRuntimeProjection: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] }
+    ProfileRuntimeStatusBatchInput: { type: object, required: [workspaceId, profileId], properties: { workspaceId: { $ref: '#/components/schemas/CanonicalId' }, profileId: { type: array, minItems: 1, maxItems: 250, items: { $ref: '#/components/schemas/CanonicalId' } } }, additionalProperties: false }
+    ProfileRuntimeStatusSnapshot: { type: object, required: [profileId, lease, runtime], properties: { profileId: { $ref: '#/components/schemas/CanonicalId' }, lease: { oneOf: [{ $ref: '#/components/schemas/LeaseStatus' }, { type: "null" }] }, runtime: { oneOf: [{ $ref: '#/components/schemas/RuntimeProjection' }, { type: "null" }] } }, additionalProperties: false }
+    ProfileRuntimeStatusBatch: { type: array, items: { $ref: '#/components/schemas/ProfileRuntimeStatusSnapshot' } }
     SyncManifest: { type: object, required: [schemaVersion, workspaceId, resourceId, fencingToken, generation, parentGeneration, rootChecksum, objects, tombstones], properties: { schemaVersion: { enum: [2, 3] }, workspaceId: { $ref: '#/components/schemas/CanonicalId' }, resourceId: { $ref: '#/components/schemas/CanonicalId' }, fencingToken: { type: integer, minimum: 1 }, generation: { type: integer, minimum: 1 }, parentGeneration: { type: [integer, "null"], minimum: 1 }, rootChecksum: { type: string, pattern: '^[0-9a-f]{64}$' }, objects: { type: array, items: { $ref: '#/components/schemas/ManifestObject' } }, tombstones: { type: array, items: { $ref: '#/components/schemas/ManifestTombstone' } }, dependencies: { type: array, items: { $ref: '#/components/schemas/ManifestDependency' } }, payloadEncryption: { oneOf: [{ $ref: '#/components/schemas/ManifestPayloadEncryption' }, { type: "null" }] }, fileChunks: { type: array, items: { $ref: '#/components/schemas/ManifestFileChunks' } } }, additionalProperties: false }
     ResourceManifestKeyRotationInput: { type: object, required: [manifest], properties: { manifest: { $ref: '#/components/schemas/SyncManifest' }, keyShareEnvelopeUpdates: { type: array, maxItems: 256, items: { $ref: '#/components/schemas/ProfileKeyRotationEnvelopeUpdate' } } }, additionalProperties: false }
     ProfileKeyRotationEnvelopeUpdate: { type: object, required: [memberId, recipientKeyEnvelopes], properties: { memberId: { $ref: '#/components/schemas/CanonicalId' }, recipientKeyEnvelopes: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ConfirmedProfileKeyShareEnvelope' } } }, additionalProperties: false }
