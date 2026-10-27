@@ -1,0 +1,60 @@
+name: Independent Chromium Adapter Native Smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: independent-chromium-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-buglogin
+        with:
+          install-node-dependencies: false
+      - name: Verify adapter and existing Wayfern contract
+        run: cargo test --locked -p buglogin-browser --test independent_chromium --test runtime_contract
+      - name: Build native process probe
+        run: cargo build --locked -p buglogin-browser --example independent_chromium_probe
+      - name: Fetch checksum-pinned upstream test package
+        run: node scripts/runtime/fetch-independent-chromium.mjs --directory .adapter-smoke-engine
+      - name: Exercise native fingerprint, cookies, extensions, proxy and process stop
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const engine = JSON.parse(fs.readFileSync('.adapter-smoke-engine/engine-metadata.json', 'utf8'));
+          const suffix = process.platform === 'win32' ? '.exe' : '';
+          const result = spawnSync(process.execPath, [
+            'scripts/runtime/smoke-independent-chromium.mjs',
+            '--probe', path.join(process.env.CARGO_TARGET_DIR, 'debug', 'examples', `independent_chromium_probe${suffix}`),
+            '--binary', engine.binary, '--version', engine.version, '--sha256', engine.sha256,
+            '--output', 'independent-chromium-native-evidence.json',
+          ], { stdio: 'inherit', timeout: 180000 });
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
+          JS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: independent-chromium-${{ matrix.os }}-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            independent-chromium-native-evidence.json
+            .adapter-smoke-engine/engine-metadata.json
