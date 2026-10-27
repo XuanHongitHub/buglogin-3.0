@@ -47,8 +47,8 @@ Latest candidate has no macOS asset; macOS parity cannot be claimed from it.
 - New adapter refuses pre-existing Wayfern or untracked Chromium profile data
   without an explicit identity migration. Existing Wayfern profiles are not
   reidentified and new runtime profiles are not enabled in the product UI.
-- Native CI at `c4c3c9d4d9f087c93af10e04115ed907dcc0f48b` passed on Windows
-  x64 and macOS arm64: https://github.com/XuanHongitHub/buglogin-3.0/actions/runs/40491491634.
+- Native CI at `875df7249f6b7c3d9f7af119cde76c6f9a392838` passed on Windows
+  x64 and macOS arm64: https://github.com/XuanHongitHub/buglogin-3.0/actions/runs/40492401968.
   macOS cleanup waits for verified process exit after CDP close; it does not
   reinterpret an unverified process as stopped. Shared process code is unchanged.
 - Override validation follows Chromium switch prefixes (`--`, `-`, and Windows
