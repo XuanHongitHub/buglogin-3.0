@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 
@@ -50,12 +50,44 @@ const archive = path.join(directory, release.name);
 const url = fury
   ? `https://github.com/furyteamtop/fury-antidetect-browser/releases/download/v0.4.16/${release.name}`
   : `https://github.com/adryfish/fingerprint-chromium/releases/download/${version}/${release.name}`;
-const response = await fetch(url);
+console.log(`Downloading ${release.name} from ${url}`);
+const controller = new AbortController();
+let idleTimer;
+const resetIdleTimer = () => {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(
+    () => controller.abort(new Error("No download data received for 120 seconds")),
+    120_000,
+  );
+  idleTimer.unref?.();
+};
+resetIdleTimer();
+const response = await fetch(url, { signal: controller.signal });
 assert.equal(response.status, 200, "official engine package download");
-await pipeline(
-  Readable.fromWeb(response.body),
-  createWriteStream(archive, { flags: "wx" }),
-);
+assert.ok(response.body, "official engine package response body");
+let downloadedBytes = 0;
+let nextProgressBytes = 16 * 1024 * 1024;
+const progress = new Transform({
+  transform(chunk, _encoding, callback) {
+    downloadedBytes += chunk.length;
+    resetIdleTimer();
+    if (downloadedBytes >= nextProgressBytes) {
+      console.log(`Downloaded ${(downloadedBytes / 1024 / 1024).toFixed(0)} MiB`);
+      nextProgressBytes += 16 * 1024 * 1024;
+    }
+    callback(null, chunk);
+  },
+});
+try {
+  await pipeline(
+    Readable.fromWeb(response.body),
+    progress,
+    createWriteStream(archive, { flags: "wx" }),
+  );
+} finally {
+  clearTimeout(idleTimer);
+}
+console.log(`Download complete: ${(downloadedBytes / 1024 / 1024).toFixed(1)} MiB`);
 async function sha256(file) {
   const hash = createHash("sha256");
   for await (const bytes of createReadStream(file)) hash.update(bytes);
@@ -70,7 +102,12 @@ const extracted = path.join(directory, "engine");
 await fs.mkdir(extracted);
 let binary;
 if (fury) {
-  execFileSync("tar", ["-xf", archive, "-C", extracted]);
+  console.log("Extracting Fury package");
+  execFileSync("tar", ["-xf", archive, "-C", extracted], {
+    stdio: "inherit",
+    timeout: 15 * 60 * 1000,
+  });
+  console.log("Fury package extracted");
   if (process.platform === "win32") {
     binary = path.join(extracted, "Fury", "chrome.exe");
   } else {
