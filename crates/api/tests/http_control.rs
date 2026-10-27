@@ -637,6 +637,53 @@ async fn extension_group_rest_crud_is_workspace_scoped_versioned_and_authorized(
     let token = state.issue_token("acct_extension_groups").unwrap();
     let account_id = AccountId::from_str("acct_extension_groups").unwrap();
     let workspace_id = WorkspaceId::from_str("wsp_extension_groups").unwrap();
+    let organization_id = OrganizationId::from_str("org_extension_groups").unwrap();
+    let platform_admin = Principal {
+        roles: [Role::PlatformAdmin].into_iter().collect(),
+        ..Principal::default()
+    };
+    state
+        .workspaces
+        .write()
+        .unwrap()
+        .add_organization(
+            &platform_admin,
+            &[],
+            Organization {
+                id: organization_id.clone(),
+                account_id: account_id.clone(),
+                name: "Extension groups test".into(),
+                created_at: "2026-10-27T00:00:00Z".into(),
+            },
+            OrganizationPolicy {
+                max_workspaces: 2,
+                offline_entitled: true,
+            },
+        )
+        .unwrap();
+    state
+        .workspaces
+        .write()
+        .unwrap()
+        .create_workspace(
+            &platform_admin,
+            &[],
+            &organization_id,
+            Workspace {
+                id: workspace_id.clone(),
+                organization_id: organization_id.clone(),
+                name: "Extension groups test".into(),
+                policy: WorkspacePolicy {
+                    max_profiles: 10,
+                    max_members: 10,
+                    max_storage_bytes: 1_048_576,
+                    offline_entitled: true,
+                    default_extension_group_id: None,
+                },
+                created_at: "2026-10-27T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
     let owner_member_id = MemberId::from_str("mem_extension_groups_owner").unwrap();
     state
         .members
@@ -793,7 +840,9 @@ async fn extension_group_rest_crud_is_workspace_scoped_versioned_and_authorized(
         ))
         .await
         .unwrap();
-    assert_eq!(deleted.status(), StatusCode::OK);
+    let deleted_status = deleted.status();
+    let deleted_body = json_body(deleted).await;
+    assert_eq!(deleted_status, StatusCode::OK, "delete response: {deleted_body}");
 
     let deleted_group = app
         .clone()

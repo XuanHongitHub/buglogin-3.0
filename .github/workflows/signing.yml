@@ -120,7 +120,7 @@ jobs:
         run: >-
           cosign verify-blob dist-release/SHA256SUMS.txt
           --bundle dist-release/provenance.sigstore.json
-          --certificate-identity-regexp '^https://github\.com/XuanHongitHub/buglogin-3\.0/\.github/workflows/signing\.yml@refs/heads/main$'
+          --certificate-identity 'https://github.com/XuanHongitHub/buglogin-3.0/.github/workflows/signing.yml@refs/heads/main'
           --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -277,7 +277,7 @@ jobs:
         run: >-
           cosign verify-blob dist-release/SHA256SUMS.txt
           --bundle dist-release/provenance.sigstore.json
-          --certificate-identity-regexp '^https://github\.com/XuanHongitHub/buglogin-3\.0/\.github/workflows/signing\.yml@refs/heads/main$'
+          --certificate-identity 'https://github.com/XuanHongitHub/buglogin-3.0/.github/workflows/signing.yml@refs/heads/main'
           --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

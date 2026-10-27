@@ -17,13 +17,22 @@ test("release workflows satisfy fail-closed static policy", async () => {
   assert.match(release, /workflow_dispatch:/);
   assert.match(signing, /Create Windows updater build configuration/);
   assert.equal(
-    (signing.match(/https:\/\/github\\\.com\/XuanHongitHub\/buglogin-3\\\.0\/\\.github\/workflows\/signing\\\.yml@refs\/heads\/main/g) ?? [])
+    (signing.match(/--certificate-identity 'https:\/\/github\.com\/XuanHongitHub\/buglogin-3\.0\/\.github\/workflows\/signing\.yml@refs\/heads\/main'/g) ?? [])
       .length,
     2,
   );
   assert.match(
     promotion,
-    /https:\/\/github\\\.com\/XuanHongitHub\/buglogin-3\\\.0\/\\.github\/workflows\/signing\\\.yml@refs\/heads\/main/,
+    /COSIGN_IDENTITY='https:\/\/github\.com\/XuanHongitHub\/buglogin-3\.0\/\.github\/workflows\/signing\.yml@refs\/heads\/main'/,
+  );
+  assert.equal(
+    (promotion.match(/--certificate-identity "\$COSIGN_IDENTITY"/g) ?? [])
+      .length,
+    2,
+  );
+  assert.doesNotMatch(
+    `${signing}\n${promotion}`,
+    /--certificate-identity-regexp/,
   );
   assert.doesNotMatch(
     `${signing}\n${promotion}`,
