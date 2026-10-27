@@ -13,7 +13,6 @@ import {
   type AccountPasswordChangeReceipt,
   type AccountProvisioningReceipt,
   type AccountSessionRevokeReceipt,
-  type AccountSessionsListInput,
   type AccountStatusUpdateCommandInput,
   type AccountView,
   type ApiToken,
