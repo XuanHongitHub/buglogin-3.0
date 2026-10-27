@@ -247,6 +247,29 @@ impl AuthService {
             device_id,
             credential_version,
             account_revision,
+            None,
+            Vec::new(),
+        )
+    }
+
+    pub fn issue_device_session_with_account_revision_at(
+        &mut self,
+        account_id: AccountId,
+        access_expires_at: u64,
+        refresh_expires_at: u64,
+        device_id: String,
+        credential_version: Option<u32>,
+        account_revision: Option<u64>,
+        issued_at: u64,
+    ) -> Result<DeviceSessionTokens, Problem> {
+        self.issue_device_session_inner(
+            account_id,
+            access_expires_at,
+            refresh_expires_at,
+            device_id,
+            credential_version,
+            account_revision,
+            Some(issued_at),
             Vec::new(),
         )
     }
@@ -276,6 +299,38 @@ impl AuthService {
             device_id,
             credential_version,
             account_revision,
+            None,
+            consumption.into_deletes(),
+        )
+    }
+
+    pub(crate) fn issue_device_session_with_account_revision_and_consumption_at(
+        &mut self,
+        account_id: AccountId,
+        access_expires_at: u64,
+        refresh_expires_at: u64,
+        device_id: String,
+        credential_version: Option<u32>,
+        account_revision: Option<u64>,
+        consumption: DeviceAuthorizationConsumption,
+        issued_at: u64,
+    ) -> Result<DeviceSessionTokens, Problem> {
+        if self.persistence.is_none() {
+            return Err(Problem::new(
+                "auth_unavailable",
+                "Persistent authentication storage is required for device-code exchange",
+                503,
+                "identity",
+            ));
+        }
+        self.issue_device_session_inner(
+            account_id,
+            access_expires_at,
+            refresh_expires_at,
+            device_id,
+            credential_version,
+            account_revision,
+            Some(issued_at),
             consumption.into_deletes(),
         )
     }
@@ -288,6 +343,7 @@ impl AuthService {
         device_id: String,
         credential_version: Option<u32>,
         account_revision: Option<u64>,
+        issued_at: Option<u64>,
         deletes: Vec<ControlDelete>,
     ) -> Result<DeviceSessionTokens, Problem> {
         if access_expires_at == 0 || refresh_expires_at <= access_expires_at {
@@ -302,6 +358,10 @@ impl AuthService {
             ));
         }
         let mut issued = issue_for_device(account_id, access_expires_at, Some(device_id.clone()))?;
+        if let Some(issued_at) = issued_at {
+            issued.record.created_at = Some(issued_at);
+            issued.record.last_seen_at = Some(issued_at);
+        }
         issued.record.credential_version = credential_version;
         let record = &issued.record;
         let mut refresh_token = Zeroizing::new(random_refresh_token()?);
@@ -309,7 +369,7 @@ impl AuthService {
             account_id: record.account_id.clone(),
             token_hash: sha256(refresh_token.as_bytes()),
             access_token_hash: record.token_hash,
-            device_id,
+            device_id: device_id.clone(),
             family_id: record.family_id.clone().ok_or_else(invalid_session)?,
             expires_at: refresh_expires_at,
             consumed_at: None,
@@ -318,15 +378,40 @@ impl AuthService {
         };
         let revision = match &self.persistence {
             Some(persistence) => {
-                persistence.create_device_session_with_account_revision_and_deletes(
+                let prior_device_sessions = issued_at
+                    .map(|now| {
+                        persistence.device_session_revocation_puts(
+                            &record.account_id,
+                            &device_id,
+                            now,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                persistence.create_device_session_with_account_revision_and_mutations(
                     record,
                     &refresh_record,
                     account_revision,
+                    prior_device_sessions,
                     deletes,
                 )?;
                 1
             }
             None => {
+                if let Some(issued_at) = issued_at {
+                    for stored in self.sessions.values_mut().filter(|stored| {
+                        stored.record.account_id == record.account_id
+                            && stored.record.device_id.as_deref() == Some(device_id.as_str())
+                            && stored.record.revoked_at.is_none()
+                    }) {
+                        stored.record.revoked_at = Some(issued_at);
+                        if let Some(family_id) = stored.record.family_id.as_deref() {
+                            self.revoked_families
+                                .entry(family_id.to_owned())
+                                .or_insert(issued_at);
+                        }
+                    }
+                }
                 self.sessions.insert(
                     record.token_hash,
                     StoredSession {
@@ -590,43 +675,43 @@ impl AuthService {
             self.revoke_family(&record.family_id, &record.account_id, now)?;
             return Err(session_revoked());
         }
-        if let (Some(key), Some(replay)) = (idempotency_key, record.refresh_replay.as_ref()) {
-            if replay.idempotency_key_hash == sha256(key.as_bytes()) {
-                if replay.expires_at <= now {
-                    return Err(refresh_replay_expired());
-                }
-                self.verify_refresh_family(record, now)?;
-                if let Some(version) = record.credential_version {
-                    let credentials = self.credentials.as_ref().ok_or_else(|| {
-                        Problem::new(
-                            "session_authority_unavailable",
-                            "Session authority is unavailable",
-                            503,
-                            "identity",
-                        )
-                    })?;
-                    if credentials.password_version(&record.account_id)? != Some(version) {
-                        return Err(session_revoked());
-                    }
-                }
-                let mut payload = open_refresh_replay(
-                    raw_refresh_token,
-                    &record.token_hash,
-                    key,
-                    "device",
-                    Some(device_id),
-                    replay,
-                )?;
-                let refresh_token = payload
-                    .refresh_token
-                    .take()
-                    .ok_or_else(refresh_replay_corrupt)?;
-                return Ok(DeviceSessionTokens {
-                    access_token: std::mem::take(&mut payload.access_token),
-                    refresh_token,
-                    expires_at: payload.expires_at,
-                });
+        if let (Some(key), Some(replay)) = (idempotency_key, record.refresh_replay.as_ref())
+            && replay.idempotency_key_hash == sha256(key.as_bytes())
+        {
+            if replay.expires_at <= now {
+                return Err(refresh_replay_expired());
             }
+            self.verify_refresh_family(record, now)?;
+            if let Some(version) = record.credential_version {
+                let credentials = self.credentials.as_ref().ok_or_else(|| {
+                    Problem::new(
+                        "session_authority_unavailable",
+                        "Session authority is unavailable",
+                        503,
+                        "identity",
+                    )
+                })?;
+                if credentials.password_version(&record.account_id)? != Some(version) {
+                    return Err(session_revoked());
+                }
+            }
+            let mut payload = open_refresh_replay(
+                raw_refresh_token,
+                &record.token_hash,
+                key,
+                "device",
+                Some(device_id),
+                replay,
+            )?;
+            let refresh_token = payload
+                .refresh_token
+                .take()
+                .ok_or_else(refresh_replay_corrupt)?;
+            return Ok(DeviceSessionTokens {
+                access_token: std::mem::take(&mut payload.access_token),
+                refresh_token,
+                expires_at: payload.expires_at,
+            });
         }
         self.revoke_family(&record.family_id, &record.account_id, now)?;
         Err(session_revoked())
@@ -835,29 +920,23 @@ impl AuthService {
         idempotency_key: Option<&str>,
         now: u64,
     ) -> Result<(String, u64), Problem> {
-        if let (Some(key), Some(replay)) = (idempotency_key, record.refresh_replay.as_ref()) {
-            if replay.idempotency_key_hash == sha256(key.as_bytes()) {
-                if replay.expires_at <= now {
-                    return Err(refresh_replay_expired());
-                }
-                self.verify_replay_family(record)?;
-                self.verify_replay_credential_version(record)?;
-                let mut payload = open_refresh_replay(
-                    raw_token,
-                    &record.token_hash,
-                    key,
-                    "session",
-                    None,
-                    replay,
-                )?;
-                if payload.refresh_token.is_some() {
-                    return Err(refresh_replay_corrupt());
-                }
-                return Ok((
-                    std::mem::take(&mut payload.access_token),
-                    payload.expires_at,
-                ));
+        if let (Some(key), Some(replay)) = (idempotency_key, record.refresh_replay.as_ref())
+            && replay.idempotency_key_hash == sha256(key.as_bytes())
+        {
+            if replay.expires_at <= now {
+                return Err(refresh_replay_expired());
             }
+            self.verify_replay_family(record)?;
+            self.verify_replay_credential_version(record)?;
+            let mut payload =
+                open_refresh_replay(raw_token, &record.token_hash, key, "session", None, replay)?;
+            if payload.refresh_token.is_some() {
+                return Err(refresh_replay_corrupt());
+            }
+            return Ok((
+                std::mem::take(&mut payload.access_token),
+                payload.expires_at,
+            ));
         }
         if let Some(family_id) = record.family_id.as_deref() {
             match &self.persistence {
@@ -1601,6 +1680,89 @@ mod tests {
         assert_eq!(
             verifier.list_sessions(&account_id, Some(&token)).unwrap()[0].revoked_at,
             Some(60)
+        );
+    }
+
+    #[test]
+    fn a_new_login_replaces_only_the_existing_session_on_the_same_device() {
+        let persistence =
+            SessionPersistence::new(ControlPersistence::new(MemoryControlRecordStore::default()));
+        let account_id = AccountId::new("acct_device_login_replace").unwrap();
+        let mut auth = AuthService::persistent(persistence.clone()).unwrap();
+        let first_device_session = auth
+            .issue_device_session_with_account_revision_at(
+                account_id.clone(),
+                1_000,
+                100_000,
+                "device-qa-a".into(),
+                None,
+                None,
+                100,
+            )
+            .unwrap();
+        let second_device_session = auth
+            .issue_device_session_with_account_revision_at(
+                account_id.clone(),
+                1_000,
+                100_000,
+                "device-qa-b".into(),
+                None,
+                None,
+                101,
+            )
+            .unwrap();
+
+        let replacement_session = auth
+            .issue_device_session_with_account_revision_at(
+                account_id.clone(),
+                1_000,
+                100_000,
+                "device-qa-a".into(),
+                None,
+                None,
+                200,
+            )
+            .unwrap();
+
+        assert_eq!(
+            auth.authenticate(&first_device_session.access_token, 201)
+                .unwrap_err()
+                .code,
+            "session_revoked"
+        );
+        assert_eq!(
+            auth.authenticate(&second_device_session.access_token, 201)
+                .unwrap(),
+            account_id
+        );
+        assert_eq!(
+            auth.authenticate(&replacement_session.access_token, 201)
+                .unwrap(),
+            account_id
+        );
+
+        let sessions = auth
+            .list_sessions(&account_id, Some(&replacement_session.access_token))
+            .unwrap();
+        let active = sessions
+            .iter()
+            .filter(|session| session.revoked_at.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(sessions.len(), 3, "revoked history remains auditable");
+        assert_eq!(active.len(), 2, "one active login per stable device ID");
+        assert_eq!(
+            active
+                .iter()
+                .filter(|session| session.device_id.as_deref() == Some("device-qa-a"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            active
+                .iter()
+                .filter(|session| session.device_id.as_deref() == Some("device-qa-b"))
+                .count(),
+            1
         );
     }
 
