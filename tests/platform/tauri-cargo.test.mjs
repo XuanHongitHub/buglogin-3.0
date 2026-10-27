@@ -87,7 +87,7 @@ test("Tauri Cargo stages the migration sidecar only for desktop builds", () => {
   );
 });
 
-test("Tauri JavaScript plugins use the Rust plugin API major version", async () => {
+test("Tauri JavaScript plugins match the Rust plugin major and minor versions", async () => {
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   const lockfile = (await readFile("Cargo.lock", "utf8")).replaceAll(
     "\r\n",
@@ -116,9 +116,9 @@ test("Tauri JavaScript plugins use the Rust plugin API major version", async () 
       `missing Rust lockfile version for ${rustName}`,
     );
     assert.equal(
-      jsVersion.split(".")[0],
-      rustVersion.split(".")[0],
-      `${jsName} ${jsVersion} must use the same API major as ${rustName} ${rustVersion}`,
+      jsVersion.split(".").slice(0, 2).join("."),
+      rustVersion.split(".").slice(0, 2).join("."),
+      `${jsName} ${jsVersion} must match ${rustName} ${rustVersion}`,
     );
   }
 });
