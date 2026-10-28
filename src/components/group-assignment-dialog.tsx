@@ -12,7 +12,6 @@ import {
   LuSearch,
 } from "react-icons/lu";
 import { toast } from "sonner";
-import { CreateGroupDialog } from "@/components/create-group-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,7 +22,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { translateBackendError } from "@/lib/backend-errors";
 import { cn } from "@/lib/utils";
 import type { ProfileGroup } from "@/types";
 
@@ -47,8 +48,10 @@ export function GroupAssignmentDialog({
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isAssigning, setIsAssigning] = useState(false);
+  const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
 
   const loadGroups = useCallback(async () => {
@@ -66,6 +69,37 @@ export function GroupAssignmentDialog({
       setIsLoading(false);
     }
   }, [t]);
+
+  const handleClose = useCallback(() => {
+    if (isAssigning || isCreatingGroup) return;
+    setShowCreateGroup(false);
+    setNewGroupName("");
+    onClose();
+  }, [isAssigning, isCreatingGroup, onClose]);
+
+  const handleCreateGroup = useCallback(async () => {
+    const name = newGroupName.trim();
+    if (!name || isCreatingGroup) return;
+
+    setIsCreatingGroup(true);
+    setError(null);
+    try {
+      const group = await invoke<ProfileGroup>("create_profile_group", {
+        name,
+      });
+      setGroups((previous) => [...previous, group]);
+      setSelectedGroupId(group.id);
+      setNewGroupName("");
+      setShowCreateGroup(false);
+      toast.success(t("groups.createSuccess"));
+    } catch (err) {
+      const message = translateBackendError(t, err);
+      setError(message);
+      toast.error(message);
+    } finally {
+      setIsCreatingGroup(false);
+    }
+  }, [isCreatingGroup, newGroupName, t]);
 
   const handleAssign = useCallback(async () => {
     setIsAssigning(true);
@@ -117,6 +151,8 @@ export function GroupAssignmentDialog({
       setSelectedGroupId(null);
       setError(null);
       setSearchQuery("");
+      setShowCreateGroup(false);
+      setNewGroupName("");
     }
   }, [isOpen, loadGroups]);
 
@@ -126,7 +162,7 @@ export function GroupAssignmentDialog({
 
   return (
     <>
-      <Dialog open={isOpen} onOpenChange={onClose}>
+      <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>
         <DialogContent className="max-w-md p-0 overflow-hidden sm:rounded-2xl border-border bg-card shadow-2xl">
           {/* Header */}
           <DialogHeader className="p-5 pb-3 border-b border-border/60">
@@ -171,12 +207,60 @@ export function GroupAssignmentDialog({
                 variant="outline"
                 size="sm"
                 className="h-9 gap-1.5 text-xs shrink-0"
-                onClick={() => setCreateDialogOpen(true)}
+                onClick={() => {
+                  setError(null);
+                  setShowCreateGroup((visible) => !visible);
+                }}
+                disabled={isAssigning || isCreatingGroup}
               >
                 <LuFolderPlus className="size-3.5" />
-                <span>{isVi ? "Tạo nhóm mới" : "New Group"}</span>
+                <span>
+                  {showCreateGroup
+                    ? t("common.buttons.cancel")
+                    : isVi
+                      ? "Tạo nhóm mới"
+                      : "New Group"}
+                </span>
               </Button>
             </div>
+
+            {showCreateGroup && (
+              <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="profile-group-inline-name">
+                    {t("groups.form.name")}
+                  </Label>
+                  <Input
+                    id="profile-group-inline-name"
+                    autoFocus
+                    value={newGroupName}
+                    onChange={(event) => setNewGroupName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void handleCreateGroup();
+                      }
+                    }}
+                    placeholder={t("groups.form.namePlaceholder")}
+                    maxLength={128}
+                    disabled={isCreatingGroup}
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => void handleCreateGroup()}
+                    disabled={!newGroupName.trim() || isCreatingGroup}
+                  >
+                    {isCreatingGroup && (
+                      <span className="mr-2 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    )}
+                    {t("common.buttons.create")}
+                  </Button>
+                </div>
+              </div>
+            )}
 
             {/* Destination Group Selection List */}
             <div className="space-y-1.5">
@@ -283,8 +367,8 @@ export function GroupAssignmentDialog({
               type="button"
               variant="outline"
               size="sm"
-              onClick={onClose}
-              disabled={isAssigning}
+              onClick={handleClose}
+              disabled={isAssigning || isCreatingGroup}
               className="text-xs"
             >
               {t("common.buttons.cancel", { defaultValue: "Hủy" })}
@@ -293,7 +377,7 @@ export function GroupAssignmentDialog({
               type="button"
               size="sm"
               onClick={() => void handleAssign()}
-              disabled={isLoading || isAssigning}
+              disabled={isLoading || isAssigning || isCreatingGroup}
               className="text-xs gap-1.5"
             >
               {isAssigning && (
@@ -304,22 +388,6 @@ export function GroupAssignmentDialog({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Submodal: Create Group */}
-      <CreateGroupDialog
-        isOpen={createDialogOpen}
-        onClose={() => setCreateDialogOpen(false)}
-        onGroupCreated={(group) => {
-          setGroups((prev) => [...prev, group]);
-          setSelectedGroupId(group.id);
-          setCreateDialogOpen(false);
-          toast.success(
-            isVi
-              ? `Đã tạo nhóm "${group.name}"`
-              : `Created group "${group.name}"`,
-          );
-        }}
-      />
     </>
   );
 }
