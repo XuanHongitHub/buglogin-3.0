@@ -103,7 +103,6 @@ import {
 } from "@/components/ui/tooltip";
 import { useBrowserState } from "@/hooks/use-browser-state";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
-import { useLaunchActivity } from "@/hooks/use-launch-activity";
 import { useScrollFade } from "@/hooks/use-scroll-fade";
 import { useTablePreferences } from "@/hooks/use-table-preferences";
 import { useTableSorting } from "@/hooks/use-table-sorting";
@@ -145,39 +144,25 @@ import { RippleButton } from "./ui/ripple";
 import { Skeleton } from "./ui/skeleton";
 
 /**
- * The launch control's tooltip. While a launch is in flight, hovering the
- * control shows the current backend stage without covering the profile list.
+ * The launch control's tooltip. Launch progress stays in the button/activity
+ * surface; keeping a live tooltip here causes it to remain visible while the
+ * clicked button retains keyboard focus, even after the pointer leaves.
  */
 function LaunchControlTooltip({
-  profileId,
   launching,
   content,
   children,
 }: {
-  profileId: string;
   launching: boolean;
   content: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const { t } = useTranslation();
-  const _profileDrag = useProfileGroupDrag();
-  const stage = useLaunchActivity(profileId).at(-1)?.stage;
-  const live = launching && stage !== "running" && stage !== "failed";
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      {(live || content) && (
-        <TooltipContent
-          data-launch-stage={live ? stage : undefined}
-          className={cn(live && "pointer-events-none")}
-        >
-          {live
-            ? stage
-              ? t(`appFeedback.launch.${stage}`)
-              : t("profileSelector.launching")
-            : content}
-        </TooltipContent>
-      )}
+      {!launching && content ? (
+        <TooltipContent>{content}</TooltipContent>
+      ) : null}
     </Tooltip>
   );
 }
@@ -3016,7 +3001,6 @@ export function ProfilesDataTable({
               )}
               {(isRunning || canOpenHere) && (
                 <LaunchControlTooltip
-                  profileId={profile.id}
                   launching={isLaunching}
                   content={isRunning ? stopTooltip : openTooltipContent}
                 >
