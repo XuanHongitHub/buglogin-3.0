@@ -19,7 +19,6 @@ export function resolveTeamLockState(
   locallyRunning: boolean,
   _nowMs = Date.now(),
 ): {
-  unknown: boolean;
   lockedRemotely: boolean;
   runningRemotely: boolean;
   syncingRemotely: boolean;
@@ -28,7 +27,6 @@ export function resolveTeamLockState(
   // no team lock, even if the informational runtime projection is unavailable.
   if (!lease) {
     return {
-      unknown: false,
       lockedRemotely: false,
       runningRemotely: false,
       syncingRemotely: false,
@@ -42,7 +40,6 @@ export function resolveTeamLockState(
 
   if (runtimeMatchesLease && runtime?.state === "syncing") {
     return {
-      unknown: false,
       lockedRemotely: true,
       runningRemotely: false,
       syncingRemotely: true,
@@ -53,7 +50,6 @@ export function resolveTeamLockState(
     const runningRemotely =
       localDeviceId !== null && runtime.deviceId !== localDeviceId;
     return {
-      unknown: false,
       lockedRemotely: runningRemotely || !locallyRunning,
       runningRemotely,
       syncingRemotely: false,
@@ -63,7 +59,6 @@ export function resolveTeamLockState(
   // A live lease is definitive lock evidence. Missing/stale runtime detail
   // affects the activity label, not whether a second device may use the data.
   return {
-    unknown: false,
     lockedRemotely: true,
     runningRemotely: false,
     syncingRemotely: false,

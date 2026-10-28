@@ -121,7 +121,8 @@ impl CoordinationBackend for LocalCoordination {
                     "sync-coordination",
                 )
                 .with_field("ownerId", current.owner_id.clone())
-                .with_field("expiresAtMs", current.expires_at_ms));
+                .with_field("expiresAtMs", current.expires_at_ms)
+                .retryable(true));
             }
             state.leases.remove(&key);
         }

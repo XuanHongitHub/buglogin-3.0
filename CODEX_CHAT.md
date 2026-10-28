@@ -382,3 +382,14 @@
 - Bổ sung test chạy đồng thời hai lần cấp session cho cùng account/device trên cùng control store; cả hai request hoàn tất, durable head revision lên 2 và chỉ còn đúng một session family active.
 - Test tập trung `concurrent_same_device_sign_ins_leave_only_one_active_family` PASS; thay đổi test và cập nhật plan là WIP trên `main`, chưa push riêng.
 - Thử nghiệm 8 request đồng thời vượt giới hạn retry hữu hạn và có thể trả conflict retryable; gate giữ ở race hai API instance đúng kịch bản cần xử lý, không tăng retry không giới hạn.
+
+## Điều phối 69: Sync lease và đo thời gian launch/sync
+- Sync lifecycle: lease không còn hết hạn sau 5 phút nếu đang có lượt sync thật; 5 phút chỉ áp dụng cho trạng thái dừng chờ retry. Sync status chỉ được publish sau key/proxy/recipient preflight; nếu sync lỗi, publish `stopped`, giữ local dirty data, queue retry và nhả lease.
+- Regression `active_sync_attempt_renews_past_idle_hold_then_releases_for_retry` PASS; chạy đủ `profile_runtime::tests` PASS 30/30; desktop typecheck/self-tests, Rust fmt/check và `git diff --check` PASS.
+- App log nay đo từng bước launch preflight (extension, manifest, key rotation, pending proxy, device key) và tổng thời gian stop/sync với outcome `success`/`retry`, không log profile ID hay nội dung profile. Rust desktop `cargo check` PASS; production samples chỉ có sau khi cài build instrumented.
+- Thay đổi đang là WIP trên `main`, chưa commit/push/release. Còn toàn bộ plan acceptance ngoài local (production timing/load matrix, multi-instance invalidation/resource policy, authenticated UI QA/OS evidence); Cookie Bot/Agent runtime thực và adapter security-current rebuild vẫn chưa hoàn tất.
+## Điều phối 70: Dot sync không treo cam và retry nền nhanh hơn
+- Nguyên nhân dot cam treo: bảng profile ưu tiên `runtime.activity=syncing` từ projection/lease server; nếu upload xong nhưng request cập nhật projection `stopped` thất bại, UI tiếp tục tô cam dù không còn lượt upload. Dot nay chỉ dựa trên event sync cục bộ/API sync status.
+- Sync nền sau khi profile đóng vẫn chạy ngay; lỗi sẽ retry từ local data sau 3s, 6s, 12s... tối đa 30s giữa các lần (trước đây tối đa 5 phút). Lease được nhả giữa các retry và được gia hạn trong lúc upload thật đang hoạt động.
+- Không có ETA tổng cố định: mỗi HTTP request timeout 60s; tổng sync tùy dung lượng/object/mạng. App log ghi duration_ms và success/retry sau mỗi lần; cần build chạy thực tế để có số production.
+- `cargo fmt --check`, test backoff mục tiêu PASS, desktop typecheck PASS. Đang chuẩn bị candidate 3.0.24; chưa commit/push/release stable.

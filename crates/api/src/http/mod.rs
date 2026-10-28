@@ -6300,70 +6300,81 @@ async fn submit_feedback(
         )));
     }
 
-    if let Some(replay) = state
-        .control_persistence
-        .replay(account_id.as_str(), &idempotency_key)
-        .map_err(response)?
-    {
-        return Ok((
-            StatusCode::from_u16(replay.response.status).unwrap_or(StatusCode::OK),
-            Json(replay.response.body),
-        )
-            .into_response());
-    }
-
-    let idempotency_digest =
-        Sha256::digest(format!("{}:{idempotency_key}", account_id.as_str()).as_bytes());
-    let id = format!(
-        "fbk_{}",
-        idempotency_digest[..16]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
     let now = request_now(&headers)?;
-    let command_id = "feedback.submit";
-    let body = json!({ "id": id });
-    state
-        .control_persistence
-        .execute(ExecuteControlCommand {
-            tenant_id: account_id.as_str().to_owned(),
-            command_id: command_id.into(),
-            idempotency_key,
-            expected_revisions: BTreeMap::new(),
-            puts: vec![ControlPut {
-                tenant_id: account_id.as_str().to_owned(),
-                record_type: "support_feedback".into(),
-                record_id: id.clone(),
-                expected_revision: Some(0),
-                value: json!({
-                    "id": id,
-                    "accountId": account_id,
-                    "kind": input.kind,
-                    "message": input.message,
-                    "includeLogs": input.include_logs,
-                    "logs": input.logs,
-                    "replyTo": input.email,
-                    "locale": input.locale,
-                    "submittedAtMs": now,
-                }),
-            }],
-            deletes: vec![],
-            audit: ControlAuditEntry {
+    let persistence_state = state.clone();
+    let (status, body) = tokio::task::spawn_blocking(move || {
+        if let Some(replay) = persistence_state
+            .control_persistence
+            .replay(account_id.as_str(), &idempotency_key)?
+        {
+            return Ok::<_, Problem>((replay.response.status, replay.response.body));
+        }
+
+        let idempotency_digest =
+            Sha256::digest(format!("{}:{idempotency_key}", account_id.as_str()).as_bytes());
+        let id = format!(
+            "fbk_{}",
+            idempotency_digest[..16]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let command_id = "feedback.submit";
+        let body = json!({ "id": id });
+        persistence_state
+            .control_persistence
+            .execute(ExecuteControlCommand {
                 tenant_id: account_id.as_str().to_owned(),
                 command_id: command_id.into(),
-                actor_id: account_id.as_str().to_owned(),
-                allowed: true,
-                detail: json!({ "feedbackId": id, "kind": input.kind }),
-            },
-            response: HttpResponse {
-                status: StatusCode::CREATED.as_u16(),
-                headers: BTreeMap::new(),
-                body: body.clone(),
-            },
-        })
-        .map_err(response)?;
-    Ok((StatusCode::CREATED, Json(body)).into_response())
+                idempotency_key,
+                expected_revisions: BTreeMap::new(),
+                puts: vec![ControlPut {
+                    tenant_id: account_id.as_str().to_owned(),
+                    record_type: "support_feedback".into(),
+                    record_id: id.clone(),
+                    expected_revision: Some(0),
+                    value: json!({
+                        "id": id,
+                        "accountId": account_id,
+                        "kind": input.kind,
+                        "message": input.message,
+                        "includeLogs": input.include_logs,
+                        "logs": input.logs,
+                        "replyTo": input.email,
+                        "locale": input.locale,
+                        "submittedAtMs": now,
+                    }),
+                }],
+                deletes: vec![],
+                audit: ControlAuditEntry {
+                    tenant_id: account_id.as_str().to_owned(),
+                    command_id: command_id.into(),
+                    actor_id: account_id.as_str().to_owned(),
+                    allowed: true,
+                    detail: json!({ "feedbackId": id, "kind": input.kind }),
+                },
+                response: HttpResponse {
+                    status: StatusCode::CREATED.as_u16(),
+                    headers: BTreeMap::new(),
+                    body: body.clone(),
+                },
+            })?;
+        Ok((StatusCode::CREATED.as_u16(), body))
+    })
+    .await
+    .map_err(|_| {
+        response(problem(
+            "control_unavailable",
+            "Control persistence worker unavailable",
+            503,
+        ))
+    })?
+    .map_err(response)?;
+    Ok((
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(body),
+    )
+        .into_response())
 }
 
 async fn create_api_token(

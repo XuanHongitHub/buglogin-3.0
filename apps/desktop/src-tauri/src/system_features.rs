@@ -325,22 +325,32 @@ pub async fn set_team_member_access(
 // App & Browser Updates
 // -------------------------------------------------------------
 
-#[derive(Default)]
-struct PreparedAppUpdateStore {
-    prepared: Option<PreparedAppUpdate>,
+struct PreparedAppUpdateStore<U = tauri_plugin_updater::Update> {
+    prepared: Option<PreparedAppUpdate<U>>,
 }
 
-struct PreparedAppUpdate {
+impl<U> Default for PreparedAppUpdateStore<U> {
+    fn default() -> Self {
+        Self { prepared: None }
+    }
+}
+
+struct PreparedAppUpdate<U = tauri_plugin_updater::Update> {
     version: String,
     bytes: Vec<u8>,
+    update: U,
 }
 
-impl PreparedAppUpdateStore {
-    fn replace(&mut self, version: String, bytes: Vec<u8>) {
-        self.prepared = Some(PreparedAppUpdate { version, bytes });
+impl<U> PreparedAppUpdateStore<U> {
+    fn replace(&mut self, version: String, bytes: Vec<u8>, update: U) {
+        self.prepared = Some(PreparedAppUpdate {
+            version,
+            bytes,
+            update,
+        });
     }
 
-    fn take(&mut self, version: &str) -> Result<PreparedAppUpdate, String> {
+    fn take(&mut self, version: &str) -> Result<PreparedAppUpdate<U>, String> {
         match self.prepared.take() {
             Some(prepared) if prepared.version == version => Ok(prepared),
             Some(prepared) => {
@@ -351,7 +361,7 @@ impl PreparedAppUpdateStore {
         }
     }
 
-    fn restore(&mut self, prepared: PreparedAppUpdate) {
+    fn restore(&mut self, prepared: PreparedAppUpdate<U>) {
         self.prepared = Some(prepared);
     }
 
@@ -361,7 +371,8 @@ impl PreparedAppUpdateStore {
 }
 
 fn prepared_app_update_store() -> &'static Mutex<PreparedAppUpdateStore> {
-    static STORE: OnceLock<Mutex<PreparedAppUpdateStore>> = OnceLock::new();
+    static STORE: OnceLock<Mutex<PreparedAppUpdateStore<tauri_plugin_updater::Update>>> =
+        OnceLock::new();
     STORE.get_or_init(|| Mutex::new(PreparedAppUpdateStore::default()))
 }
 
@@ -448,7 +459,7 @@ pub async fn download_and_prepare_app_update(
     prepared_app_update_store()
         .lock()
         .map_err(|_| "app_update_state_unavailable".to_owned())?
-        .replace(requested_version.to_owned(), bytes);
+        .replace(requested_version.to_owned(), bytes, update);
     app.emit("app-update-ready", requested_version)
         .map_err(|error| error.to_string())?;
     Ok(json!({ "ready": true, "version": requested_version }))
@@ -480,6 +491,7 @@ pub async fn restart_application(
     app: AppHandle,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<(), String> {
+    let _ = &app;
     let prepared = {
         let version = {
             // Only one prepared package is retained. Read its version without moving the bytes
@@ -499,35 +511,7 @@ pub async fn restart_application(
             .take(&version)?
     };
 
-    let updater = match configured_app_updater(&app) {
-        Ok(updater) => updater,
-        Err(error) => {
-            prepared_app_update_store()
-                .lock()
-                .map_err(|_| "app_update_state_unavailable".to_owned())?
-                .restore(prepared);
-            return Err(error);
-        }
-    };
-    let update = match updater.check().await {
-        Ok(Some(update)) if update.version == prepared.version => update,
-        Ok(_) => {
-            prepared_app_update_store()
-                .lock()
-                .map_err(|_| "app_update_state_unavailable".to_owned())?
-                .restore(prepared);
-            return Err("app_update_release_changed".to_owned());
-        }
-        Err(error) => {
-            prepared_app_update_store()
-                .lock()
-                .map_err(|_| "app_update_state_unavailable".to_owned())?
-                .restore(prepared);
-            return Err(error.to_string());
-        }
-    };
-
-    if let Err(error) = update.verify(&prepared.bytes) {
+    if let Err(error) = prepared.update.verify(&prepared.bytes) {
         prepared_app_update_store()
             .lock()
             .map_err(|_| "app_update_state_unavailable".to_owned())?
@@ -543,7 +527,8 @@ pub async fn restart_application(
                 .map_err(|error| format!("{}: {}", error.code, error.title))
         },
         || {
-            update
+            prepared
+                .update
                 .install(&prepared.bytes)
                 .map_err(|error| error.to_string())
         },
@@ -1186,8 +1171,8 @@ mod tests {
 
     #[test]
     fn prepared_update_store_preserves_only_the_matching_release() {
-        let mut store = PreparedAppUpdateStore::default();
-        store.replace("3.0.8".to_owned(), vec![1, 2, 3]);
+        let mut store = PreparedAppUpdateStore::<()>::default();
+        store.replace("3.0.8".to_owned(), vec![1, 2, 3], ());
 
         assert_eq!(
             store.take("3.0.7").err().as_deref(),

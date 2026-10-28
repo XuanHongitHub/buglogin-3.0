@@ -23,7 +23,6 @@ assert.deepEqual(
     currentTime,
   ),
   {
-    unknown: false,
     lockedRemotely: true,
     runningRemotely: true,
     syncingRemotely: false,
@@ -39,7 +38,6 @@ assert.deepEqual(
     currentTime,
   ),
   {
-    unknown: false,
     lockedRemotely: true,
     runningRemotely: false,
     syncingRemotely: false,
@@ -55,7 +53,6 @@ assert.deepEqual(
     currentTime,
   ),
   {
-    unknown: false,
     lockedRemotely: true,
     runningRemotely: false,
     syncingRemotely: true,
@@ -71,7 +68,6 @@ assert.deepEqual(
     currentTime,
   ),
   {
-    unknown: false,
     lockedRemotely: true,
     runningRemotely: true,
     syncingRemotely: false,
@@ -82,7 +78,6 @@ assert.deepEqual(
 assert.deepEqual(
   resolveTeamLockState(null, null, null, false, currentTime),
   {
-    unknown: false,
     lockedRemotely: false,
     runningRemotely: false,
     syncingRemotely: false,
@@ -103,7 +98,6 @@ assert.deepEqual(
     currentTime,
   ),
   {
-    unknown: false,
     lockedRemotely: true,
     runningRemotely: false,
     syncingRemotely: false,
@@ -129,7 +123,6 @@ assert.deepEqual(
     currentTime,
   ),
   {
-    unknown: false,
     lockedRemotely: true,
     runningRemotely: true,
     syncingRemotely: false,

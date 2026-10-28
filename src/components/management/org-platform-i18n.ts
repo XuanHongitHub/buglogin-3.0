@@ -115,6 +115,15 @@ const en = {
   deleteTitle: "Confirm deletion",
   deleteOrgHelp:
     "An organization can be deleted only after its members and workspaces are removed.",
+  pendingDeleteTitle: "Deletion cleanup is paused",
+  pendingDeleteBody:
+    "Continue removing dependencies before deleting this {{kind}}: {{name}}.",
+  pendingDeleteTargetUnavailable:
+    "This target is no longer available in this view. Refresh the list or dismiss the saved cleanup.",
+  organizationLabel: "organization",
+  workspaceLabel: "workspace",
+  resumeDelete: "Resume cleanup",
+  dismissDelete: "Dismiss",
   deleteDependencies: "Items that must be removed first",
   checkingDependencies: "Checking organization members and workspaces…",
   checkingWorkspaceDependencies:
@@ -313,6 +322,15 @@ const vi: typeof en = {
   transferOwner: "Chuyển chủ sở hữu",
   deleteTitle: "Xác nhận xóa",
   deleteOrgHelp: "Chỉ xóa được tổ chức sau khi gỡ hết thành viên và workspace.",
+  pendingDeleteTitle: "Đang tạm dừng xử lý trước khi xóa",
+  pendingDeleteBody:
+    "Tiếp tục gỡ các mục phụ thuộc trước khi xóa {{kind}}: {{name}}.",
+  pendingDeleteTargetUnavailable:
+    "Không tìm thấy mục tiêu trong danh sách hiện tại. Hãy tải lại hoặc bỏ bước xóa đã lưu.",
+  organizationLabel: "tổ chức",
+  workspaceLabel: "workspace",
+  resumeDelete: "Tiếp tục xử lý",
+  dismissDelete: "Bỏ qua",
   deleteDependencies: "Các mục cần xử lý trước",
   checkingDependencies: "Đang kiểm tra thành viên và workspace…",
   checkingWorkspaceDependencies:

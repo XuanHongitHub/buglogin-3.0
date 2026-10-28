@@ -343,7 +343,6 @@ interface TableMeta {
 
   // Team locks
   isProfileLockedByAnother: (profileId: string) => boolean;
-  isProfileLockUnknown: (profileId: string) => boolean;
   getProfileLockEmail: (profileId: string) => string | undefined;
   getProfileLockInfo: (profileId: string) => ProfileLockInfo | undefined;
   refreshProfileLockStatus: () => Promise<void>;
@@ -421,7 +420,7 @@ function getProfileSyncStatusDot(
       };
     case "waiting":
       return {
-        color: "bg-warning",
+        color: "bg-muted-foreground/40",
         tooltip: t("profileTable.syncTooltipCloseToSync"),
         animate: false,
         encrypted,
@@ -1896,7 +1895,6 @@ export function ProfilesDataTable({
   const { user } = useCloudAuth();
   const {
     isProfileLocked,
-    isProfileLockUnknown,
     getLockInfo,
     runtimeRunningProfileIds,
     refetchLocks,
@@ -2209,8 +2207,19 @@ export function ProfilesDataTable({
       }
     };
     refresh();
-    const interval = window.setInterval(refresh, 10_000);
-    return () => window.clearInterval(interval);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 30_000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, [browserState.isClient, profiles, refreshProfileSyncStatus]);
 
   // Listen for sync status events
@@ -2744,7 +2753,6 @@ export function ProfilesDataTable({
 
       // Team locks
       isProfileLockedByAnother: isProfileLocked,
-      isProfileLockUnknown,
       getProfileLockEmail: (profileId: string) =>
         getLockInfo(profileId)?.ownerLabel ??
         getLockInfo(profileId)?.lockedByEmail,
@@ -2811,7 +2819,6 @@ export function ProfilesDataTable({
       loadCountries,
       handleCreateCountryProxy,
       isProfileLocked,
-      isProfileLockUnknown,
       getLockInfo,
       refetchLocks,
       getProfileSyncInfo,
@@ -2884,25 +2891,18 @@ export function ProfilesDataTable({
               !meta.runningProfiles.has(profile.id));
           const isPendingRemotePull = handoff === "pending_sync";
           const isRunning =
-            (meta.isClient && meta.runningProfiles.has(profile.id)) ||
-            isRunningRemotely;
+            meta.isClient && meta.runningProfiles.has(profile.id);
           const isLaunching = meta.launchingProfiles.has(profile.id);
           const isStopping = meta.stoppingProfiles.has(profile.id);
           const isLockedByAnother = meta.isProfileLockedByAnother(profile.id);
-          const isLockUnknown = meta.isProfileLockUnknown(profile.id);
-          const isSyncing = meta.syncStatuses[profile.id]?.status === "syncing";
           const syncEntry = meta.syncStatuses[profile.id];
           const requiresSyncKey =
             profile.sync_mode === "managed" ||
             profile.sync_mode === "Encrypted" ||
             profile.sync_mode === "Regular";
           const canOpenHere = !requiresSyncKey || syncEntry?.can_open !== false;
-          const canLaunch = isRunningRemotely
-            ? false
-            : meta.browserState.canLaunchProfile(profile) &&
-              !isPendingRemotePull &&
-              !isLockedByAnother &&
-              !isSyncing;
+          const canLaunch =
+            meta.browserState.canLaunchProfile(profile) && !isPendingRemotePull;
           const lockEmail = meta.getProfileLockEmail(profile.id);
           const lockInfo = meta.getProfileLockInfo(profile.id);
           const expiryLabel = lockInfo?.expiresAt
@@ -2911,26 +2911,13 @@ export function ProfilesDataTable({
               })
             : "";
           const lockOwnerLabel = `${lockEmail ?? ""}${expiryLabel}`;
-          const tooltipContent =
-            lockInfo?.activity === "syncing"
-              ? meta.t("sync.team.remoteSyncing", {
-                  owner: lockEmail || meta.t("sync.team.anotherDevice"),
+          const tooltipContent = isPendingRemotePull
+            ? meta.t("profiles.remote.pendingSyncTooltip")
+            : isRunningRemotely || isLockedByAnother
+              ? meta.t("sync.team.launchWillRecheck", {
+                  owner: lockOwnerLabel || meta.t("sync.team.anotherDevice"),
                 })
-              : isRunningRemotely
-                ? lockEmail
-                  ? meta.t("profiles.remote.runningTooltipOwner", {
-                      owner: lockEmail,
-                    })
-                  : meta.t("profiles.remote.runningTooltip")
-                : isPendingRemotePull
-                  ? meta.t("profiles.remote.pendingSyncTooltip")
-                  : isLockedByAnother
-                    ? meta.t("sync.team.cannotLaunchLocked", {
-                        owner: lockOwnerLabel,
-                      })
-                    : isLockUnknown
-                      ? meta.t("sync.team.leaseUnknown")
-                      : meta.browserState.getLaunchTooltipContent(profile);
+              : meta.browserState.getLaunchTooltipContent(profile);
           const openTooltipContent =
             syncEntry?.can_open === false
               ? formatError(
@@ -3038,13 +3025,11 @@ export function ProfilesDataTable({
                       data-running={isRunning ? "true" : undefined}
                       disabled={!canLaunch || isLaunching || isStopping}
                       aria-label={
-                        isRunningRemotely
-                          ? tooltipContent
-                          : isRunning
-                            ? meta.t("profiles.actions.stop")
-                            : isLockedByAnother
-                              ? tooltipContent
-                              : meta.t("profiles.actions.launch")
+                        isRunning
+                          ? meta.t("profiles.actions.stop")
+                          : isRunningRemotely || isLockedByAnother
+                            ? tooltipContent
+                            : meta.t("profiles.actions.launch")
                       }
                       className={cn(
                         "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",
@@ -3065,12 +3050,8 @@ export function ProfilesDataTable({
                       <span className="grid place-items-center">
                         {isLaunching || isStopping ? (
                           <span className="size-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none" />
-                        ) : isRunningRemotely || isLockedByAnother ? (
-                          <LuLock className={cn("size-3.5")} />
                         ) : isRunning ? (
                           <LuSquare className="size-3 fill-current" />
-                        ) : isLockedByAnother ? (
-                          <LuLock className="size-3.5" />
                         ) : (
                           <LuPlay className="size-3 translate-x-px fill-current" />
                         )}
@@ -3568,10 +3549,10 @@ export function ProfilesDataTable({
           const profile = row.original;
           const meta = table.options.meta as TableMeta;
           const syncEntry = meta.syncStatuses[profile.id];
-          const lockInfo = meta.getProfileLockInfo(profile.id);
-          const liveStatus = (
-            lockInfo?.activity === "syncing" ? "syncing" : syncEntry?.status
-          ) as
+          // A remote runtime projection can outlive the upload if its final
+          // stopped update failed. Only the local sync event/API result may
+          // paint this dot amber; a lease projection alone is not sync activity.
+          const liveStatus = syncEntry?.status as
             | "syncing"
             | "waiting"
             | "synced"

@@ -967,10 +967,10 @@
       "profileLocked": "In use by {{owner}}",
       "profileLockedShort": "In use",
       "cannotLaunchLocked": "Cannot launch — profile is in use by {{owner}}",
+      "launchWillRecheck": "{{owner}} may be using this profile. Start it to let the server check its current state.",
       "leaseExpiry": " · access ends at {{time}}",
       "remoteSyncing": "{{owner}} is finishing the profile sync. You can open it when syncing is done.",
       "anotherDevice": "Another device",
-      "leaseUnknown": "The latest status could not be fetched. When you start the profile, the server will check current access.",
       "createdBy": "Created by {{email}}",
       "roleLauncher": "Launcher"
     },

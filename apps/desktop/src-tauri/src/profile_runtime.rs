@@ -228,6 +228,23 @@ impl ProfileRuntimeHandle {
         response.await.map_err(|_| unavailable())?
     }
 
+    pub async fn set_sync_attempt_active(
+        &self,
+        profile_id: ProfileId,
+        active: bool,
+    ) -> Result<(), Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::SetSyncAttemptActive {
+                profile_id,
+                active,
+                reply,
+            })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
     pub async fn hold_idle_profile_for_sync(
         &self,
         profile_id: ProfileId,
@@ -258,7 +275,7 @@ impl ProfileRuntimeHandle {
         response.await.map_err(|_| unavailable())?
     }
 
-    async fn release_stopped_for_retry(&self, profile_id: ProfileId) -> Result<(), Problem> {
+    pub async fn release_stopped_for_retry(&self, profile_id: ProfileId) -> Result<(), Problem> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(RuntimeCommand::ReleaseStoppedForRetry { profile_id, reply })
@@ -391,6 +408,11 @@ enum RuntimeCommand {
         profile_id: ProfileId,
         reply: oneshot::Sender<Result<(), Problem>>,
     },
+    SetSyncAttemptActive {
+        profile_id: ProfileId,
+        active: bool,
+        reply: oneshot::Sender<Result<(), Problem>>,
+    },
     Authority {
         profile_id: ProfileId,
         reply: oneshot::Sender<Option<WriteAuthority>>,
@@ -427,6 +449,7 @@ struct RunningProfile {
     was_launched: bool,
     process_stopped: bool,
     sync_pending: bool,
+    sync_attempt_active: bool,
     sync_started_at: Option<Instant>,
     proxy_bridge: Option<ProxyBridgeHandle>,
 }
@@ -491,6 +514,9 @@ where
                 }
                 Some(RuntimeCommand::ReleaseStoppedForRetry { profile_id, reply }) => {
                     let _ = reply.send(runtime.release_stopped_for_retry(&profile_id).await);
+                }
+                Some(RuntimeCommand::SetSyncAttemptActive { profile_id, active, reply }) => {
+                    let _ = reply.send(runtime.set_sync_attempt_active(&profile_id, active));
                 }
                 Some(RuntimeCommand::Authority { profile_id, reply }) => {
                     let _ = reply.send(runtime.authority(&profile_id));
@@ -693,6 +719,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 was_launched: true,
                 process_stopped: false,
                 sync_pending: false,
+                sync_attempt_active: false,
                 sync_started_at: None,
                 proxy_bridge,
             },
@@ -751,6 +778,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 running.sync_started_at = Some(Instant::now());
             }
             running.sync_pending = true;
+            running.sync_attempt_active = false;
         }
         Ok(StopReceipt {
             profile_path,
@@ -811,6 +839,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 was_launched: false,
                 process_stopped: true,
                 sync_pending: true,
+                sync_attempt_active: false,
                 sync_started_at: Some(Instant::now()),
                 proxy_bridge: None,
             },
@@ -832,6 +861,34 @@ impl<C: ProcessController> ProfileRuntime<C> {
             // acknowledge release; the remote lease expires on its own.
             return Err(error);
         }
+        Ok(())
+    }
+
+    fn set_sync_attempt_active(
+        &mut self,
+        profile_id: &ProfileId,
+        active: bool,
+    ) -> Result<(), Problem> {
+        let Some(running) = self.running.get_mut(profile_id) else {
+            return Err(Problem::new(
+                "profile_sync_lease_missing",
+                "Profile has no local sync transaction",
+                409,
+                "desktop",
+            ));
+        };
+        if !running.process_stopped || !running.sync_pending || running.lease.is_none() {
+            return Err(Problem::new(
+                "profile_sync_lease_invalid",
+                "Profile sync requires a stopped process and a held lease",
+                409,
+                "desktop",
+            ));
+        }
+        if active {
+            running.sync_started_at = Some(Instant::now());
+        }
+        running.sync_attempt_active = active;
         Ok(())
     }
 
@@ -886,6 +943,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             let stop_sync_expired = self.running.get(&profile_id).is_some_and(|running| {
                 running.process_stopped
                     && running.sync_pending
+                    && !running.sync_attempt_active
                     && sync_hold_expired(running.sync_started_at, Instant::now())
             });
             if stop_sync_expired {
@@ -1002,6 +1060,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
 fn mark_process_stopped_for_sync(running: &mut RunningProfile) {
     running.process_stopped = true;
     running.sync_pending = true;
+    running.sync_attempt_active = false;
     running.sync_started_at.get_or_insert_with(Instant::now);
 }
 
@@ -1774,11 +1833,46 @@ mod tests {
             .get_mut(&profile_id)
             .unwrap()
             .sync_started_at = Some(Instant::now() - MAX_STOP_SYNC_HOLD);
-
         runtime.renew().await;
 
         assert!(!runtime.running.contains_key(&profile_id));
         assert!(runtime.unexpectedly_stopped.contains(&profile_id));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_sync_attempt_renews_past_idle_hold_then_releases_for_retry() {
+        let path = profile_path("active-sync-attempt-lease");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        let mut runtime = runtime(controller, managed_coordination(backend.clone()));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        runtime.launch(request(&path, true)).await.unwrap();
+        runtime.stop_for_sync(&profile_id).await.unwrap();
+        runtime.set_sync_attempt_active(&profile_id, true).unwrap();
+        runtime
+            .running
+            .get_mut(&profile_id)
+            .unwrap()
+            .sync_started_at = Some(Instant::now() - MAX_STOP_SYNC_HOLD);
+        runtime
+            .running
+            .get_mut(&profile_id)
+            .unwrap()
+            .lease
+            .as_mut()
+            .unwrap()
+            .expires_at_ms = unix_time_millis("test").unwrap() + 30_000;
+
+        runtime.renew().await;
+
+        assert!(runtime.running.contains_key(&profile_id));
+        assert_eq!(backend.renewals.load(Ordering::SeqCst), 1);
+
+        runtime.set_sync_attempt_active(&profile_id, false).unwrap();
+        runtime.renew().await;
+        assert!(!runtime.running.contains_key(&profile_id));
         fs::remove_dir_all(path).unwrap();
     }
 

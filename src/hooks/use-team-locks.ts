@@ -32,9 +32,6 @@ export function useTeamLocks(
   locallyRunningProfileIds: ReadonlySet<string> = new Set(),
 ) {
   const [locks, setLocks] = useState<ProfileLockInfo[]>([]);
-  const [unknownProfileIds, setUnknownProfileIds] = useState<Set<string>>(
-    new Set(),
-  );
   const [runtimeRunningProfileIds, setRuntimeRunningProfileIds] = useState<
     Set<string>
   >(new Set());
@@ -56,17 +53,16 @@ export function useTeamLocks(
       if (BUGLOGIN_DESKTOP) {
         if (!workspaceId || profileIds.length === 0) {
           setLocks([]);
-          setUnknownProfileIds(new Set());
           setRuntimeRunningProfileIds(new Set());
           return;
         }
         const nextLocks: ProfileLockInfo[] = [];
-        const unconfirmed = new Set<string>();
         const runtimeRunning = new Set<string>();
         const targetIds = onlyProfileIds
           ? profileIds.filter((profileId) => onlyProfileIds.includes(profileId))
           : profileIds;
         if (targetIds.length === 0) return;
+        let statusReadSucceeded = false;
         try {
           const response = await invoke<CommandResult<RuntimeStatusSnapshot[]>>(
             "profile_runtime_status_batch",
@@ -75,15 +71,14 @@ export function useTeamLocks(
               payload: { workspaceId, profileIds: targetIds },
             },
           );
+          statusReadSucceeded = true;
           const snapshots = new Map(
             response.data.map((snapshot) => [snapshot.profileId, snapshot]),
           );
           for (const profileId of targetIds) {
             const snapshot = snapshots.get(profileId);
             if (!snapshot) {
-              // The API deliberately omits profiles that are no longer bound
-              // to this workspace or are not readable. A successful response
-              // with an omitted ID is not a failed status request. Launch still
+              // No current lock was returned for this profile. Launch still
               // relies on the server's atomic lease acquisition.
               continue;
             }
@@ -94,10 +89,6 @@ export function useTeamLocks(
               localDeviceId,
               locallyRunningProfileIds.has(profileId),
             );
-            if (lockState.unknown) {
-              unconfirmed.add(profileId);
-              continue;
-            }
             if (lockState.lockedRemotely) {
               if (lockState.runningRemotely) runtimeRunning.add(profileId);
               nextLocks.push({
@@ -116,31 +107,17 @@ export function useTeamLocks(
             }
           }
         } catch {
-          for (const profileId of targetIds) unconfirmed.add(profileId);
+          // Keep the last confirmed lease for display. Start remains enabled
+          // and the server performs the authoritative atomic acquire on click.
         }
         if (sequence !== requestSequence.current) return;
+        if (!statusReadSucceeded) return;
         if (onlyProfileIds) {
           const refreshedIds = new Set(targetIds);
-          const failedIds = new Set(
-            targetIds.filter((profileId) => unconfirmed.has(profileId)),
-          );
           setLocks((current) => [
-            ...current.filter(
-              (lock) =>
-                !refreshedIds.has(lock.profileId) ||
-                failedIds.has(lock.profileId),
-            ),
+            ...current.filter((lock) => !refreshedIds.has(lock.profileId)),
             ...nextLocks,
           ]);
-          setUnknownProfileIds((current) => {
-            const next = new Set(
-              [...current].filter((profileId) => !refreshedIds.has(profileId)),
-            );
-            for (const profileId of targetIds) {
-              if (unconfirmed.has(profileId)) next.add(profileId);
-            }
-            return next;
-          });
           setRuntimeRunningProfileIds((current) => {
             const next = new Set(
               [...current].filter((profileId) => !refreshedIds.has(profileId)),
@@ -149,14 +126,7 @@ export function useTeamLocks(
             return next;
           });
         } else {
-          const failedIds = new Set(
-            profileIds.filter((profileId) => unconfirmed.has(profileId)),
-          );
-          setLocks((current) => [
-            ...current.filter((lock) => failedIds.has(lock.profileId)),
-            ...nextLocks,
-          ]);
-          setUnknownProfileIds(new Set([...unconfirmed]));
+          setLocks(nextLocks);
           setRuntimeRunningProfileIds(runtimeRunning);
         }
         return;
@@ -165,12 +135,10 @@ export function useTeamLocks(
         const result = await invoke<ProfileLockInfo[]>("get_team_locks");
         if (sequence !== requestSequence.current) return;
         setLocks(result);
-        setUnknownProfileIds(new Set());
         setRuntimeRunningProfileIds(new Set());
       } catch {
         if (sequence !== requestSequence.current) return;
         setLocks([]);
-        setUnknownProfileIds(new Set());
         setRuntimeRunningProfileIds(new Set());
       }
     },
@@ -226,7 +194,7 @@ export function useTeamLocks(
     if (BUGLOGIN_DESKTOP) {
       const interval = window.setInterval(() => {
         if (document.visibilityState === "visible") void fetchLocks();
-      }, 5_000);
+      }, 15_000);
       const refreshWhenActive = () => {
         if (document.visibilityState === "visible") {
           void fetchLocks(undefined, true);
@@ -273,15 +241,9 @@ export function useTeamLocks(
     [locks],
   );
 
-  const isProfileLockUnknown = useCallback(
-    (profileId: string) => BUGLOGIN_DESKTOP && unknownProfileIds.has(profileId),
-    [unknownProfileIds],
-  );
-
   return {
     locks,
     isProfileLocked,
-    isProfileLockUnknown,
     runtimeRunningProfileIds,
     getLockInfo,
     refetchLocks,

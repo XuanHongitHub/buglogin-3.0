@@ -967,10 +967,10 @@
       "profileLocked": "Đang được sử dụng bởi {{owner}}",
       "profileLockedShort": "Đang sử dụng",
       "cannotLaunchLocked": "Không thể khởi chạy — profile đang được sử dụng bởi {{owner}}",
+      "launchWillRecheck": "{{owner}} có thể đang dùng profile. Bấm mở để máy chủ kiểm tra trạng thái hiện tại.",
       "leaseExpiry": " · quyền sử dụng hết hạn lúc {{time}}",
       "remoteSyncing": "{{owner}} đang hoàn tất đồng bộ hồ sơ. Bạn có thể mở khi đồng bộ xong.",
       "anotherDevice": "Thiết bị khác",
-      "leaseUnknown": "Chưa cập nhật được trạng thái từ máy chủ. Khi bạn bấm mở, máy chủ sẽ kiểm tra quyền sử dụng mới nhất.",
       "createdBy": "Được tạo bởi {{email}}",
       "roleLauncher": "Người khởi chạy"
     },

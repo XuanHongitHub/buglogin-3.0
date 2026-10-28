@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import {
   parseOrganizationManagementRoute,
+  parsePendingTenancyDeletes,
+  removePendingTenancyDelete,
   serializeOrganizationManagementRoute,
+  serializePendingTenancyDeletes,
+  upsertPendingTenancyDelete,
 } from "../../../src/components/management/org-management-route.ts";
 
 assert.equal(parseOrganizationManagementRoute("?theme=dark"), null);
@@ -48,5 +52,37 @@ assert.equal(
   )?.workspaceTab,
   "resources",
 );
+
+const pendingDelete = {
+  kind: "workspace" as const,
+  organizationId: "org_1",
+  organizationName: "Partner BugMedia",
+  workspaceId: "ws_2",
+  workspaceName: "Workspace 100/30",
+};
+assert.deepEqual(
+  parsePendingTenancyDeletes(serializePendingTenancyDeletes([pendingDelete])),
+  [pendingDelete],
+);
+assert.deepEqual(parsePendingTenancyDeletes("not-json"), []);
+assert.deepEqual(
+  parsePendingTenancyDeletes(
+    JSON.stringify({ kind: "organization", organizationId: "org_1" }),
+  ),
+  [],
+);
+const pendingOrganization = {
+  kind: "organization" as const,
+  organizationId: "org_1",
+  organizationName: "Partner BugMedia",
+};
+const pendingDeletes = upsertPendingTenancyDelete(
+  [pendingOrganization],
+  pendingDelete,
+);
+assert.deepEqual(pendingDeletes, [pendingOrganization, pendingDelete]);
+assert.deepEqual(removePendingTenancyDelete(pendingDeletes, pendingDelete), [
+  pendingOrganization,
+]);
 
 console.log("organization management route self-test passed");

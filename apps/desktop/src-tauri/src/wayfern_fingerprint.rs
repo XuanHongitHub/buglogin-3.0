@@ -1,7 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    net::TcpListener,
     path::Path,
     time::Duration,
 };
@@ -29,38 +28,16 @@ const PAGE_TARGET_STARTUP_GRACE: Duration = Duration::from_secs(8);
 const PAGE_TARGET_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(5);
 const FINGERPRINT_PATH: &str = "BugLogin/fingerprint.json";
 
-pub fn configure_local_cdp_args(
-    args: &mut Vec<String>,
-    correlation_id: &str,
-) -> Result<u16, Problem> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| {
-        problem(
-            "wayfern_cdp_unavailable",
-            "A local Wayfern control port could not be allocated",
-            503,
-            correlation_id,
-        )
-    })?;
-    let port = listener
-        .local_addr()
-        .map_err(|_| {
-            problem(
-                "wayfern_cdp_unavailable",
-                "A local Wayfern control port could not be allocated",
-                503,
-                correlation_id,
-            )
-        })?
-        .port();
-    drop(listener);
-
+pub fn configure_local_cdp_args(args: &mut Vec<String>) {
+    // Let Chromium choose its own port and publish it in DevToolsActivePort.
+    // Probing an available port here and releasing it before browser startup
+    // leaves a race in which another process can claim the port first.
     args.retain(|arg| {
         !arg.starts_with("--remote-debugging-port=")
             && !arg.starts_with("--remote-debugging-address=")
     });
-    args.push(format!("--remote-debugging-port={port}"));
+    args.push("--remote-debugging-port=0".to_owned());
     args.push("--remote-debugging-address=127.0.0.1".to_owned());
-    Ok(port)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -137,11 +114,63 @@ pub fn clear_stale_cdp_marker(profile_path: &Path, correlation_id: &str) -> Resu
     }
 }
 
+async fn discover_devtools_port(
+    profile_path: &Path,
+    startup_timeout: Duration,
+    correlation_id: &str,
+) -> Result<u16, Problem> {
+    let marker = profile_path.join("DevToolsActivePort");
+    let started = tokio::time::Instant::now();
+    loop {
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= 256 => {
+                if let Ok(contents) = fs::read_to_string(&marker)
+                    && let Some(port) = parse_devtools_active_port(&contents)
+                {
+                    return Ok(port);
+                }
+            }
+            Ok(_) => {
+                return Err(problem(
+                    "wayfern_cdp_marker_invalid",
+                    "Wayfern browser control marker is invalid",
+                    409,
+                    correlation_id,
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(problem(
+                    "wayfern_cdp_marker_unavailable",
+                    "Wayfern browser control marker is unavailable",
+                    503,
+                    correlation_id,
+                ));
+            }
+        }
+        if started.elapsed() >= startup_timeout {
+            return Err(problem(
+                "wayfern_cdp_unavailable",
+                "Wayfern did not publish its local browser control endpoint",
+                503,
+                correlation_id,
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn parse_devtools_active_port(contents: &str) -> Option<u16> {
+    let mut lines = contents.lines();
+    let port = lines.next()?.parse::<u16>().ok()?;
+    let browser_path = lines.next()?;
+    (port > 0 && browser_path.starts_with("/devtools/browser/")).then_some(port)
+}
+
 pub async fn apply_or_generate(
     profile_path: &Path,
     target: &ProfileFingerprintTarget,
     runtime_version: &str,
-    cdp_port: u16,
     correlation_id: &str,
 ) -> Result<Option<Problem>, Problem> {
     ensure_profile_directory(profile_path, correlation_id)?;
@@ -168,6 +197,7 @@ pub async fn apply_or_generate(
         }
     };
 
+    let cdp_port = discover_devtools_port(profile_path, STARTUP_TIMEOUT, correlation_id).await?;
     let should_persist = stored.is_none();
     let (fingerprint, identity_id) = match stored {
         Some(stored) if stored.schema_version == 1 && stored.target == *target => {
@@ -958,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn local_cdp_args_use_one_explicit_loopback_port() {
+    fn local_cdp_args_use_a_browser_allocated_loopback_port() {
         let mut args = vec![
             "--remote-debugging-port=0".to_owned(),
             "--remote-debugging-port=9222".to_owned(),
@@ -966,16 +996,15 @@ mod tests {
             "--lang=en-US".to_owned(),
         ];
 
-        let port = configure_local_cdp_args(&mut args, "test-cdp").unwrap();
+        configure_local_cdp_args(&mut args);
 
-        assert_ne!(port, 0);
         assert_eq!(
             args.iter()
                 .filter(|arg| arg.starts_with("--remote-debugging-port="))
                 .count(),
             1
         );
-        assert!(args.contains(&format!("--remote-debugging-port={port}")));
+        assert!(args.contains(&"--remote-debugging-port=0".to_owned()));
         assert_eq!(
             args.iter()
                 .filter(|arg| arg.starts_with("--remote-debugging-address="))
@@ -984,6 +1013,49 @@ mod tests {
         );
         assert!(args.contains(&"--remote-debugging-address=127.0.0.1".to_owned()));
         assert!(args.contains(&"--lang=en-US".to_owned()));
+    }
+
+    #[test]
+    fn devtools_active_port_parser_requires_a_valid_browser_marker() {
+        assert_eq!(
+            parse_devtools_active_port("43123\n/devtools/browser/abc123\n"),
+            Some(43123)
+        );
+        assert_eq!(
+            parse_devtools_active_port("0\n/devtools/browser/abc123\n"),
+            None
+        );
+        assert_eq!(
+            parse_devtools_active_port("43123\n/devtools/page/abc123\n"),
+            None
+        );
+        assert_eq!(parse_devtools_active_port("43123"), None);
+        assert_eq!(
+            parse_devtools_active_port("port\n/devtools/browser/x"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn devtools_port_discovery_reads_the_browser_owned_marker() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "buglogin-wayfern-devtools-port-{}-{}",
+            std::process::id(),
+            crate::clock::unix_time_nanos("test").unwrap()
+        ));
+        fs::create_dir_all(&profile_path).unwrap();
+        fs::write(
+            profile_path.join("DevToolsActivePort"),
+            "43123\n/devtools/browser/abc123\n",
+        )
+        .unwrap();
+
+        let port = discover_devtools_port(&profile_path, Duration::from_millis(100), "test")
+            .await
+            .unwrap();
+
+        assert_eq!(port, 43123);
+        fs::remove_dir_all(profile_path).unwrap();
     }
 
     #[tokio::test]

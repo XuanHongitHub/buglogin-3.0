@@ -1859,14 +1859,10 @@ impl AdapterState {
                 );
             }
         }
-        let (fingerprint_cdp_port, mut fingerprint_warning) = if fingerprint_target.is_some() {
-            match configure_local_cdp_args(&mut specification.args, correlation_id).and_then(
-                |port| {
-                    clear_stale_cdp_marker(&profile_path, correlation_id)?;
-                    Ok(port)
-                },
-            ) {
-                Ok(port) => (Some(port), None),
+        let (fingerprint_cdp_enabled, mut fingerprint_warning) = if fingerprint_target.is_some() {
+            configure_local_cdp_args(&mut specification.args);
+            match clear_stale_cdp_marker(&profile_path, correlation_id) {
+                Ok(()) => (true, None),
                 Err(error) => {
                     // Fingerprint control is an optional Wayfern capability. Keep
                     // browser access available if its local CDP setup is broken,
@@ -1877,13 +1873,13 @@ impl AdapterState {
                             && !argument.starts_with("--remote-debugging-address=")
                     });
                     (
-                        None,
+                        false,
                         Some(fingerprint_unverified_warning(error, correlation_id)),
                     )
                 }
             }
         } else {
-            (None, None)
+            (false, None)
         };
         let runtime_version = specification.version.clone();
         let mut launching_profile = current.value;
@@ -1922,12 +1918,11 @@ impl AdapterState {
             }
         };
         if let Some(target) = fingerprint_target.as_ref() {
-            if let Some(cdp_port) = fingerprint_cdp_port {
+            if fingerprint_cdp_enabled {
                 match apply_wayfern_fingerprint(
                     &profile_path,
                     target,
                     &runtime_version,
-                    cdp_port,
                     correlation_id,
                 )
                 .await

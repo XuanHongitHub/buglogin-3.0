@@ -24,3 +24,11 @@ Lease recovery regression fix — 2026-10-28:
 - The heartbeat now reconciles process exits itself, records the stopped-sync start time, stops the proxy bridge, and lets the existing bounded hold release the lease while preserving retry intent and local files.
 - A stopped/pending-sync entry with a missing start time is treated as expired instead of renewing indefinitely.
 - Windows regression test `heartbeat_detects_closed_browser_and_bounds_its_sync_lease` passes. It closes the managed process without a UI poll, verifies the heartbeat detects it, then verifies the lease is released after the hold deadline.
+
+Sync lifecycle follow-up — 2026-10-28:
+
+- A five-minute safety release could race an upload that was still actively syncing a large profile. The runtime now renews leases during an active sync attempt; the five-minute cap applies only while stopped and waiting for retry.
+- Sync status is published only after key/proxy/recipient preflight and immediately before snapshot upload. Failed sync attempts publish `stopped`, retain dirty local files, queue retry, and release the held lease promptly.
+- A managed browser stop starts sync inline. If that attempt fails, automatic reconciliation retries from local data using exponential backoff (3 seconds doubling up to 30 seconds), without holding a lease between attempts. Unexpected browser exit is detected by the desktop reconciler within about two seconds, then follows the same path.
+- Sync duration has no fixed limit/ETA: it varies with changed profile data, object count, and network throughput. Each completed attempt now records end-to-end duration and success/retry in the local app log; production timing remains unmeasured until an instrumented build is exercised.
+- The profile-list amber dot now uses the local sync event/API status only. A stale server runtime projection that still says `syncing` after its final stopped update failed no longer keeps the dot amber or implies a held sync.

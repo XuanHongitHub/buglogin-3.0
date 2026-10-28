@@ -85,6 +85,17 @@ const MAX_CONCURRENT_PROFILE_BLOB_UPLOADS: usize = 2;
 const MAX_OPERATION_IDEMPOTENCY_RECORDS: usize = 1_024;
 const PROXY_MUTATION_JOURNAL_SCHEMA_VERSION: u16 = 1;
 
+async fn log_profile_launch_preflight<T>(step: &'static str, future: impl Future<Output = T>) -> T {
+    let started_at = tokio::time::Instant::now();
+    let result = future.await;
+    tauri_plugin_log::log::info!(
+        "Profile launch preflight completed: step={} duration_ms={}",
+        step,
+        started_at.elapsed().as_millis()
+    );
+    result
+}
+
 #[derive(Clone)]
 pub enum DesktopState {
     Local(AdapterState),
@@ -442,7 +453,7 @@ impl ProfileOperationLocks {
     }
 }
 
-/// Exponential backoff (3 s doubling to 5 min) for re-stopping profiles whose
+/// Exponential backoff (3 s doubling to 30 s) for re-stopping profiles whose
 /// browser exited on its own, so a sync that keeps failing isn't retried every tick.
 #[derive(Default)]
 struct ExitReconcileBackoff {
@@ -460,7 +471,7 @@ impl ExitReconcileBackoff {
         let attempts = self.attempts.get(profile_id).map_or(0, |(count, _)| *count) + 1;
         let delay = Duration::from_secs(3)
             .saturating_mul(1 << attempts.saturating_sub(1).min(16))
-            .min(Duration::from_secs(300));
+            .min(Duration::from_secs(30));
         self.attempts
             .insert(profile_id.clone(), (attempts, now + delay));
     }
@@ -4246,11 +4257,11 @@ impl ProductionDesktopState {
             pending_proxy_result,
             device_key_result,
         ) = tokio::join!(
-            extension_future,
-            manifest_future,
-            key_rotation_future,
-            pending_proxy_future,
-            device_key_future,
+            log_profile_launch_preflight("extension", extension_future),
+            log_profile_launch_preflight("manifest", manifest_future),
+            log_profile_launch_preflight("key_rotation", key_rotation_future),
+            log_profile_launch_preflight("pending_proxy", pending_proxy_future),
+            log_profile_launch_preflight("device_key", device_key_future),
         );
         let (mut manifest, manifest_proxy_stale) = manifest_result?;
         let pending_proxy_assignment = pending_proxy_result?;
@@ -4647,24 +4658,22 @@ impl ProductionDesktopState {
             let generation = projection.generation;
             let root_checksum = projection.root_checksum.clone();
             let profile_path = projection.path.clone();
-            let (fingerprint_cdp_port, fingerprint_setup_warning) = if fingerprint_target.is_some()
-            {
-                match configure_local_cdp_args(&mut specification.args, &correlation_id) {
-                    Ok(port) => match clear_stale_cdp_marker(&profile_path, &correlation_id) {
-                        Ok(()) => (Some(port), None),
+            let (fingerprint_cdp_enabled, fingerprint_setup_warning) =
+                if fingerprint_target.is_some() {
+                    configure_local_cdp_args(&mut specification.args);
+                    match clear_stale_cdp_marker(&profile_path, &correlation_id) {
+                        Ok(()) => (true, None),
                         Err(error) => {
                             specification.args.retain(|argument| {
                                 !argument.starts_with("--remote-debugging-port=")
                                     && !argument.starts_with("--remote-debugging-address=")
                             });
-                            (None, Some(error))
+                            (false, Some(error))
                         }
-                    },
-                    Err(error) => (None, Some(error)),
-                }
-            } else {
-                (None, None)
-            };
+                    }
+                } else {
+                    (false, None)
+                };
             let runtime_key = runtime_projection_idempotency_key(&idempotency_key, "started");
             let lease_for_projection = lease.clone();
             if let Err(error) =
@@ -4711,12 +4720,11 @@ impl ProductionDesktopState {
                 );
             }
             if let Some(target) = fingerprint_target.as_ref() {
-                if let Some(cdp_port) = fingerprint_cdp_port {
+                if fingerprint_cdp_enabled {
                     match apply_wayfern_fingerprint(
                         &profile_path,
                         target,
                         profile.value.runtime_version.as_deref().unwrap_or_default(),
-                        cdp_port,
                         &correlation_id,
                     )
                     .await
@@ -4931,6 +4939,7 @@ impl ProductionDesktopState {
         preacquired_lease: Option<LeaseGrant>,
         preheld_stop: Option<StopReceipt>,
     ) -> Result<Value, Problem> {
+        let started_at = tokio::time::Instant::now();
         let cleanup_profile_id = profile_id.clone();
         let result = self
             .stop_profile_inner(
@@ -4955,19 +4964,23 @@ impl ProductionDesktopState {
             self.profile_runtime
                 .queue_sync_retry(cleanup_profile_id.clone())
                 .await;
-            if self
+            // A stopped browser has no writer left. Preserve its local files
+            // and retry intent, but release the local/remote lease immediately
+            // instead of making the user wait for the five-minute safety cap.
+            let _ = self
                 .profile_runtime
-                .unexpectedly_stopped_profiles()
-                .await
-                .is_ok_and(|queued| queued.contains(&cleanup_profile_id))
-            {
-                return result;
-            }
-            // Cover failures before the sync transaction has a StopReceipt
-            // (for example key/manifest preflight or proxy shutdown). Never
-            // clear state while the browser is still active.
-            let _ = self.profile_runtime.complete_stop(cleanup_profile_id).await;
+                .set_sync_attempt_active(cleanup_profile_id.clone(), false)
+                .await;
+            let _ = self
+                .profile_runtime
+                .release_stopped_for_retry(cleanup_profile_id)
+                .await;
         }
+        tauri_plugin_log::log::info!(
+            "Profile stop/sync attempt completed: result={} duration_ms={}",
+            if result.is_ok() { "success" } else { "retry" },
+            started_at.elapsed().as_millis()
+        );
         result
     }
 
@@ -5015,6 +5028,11 @@ impl ProductionDesktopState {
                     })?,
             );
         }
+        if preheld_stop.is_some() {
+            self.profile_runtime
+                .set_sync_attempt_active(profile_id.clone(), true)
+                .await?;
+        }
         let auth = self.auth(&correlation_id)?;
         let scope = CoordinationScope {
             workspace_id: &binding.workspace_id,
@@ -5054,35 +5072,9 @@ impl ProductionDesktopState {
             }
             Err(error) => return Err(error),
         };
-        let mut syncing_projection_published = false;
-        if let Some(stopped) = preheld_stop.as_ref().filter(|stopped| stopped.was_launched) {
-            if let Some(lease) = stopped.lease.as_ref() {
-                match self
-                    .client
-                    .runtime_syncing(
-                        &profile_id,
-                        auth.actor_id(),
-                        previous.generation,
-                        &previous.root_checksum,
-                        lease,
-                        &runtime_projection_idempotency_key(&idempotency_key, "syncing-preflight"),
-                        &correlation_id,
-                    )
-                    .await
-                {
-                    Ok(()) => syncing_projection_published = true,
-                    Err(error) => crate::diagnostics::report_problem_failure(
-                        DesktopState::Production(self.clone()),
-                        "profile.runtime.syncing",
-                        error,
-                    ),
-                }
-            }
-        }
-        // A stopped browser with a held lease is already projected as syncing
-        // before the remaining key/proxy preflight. Idle-profile sync publishes
-        // the same phase after acquiring its lease below. Projection failure is
-        // diagnostic only and never blocks the sync lifecycle.
+        // Finish key, proxy, and recipient preflight before publishing `syncing`.
+        // Otherwise a validation failure could leave a stale amber status even
+        // though no upload had started.
         self.ensure_device_key_registered(&correlation_id).await?;
         let rotation_recipients = match self
             .client
@@ -5300,7 +5292,10 @@ impl ProductionDesktopState {
                 &correlation_id,
             ));
         };
-        if !syncing_projection_published && let Some(lease) = stopped.lease.as_ref() {
+        self.profile_runtime
+            .set_sync_attempt_active(profile_id.clone(), true)
+            .await?;
+        if let Some(lease) = stopped.lease.as_ref() {
             if let Err(error) = self
                 .client
                 .runtime_syncing(
@@ -5380,7 +5375,7 @@ impl ProductionDesktopState {
                     "production_write_authority_mismatch",
                     "Production write authority does not match binding",
                     409,
-                    correlation_id,
+                    correlation_id.as_str(),
                 ));
             }
             if pending_proxy_assignment
@@ -5577,7 +5572,7 @@ impl ProductionDesktopState {
                 .complete_stop(profile_id.clone())
                 .await
                 .map_err(|mut error| {
-                    error.correlation_id = correlation_id;
+                    error.correlation_id = correlation_id.clone();
                     error
                 })?;
             if let Some(error) = key_rotation_error {
@@ -5591,6 +5586,27 @@ impl ProductionDesktopState {
             }))
         }
         .await;
+        if sync_result.is_err()
+            && let Some(lease) = stopped.lease.as_ref()
+            && let Err(error) = self
+                .client
+                .runtime_stopped(
+                    &profile_id,
+                    auth.actor_id(),
+                    previous.generation,
+                    &previous.root_checksum,
+                    lease,
+                    &runtime_projection_idempotency_key(&idempotency_key, "sync-failed"),
+                    &correlation_id,
+                )
+                .await
+        {
+            crate::diagnostics::report_problem_failure(
+                DesktopState::Production(self.clone()),
+                "profile.runtime.sync-failed",
+                error,
+            );
+        }
         self.profile_runtime
             .finish_sync_result(profile_id, sync_result)
             .await
@@ -7590,7 +7606,7 @@ mod tests {
         for attempt in 0..20 {
             backoff.record_attempt(&profile, start + std::time::Duration::from_secs(attempt));
         }
-        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(19 + 300)));
+        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(19 + 30)));
 
         backoff.retain_exited(&[]);
         assert!(backoff.ready(&profile, start));

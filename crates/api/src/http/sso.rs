@@ -329,10 +329,7 @@ fn create_or_link_identity(
 ) -> Result<AccountId, buglogin_domain::errors::Problem> {
     let by_email = state.identity_persistence.find_by_email(email)?;
     let by_legacy = if user.app == app_code {
-        user.old_account
-            .as_deref()
-            .map(canonical_username)
-            .transpose()?
+        legacy_username(user.old_account.as_deref())
             .map(|username| state.identity_persistence.find_by_username(&username))
             .transpose()?
             .flatten()
@@ -373,10 +370,7 @@ fn create_or_link_identity(
     } else {
         let generated_username = format!("buglab_{}", &subject_hash[..16]);
         let candidate_username = if user.app == app_code {
-            user.old_account
-                .as_deref()
-                .and_then(|value| canonical_username(value).ok())
-                .unwrap_or(generated_username)
+            legacy_username(user.old_account.as_deref()).unwrap_or(generated_username)
         } else {
             generated_username
         };
@@ -465,6 +459,14 @@ fn create_or_link_identity(
         })?;
     }
     Ok(account_id)
+}
+
+// BugLab's legacy account field is optional compatibility data, not an
+// authority for the verified SSO identity. Older provider records can contain
+// values that no longer satisfy BugLogin's username rules; they must not make
+// a valid email/subject sign-in fail with `invalid_username`.
+fn legacy_username(value: Option<&str>) -> Option<String> {
+    value.and_then(|value| canonical_username(value).ok())
 }
 
 fn linked_identity(account_id: AccountId, subject_hash: &str, email: &str) -> LinkedBugLabIdentity {
@@ -639,7 +641,7 @@ mod tests {
     use buglogin_domain::ids::AccountId;
     use buglogin_storage::control::MemoryControlRecordStore;
 
-    use super::{SsoTransaction, SsoTransactionStatus, issue_sso_session};
+    use super::{SsoTransaction, SsoTransactionStatus, issue_sso_session, legacy_username};
     use crate::{
         auth::AuthService,
         services::{
@@ -654,6 +656,17 @@ mod tests {
             status: SsoTransactionStatus::Exchanging,
             expires_at: 10_000,
         }
+    }
+
+    #[test]
+    fn invalid_legacy_username_does_not_block_buglab_sign_in() {
+        assert_eq!(
+            legacy_username(Some("legacy.user")),
+            Some("legacy.user".into())
+        );
+        assert_eq!(legacy_username(Some("old user")), None);
+        assert_eq!(legacy_username(Some("ab")), None);
+        assert_eq!(legacy_username(None), None);
     }
 
     #[test]

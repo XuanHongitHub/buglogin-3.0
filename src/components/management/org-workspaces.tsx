@@ -65,8 +65,13 @@ import type {
 } from "../../../frontend/src/generated/command-registry";
 import { AccountDirectory, AccountProvisioning } from "./accounts";
 import {
+  type PendingTenancyDelete,
   parseOrganizationManagementRoute,
+  parsePendingTenancyDeletes,
+  removePendingTenancyDelete,
   serializeOrganizationManagementRoute,
+  serializePendingTenancyDeletes,
+  upsertPendingTenancyDelete,
 } from "./org-management-route";
 import { ManagementWorkspace, type ManagementWorkspaceTab } from "./workspace";
 import "./org-platform-i18n";
@@ -147,6 +152,36 @@ function errorMessage(error: unknown): string {
   )
     return error.title;
   return String(error);
+}
+
+function readPendingTenancyDeletes(storageKey: string): PendingTenancyDelete[] {
+  if (typeof window === "undefined") return [];
+  try {
+    return parsePendingTenancyDeletes(
+      window.sessionStorage.getItem(storageKey),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function pendingTenancyDeleteFor(
+  target: Organization | WorkspaceEntry,
+): PendingTenancyDelete {
+  if ("workspace" in target) {
+    return {
+      kind: "workspace",
+      organizationId: target.organization.id,
+      organizationName: target.organization.name,
+      workspaceId: target.workspace.id,
+      workspaceName: target.workspace.name,
+    };
+  }
+  return {
+    kind: "organization",
+    organizationId: target.id,
+    organizationName: target.name,
+  };
 }
 
 function parseRows(text: string): string[][] {
@@ -413,7 +448,11 @@ export function OrganizationManagement({
   const { actor, organizations, workspaces, loading, error, reload } =
     useDirectory();
   const stateKey = `buglogin:management:${platformView ?? "organization"}:v1`;
+  const pendingDeleteKey = `${stateKey}:pending-delete:v1`;
   const [savedState] = useState(() => readManagementState(stateKey));
+  const [pendingDeletes, setPendingDeletes] = useState(() =>
+    readPendingTenancyDeletes(pendingDeleteKey),
+  );
   const [initialUrlRoute] = useState(() =>
     typeof window === "undefined"
       ? null
@@ -462,6 +501,20 @@ export function OrganizationManagement({
       // The current view still works when the desktop storage is unavailable.
     }
   }, [orgTab, page, route, search, stateKey]);
+  useEffect(() => {
+    try {
+      if (pendingDeletes.length > 0) {
+        window.sessionStorage.setItem(
+          pendingDeleteKey,
+          serializePendingTenancyDeletes(pendingDeletes),
+        );
+      } else {
+        window.sessionStorage.removeItem(pendingDeleteKey);
+      }
+    } catch {
+      // Cleanup remains usable in the current view if session storage is unavailable.
+    }
+  }, [pendingDeletes, pendingDeleteKey]);
   useEffect(() => {
     const onPopState = () => {
       skipHistoryPush.current = true;
@@ -552,6 +605,93 @@ export function OrganizationManagement({
       : organizations.find((entry) => canManageOrg(entry.organization))
           ?.organization);
 
+  const pendingDeleteBanner =
+    pendingDeletes.length > 0 ? (
+      <div
+        role="status"
+        aria-live="polite"
+        className="mx-4 mt-3 space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2"
+      >
+        <p className="text-sm font-medium">{t("pendingDeleteTitle")}</p>
+        <ul className="space-y-2">
+          {pendingDeletes.map((pending) => {
+            const organization = organizations.find(
+              (entry) => entry.organization.id === pending.organizationId,
+            )?.organization;
+            const workspace =
+              pending.kind === "workspace"
+                ? workspaces.find(
+                    (entry) => entry.workspace.id === pending.workspaceId,
+                  )
+                : undefined;
+            const canResume = Boolean(
+              organization && (pending.kind === "organization" || workspace),
+            );
+            const name =
+              pending.kind === "organization"
+                ? pending.organizationName
+                : pending.workspaceName;
+            return (
+              <li
+                key={`${pending.kind}:${pending.organizationId}:${pending.kind === "workspace" ? pending.workspaceId : ""}`}
+                className="flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-2 first:border-0 first:pt-0"
+              >
+                <div className="min-w-0">
+                  <p className="break-words text-xs text-muted-foreground">
+                    {t("pendingDeleteBody", {
+                      kind: t(
+                        pending.kind === "organization"
+                          ? "organizationLabel"
+                          : "workspaceLabel",
+                      ),
+                      name,
+                    })}
+                  </p>
+                  {!loading && !error && !canResume ? (
+                    <p className="mt-1 text-xs text-destructive">
+                      {t("pendingDeleteTargetUnavailable")}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={loading || !canResume}
+                    onClick={() => {
+                      if (!organization) return;
+                      setRoute({ orgId: organization.id, workspaceId: null });
+                      setOrgTab("workspaces");
+                      if (pending.kind === "organization") {
+                        setDeleteTarget(organization);
+                      } else if (workspace) {
+                        setDeleteTarget(workspace);
+                      }
+                    }}
+                  >
+                    <LuRefreshCw />
+                    {t("resumeDelete")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      setPendingDeletes((current) =>
+                        removePendingTenancyDelete(current, pending),
+                      )
+                    }
+                  >
+                    <LuX />
+                    {t("dismissDelete")}
+                  </Button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    ) : null;
+
   const previousPlatformView = useRef(platformView);
   useEffect(() => {
     if (previousPlatformView.current === platformView) return;
@@ -592,20 +732,23 @@ export function OrganizationManagement({
 
   if (selectedWs)
     return (
-      <ManagementWorkspace
-        organizationId={selectedWs.organization.id}
-        organizationName={selectedWs.organization.name}
-        workspaceId={selectedWs.workspace.id}
-        workspaceName={selectedWs.workspace.name}
-        initialTab={workspaceInitialTab}
-        onTabChange={setWorkspaceInitialTab}
-        onBack={() =>
-          setRoute((current) => ({ ...current, workspaceId: null }))
-        }
-        onDataChanged={() => {
-          void changed();
-        }}
-      />
+      <div className="flex min-h-0 flex-1 flex-col">
+        {pendingDeleteBanner}
+        <ManagementWorkspace
+          organizationId={selectedWs.organization.id}
+          organizationName={selectedWs.organization.name}
+          workspaceId={selectedWs.workspace.id}
+          workspaceName={selectedWs.workspace.name}
+          initialTab={workspaceInitialTab}
+          onTabChange={setWorkspaceInitialTab}
+          onBack={() =>
+            setRoute((current) => ({ ...current, workspaceId: null }))
+          }
+          onDataChanged={() => {
+            void changed();
+          }}
+        />
+      </div>
     );
 
   return (
@@ -696,6 +839,7 @@ export function OrganizationManagement({
             ) : null}
           </div>
         </div>
+        {pendingDeleteBanner}
         {selectedOrg ? (
           <nav className="mt-3 flex gap-1" aria-label={selectedOrg.name}>
             {(["workspaces", "accounts", "settings"] as const).map((tab) => (
@@ -1256,6 +1400,12 @@ export function OrganizationManagement({
               "workspace" in deleteTarget
                 ? deleteTarget.organization
                 : deleteTarget;
+            setPendingDeletes((current) =>
+              upsertPendingTenancyDelete(
+                current,
+                pendingTenancyDeleteFor(deleteTarget),
+              ),
+            );
             setDeleteTarget(null);
             if (typeof destination === "string") {
               setRoute({ orgId: organization.id, workspaceId: null });
@@ -1269,6 +1419,12 @@ export function OrganizationManagement({
             }
           }}
           onSaved={() => {
+            setPendingDeletes((current) =>
+              removePendingTenancyDelete(
+                current,
+                pendingTenancyDeleteFor(deleteTarget),
+              ),
+            );
             setRoute({ orgId: null, workspaceId: null });
             void changed();
           }}
