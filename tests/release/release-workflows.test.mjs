@@ -153,6 +153,8 @@ test("stable publication validates signed candidate assets and updates S3 withou
   assert.match(promotion, /candidate_run_id:/);
   assert.match(promotion, /publication_reason:/);
   assert.match(promotion, /conclusion!=="success"/);
+  assert.match(promotion, /git[\s\S]*rev-parse[\s\S]*candidate provenance reference mismatch/);
+  assert.doesNotMatch(promotion, /p\.source\.ref!==process\.env\.SOURCE_SHA/);
   assert.match(
     promotion,
     /actions\/runs\/\$CANDIDATE_RUN_ID\/artifacts/,
