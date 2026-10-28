@@ -50,6 +50,11 @@ runs:
     - name: Assert Rust pin
       shell: bash
       run: rustc --version | grep -q '^rustc 1\.95\.0 '
+    - name: Cache Rust build artifacts
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      with:
+        shared-key: buglogin-${{ runner.os }}-${{ runner.arch }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}
     - name: Install JavaScript dependencies
       if: inputs.install-node-dependencies == 'true'
       shell: bash
