@@ -626,9 +626,13 @@ where
                         .collect::<Vec<_>>();
                     let mut profiles = candidates
                         .into_iter()
-                        .filter_map(|(profile_id, path, stopped)| {
-                            (!stopped && runtime.lifecycle.process_is_verified_running(&path))
-                                .then_some(profile_id)
+                        // `reconcile_exited_processes` above marks only a confirmed
+                        // process exit as stopped. If the OS cannot verify status,
+                        // keep the tracked process active; treating Unknown as
+                        // stopped can make launch recovery stop a browser that is
+                        // still open.
+                        .filter_map(|(profile_id, _path, stopped)| {
+                            (!stopped).then_some(profile_id)
                         })
                         .collect::<Vec<_>>();
                     profiles.sort();
@@ -1621,6 +1625,7 @@ mod tests {
     struct TestController {
         fail_launch: Arc<AtomicBool>,
         process_exited: Arc<AtomicBool>,
+        process_status_unknown: Arc<AtomicBool>,
         launches: Arc<AtomicUsize>,
         stop_failures: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
@@ -1645,6 +1650,7 @@ mod tests {
                 },
                 stop_failures: self.stop_failures.clone(),
                 process_exited: self.process_exited.clone(),
+                process_status_unknown: self.process_status_unknown.clone(),
                 stops: self.stops.clone(),
                 log: self.log.clone(),
             }))
@@ -1666,6 +1672,7 @@ mod tests {
     struct TestProcess {
         identity: ProcessIdentity,
         process_exited: Arc<AtomicBool>,
+        process_status_unknown: Arc<AtomicBool>,
         stop_failures: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
         log: Arc<Mutex<Vec<&'static str>>>,
@@ -1677,7 +1684,9 @@ mod tests {
         }
 
         fn status(&mut self) -> Result<ProcessStatus, Problem> {
-            Ok(if self.process_exited.load(Ordering::SeqCst) {
+            Ok(if self.process_status_unknown.load(Ordering::SeqCst) {
+                ProcessStatus::Unknown
+            } else if self.process_exited.load(Ordering::SeqCst) {
                 ProcessStatus::Exited
             } else {
                 ProcessStatus::Running
@@ -2196,6 +2205,26 @@ mod tests {
         assert!(stopped.was_launched);
         handle.complete_stop(profile_id.clone()).await.unwrap();
         assert!(handle.running_profiles().await.unwrap().is_empty());
+
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unverified_tracked_browser_remains_active_until_exit_is_confirmed() {
+        let path = profile_path("unverified-process-remains-active");
+        let controller = TestController::default();
+        let handle = spawn_profile_runtime(controller.clone(), None);
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+
+        handle.launch(request(&path, false)).await.unwrap();
+        controller
+            .process_status_unknown
+            .store(true, Ordering::SeqCst);
+
+        assert_eq!(handle.active_profiles().await.unwrap(), vec![profile_id]);
+        assert_eq!(handle.running_profiles().await.unwrap().len(), 1);
+        assert_eq!(controller.stops.load(Ordering::SeqCst), 0);
 
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
