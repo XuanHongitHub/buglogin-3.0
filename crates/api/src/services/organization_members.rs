@@ -126,6 +126,33 @@ impl OrganizationMemberService {
         Ok(updated)
     }
 
+    pub fn remove(
+        &mut self,
+        organization_id: &OrganizationId,
+        account_id: &AccountId,
+        expected_revision: u64,
+    ) -> Result<OrganizationMember, Problem> {
+        let current = self
+            .get(organization_id, account_id)
+            .cloned()
+            .ok_or_else(|| {
+                problem(
+                    "organization_member_not_found",
+                    "Organization member not found",
+                    404,
+                )
+            })?;
+        if current.revision != expected_revision {
+            return Err(problem(
+                "revision_conflict",
+                "Organization member revision conflict",
+                409,
+            ));
+        }
+        self.members.remove(current.id.as_str());
+        Ok(current)
+    }
+
     pub fn suspended_organizations_for(&self, account_id: &AccountId) -> Vec<OrganizationId> {
         self.members
             .values()
@@ -209,6 +236,34 @@ mod tests {
                 .unwrap_err()
                 .code,
             "revision_conflict"
+        );
+    }
+
+    #[test]
+    fn remove_is_revision_checked_and_does_not_change_the_account_identity() {
+        let organization = OrganizationId::new("org_remove_member").unwrap();
+        let account = AccountId::new("acct_remove_member").unwrap();
+        let mut members = OrganizationMemberService::default();
+        let created = members
+            .create_active(organization.clone(), account.clone())
+            .unwrap();
+
+        assert_eq!(
+            members
+                .remove(&organization, &account, created.revision + 1)
+                .unwrap_err()
+                .code,
+            "revision_conflict"
+        );
+        let removed = members
+            .remove(&organization, &account, created.revision)
+            .unwrap();
+        assert_eq!(removed, created);
+        assert!(members.get(&organization, &account).is_none());
+        assert!(
+            members
+                .remove(&organization, &account, created.revision)
+                .is_err()
         );
     }
 }

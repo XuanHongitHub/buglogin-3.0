@@ -281,6 +281,7 @@ pub fn run() {
             organization_members_list,
             organization_account_create,
             organization_member_status_update,
+            organization_member_remove,
             organization_member_workspace_assign,
             workspace_list,
             workspace_get,
@@ -1783,6 +1784,23 @@ async fn organization_member_status_update(
     state
         .invoke(
             "organization_member_status_update",
+            &correlation_id,
+            idempotency_key.as_deref(),
+            payload,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn organization_member_remove(
+    state: State<'_, DesktopState>,
+    correlation_id: String,
+    idempotency_key: Option<String>,
+    payload: Value,
+) -> Result<CommandResult<Value>, Problem> {
+    state
+        .invoke(
+            "organization_member_remove",
             &correlation_id,
             idempotency_key.as_deref(),
             payload,

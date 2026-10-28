@@ -1,6 +1,7 @@
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Bound::{Excluded, Unbounded},
     path::PathBuf,
@@ -122,6 +123,46 @@ use profile_lifecycle::{ProfileLifecycleCommand, ProfileLifecycleService};
 
 tokio::task_local! {
     static REQUEST_CORRELATION_ID: String;
+}
+
+thread_local! {
+    static CONTROL_BLOCKING_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+static CONTROL_AUTHENTICATION_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+const MAX_CONCURRENT_CONTROL_AUTHENTICATIONS: usize = 4;
+
+struct ControlBlockingScope;
+
+impl ControlBlockingScope {
+    fn enter() -> Self {
+        CONTROL_BLOCKING_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for ControlBlockingScope {
+    fn drop(&mut self) {
+        CONTROL_BLOCKING_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+pub(super) fn with_control_blocking<T>(operation: impl FnOnce() -> T) -> T {
+    let already_blocking = CONTROL_BLOCKING_DEPTH.with(|depth| depth.get() > 0);
+    if already_blocking {
+        return operation();
+    }
+    let multi_thread_runtime = tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if multi_thread_runtime {
+        tokio::task::block_in_place(|| {
+            let _scope = ControlBlockingScope::enter();
+            operation()
+        })
+    } else {
+        let _scope = ControlBlockingScope::enter();
+        operation()
+    }
 }
 
 #[cfg(test)]
@@ -1115,7 +1156,7 @@ impl ApiState {
         &self,
         object_key: String,
     ) -> Result<Option<String>, Problem> {
-        let permit = remote_chunk_io_slot()?;
+        let permit = remote_chunk_metadata_slot()?;
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -1156,7 +1197,7 @@ impl ApiState {
         object_key: String,
         expected_checksum: String,
     ) -> Result<Vec<u8>, Problem> {
-        let permit = remote_chunk_io_slot()?;
+        let permit = remote_chunk_transfer_slot()?;
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -1175,9 +1216,9 @@ impl ApiState {
         size: u64,
         reservation_time_ms: u64,
         body: Bytes,
-        body_admission: tokio::sync::OwnedSemaphorePermit,
+        body_admission: LargeTransferAdmission,
     ) -> Result<(), Problem> {
-        let remote_permit = remote_chunk_io_slot()?;
+        let remote_permit = remote_chunk_transfer_slot()?;
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
             let _remote_permit = remote_permit;
@@ -6385,50 +6426,142 @@ async fn log_slow_requests(request: axum::extract::Request, next: Next) -> Respo
     response
 }
 
-static LARGE_TRANSFER_BODY_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-static REMOTE_CHUNK_IO_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+static LARGE_TRANSFER_BUDGET: OnceLock<LargeTransferBudget> = OnceLock::new();
+static REMOTE_CHUNK_IO_BUDGET: OnceLock<RemoteChunkIoBudget> = OnceLock::new();
 
-fn remote_chunk_io_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Problem> {
-    Arc::clone(REMOTE_CHUNK_IO_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(8))))
-        .try_acquire_owned()
-        .map_err(|_| {
-            problem(
-                "remote_chunk_capacity_exhausted",
-                "Remote storage is busy; retry shortly",
-                503,
-            )
-            .retryable(true)
-        })
+const LARGE_TRANSFER_SLOT_MEBIBYTES: u64 = 1024 * 1024;
+const MAX_CONCURRENT_LARGE_TRANSFERS: usize = 4;
+const MAX_LARGE_TRANSFER_BYTES_MEBIBYTES: usize = 128;
+const MAX_REMOTE_CHUNK_IO: usize = 8;
+const MAX_REMOTE_CHUNK_TRANSFERS: usize = 4;
+
+pub(crate) struct LargeTransferAdmission {
+    _request: tokio::sync::OwnedSemaphorePermit,
+    _bytes: tokio::sync::OwnedSemaphorePermit,
 }
 
-pub(crate) async fn large_transfer_body_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Problem>
-{
-    let semaphore = Arc::clone(
-        LARGE_TRANSFER_BODY_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4))),
-    );
-    // A desktop may upload two encrypted chunks at once. Four process-wide
-    // slots accommodate the two supported desktop sessions without allowing
-    // unbounded buffering (the per-request body limit remains 64 MiB).
-    tokio::time::timeout(Duration::from_secs(10), semaphore.acquire_owned())
-        .await
-        .map_err(|_| {
-            Problem::new(
-                "large_transfer_capacity_exhausted",
-                "Large transfer capacity remained busy for 10 seconds; retry the request",
-                503,
-                "api",
-            )
-            .retryable(true)
-        })?
-        .map_err(|_| {
-            Problem::new(
-                "large_transfer_capacity_unavailable",
-                "Large transfer capacity is unavailable",
-                503,
-                "api",
-            )
-            .retryable(true)
+struct LargeTransferBudget {
+    requests: Arc<tokio::sync::Semaphore>,
+    bytes: Arc<tokio::sync::Semaphore>,
+}
+
+struct RemoteChunkIoBudget {
+    total: Arc<tokio::sync::Semaphore>,
+    transfers: Arc<tokio::sync::Semaphore>,
+}
+
+struct RemoteChunkIoAdmission {
+    _total: tokio::sync::OwnedSemaphorePermit,
+    _transfer: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl RemoteChunkIoBudget {
+    fn new(total: usize, transfers: usize) -> Self {
+        Self {
+            total: Arc::new(tokio::sync::Semaphore::new(total)),
+            transfers: Arc::new(tokio::sync::Semaphore::new(transfers)),
+        }
+    }
+
+    fn try_acquire_metadata(&self) -> Result<RemoteChunkIoAdmission, Problem> {
+        let total = Arc::clone(&self.total)
+            .try_acquire_owned()
+            .map_err(|_| remote_chunk_capacity_exhausted())?;
+        Ok(RemoteChunkIoAdmission {
+            _total: total,
+            _transfer: None,
         })
+    }
+
+    fn try_acquire_transfer(&self) -> Result<RemoteChunkIoAdmission, Problem> {
+        let transfer = Arc::clone(&self.transfers)
+            .try_acquire_owned()
+            .map_err(|_| remote_chunk_capacity_exhausted())?;
+        let total = Arc::clone(&self.total)
+            .try_acquire_owned()
+            .map_err(|_| remote_chunk_capacity_exhausted())?;
+        Ok(RemoteChunkIoAdmission {
+            _total: total,
+            _transfer: Some(transfer),
+        })
+    }
+}
+
+impl LargeTransferBudget {
+    fn new(request_count: usize, byte_capacity_mebibytes: usize) -> Self {
+        Self {
+            requests: Arc::new(tokio::sync::Semaphore::new(request_count)),
+            bytes: Arc::new(tokio::sync::Semaphore::new(byte_capacity_mebibytes)),
+        }
+    }
+
+    fn try_acquire(&self, requested_bytes: u64) -> Result<LargeTransferAdmission, Problem> {
+        let request = Arc::clone(&self.requests)
+            .try_acquire_owned()
+            .map_err(|_| {
+                large_transfer_capacity_exhausted(
+                    "Large transfer request capacity is busy; retry shortly",
+                )
+            })?;
+        let requested_mebibytes = requested_bytes
+            .max(1)
+            .div_ceil(LARGE_TRANSFER_SLOT_MEBIBYTES)
+            .min(MAX_LARGE_TRANSFER_BYTES_MEBIBYTES as u64)
+            as u32;
+        let bytes = Arc::clone(&self.bytes)
+            .try_acquire_many_owned(requested_mebibytes)
+            .map_err(|_| {
+                large_transfer_capacity_exhausted(
+                    "Large transfer memory capacity is busy; retry shortly",
+                )
+            })?;
+        Ok(LargeTransferAdmission {
+            _request: request,
+            _bytes: bytes,
+        })
+    }
+}
+
+fn remote_chunk_capacity_exhausted() -> Problem {
+    problem(
+        "remote_chunk_capacity_exhausted",
+        "Remote storage is busy; retry shortly",
+        503,
+    )
+    .retryable(true)
+}
+
+fn remote_chunk_io_budget() -> &'static RemoteChunkIoBudget {
+    REMOTE_CHUNK_IO_BUDGET
+        .get_or_init(|| RemoteChunkIoBudget::new(MAX_REMOTE_CHUNK_IO, MAX_REMOTE_CHUNK_TRANSFERS))
+}
+
+fn remote_chunk_metadata_slot() -> Result<RemoteChunkIoAdmission, Problem> {
+    remote_chunk_io_budget().try_acquire_metadata()
+}
+
+fn remote_chunk_transfer_slot() -> Result<RemoteChunkIoAdmission, Problem> {
+    remote_chunk_io_budget().try_acquire_transfer()
+}
+
+pub(crate) async fn large_transfer_body_slot(
+    requested_bytes: u64,
+) -> Result<LargeTransferAdmission, Problem> {
+    // Reserve request count and retained payload bytes before reading or
+    // allocating a large body. Both limits fail fast so bulk work cannot build
+    // an unbounded wait queue in front of the API.
+    LARGE_TRANSFER_BUDGET
+        .get_or_init(|| {
+            LargeTransferBudget::new(
+                MAX_CONCURRENT_LARGE_TRANSFERS,
+                MAX_LARGE_TRANSFER_BYTES_MEBIBYTES,
+            )
+        })
+        .try_acquire(requested_bytes)
+}
+
+fn large_transfer_capacity_exhausted(message: &'static str) -> Problem {
+    Problem::new("large_transfer_capacity_exhausted", message, 503, "api").retryable(true)
 }
 
 pub(crate) fn declared_body_exceeds_limit(
@@ -10489,9 +10622,38 @@ fn cookie_value(mut value: String) -> Result<HeaderValue, Response> {
 }
 
 fn authenticate(state: &ApiState, headers: &HeaderMap) -> Result<Principal, Response> {
-    state
-        .authenticate_token(bearer_token(headers)?, request_now(headers)?)
-        .map_err(response)
+    let token = bearer_token(headers)?;
+    let now_ms = request_now(headers)?;
+    let multi_thread_runtime = tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    let admission = if multi_thread_runtime {
+        Some(
+            CONTROL_AUTHENTICATION_SLOTS
+                .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_CONTROL_AUTHENTICATIONS))
+                .try_acquire()
+                .map_err(|_| control_authentication_overloaded())?,
+        )
+    } else {
+        None
+    };
+    let result = with_control_blocking(|| state.authenticate_token(token, now_ms));
+    drop(admission);
+    result.map_err(response)
+}
+
+fn control_authentication_overloaded() -> Response {
+    let mut response = response(
+        problem(
+            "control_authentication_overloaded",
+            "Authentication is busy; retry shortly",
+            503,
+        )
+        .retryable(true),
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+    response
 }
 
 fn authenticate_profile_reader(
@@ -13452,6 +13614,48 @@ mod persistence_tests {
             "buglogin-api-persistence-{label}-{}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn large_transfer_budget_bounds_retained_bytes_and_releases_admission() {
+        let budget = LargeTransferBudget::new(4, 128);
+        let first = budget.try_acquire(64 * 1024 * 1024).unwrap();
+        let second = budget.try_acquire(64 * 1024 * 1024).unwrap();
+        let exhausted = match budget.try_acquire(1024 * 1024) {
+            Ok(_) => panic!("the retained-byte limit must reject another transfer"),
+            Err(error) => error,
+        };
+        assert_eq!(exhausted.code, "large_transfer_capacity_exhausted");
+
+        drop(first);
+        let replacement = budget.try_acquire(64 * 1024 * 1024).unwrap();
+        drop((second, replacement));
+        assert!(budget.try_acquire(128 * 1024 * 1024).is_ok());
+
+        let request_limited = LargeTransferBudget::new(1, 128);
+        let held = request_limited.try_acquire(1024).unwrap();
+        assert!(request_limited.try_acquire(1024).is_err());
+        drop(held);
+        assert!(request_limited.try_acquire(1024).is_ok());
+    }
+
+    #[test]
+    fn remote_chunk_io_reserves_capacity_for_metadata() {
+        let budget = RemoteChunkIoBudget::new(8, 4);
+        let transfers = (0..4)
+            .map(|_| budget.try_acquire_transfer().unwrap())
+            .collect::<Vec<_>>();
+        assert!(budget.try_acquire_transfer().is_err());
+
+        let metadata = (0..4)
+            .map(|_| budget.try_acquire_metadata().unwrap())
+            .collect::<Vec<_>>();
+        assert!(budget.try_acquire_metadata().is_err());
+
+        drop(transfers);
+        assert!(budget.try_acquire_transfer().is_ok());
+        drop(metadata);
+        assert!(budget.try_acquire_transfer().is_ok());
     }
 
     struct DeleteFailStore {

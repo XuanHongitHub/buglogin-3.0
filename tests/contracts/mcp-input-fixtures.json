@@ -206,6 +206,11 @@
     "email": "new-org-member@example.test",
     "initialPassword": "fixture-password-123"
   },
+  "OrganizationMemberRemoveInput": {
+    "organizationId": "org_fixture_001",
+    "accountId": "acct_fixture_003",
+    "expectedRevision": 1
+  },
   "OrganizationMemberStatusUpdateInput": {
     "organizationId": "org_fixture_001",
     "accountId": "acct_fixture_003",

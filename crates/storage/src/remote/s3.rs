@@ -15,6 +15,8 @@ use super::{
 use crate::blob::checksum;
 
 const CHECKSUM_METADATA: &str = "sha256";
+const S3_METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const S3_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct BoundedRemoteObjectWriter {
     bytes: Vec<u8>,
@@ -201,7 +203,8 @@ fn endpoint_authority_has_userinfo(endpoint: &str) -> bool {
 }
 
 pub struct S3RemoteChunkStore {
-    bucket: Box<Bucket>,
+    metadata_bucket: Box<Bucket>,
+    transfer_bucket: Box<Bucket>,
     config: S3Config,
     object_locks: [Mutex<()>; 128],
 }
@@ -226,9 +229,16 @@ impl S3RemoteChunkStore {
         } else {
             bucket
         };
+        let metadata_bucket = bucket
+            .with_request_timeout(S3_METADATA_TIMEOUT)
+            .map_err(|_| unavailable())?;
+        let transfer_bucket = bucket
+            .with_request_timeout(S3_TRANSFER_TIMEOUT)
+            .map_err(|_| unavailable())?;
         config.zeroize_credentials();
         Ok(Self {
-            bucket,
+            metadata_bucket,
+            transfer_bucket,
             config,
             object_locks: std::array::from_fn(|_| Mutex::new(())),
         })
@@ -238,7 +248,7 @@ impl S3RemoteChunkStore {
 impl S3RemoteChunkStore {
     fn store_readiness(&self) -> Result<(), Problem> {
         let key = self.config.namespaced_key("buglogin-readiness-probe")?;
-        match self.bucket.head_object(&key) {
+        match self.metadata_bucket.head_object(&key) {
             Ok((_, 200..=299 | 404)) => Ok(()),
             Ok(_) | Err(_) => Err(unavailable()),
         }
@@ -251,7 +261,7 @@ impl S3RemoteChunkStore {
 
     fn read_checksum(&self, object_key: &str) -> Result<Option<String>, Problem> {
         let key = self.config.namespaced_key(object_key)?;
-        match self.bucket.head_object(&key) {
+        match self.metadata_bucket.head_object(&key) {
             Ok((_, 404)) => Ok(None),
             Ok((head, 200..=299)) => head
                 .metadata
@@ -296,7 +306,7 @@ impl S3RemoteChunkStore {
             HeaderValue::from_static("*"),
         );
         let response = self
-            .bucket
+            .transfer_bucket
             .put_object_with_content_type_and_headers(
                 &key,
                 bytes,
@@ -329,7 +339,7 @@ impl S3RemoteChunkStore {
         let _lock = self.lock_object(object_key)?;
         let key = self.config.namespaced_key(object_key)?;
         let mut body = BoundedRemoteObjectWriter::new(MAX_REMOTE_OBJECT_BYTES as usize);
-        let status = match self.bucket.get_object_to_writer(&key, &mut body) {
+        let status = match self.transfer_bucket.get_object_to_writer(&key, &mut body) {
             Ok(status) => status,
             Err(_) if body.exceeded_limit => {
                 return Err(Problem::new(
@@ -379,7 +389,10 @@ impl S3RemoteChunkStore {
                 "storage",
             ));
         }
-        let response = self.bucket.delete_object(&key).map_err(|_| unavailable())?;
+        let response = self
+            .metadata_bucket
+            .delete_object(&key)
+            .map_err(|_| unavailable())?;
         if response.status_code() == 404 {
             return Ok(false);
         }
@@ -612,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn config_zeroizes_cloud_credentials() {
+    fn s3_buckets_use_separate_request_deadlines_and_config_zeroizes_credentials() {
         let mut configured = S3Config::new(
             "https://objects.example.test",
             "chunks",
@@ -633,6 +646,14 @@ mod tests {
         assert_eq!(configured.session_token.as_deref(), Some(""));
 
         let store = S3RemoteChunkStore::new(config()).unwrap();
+        assert_eq!(
+            store.metadata_bucket.request_timeout(),
+            Some(S3_METADATA_TIMEOUT)
+        );
+        assert_eq!(
+            store.transfer_bucket.request_timeout(),
+            Some(S3_TRANSFER_TIMEOUT)
+        );
         assert!(store.config.access_key.is_empty());
         assert!(store.config.secret_key.is_empty());
         assert!(store.config.session_token.is_none());

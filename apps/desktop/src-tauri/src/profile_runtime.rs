@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::clock::unix_time_millis;
 use crate::proxy_bridge::ProxyBridgeHandle;
 
+pub const PROFILE_LEASE_TTL: Duration = Duration::from_secs(60);
 const MAX_STOP_SYNC_HOLD: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
@@ -245,6 +246,15 @@ impl ProfileRuntimeHandle {
         response.await.map_err(|_| unavailable())?
     }
 
+    pub async fn sync_attempt_active(&self, profile_id: ProfileId) -> Result<bool, Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::SyncAttemptActive { profile_id, reply })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())
+    }
+
     pub async fn hold_idle_profile_for_sync(
         &self,
         profile_id: ProfileId,
@@ -413,6 +423,10 @@ enum RuntimeCommand {
         active: bool,
         reply: oneshot::Sender<Result<(), Problem>>,
     },
+    SyncAttemptActive {
+        profile_id: ProfileId,
+        reply: oneshot::Sender<bool>,
+    },
     Authority {
         profile_id: ProfileId,
         reply: oneshot::Sender<Option<WriteAuthority>>,
@@ -517,6 +531,9 @@ where
                 }
                 Some(RuntimeCommand::SetSyncAttemptActive { profile_id, active, reply }) => {
                     let _ = reply.send(runtime.set_sync_attempt_active(&profile_id, active));
+                }
+                Some(RuntimeCommand::SyncAttemptActive { profile_id, reply }) => {
+                    let _ = reply.send(runtime.sync_attempt_active(&profile_id));
                 }
                 Some(RuntimeCommand::Authority { profile_id, reply }) => {
                     let _ = reply.send(runtime.authority(&profile_id));
@@ -892,6 +909,12 @@ impl<C: ProcessController> ProfileRuntime<C> {
         Ok(())
     }
 
+    fn sync_attempt_active(&self, profile_id: &ProfileId) -> bool {
+        self.running
+            .get(profile_id)
+            .is_some_and(|running| running.process_stopped && running.sync_attempt_active)
+    }
+
     async fn release_stopped_for_retry(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
         if self
             .running
@@ -1028,7 +1051,15 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 // never upload, so stop holding it (the local copy stays on disk).
                 Err(error) if process_stopped && lease_ownership_lost(&error) => {
                     self.running.remove(&profile_id);
-                    self.unexpectedly_stopped.remove(&profile_id);
+                    if error.code == "lease_not_found" {
+                        // An absent lease is not proof that another device owns
+                        // the resource. Keep the local retry intent so the
+                        // stopped snapshot can acquire a fresh lease and CAS
+                        // against the latest manifest.
+                        self.unexpectedly_stopped.insert(profile_id.clone());
+                    } else {
+                        self.unexpectedly_stopped.remove(&profile_id);
+                    }
                 }
                 // Already stopped with a sync pending; the reconcile loop retries it.
                 _ if process_stopped => {}
@@ -1851,6 +1882,7 @@ mod tests {
         runtime.launch(request(&path, true)).await.unwrap();
         runtime.stop_for_sync(&profile_id).await.unwrap();
         runtime.set_sync_attempt_active(&profile_id, true).unwrap();
+        assert!(runtime.sync_attempt_active(&profile_id));
         runtime
             .running
             .get_mut(&profile_id)
@@ -1871,6 +1903,7 @@ mod tests {
         assert_eq!(backend.renewals.load(Ordering::SeqCst), 1);
 
         runtime.set_sync_attempt_active(&profile_id, false).unwrap();
+        assert!(!runtime.sync_attempt_active(&profile_id));
         runtime.renew().await;
         assert!(!runtime.running.contains_key(&profile_id));
         fs::remove_dir_all(path).unwrap();
@@ -2410,6 +2443,29 @@ mod tests {
 
         assert!(!runtime.running.contains_key(&profile_id));
         assert!(!runtime.unexpectedly_stopped.contains(&profile_id));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_stopped_sync_lease_preserves_automatic_retry_intent() {
+        let path = profile_path("renewal-missing-stopped-lease");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log));
+        backend.fail_renew.store(true, Ordering::SeqCst);
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(60)), Ordering::SeqCst);
+        let mut runtime = runtime(controller, managed_coordination(backend.clone()));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        runtime.launch(request(&path, true)).await.unwrap();
+        runtime.stop_for_sync(&profile_id).await.unwrap();
+
+        *backend.renew_error_code.lock().unwrap() = Some("lease_not_found");
+        runtime.renew().await;
+
+        assert!(!runtime.running.contains_key(&profile_id));
+        assert!(runtime.unexpectedly_stopped.contains(&profile_id));
         fs::remove_dir_all(path).unwrap();
     }
 

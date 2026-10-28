@@ -2,6 +2,8 @@ import i18n from "@/i18n";
 
 const en = {
   defaultExtensionGroup: "Default extension group for new profiles",
+  extensionGroupLoadFailed:
+    "Extension groups could not be loaded. Other workspace settings can still be edited; retry to change this setting.",
   noDefaultExtensionGroup: "No automatic extension group",
   organizations: "Organizations",
   organization: "Organization",
@@ -209,6 +211,8 @@ const en = {
 
 const vi: typeof en = {
   defaultExtensionGroup: "Nhóm tiện ích mặc định cho profile mới",
+  extensionGroupLoadFailed:
+    "Không tải được nhóm tiện ích. Bạn vẫn có thể sửa các cài đặt workspace khác; hãy thử tải lại để đổi mục này.",
   noDefaultExtensionGroup: "Không tự gán nhóm tiện ích",
   organizations: "Tổ chức",
   organization: "Tổ chức",

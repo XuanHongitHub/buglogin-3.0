@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{Path, Query, Request, State},
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -368,6 +368,14 @@ struct OrganizationMemberStatusUpdateInput {
     organization_id: OrganizationId,
     account_id: AccountId,
     status: OrganizationMemberStatus,
+    expected_revision: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationMemberRemoveInput {
+    organization_id: OrganizationId,
+    account_id: AccountId,
     expected_revision: u64,
 }
 
@@ -1150,7 +1158,8 @@ fn routes_core() -> Router<ApiState> {
         )
         .route(
             "/v1/organizations/{organization_id}/members/{account_id}",
-            axum::routing::patch(update_organization_member_status),
+            axum::routing::patch(update_organization_member_status)
+                .delete(remove_organization_member),
         )
         .route(
             "/v1/organizations/{organization_id}/workspaces/{workspace_id}/members",
@@ -3869,6 +3878,103 @@ async fn update_organization_member_status(
     .await
 }
 
+async fn remove_organization_member(
+    State(state): State<ApiState>,
+    Path((organization_id, account_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<OrganizationMemberRemoveInput>,
+) -> Result<Response, Response> {
+    let organization_id =
+        OrganizationId::from_str(&organization_id).map_err(|_| bad_id("organization_id"))?;
+    let account_id = AccountId::from_str(&account_id).map_err(|_| bad_id("account_id"))?;
+    if input.organization_id != organization_id || input.account_id != account_id {
+        return Err(problem_response(
+            "tenant_mismatch",
+            "Organization member identifiers do not match the request path",
+            403,
+            correlation(&headers),
+        ));
+    }
+    if input.expected_revision == 0 {
+        return Err(problem_response(
+            "invalid_revision",
+            "Expected revision must be positive",
+            400,
+            correlation(&headers),
+        ));
+    }
+    let principal = authenticate(&state, &headers)?;
+    let grant_snapshot = grants(&state)?;
+    let organization = authorize_organization_management(
+        &state,
+        &principal,
+        &grant_snapshot,
+        &organization_id,
+        Action::Manage,
+    )?;
+    if organization.account_id == account_id {
+        return Err(problem_response(
+            "organization_owner_protected",
+            "The organization owner cannot be removed",
+            409,
+            correlation(&headers),
+        ));
+    }
+    let mutation_input = serde_json::to_value(&input).map_err(internal)?;
+    let scope = ResourceScope {
+        account_id: Some(organization.account_id),
+        organization_id: Some(organization_id.clone()),
+        ..ResourceScope::default()
+    };
+    mutate(
+        &state,
+        &headers,
+        &principal,
+        &grant_snapshot,
+        organization_id.as_str(),
+        "organization.member.remove",
+        mutation_input,
+        scope,
+        account_id.as_str(),
+        || {
+            let workspace_ids = state
+                .workspaces
+                .read()
+                .map_err(|_| service_unavailable("workspace"))?
+                .workspace_ids_in_organization(&organization_id);
+            let has_child_membership = state
+                .members
+                .read()
+                .map_err(|_| service_unavailable("member"))?
+                .all_members()
+                .iter()
+                .any(|member| {
+                    member.account_id == account_id && workspace_ids.contains(&member.workspace_id)
+                });
+            if has_child_membership {
+                return Err(response_problem(Problem::new(
+                    "organization_member_has_workspace_memberships",
+                    "Remove this account from the organization's workspaces first",
+                    409,
+                    "organization.member.remove",
+                )));
+            }
+            let removed = state
+                .organization_members
+                .write()
+                .map_err(|_| service_unavailable("organization_member"))?
+                .remove(&organization_id, &account_id, input.expected_revision)
+                .map_err(response_problem)?;
+            Ok(json!({
+                "organizationId": removed.organization_id,
+                "accountId": removed.account_id,
+                "removed": true
+            }))
+        },
+    )
+    .await
+}
+
 async fn assign_organization_member_to_workspace(
     State(state): State<ApiState>,
     Path((organization_path, workspace_path)): Path<(String, String)>,
@@ -6229,6 +6335,9 @@ async fn commit_resource_manifest(
         .await
         .map_err(response_problem)?;
     for object in &manifest.objects {
+        let _admission = super::large_transfer_body_slot(object.size)
+            .await
+            .map_err(response_problem)?;
         let bytes = state
             .get_remote_chunk_async(
                 payload_object_key(
@@ -7341,7 +7450,7 @@ async fn get_resource_blob(
                 correlation(&headers),
             )
         })?;
-    let admission = super::large_transfer_body_slot()
+    let admission = super::large_transfer_body_slot(object.size)
         .await
         .map_err(response_problem)?;
     let bytes = state
@@ -7496,7 +7605,12 @@ async fn put_resource_blob(
             correlation(&headers),
         ));
     }
-    let body_admission = super::large_transfer_body_slot()
+    let declared_body_bytes = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(MAX_PROFILE_SYNC_OBJECT_BYTES);
+    let body_admission = super::large_transfer_body_slot(declared_body_bytes)
         .await
         .map_err(response_problem)?;
     let body = axum::body::to_bytes(body, MAX_PROFILE_SYNC_OBJECT_BYTES as usize)
@@ -7555,6 +7669,9 @@ async fn put_resource_blob(
         }
         let storage_key =
             payload_object_key(&resource_id, generation, &query.key, expected_checksum);
+        let _admission = super::large_transfer_body_slot(MAX_PROFILE_SYNC_OBJECT_BYTES)
+            .await
+            .map_err(response_problem)?;
         match state
             .get_remote_chunk_async(storage_key.clone(), expected_checksum.to_owned())
             .await
@@ -8562,6 +8679,7 @@ where
                 | "account.create.scoped"
                 | "organization.account.create"
                 | "organization.member.status.update"
+                | "organization.member.remove"
                 | "member.invitation.create"
                 | "member.invitation.revoke"
                 | "member.activate"
@@ -8657,6 +8775,7 @@ where
                 command,
                 "organization.account.create"
                     | "organization.member.status.update"
+                    | "organization.member.remove"
                     | "organization.member.workspace.assign"
             ) {
                 let organization_id = scope.organization_id.as_ref().ok_or_else(|| {
@@ -8905,18 +9024,7 @@ where
 }
 
 fn with_control_blocking<T>(operation: impl FnOnce() -> T) -> T {
-    let multi_thread_runtime = tokio::runtime::Handle::try_current()
-        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-    if multi_thread_runtime {
-        // ControlPersistence uses a bounded synchronous PostgreSQL worker. Mark
-        // this whole mutation as blocking so Tokio can replace the occupied
-        // runtime worker while its serialized database operations complete.
-        tokio::task::block_in_place(operation)
-    } else {
-        // Current-thread runtimes are used by focused handler tests; they have
-        // no worker pool to hand off to.
-        operation()
-    }
+    super::with_control_blocking(operation)
 }
 
 fn same_grant_snapshot(
@@ -9633,6 +9741,7 @@ mod tests {
         assert_eq!(organization_restored.status(), StatusCode::OK);
 
         let restored_child = app
+            .clone()
             .oneshot(
                 Request::put(format!(
                     "/v1/workspaces/{}/members/{}/activate",
@@ -9648,6 +9757,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(restored_child.status(), StatusCode::OK);
+
+        let blocked_org_remove = app
+            .clone()
+            .oneshot(
+                Request::delete(format!(
+                    "/v1/organizations/{}/members/org_account_member",
+                    owner.organization_id.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header(
+                    "x-correlation-id",
+                    "organization-member-remove-child-blocked",
+                )
+                .header("content-type", "application/json")
+                .header(
+                    "idempotency-key",
+                    "organization-member-remove-child-blocked",
+                )
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "accountId": "org_account_member",
+                        "expectedRevision": 3
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked_org_remove.status(), StatusCode::CONFLICT);
+
+        let workspace_member_removed = app
+            .clone()
+            .oneshot(
+                Request::delete(format!(
+                    "/v1/workspaces/{}/members/{}",
+                    owner.workspace_id.as_str(),
+                    assigned["id"].as_str().unwrap(),
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-member-remove-child")
+                .header("idempotency-key", "organization-member-remove-child")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(workspace_member_removed.status(), StatusCode::OK);
+
+        let org_member_removed = app
+            .clone()
+            .oneshot(
+                Request::delete(format!(
+                    "/v1/organizations/{}/members/org_account_member",
+                    owner.organization_id.as_str()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-correlation-id", "organization-member-remove")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "organization-member-remove")
+                .body(Body::from(
+                    serde_json::json!({
+                        "organizationId": owner.organization_id,
+                        "accountId": "org_account_member",
+                        "expectedRevision": 3
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(org_member_removed.status(), StatusCode::OK);
+        let org_member_removed_body =
+            axum::body::to_bytes(org_member_removed.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+        let org_member_removed: Value = serde_json::from_slice(&org_member_removed_body).unwrap();
+        assert_eq!(org_member_removed["removed"], true);
+        assert!(
+            state
+                .organization_members
+                .read()
+                .unwrap()
+                .get(
+                    &owner.organization_id,
+                    &AccountId::new("org_account_member").unwrap()
+                )
+                .is_none()
+        );
+        assert!(
+            state
+                .account_persistence
+                .load(&AccountId::new("org_account_member").unwrap())
+                .unwrap()
+                .is_some()
+        );
     }
 
     fn expiring_dispatch(

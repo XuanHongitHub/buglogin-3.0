@@ -1478,6 +1478,10 @@ function OrganizationEditor({
   const [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(Boolean(organization));
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{
+    name?: string;
+    limit?: string;
+  }>({});
   useEffect(() => {
     let active = true;
     if (!organization) return;
@@ -1501,12 +1505,18 @@ function OrganizationEditor({
     };
   }, [organization]);
   const save = async () => {
-    if (!name.trim()) {
-      setError(t("requiredName"));
-      return;
+    const nextFieldErrors: typeof fieldErrors = {};
+    if (!name.trim()) nextFieldErrors.name = t("requiredName");
+    if (
+      !Number.isSafeInteger(Number(limit)) ||
+      Number(limit) < 1 ||
+      Number(limit) > 10000
+    ) {
+      nextFieldErrors.limit = t("invalidLimit");
     }
-    if (!Number.isSafeInteger(Number(limit)) || Number(limit) < 1) {
-      setError(t("invalidLimit"));
+    setFieldErrors(nextFieldErrors);
+    if (Object.keys(nextFieldErrors).length > 0) {
+      setError(null);
       return;
     }
     setBusy(true);
@@ -1571,12 +1581,31 @@ function OrganizationEditor({
             <Input
               id="management-organization-name"
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                setName(event.target.value);
+                setFieldErrors((current) => ({ ...current, name: undefined }));
+                setError(null);
+              }}
               maxLength={128}
               required
+              aria-invalid={Boolean(fieldErrors.name)}
+              aria-describedby={
+                fieldErrors.name
+                  ? "management-organization-name-error"
+                  : undefined
+              }
               disabled={busy || loading}
               autoFocus
             />
+            {fieldErrors.name ? (
+              <p
+                id="management-organization-name-error"
+                role="alert"
+                className="text-sm text-destructive"
+              >
+                {fieldErrors.name}
+              </p>
+            ) : null}
           </div>
           {platform ? (
             <div className="space-y-1.5">
@@ -1588,13 +1617,39 @@ function OrganizationEditor({
                 type="number"
                 min={1}
                 max={10000}
+                step={1}
                 value={limit}
-                onChange={(event) => setLimit(event.target.value)}
+                onChange={(event) => {
+                  setLimit(event.target.value);
+                  setFieldErrors((current) => ({
+                    ...current,
+                    limit: undefined,
+                  }));
+                  setError(null);
+                }}
+                aria-invalid={Boolean(fieldErrors.limit)}
+                aria-describedby={
+                  fieldErrors.limit
+                    ? "management-organization-limit-error"
+                    : "management-organization-limit-hint"
+                }
                 disabled={busy || loading}
               />
-              <p className="text-xs text-muted-foreground">
+              <p
+                id="management-organization-limit-hint"
+                className="text-xs text-muted-foreground"
+              >
                 {t("orgLimitHint")}
               </p>
+              {fieldErrors.limit ? (
+                <p
+                  id="management-organization-limit-error"
+                  role="alert"
+                  className="text-sm text-destructive"
+                >
+                  {fieldErrors.limit}
+                </p>
+              ) : null}
             </div>
           ) : null}
           <DialogFooter>
@@ -1652,66 +1707,106 @@ function WorkspaceEditor({
   const [extensionGroups, setExtensionGroups] = useState<
     { id: string; name: string }[]
   >([]);
+  const [extensionGroupsError, setExtensionGroupsError] = useState(false);
+  const [extensionGroupsLoading, setExtensionGroupsLoading] = useState(false);
   const [record, setRecord] = useState<WorkspaceRecord | null>(null),
     [error, setError] = useState<string | null>(null),
     [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(Boolean(entry));
+  const [fieldErrors, setFieldErrors] = useState<{
+    name?: string;
+    profiles?: string;
+    members?: string;
+  }>({});
+  const reloadExtensionGroups = useCallback(async () => {
+    if (!entry) return;
+    setExtensionGroupsLoading(true);
+    try {
+      const groups = await api.listExtensionGroups(entry.workspace.id);
+      setExtensionGroups(
+        groups.map(({ group }) => ({ id: group.id, name: group.name })),
+      );
+      setExtensionGroupsError(false);
+    } catch {
+      setExtensionGroupsError(true);
+    } finally {
+      setExtensionGroupsLoading(false);
+    }
+  }, [entry]);
   useEffect(() => {
     let active = true;
     if (!entry) return;
-    void Promise.all([
+    setLoading(true);
+    setError(null);
+    setExtensionGroupsError(false);
+    setExtensionGroupsLoading(true);
+    void Promise.allSettled([
       api.getWorkspaceRecord({
         organizationId: entry.organization.id,
         workspaceId: entry.workspace.id,
       }),
       api.listExtensionGroups(entry.workspace.id),
     ])
-      .then(([value, groups]) => {
-        if (active) {
-          setRecord(value);
-          setName(value.workspace.name);
-          setProfiles(String(value.workspace.policy.maxProfiles));
-          setMembers(String(value.workspace.policy.maxMembers));
-          setDefaultExtensionGroupId(
-            value.workspace.policy.defaultExtensionGroupId ?? "none",
-          );
+      .then(([recordResult, groupsResult]) => {
+        if (!active) return;
+        if (recordResult.status === "rejected") {
+          setError(errorMessage(recordResult.reason));
+          return;
+        }
+        const value = recordResult.value;
+        setRecord(value);
+        setName(value.workspace.name);
+        setProfiles(String(value.workspace.policy.maxProfiles));
+        setMembers(String(value.workspace.policy.maxMembers));
+        setDefaultExtensionGroupId(
+          value.workspace.policy.defaultExtensionGroupId ?? "none",
+        );
+        if (groupsResult.status === "fulfilled") {
+          const groups = groupsResult.value;
           setExtensionGroups(
             groups.map(({ group }) => ({ id: group.id, name: group.name })),
           );
+        } else {
+          // The workspace revision is sufficient to edit its other fields.
+          // Keep the stored extension-group choice intact and let the operator
+          // retry that optional catalog read without discarding the whole form.
+          setExtensionGroupsError(true);
         }
       })
-      .catch((err) => {
-        if (active) setError(errorMessage(err));
-      })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setExtensionGroupsLoading(false);
+        }
       });
     return () => {
       active = false;
     };
   }, [entry]);
   const save = async () => {
-    if (!name.trim()) {
-      setError(t("requiredName"));
-      return;
+    const nextFieldErrors: typeof fieldErrors = {};
+    if (!name.trim()) nextFieldErrors.name = t("requiredName");
+    if (
+      !Number.isSafeInteger(Number(profiles)) ||
+      Number(profiles) < 1 ||
+      Number(profiles) > 1_000_000
+    ) {
+      nextFieldErrors.profiles = t("invalidLimit");
+    } else if (entry?.usage && Number(profiles) < entry.usage.profiles) {
+      nextFieldErrors.profiles = t("minimumUsage");
     }
     if (
-      [profiles, members].some(
-        (value) =>
-          !Number.isSafeInteger(Number(value)) ||
-          Number(value) < 1 ||
-          Number(value) > 1_000_000,
-      )
+      !Number.isSafeInteger(Number(members)) ||
+      Number(members) < 1 ||
+      Number(members) > 1_000_000
     ) {
-      setError(t("invalidLimit"));
-      return;
+      nextFieldErrors.members = t("invalidLimit");
+    } else if (entry?.usage && Number(members) < entry.usage.members) {
+      nextFieldErrors.members = t("minimumUsage");
     }
-    if (
-      entry?.usage &&
-      (Number(profiles) < entry.usage.profiles ||
-        Number(members) < entry.usage.members)
-    ) {
-      setError(t("minimumUsage"));
+    setFieldErrors(nextFieldErrors);
+    if (Object.keys(nextFieldErrors).length > 0) {
+      setError(null);
       return;
     }
     setBusy(true);
@@ -1810,12 +1905,29 @@ function WorkspaceEditor({
             <Input
               id="management-workspace-name"
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                setName(event.target.value);
+                setFieldErrors((current) => ({ ...current, name: undefined }));
+                setError(null);
+              }}
               maxLength={128}
               required
+              aria-invalid={Boolean(fieldErrors.name)}
+              aria-describedby={
+                fieldErrors.name ? "management-workspace-name-error" : undefined
+              }
               disabled={busy || loading}
               autoFocus
             />
+            {fieldErrors.name ? (
+              <p
+                id="management-workspace-name-error"
+                role="alert"
+                className="text-sm text-destructive"
+              >
+                {fieldErrors.name}
+              </p>
+            ) : null}
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
@@ -1826,10 +1938,34 @@ function WorkspaceEditor({
                 id="management-profile-limit"
                 type="number"
                 min={Math.max(1, entry?.usage?.profiles ?? 1)}
+                max={1_000_000}
+                step={1}
                 value={profiles}
-                onChange={(event) => setProfiles(event.target.value)}
+                onChange={(event) => {
+                  setProfiles(event.target.value);
+                  setFieldErrors((current) => ({
+                    ...current,
+                    profiles: undefined,
+                  }));
+                  setError(null);
+                }}
+                aria-invalid={Boolean(fieldErrors.profiles)}
+                aria-describedby={
+                  fieldErrors.profiles
+                    ? "management-profile-limit-error"
+                    : undefined
+                }
                 disabled={busy || loading}
               />
+              {fieldErrors.profiles ? (
+                <p
+                  id="management-profile-limit-error"
+                  role="alert"
+                  className="text-sm text-destructive"
+                >
+                  {fieldErrors.profiles}
+                </p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="management-member-limit">
@@ -1839,10 +1975,34 @@ function WorkspaceEditor({
                 id="management-member-limit"
                 type="number"
                 min={Math.max(1, entry?.usage?.members ?? 1)}
+                max={1_000_000}
+                step={1}
                 value={members}
-                onChange={(event) => setMembers(event.target.value)}
+                onChange={(event) => {
+                  setMembers(event.target.value);
+                  setFieldErrors((current) => ({
+                    ...current,
+                    members: undefined,
+                  }));
+                  setError(null);
+                }}
+                aria-invalid={Boolean(fieldErrors.members)}
+                aria-describedby={
+                  fieldErrors.members
+                    ? "management-member-limit-error"
+                    : undefined
+                }
                 disabled={busy || loading}
               />
+              {fieldErrors.members ? (
+                <p
+                  id="management-member-limit-error"
+                  role="alert"
+                  className="text-sm text-destructive"
+                >
+                  {fieldErrors.members}
+                </p>
+              ) : null}
             </div>
           </div>
           {entry ? (
@@ -1853,7 +2013,12 @@ function WorkspaceEditor({
               <Select
                 value={defaultExtensionGroupId}
                 onValueChange={setDefaultExtensionGroupId}
-                disabled={busy || loading}
+                disabled={
+                  busy ||
+                  loading ||
+                  extensionGroupsError ||
+                  extensionGroupsLoading
+                }
               >
                 <SelectTrigger id="management-default-extension-group">
                   <SelectValue />
@@ -1869,6 +2034,12 @@ function WorkspaceEditor({
                   ))}
                 </SelectContent>
               </Select>
+              {extensionGroupsError ? (
+                <ErrorNotice
+                  message={t("extensionGroupLoadFailed")}
+                  onRetry={() => void reloadExtensionGroups()}
+                />
+              ) : null}
             </div>
           ) : null}
           {entry ? (

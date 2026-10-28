@@ -1,7 +1,7 @@
 # Sync/API resilience implementation and rollout plan
 
 Date: 2026-10-28
-Status: detailed implementation proposal. Planning only in this turn; implementation, runtime tests and deployment have not been completed.
+Status: implementation in progress; local API and desktop packets are on main, but cancellation, provider deadlines, measured capacity, load evidence and deployment acceptance remain incomplete.
 Design authority: [Sync and API resilience design](../specs/2026-10-28-sync-api-resilience-design.md).
 Related existing work: [API and profile capacity](2026-10-27-api-and-profile-capacity.md), authoritative profile status spec, existing GC fencing and release contracts.
 
@@ -28,7 +28,8 @@ This plan does not authorize running a load attack on production, deleting cloud
 | Member identities initially loaded synchronously in async route; offload now visible in concurrent WIP | `control.rs::member_directory_views` | Verify the owning read unit, error mapping and guard lifetimes |
 | Async upload can lose explicit advisory unlock on cancellation | `control.rs::put_resource_blob` | Move work/lock/cleanup ownership together; cancellation regression is mandatory |
 | Current async wrapper copies request body | `http/mod.rs::put_remote_chunk_async`, upload route | Move/shared-own bytes and retain memory permits until actual completion |
-| Current 8-slot limiter is unmeasured | `http/mod.rs::remote_chunk_io_slot` | Treat as candidate; validate byte budget and class fairness |
+| Current 8-slot limiter was shared by metadata and bulk | `http/mod.rs::remote_chunk_io_slot` | Split metadata and transfer admission; keep per-resource fairness and measured tuning as open work |
+| S3 blocking client had no explicit request deadline | `crates/storage/src/remote/s3.rs`, installed `rust-s3 0.37.2` backend | Apply separate metadata/transfer request timeouts; account for SDK retries when setting operation budgets |
 
 The current compile and format checks are useful source evidence. They do not prove one-query dispatch, cancellation safety, production responsiveness or correct deployment. The previous statement that member reads were already one PostgreSQL query was premature at the first audit. Main advanced from `4b0d3444` to `dbf7b356` while planning; subsequent forwarding/offload corrections are visible in shared WIP and must be verified rather than implemented twice. This planning turn made no application-source changes.
 
@@ -90,7 +91,7 @@ Primary files: `crates/api/src/http/mod.rs`, `http/control.rs`, `crates/storage/
 - [ ] Preserve late-result reconciliation: a timed-out request may still have written a blob. Same key/checksum/idempotency rechecks outcome safely. Do not start duplicate blocking tasks for a timed-out attempt before their existing work is bounded/reconciled.
 - [ ] Move `Bytes` or shared immutable payload ownership into the worker, avoiding an extra full `Vec` copy. Attach retained-byte permits to actual payload lifetime, including detached tasks and response streams.
 - [ ] Separate request-count limits from byte limits. Budget uploads, downloads and commit validation together; choose limits with measured base RSS and headroom under the current service memory ceiling. Four 64 MiB bodies plus duplicate buffers can exceed available process headroom.
-- [ ] Validate S3 transport timeout support for the installed blocking backend. Establish explicit metadata and transfer deadlines; proposed starting points are metadata 5 seconds and transfer 30 seconds, adjusted to supported object sizes and measured throughput. Confirm whether configured timeout covers a full operation or individual socket I/O.
+- [x] Validate S3 transport timeout support for the installed blocking backend. Establish metadata and transfer request timeouts at 5 and 30 seconds. The installed `rust-s3 0.37.2` blocking backend maps this to attohttpc's maximum request duration after TCP connection; SDK retries and backoff can extend the whole logical operation beyond that single-request deadline. Production/provider tuning remains open.
 - [ ] Bound bulk and metadata concurrency before spawning work. Evaluate a total candidate of 8 remote operations with reserved metadata capacity; use per-resource admission/fairness so one object stripe or profile does not occupy every permit. Keep transfer-body admission compatible with the remote limit.
 - [ ] Return overload promptly with canonical retryable 503 and `Retry-After`; 429 is reserved for an actual policy rate limit. Never wait behind an unbounded semaphore/worker queue.
 - [ ] Shorten control snapshot guards around external I/O. Preserve early auth and perform fresh authorization/revision/fence validation before publishing a manifest or recording an authoritative mutation. No stale-ACL shortcut.
@@ -108,6 +109,7 @@ Primary files: `crates/storage/src/control/mod.rs`, `crates/api/src/services/con
 - [ ] Keep identity visibility filtered by server policy; missing identity remains optional, corrupt records remain errors, and a viewer cannot obtain hidden identity fields through batch loading.
 - [ ] Offload the entire synchronous member-directory read operation. Place RwLock guard scopes inside the synchronous function so no guard survives into await. Preserve the original ACL snapshot/invalidation rules.
 - [ ] Audit other HTTP sync calls: principal/session reads, control mutation callbacks, reservation reads/writes, advisory acquire/release, runtime inbox and readiness. Move owning critical sections off Tokio while retaining transaction and revision boundaries.
+- [x] Move the per-request account lookup in bearer authentication out of Tokio executor workers using bounded blocking admission; overload fails fast with retryable 503 plus `Retry-After`, and the desktop honors that delay with capped deterministic jitter. Runtime responsiveness and overload regression evidence remain required before G1.
 - [ ] Instrument worker dispatch name, queue depth, outer persistence mutex wait, DB service time and transaction size. Distinguish query latency, JSON serialization, lock waiting and CPU throttling before choosing an optimization.
 - [ ] Measure full-aggregate write amplification for per-object reservations and blob receipts: SQL statement count, persisted JSON bytes and CAS conflicts per sync. If it dominates, use the existing `reserve_sync_blob_uploads` primitive through a bounded authorized preparation contract; do not split quota/reservation authority into independent non-atomic rows as a shortcut.
 - [ ] Add appropriate connection/statement/lock deadlines through owned source configuration. Test transaction rollback and session reuse after timeout.
@@ -282,6 +284,14 @@ Code-quality decisions: fix missing dispatch at the storage boundary; consolidat
 Test decisions: failure-ordering and single-worker regressions are required because format/build checks passed while real logical gaps remained. Provider/DB evidence supplements controllable adapters; it does not replace them.
 
 Performance decisions: distinguish HTTP request savings, S3 request savings, SQL counts, retained bytes and end-to-end latency. Eight remote slots are a candidate, not a final capacity fact. Conditional PUT and batch resume are measured improvements, not permission to skip integrity checks.
+
+### Implementation evidence — 2026-10-28
+
+- Added a process-wide large-transfer budget that independently caps active body/response streams at four and admitted payload memory at 128 MiB. Admission is acquired before upload body collection, download allocation, idempotency replay reads, and each manifest validation read; upload ownership moves into the blocking worker and download ownership remains with the response body until it is consumed or dropped. Saturation returns a retryable 503 immediately instead of waiting ten seconds in an in-memory queue.
+- Added `large_transfer_budget_bounds_retained_bytes_and_releases_admission`; it proves 128 MiB exhaustion, permit recovery after drop, and the independent request-count cap. `cargo test --locked -p buglogin-api large_transfer_budget_bounds_retained_bytes_and_releases_admission --lib`, `cargo test --locked -p buglogin-api --test http_leases --test http_blob_limits` (5/5), `cargo check --locked -p buglogin-api --lib`, `cargo fmt --all -- --check`, and `git diff --check` pass.
+- The S3 adapter now configures separate 5-second metadata and 30-second transfer request deadlines using the installed blocking backend. Source inspection confirms attohttpc applies the maximum duration after TCP connection; rust-s3 retries and backoff can extend a logical operation beyond one request timeout. A storage regression test checks both configured values.
+- Remote I/O admission now caps total S3 operations at eight and bulk transfers at four, preserving four slots for metadata when bulk is saturated. Its unit test proves this reservation and fail-fast recovery. Per-resource fairness remains open.
+- The 128 MiB figure is an explicit initial bound, not a measured cgroup-safe capacity. It accounts for admitted payload bytes only, not allocator overhead, DB aggregates, manifest JSON, TLS buffers, or concurrent non-transfer work. Compare it to the deployed service memory ceiling and measure peak RSS in the controlled matrix before G1. Deterministic disconnect/stalled-S3 cleanup, provider/production deadline tuning, full sync-handler persistence audit, and one-worker responsiveness tests remain open.
 
 | Packet | Current status | Done requires |
 | --- | --- | --- |

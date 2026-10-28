@@ -1396,7 +1396,7 @@ fn resolve_scope(
             workspace_id: Some(required_id(input, "workspaceId", WorkspaceId::from_str)?),
             ..ResourceScope::default()
         }),
-        "organization.member.status.update" => Ok(ResourceScope {
+        "organization.member.status.update" | "organization.member.remove" => Ok(ResourceScope {
             account_id: Some(required_id(input, "accountId", AccountId::from_str)?),
             organization_id: Some(required_id(
                 input,
@@ -1913,6 +1913,7 @@ impl McpExecutionPolicy for ProductionMcpPolicy {
             "organization.members.list"
                 | "organization.account.create"
                 | "organization.member.status.update"
+                | "organization.member.remove"
                 | "organization.member.workspace.assign"
         ) {
             let organization_id = scope.organization_id.as_ref().ok_or_else(|| {
@@ -3139,6 +3140,85 @@ impl McpExecutor for ProductionMcpExecutor {
                     })?
                     .update_status(&organization_id, &account_id, expected_revision, status)?;
                 Ok(serde_json::to_value(updated).map_err(serialization_problem)?)
+            }
+            "organization.member.remove" => {
+                let organization_id =
+                    required_id(&input, "organizationId", OrganizationId::from_str)?;
+                let account_id = required_id(&input, "accountId", AccountId::from_str)?;
+                let expected_revision = input
+                    .get("expectedRevision")
+                    .and_then(Value::as_u64)
+                    .filter(|revision| *revision > 0)
+                    .ok_or_else(|| {
+                        problem("invalid_revision", "expectedRevision must be positive", 400)
+                    })?;
+                let organization = state
+                    .workspaces
+                    .read()
+                    .map_err(|_| {
+                        problem(
+                            "workspace_unavailable",
+                            "Workspace service unavailable",
+                            503,
+                        )
+                    })?
+                    .authorize_organization_management(
+                        &principal,
+                        &grants,
+                        &organization_id,
+                        Action::Manage,
+                    )?;
+                if account_id == organization.account_id {
+                    return Err(problem(
+                        "organization_owner_protected",
+                        "The organization owner cannot be removed",
+                        409,
+                    ));
+                }
+                let workspace_ids = state
+                    .workspaces
+                    .read()
+                    .map_err(|_| {
+                        problem(
+                            "workspace_unavailable",
+                            "Workspace service unavailable",
+                            503,
+                        )
+                    })?
+                    .workspace_ids_in_organization(&organization_id);
+                if state
+                    .members
+                    .read()
+                    .map_err(|_| problem("member_unavailable", "Member service unavailable", 503))?
+                    .all_members()
+                    .iter()
+                    .any(|member| {
+                        member.account_id == account_id
+                            && workspace_ids.contains(&member.workspace_id)
+                    })
+                {
+                    return Err(problem(
+                        "organization_member_has_workspace_memberships",
+                        "Remove this account from the organization's workspaces first",
+                        409,
+                    ));
+                }
+                let removed = state
+                    .organization_members
+                    .write()
+                    .map_err(|_| {
+                        problem(
+                            "organization_member_unavailable",
+                            "Organization membership state unavailable",
+                            503,
+                        )
+                    })?
+                    .remove(&organization_id, &account_id, expected_revision)?;
+                Ok(serde_json::json!({
+                    "organizationId": removed.organization_id,
+                    "accountId": removed.account_id,
+                    "removed": true
+                }))
             }
             "organization.member.workspace.assign" => {
                 let organization_id =

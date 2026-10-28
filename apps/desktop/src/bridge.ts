@@ -59,6 +59,8 @@ import {
   type OrganizationIdInput,
   type OrganizationMember,
   type OrganizationMemberPage,
+  type OrganizationMemberRemoveInput,
+  type OrganizationMemberRemoveReceipt,
   type OrganizationMemberStatusUpdateInput,
   type OrganizationMemberWorkspaceAssignInput,
   type OrganizationOwnerTransferCommandInput,
@@ -251,6 +253,10 @@ export interface DesktopApi {
   updateOrganizationMemberStatus(
     input: OrganizationMemberStatusUpdateInput,
   ): Promise<OrganizationMember>;
+  removeOrganizationMember(
+    input: OrganizationMemberRemoveInput,
+    idempotencyKey?: string,
+  ): Promise<OrganizationMemberRemoveReceipt>;
   assignOrganizationMemberToWorkspace(
     input: OrganizationMemberWorkspaceAssignInput,
     idempotencyKey?: string,
@@ -411,6 +417,7 @@ const invokeNames = {
   organizationMemberStatusUpdate: contractInvoke(
     "organization.member.status.update",
   ),
+  organizationMemberRemove: contractInvoke("organization.member.remove"),
   organizationMemberWorkspaceAssign: contractInvoke(
     "organization.member.workspace.assign",
   ),
@@ -788,6 +795,13 @@ export function createTauriDesktopApi(
         invokeNames.organizationMemberStatusUpdate,
         input,
         true,
+      ),
+    removeOrganizationMember: (input, idempotencyKey) =>
+      call<OrganizationMemberRemoveReceipt>(
+        invokeNames.organizationMemberRemove,
+        input,
+        true,
+        idempotencyKey,
       ),
     assignOrganizationMemberToWorkspace: (input, idempotencyKey) =>
       call<Member>(

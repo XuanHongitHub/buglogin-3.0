@@ -856,6 +856,15 @@ commands:
     output: OrganizationMember
     idempotency: required
     preconditions: [organization-owner-or-platform-admin, organization-owner-membership-protected, expected-revision-current]
+  - id: organization.member.remove
+    kind: command
+    capability: CAP-ORG-001
+    action: manage
+    adapters: [tauri, rest, mcp]
+    input: OrganizationMemberRemoveInput
+    output: OrganizationMemberRemoveReceipt
+    idempotency: required
+    preconditions: [organization-owner-or-platform-admin, organization-owner-membership-protected, expected-revision-current, no-workspace-membership]
   - id: organization.member.workspace.assign
     kind: command
     capability: CAP-MEM-001

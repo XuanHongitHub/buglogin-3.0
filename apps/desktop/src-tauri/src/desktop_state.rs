@@ -49,9 +49,10 @@ use buglogin_storage::{
 };
 use buglogin_sync::{
     coordination::{CoordinationAuth, CoordinationScope, LeaseGrant},
+    manifest::SyncManifest,
     payload::PayloadDescriptor,
 };
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::{FutureExt, StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -64,8 +65,8 @@ use crate::{
     device_key_vault::DeviceKeyVault,
     profile_projection::{HydratedProxyCredential, ProfileProjection, SnapshotBlob},
     profile_runtime::{
-        DesktopSyncBackend, LaunchRequest, LeaseScope, ManagedCoordination, ProfileRuntimeHandle,
-        StopReceipt, spawn_profile_runtime,
+        DesktopSyncBackend, LaunchRequest, LeaseScope, ManagedCoordination, PROFILE_LEASE_TTL,
+        ProfileRuntimeHandle, StopReceipt, spawn_profile_runtime,
     },
     proxy_bridge::{ProxyBridgeHandle, ProxyBridgeSpec},
     proxy_credential_vault::ProxyCredentialVault,
@@ -96,6 +97,16 @@ async fn log_profile_launch_preflight<T>(step: &'static str, future: impl Future
         started_at.elapsed().as_millis()
     );
     result
+}
+
+fn is_initial_empty_profile_manifest(manifest: &SyncManifest) -> bool {
+    manifest.generation == 1
+        && manifest.parent_generation.is_none()
+        && manifest.objects.is_empty()
+        && manifest.tombstones.is_empty()
+        && manifest.dependencies.is_empty()
+        && manifest.file_chunks.is_empty()
+        && manifest.payload_encryption.is_none()
 }
 
 #[derive(Clone)]
@@ -587,7 +598,7 @@ impl ProductionDesktopState {
         let coordination = auth.clone().map(|auth| ManagedCoordination {
             backend: Arc::new(client.clone()),
             auth,
-            lease_ttl: Duration::from_secs(60),
+            lease_ttl: PROFILE_LEASE_TTL,
             heartbeat_interval: Duration::from_secs(15),
         });
         let profile_runtime =
@@ -1201,7 +1212,7 @@ impl ProductionDesktopState {
             .set_coordination(Some(ManagedCoordination {
                 backend: Arc::new(self.client.clone()),
                 auth: auth.clone(),
-                lease_ttl: Duration::from_secs(60),
+                lease_ttl: PROFILE_LEASE_TTL,
                 heartbeat_interval: Duration::from_secs(15),
             }))
             .await?;
@@ -1564,7 +1575,7 @@ impl ProductionDesktopState {
             .acquire_lease_idempotent(
                 source_scope.clone(),
                 &binding.resource_id,
-                Duration::from_secs(120),
+                PROFILE_LEASE_TTL,
                 &lease_idempotency_key(
                     &format!("cookie-copy-source-{}", job.job_id),
                     manifest.generation,
@@ -1785,7 +1796,7 @@ impl ProductionDesktopState {
             .acquire_lease_idempotent(
                 coordination_scope.clone(),
                 &binding.resource_id,
-                Duration::from_secs(120),
+                PROFILE_LEASE_TTL,
                 &lease_idempotency_key(&local_idempotency_key, manifest.generation),
             )
             .await?;
@@ -2800,11 +2811,15 @@ impl ProductionDesktopState {
                         }
                     }
                 };
+                let sync_attempt_active = self
+                    .profile_runtime
+                    .sync_attempt_active(profile_id.clone())
+                    .await?;
                 Ok(result(
                     "profile.sync.status.get",
                     correlation_id,
                     json!({
-                        "status": if synced && !local_changes_pending { "synced" } else { "waiting" },
+                        "status": if sync_attempt_active { "syncing" } else if synced && !local_changes_pending { "synced" } else { "waiting" },
                         "generation": generation,
                         "local_changes_pending": local_changes_pending,
                         "can_open": can_open,
@@ -4210,19 +4225,21 @@ impl ProductionDesktopState {
                 .with_detail(message)
             })
         };
-        let manifest_future = async {
-            match self
-                .client
-                .current_manifest(scope.clone(), &binding.resource_id)
+        let manifest_correlation_id = correlation_id.clone();
+        let manifest_scope = scope.clone();
+        let manifest_resource_id = binding.resource_id.clone();
+        let manifest_client = self.client.clone();
+        let manifest_future = async move {
+            match manifest_client
+                .current_manifest(manifest_scope.clone(), &manifest_resource_id)
                 .await
             {
                 Ok(Some(manifest)) => Ok((manifest, false)),
-                Err(error) if error.code == "manifest_dependency_stale" => self
-                    .client
+                Err(error) if error.code == "manifest_dependency_stale" => manifest_client
                     .current_manifest_for_proxy_repair(
-                        scope.clone(),
-                        &binding.resource_id,
-                        &correlation_id,
+                        manifest_scope.clone(),
+                        &manifest_resource_id,
+                        &manifest_correlation_id,
                     )
                     .await?
                     .map(|manifest| (manifest, true))
@@ -4231,21 +4248,37 @@ impl ProductionDesktopState {
                             "production_manifest_not_found",
                             "Production profile manifest not found for proxy repair",
                             409,
-                            &correlation_id,
+                            &manifest_correlation_id,
                         )
                     }),
                 Ok(None) => Err(Problem::new(
                     "production_manifest_not_found",
                     "Production profile manifest not found",
                     409,
-                    &correlation_id,
+                    &manifest_correlation_id,
                 )),
                 Err(error) => Err(error),
             }
+        }
+        .shared();
+        let key_manifest_future = manifest_future.clone();
+        let key_rotation_client = self.client.clone();
+        let key_rotation_profile_id = profile_id.clone();
+        let key_rotation_correlation_id = correlation_id.clone();
+        let key_rotation_future = async move {
+            let (manifest, _) = key_manifest_future.await?;
+            if is_initial_empty_profile_manifest(&manifest) {
+                Ok(None)
+            } else {
+                key_rotation_client
+                    .profile_key_rotation_recipients(
+                        &key_rotation_profile_id,
+                        &key_rotation_correlation_id,
+                    )
+                    .await
+                    .map(Some)
+            }
         };
-        let key_rotation_future = self
-            .client
-            .profile_key_rotation_recipients(&profile_id, &correlation_id);
         let pending_proxy_future = self.client.profile_proxy_assignment(
             &binding.workspace_id,
             &profile_id,
@@ -4260,7 +4293,7 @@ impl ProductionDesktopState {
             device_key_result,
         ) = tokio::join!(
             log_profile_launch_preflight("extension", extension_future),
-            log_profile_launch_preflight("manifest", manifest_future),
+            log_profile_launch_preflight("manifest", manifest_future.clone()),
             log_profile_launch_preflight("key_rotation", key_rotation_future),
             log_profile_launch_preflight("pending_proxy", pending_proxy_future),
             log_profile_launch_preflight("device_key", device_key_future),
@@ -4296,13 +4329,8 @@ impl ProductionDesktopState {
             );
         }
         match key_rotation_result {
-            Ok(_)
-                if manifest.generation == 1
-                    && manifest.parent_generation.is_none()
-                    && manifest.payload_encryption.is_none()
-                    && manifest.objects.is_empty()
-                    && manifest.tombstones.is_empty() => {}
-            Ok(_) => {
+            Ok(None) => {}
+            Ok(Some(_)) => {
                 return Err(Problem::new(
                     "profile_key_rotation_required",
                     "Complete profile key rotation before launching this shared profile",
@@ -4943,16 +4971,50 @@ impl ProductionDesktopState {
     ) -> Result<Value, Problem> {
         let started_at = tokio::time::Instant::now();
         let cleanup_profile_id = profile_id.clone();
-        let result = self
+        let mut result = self
             .stop_profile_inner(
-                profile_id,
-                idempotency_key,
-                correlation_id,
-                confirmed_recipients,
+                profile_id.clone(),
+                idempotency_key.clone(),
+                correlation_id.clone(),
+                confirmed_recipients.clone(),
                 preacquired_lease,
                 preheld_stop,
             )
             .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == "lease_not_found")
+            && self
+                .profile_runtime
+                .active_profiles()
+                .await
+                .is_ok_and(|active| !active.contains(&cleanup_profile_id))
+        {
+            // A 404 means the old lease is absent, not that the stopped local
+            // snapshot is unusable. Retry once with a fresh lease and manifest
+            // fence before writing the retained local snapshot.
+            self.profile_runtime
+                .queue_sync_retry(cleanup_profile_id.clone())
+                .await;
+            let _ = self
+                .profile_runtime
+                .set_sync_attempt_active(cleanup_profile_id.clone(), false)
+                .await;
+            let _ = self
+                .profile_runtime
+                .release_stopped_for_retry(cleanup_profile_id.clone())
+                .await;
+            result = self
+                .stop_profile_inner(
+                    profile_id,
+                    runtime_projection_idempotency_key(&idempotency_key, "missing-lease-retry"),
+                    format!("{correlation_id}-missing-lease-retry"),
+                    confirmed_recipients,
+                    None,
+                    None,
+                )
+                .await;
+        }
         if result.is_err()
             && self
                 .profile_runtime
@@ -5078,68 +5140,56 @@ impl ProductionDesktopState {
         // Otherwise a validation failure could leave a stale amber status even
         // though no upload had started.
         self.ensure_device_key_registered(&correlation_id).await?;
-        let rotation_recipients = match self
-            .client
-            .profile_key_rotation_recipients(&profile_id, &correlation_id)
-            .await
-        {
-            Ok(recipients) => Some(recipients),
-            Err(error) if error.code == "sync_key_rotation_not_pending" || error.status == 404 => {
-                if confirmed_recipients.is_some() {
-                    return Err(Problem::new(
-                        "profile_key_rotation_snapshot_stale",
-                        "The profile no longer has the reviewed pending key rotation",
-                        409,
-                        &correlation_id,
-                    ));
+        let initial_managed_key_bootstrap = is_initial_empty_profile_manifest(&previous);
+        if initial_managed_key_bootstrap && confirmed_recipients.is_some() {
+            return Err(Problem::new(
+                "profile_key_rotation_snapshot_stale",
+                "The profile has no pending key rotation to confirm",
+                409,
+                &correlation_id,
+            ));
+        }
+        let rotation_recipients = if initial_managed_key_bootstrap {
+            None
+        } else {
+            match self
+                .client
+                .profile_key_rotation_recipients(&profile_id, &correlation_id)
+                .await
+            {
+                Ok(recipients) => Some(recipients),
+                Err(error)
+                    if error.code == "sync_key_rotation_not_pending" || error.status == 404 =>
+                {
+                    if confirmed_recipients.is_some() {
+                        return Err(Problem::new(
+                            "profile_key_rotation_snapshot_stale",
+                            "The profile no longer has the reviewed pending key rotation",
+                            409,
+                            &correlation_id,
+                        ));
+                    }
+                    None
                 }
-                None
-            }
-            Err(error) if error.code == "profile_forbidden" => {
-                if confirmed_recipients.is_some() {
-                    return Err(error);
+                Err(error) if error.code == "profile_forbidden" => {
+                    if confirmed_recipients.is_some() {
+                        return Err(error);
+                    }
+                    None
                 }
-                None
+                Err(error) if error.code == "profile_key_enrollment_required" => return Err(error),
+                Err(error) => return Err(error),
             }
-            Err(error) if error.code == "profile_key_enrollment_required" => return Err(error),
-            Err(error) => return Err(error),
         };
         let profile = self.client.profile(&profile_id, &correlation_id).await?;
-        let initial_member_key_enrollment =
-            rotation_recipients.as_ref().is_some_and(|recipients| {
-                previous.generation == 1
-                    && previous.objects.is_empty()
-                    && previous.payload_encryption.is_none()
-                    && recipients.len() == 1
-                    && recipients[0].device_keys.len() == 1
-                    && recipients[0].device_keys[0].device_id == self.device_id
-            });
         if let Some(recipients) = rotation_recipients.as_ref() {
-            if initial_member_key_enrollment {
-                let recipient = &recipients[0].device_keys[0];
-                let private_key = self
-                    .device_key_vault
-                    .load_or_create(&self.device_id, &correlation_id)?;
-                let public_key = private_key.public_key()?;
-                let public_key_hex = encode_hex(public_key.as_bytes());
-                let fingerprint = format!("{:x}", Sha256::digest(public_key.as_bytes()));
-                if recipient.public_key != public_key_hex || recipient.fingerprint != fingerprint {
-                    return Err(Problem::new(
-                        "recipient_device_key_invalid",
-                        "The registered workspace member device key does not match this device",
-                        409,
-                        &correlation_id,
-                    ));
-                }
-            } else {
-                let supplied = confirmed_recipients.as_ref().ok_or_else(|| Problem::new(
+            let supplied = confirmed_recipients.as_ref().ok_or_else(|| Problem::new(
                     "profile_key_rotation_confirmation_required",
                     "Review and confirm every active recipient device fingerprint before syncing this profile",
                     409,
                     &correlation_id,
                 ))?;
-                validate_key_rotation_confirmation(supplied, recipients, &correlation_id)?;
-            }
+            validate_key_rotation_confirmation(supplied, recipients, &correlation_id)?;
         }
         let pending_proxy_assignment = self
             .client
@@ -5238,7 +5288,7 @@ impl ProductionDesktopState {
                         .acquire_lease_idempotent(
                             scope.clone(),
                             &binding.resource_id,
-                            Duration::from_secs(120),
+                            PROFILE_LEASE_TTL,
                             &lease_idempotency_key(&idempotency_key, previous.generation),
                         )
                         .await?
@@ -5343,7 +5393,7 @@ impl ProductionDesktopState {
                     .acquire_lease_idempotent(
                         scope.clone(),
                         &binding.resource_id,
-                        Duration::from_secs(120),
+                        PROFILE_LEASE_TTL,
                         &refreshed_lease_key,
                     )
                     .await?;
@@ -5438,7 +5488,7 @@ impl ProductionDesktopState {
                     &correlation_id,
                 )?
             };
-            let rotation_keys = if rotation_recipients.is_some() && !initial_member_key_enrollment {
+            let rotation_keys = if rotation_recipients.is_some() {
                 Some(self.sync_key_vault.stage_rotation(
                     &binding.workspace_id,
                     &binding.resource_id,
@@ -5730,7 +5780,7 @@ impl ProductionDesktopState {
             .acquire_lease_idempotent(
                 scope.clone(),
                 &binding.resource_id,
-                Duration::from_secs(120),
+                PROFILE_LEASE_TTL,
                 &lease_idempotency_key(idempotency_key, previous.generation),
             )
             .await?;
@@ -7254,9 +7304,43 @@ mod tests {
     };
     use buglogin_domain::entities::ProfileState;
     use buglogin_domain::errors::Problem;
-    use buglogin_domain::ids::{AccountId, MemberId};
+    use buglogin_domain::ids::{AccountId, MemberId, ResourceId, WorkspaceId};
+    use buglogin_sync::manifest::SyncManifest;
     use serde_json::json;
     use sha2::Digest;
+
+    #[test]
+    fn managed_key_bootstrap_applies_only_to_a_fully_empty_genesis() {
+        let genesis = SyncManifest::new(
+            WorkspaceId::new("ws_initial_empty_test").unwrap(),
+            ResourceId::new("res_initial_empty_test").unwrap(),
+            1,
+            1,
+            None,
+            b"genesis",
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(super::is_initial_empty_profile_manifest(&genesis));
+
+        let mut later_generation = genesis.clone();
+        later_generation.generation = 2;
+        later_generation.parent_generation = Some(1);
+        assert!(!super::is_initial_empty_profile_manifest(&later_generation));
+
+        let mut manifest_with_file_metadata = genesis;
+        manifest_with_file_metadata
+            .file_chunks
+            .push(buglogin_sync::manifest::ManifestFileChunks {
+                path: "profile/preferences.json".to_owned(),
+                plaintext_size: 1,
+                plaintext_checksum: "checksum".to_owned(),
+                chunks: Vec::new(),
+            });
+        assert!(!super::is_initial_empty_profile_manifest(
+            &manifest_with_file_metadata
+        ));
+    }
 
     #[test]
     fn stale_running_projection_does_not_block_local_start_but_local_process_does() {

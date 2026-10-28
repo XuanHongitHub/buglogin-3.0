@@ -662,8 +662,9 @@ impl RemoteApiClient {
                         && matches!(response.status().as_u16(), 502 | 503 | 504) =>
                 {
                     attempt += 1;
+                    let retry_delay = api_retry_delay(&response, correlation);
                     drop(response);
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    tokio::time::sleep(retry_delay).await;
                 }
                 Err(error)
                     if retry_safe && attempt == 0 && (error.is_connect() || error.is_timeout()) =>
@@ -733,7 +734,9 @@ impl RemoteApiClient {
         for (name, value) in extra {
             request = request.header(*name, value);
         }
-        let response = request.body(bytes).send().await.map_err(|error| {
+        request = request.body(bytes);
+        let retry_request = request.try_clone();
+        let response = request.send().await.map_err(|error| {
             Problem::new(
                 "api_unavailable",
                 "BugLogin API is unavailable",
@@ -742,6 +745,24 @@ impl RemoteApiClient {
             )
             .retryable(error.is_connect() || error.is_timeout())
         })?;
+        let response = if matches!(response.status().as_u16(), 502 | 503 | 504)
+            && let Some(retry_request) = retry_request
+        {
+            let retry_delay = api_retry_delay(&response, correlation);
+            drop(response);
+            tokio::time::sleep(retry_delay).await;
+            retry_request.send().await.map_err(|error| {
+                Problem::new(
+                    "api_unavailable",
+                    "BugLogin API is unavailable",
+                    503,
+                    correlation,
+                )
+                .retryable(error.is_connect() || error.is_timeout())
+            })?
+        } else {
+            response
+        };
         let status = response.status();
         if !status.is_success() {
             let mut problem = read_problem(response, correlation, true).await;
@@ -2322,6 +2343,20 @@ impl RemoteApiClient {
                 )
                 .await?
             }
+            "organization_member_remove" => {
+                let org = path_arg(&payload, "organizationId", correlation)?;
+                let account = path_arg(&payload, "accountId", correlation)?;
+                self.send::<Value>(
+                    Method::DELETE,
+                    &format!("/v1/organizations/{org}/members/{account}"),
+                    Some(payload),
+                    correlation,
+                    idem,
+                    None,
+                    &[],
+                )
+                .await?
+            }
             "workspace_list" => {
                 let org = path_arg(&payload, "organizationId", correlation)?;
                 json!({"items":self.get::<Vec<Value>>(&format!("/v1/organizations/{org}/workspaces"),correlation).await?,"nextCursor":Value::Null})
@@ -3706,6 +3741,19 @@ fn request_retry_safe(method: &Method, path: &str, has_idempotency_key: bool) ->
         || matches!(path, "/v1/auth/device/token" | "/v1/proxies/parse")
 }
 
+fn api_retry_delay(response: &reqwest::Response, correlation: &str) -> Duration {
+    let server_delay = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| Duration::from_secs(seconds.min(5)))
+        .unwrap_or_else(|| Duration::from_millis(250))
+        .max(Duration::from_millis(250));
+    let jitter_ms = Sha256::digest(correlation.as_bytes())[0] as u64 % 501;
+    server_delay + Duration::from_millis(jitter_ms)
+}
+
 fn api_route_template(path: &str) -> String {
     let path = path.split('?').next().unwrap_or_default();
     let mut redact_next = false;
@@ -3993,6 +4041,7 @@ fn command_id(name: &str) -> &str {
         "organization_members_list" => "organization.members.list",
         "organization_account_create" => "organization.account.create",
         "organization_member_status_update" => "organization.member.status.update",
+        "organization_member_remove" => "organization.member.remove",
         "organization_member_workspace_assign" => "organization.member.workspace.assign",
         "workspace_list" => "workspace.list",
         "workspace_get" => "workspace.get",

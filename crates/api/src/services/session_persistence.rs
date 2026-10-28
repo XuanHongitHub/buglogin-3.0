@@ -1531,14 +1531,17 @@ mod tests {
                     credential_version: None,
                     refresh_replay: None,
                 };
-                (issued.record.clone(), refresh)
+                let prior_device_sessions = persistence
+                    .device_session_revocation_puts(&account_id, device_id, issued_at)
+                    .unwrap();
+                (issued.record.clone(), refresh, prior_device_sessions)
             })
             .collect();
 
         std::thread::scope(|scope| {
             let handles: Vec<_> = pairs
                 .into_iter()
-                .map(|(session, refresh)| {
+                .map(|(session, refresh, prior_device_sessions)| {
                     let persistence = Arc::clone(&persistence);
                     let start = Arc::clone(&start);
                     scope.spawn(move || {
@@ -1547,7 +1550,7 @@ mod tests {
                             &session,
                             &refresh,
                             None,
-                            Vec::new(),
+                            prior_device_sessions,
                             Vec::new(),
                         )
                     })

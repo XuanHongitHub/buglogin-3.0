@@ -624,6 +624,12 @@ Rows are not silently discarded; duplicate accounts resolve to an existing accou
 - [ ] Single operations have truthful pending/success/error outcomes; batch operations show per-row results and safe retry.
 - [ ] Delete/transfer/suspend modals disclose impact and dependencies before the final commit.
 
+Implementation follow-up — 2026-10-28:
+
+- Editing a workspace previously used `Promise.all` for the authoritative workspace record and the optional extension-group picker catalog. A transient extension-group list failure therefore discarded access to an otherwise valid workspace edit and left Save blocked. These reads now settle independently: failure to load the required workspace record still blocks stale edits, while failure to load the optional extension-group catalog keeps the revision-backed fields usable, preserves the stored default-group value, disables only that picker, and offers a retry.
+- The form continues to submit the authoritative loaded workspace revision and existing policy fields; no partial local value is written for the unavailable picker.
+- `pnpm --dir apps/desktop typecheck`, focused Biome for `org-workspaces.tsx` and `org-platform-i18n.ts`, and `git diff --check` pass. Screenshot/keyboard interaction QA and the other unchecked acceptance items remain open.
+
 ## 30-round debate log
 
 Each round challenges the current design from an operator and user perspective, then records a provisional outcome. “P” means include in plan for a later design decision; “V” means verify before changing behavior.
@@ -733,6 +739,13 @@ Each round challenges the current design from an operator and user perspective, 
 - Full UI state and keyboard/responsive checklist passes with screenshots against current UI authority and Donut reference.
 - Org Owner and Platform Admin can discover and complete authorized deletion resolutions; blocker codes always map to a useful action or an explicit wait state.
 - Workspace deletion handles all current blocker families; Org deletion guides through child Workspaces and remaining Org members; partial cleanup remains resumable and auditable.
+- Removing an Org membership is an explicit, revision-bound operation that preserves the account, refuses the Org owner, and refuses while child Workspace memberships remain.
+
+Org-membership cleanup vertical slice — 2026-10-28:
+
+- Root cause: organization deletion correctly rejects remaining non-owner memberships, but the command/API surface had no remove-membership operation. The UI's “Danh bạ tài khoản” destination therefore could not resolve that blocker. Suspension is reversible and intentionally preserves child membership/grants, so it is not a substitute.
+- Contract: add an audited, idempotent `organization.member.remove` command with server-side organization management authorization, expected-revision enforcement, Owner protection, and a child-workspace-membership blocker. Removal affects only the organization-membership record and never deletes the account. Expose the operation in the Org account directory with an explicit reviewed/batch result flow and preserve the existing resumable delete target.
+- Acceptance evidence to add: service revision/owner tests; HTTP authorization, idempotency, child-membership blocker and success tests; MCP parity; generated contract checks; desktop typecheck/interaction behavior. Implementing now; no release claim until the full vertical slice verifies.
 
 ## Implementation progress — 2026-10-27
 
@@ -748,6 +761,7 @@ Each round challenges the current design from an operator and user perspective, 
 - Workspace member refresh keeps its last usable snapshot visible. Group-share reads now use bounded batches of eight; failed groups retain their prior grants and the error names those groups instead of silently representing them as having no access.
 - Group/Profile governance loading also uses bounded batches of eight for group grants, preserves the last known membership snapshot on partial member failures, and names groups whose grant lookup failed. Management member rows now label direct grants explicitly and no longer imply Owner/Admin roles grant access to every group; visibility uses backend-derived workspace capabilities.
 - Bulk activate/suspend/remove keeps a partial-result dialog open with only failed members selected, so retry submits the failed subset after refreshing server state instead of repeating successful rows.
+- Organization and Workspace create/edit forms now keep validation feedback next to each invalid field, expose errors through `aria-invalid`/`aria-describedby`, clear the field error as it is corrected, and constrain numeric values to their supported integer ranges. Authoritative server record/revision loading and server-side mutation authorization remain unchanged. Biome passes for `org-workspaces.tsx`; root TypeScript currently fails on pre-existing errors in unrelated Cookie Bot, profile, sync, and bookmark components. Screenshot, keyboard, responsive, and authenticated interaction evidence for this form change remains pending.
 - Governance assignment picker dialogs now show their parent organization/workspace and selected record count. The direct Groups surface also passes this context instead of rendering an unscoped picker.
 - Profile group assignment and member direct group grant dialogs now provide explicit Add/Replace/Remove semantics with per-profile/member current → resulting group previews and changed/unchanged counts. Team inherited access and explicit denies remain outside direct-grant mutations.
 - Member roster now shows team membership in its own column, separate from direct group grants, and resolves team names independently so a failed team lookup does not blank the member list. This clarifies membership vs direct grants; team-derived effective rights still need an authoritative server projection before the corresponding checklist item can be closed.
@@ -765,4 +779,5 @@ Each round challenges the current design from an operator and user perspective, 
 - Workspace member access now labels “Direct group grants” and “Team membership” separately and states that team membership does not inherit group access. This matches the current API data model: `Member.teamId` is a grouping relation, and group access is represented by member-targeted grants. Desktop typecheck passes; authenticated visual/accessibility QA remains pending.
 - Organization ownership transfer confirmation now states the actual server contract: only Org ownership changes, existing workspace memberships and explicit grants remain as-is, and this action does not grant Platform Admin authority. Pre-confirm copy now describes active-member eligibility and revision recheck accurately.
 - Direct group-grant editing is disabled while grant reads are loading or incomplete, so a missing/failed read cannot turn into an empty Replace selection that revokes access. Role-only edits remain available; the dialog explains the unavailable group data and offers the page's reload path. This was found during the authoritative-data audit.
+- Org-membership removal is now exposed in the account directory as a reviewed destructive batch action. It is available only for non-owner Org members with no remaining Workspace memberships, reports per-account results, retries only failed rows, and calls the revision-bound `organization.member.remove` command. REST regression verifies child-membership denial, removal after Workspace cleanup, and account preservation. Service/MCP fixtures and API contracts are covered; desktop typecheck and focused Biome pass. Root legacy Next typecheck continues to fail on unrelated missing Donut exports/types; authenticated screenshot and keyboard QA are still open.
 - Remaining: account/membership/effective-access distinctions and bulk partial retry audit; broader Group/Profile governance review; visual and accessibility QA; complete all blocker resolution paths and record measured request/latency evidence.

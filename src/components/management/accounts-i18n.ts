@@ -98,6 +98,12 @@ const vi = {
   noWorkspace: "Chọn ít nhất một workspace để cấp quyền đăng nhập và sử dụng.",
   orgSuspend: "Đình chỉ khỏi tổ chức",
   orgRestore: "Khôi phục trong tổ chức",
+  removeOrgMember: "Gỡ khỏi tổ chức",
+  removeOrgMemberHint:
+    "Chỉ gỡ quan hệ thành viên tổ chức. Tài khoản vẫn tồn tại; hãy gỡ thành viên khỏi mọi workspace trước.",
+  orgMemberWorkspaceBlock:
+    "Gỡ thành viên khỏi các workspace trước khi gỡ khỏi tổ chức.",
+  orgMemberRemoved: "Đã gỡ khỏi tổ chức",
   organizationMemberStatusHint:
     "Thay đổi quyền truy cập ở cấp tổ chức; tài khoản và các membership workspace vẫn được giữ nguyên.",
   owner: "Chủ sở hữu",
@@ -356,6 +362,12 @@ const en: Record<keyof typeof vi, string> = {
   noWorkspace: "Select at least one workspace for account access.",
   orgSuspend: "Suspend from organization",
   orgRestore: "Restore in organization",
+  removeOrgMember: "Remove from organization",
+  removeOrgMemberHint:
+    "This removes only the organization membership. The account remains; remove the member from every workspace first.",
+  orgMemberWorkspaceBlock:
+    "Remove the member from their workspaces before removing the organization membership.",
+  orgMemberRemoved: "Removed from organization",
   organizationMemberStatusHint:
     "Changes organization-level access. The account and workspace memberships remain in place.",
   owner: "Owner",

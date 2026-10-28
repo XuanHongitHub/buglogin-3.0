@@ -163,11 +163,7 @@ function LaunchControlTooltip({
   const { t } = useTranslation();
   const _profileDrag = useProfileGroupDrag();
   const stage = useLaunchActivity(profileId).at(-1)?.stage;
-  const live =
-    launching &&
-    stage !== undefined &&
-    stage !== "running" &&
-    stage !== "failed";
+  const live = launching && stage !== "running" && stage !== "failed";
   return (
     <Tooltip open={live ? true : undefined}>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
@@ -176,7 +172,11 @@ function LaunchControlTooltip({
           data-launch-stage={live ? stage : undefined}
           className={cn(live && "pointer-events-none")}
         >
-          {live ? t(`appFeedback.launch.${stage}`) : content}
+          {live
+            ? stage
+              ? t(`appFeedback.launch.${stage}`)
+              : t("profileSelector.launching")
+            : content}
         </TooltipContent>
       )}
     </Tooltip>
@@ -2270,7 +2270,10 @@ export function ProfilesDataTable({
             ...prev,
             [profile_id]: { status, error, checkedAt: Date.now() },
           }));
-          if (status !== "syncing") {
+          // A failed stop/sync event is authoritative for the local attempt.
+          // Refreshing immediately can replace its error with the server's
+          // still-old manifest status (`waiting`) and hide the actual failure.
+          if (status === "synced") {
             void refreshProfileSyncStatus(profile_id, true);
           }
         });
@@ -3024,12 +3027,15 @@ export function ProfilesDataTable({
                       size="sm"
                       data-running={isRunning ? "true" : undefined}
                       disabled={!canLaunch || isLaunching || isStopping}
+                      aria-busy={isLaunching || isStopping}
                       aria-label={
-                        isRunning
-                          ? meta.t("profiles.actions.stop")
-                          : isRunningRemotely || isLockedByAnother
-                            ? tooltipContent
-                            : meta.t("profiles.actions.launch")
+                        isLaunching
+                          ? meta.t("profileSelector.launching")
+                          : isRunning
+                            ? meta.t("profiles.actions.stop")
+                            : isRunningRemotely || isLockedByAnother
+                              ? tooltipContent
+                              : meta.t("profiles.actions.launch")
                       }
                       className={cn(
                         "grid size-7 place-items-center rounded-full p-0 transition-[background-color,color,transform] duration-150",

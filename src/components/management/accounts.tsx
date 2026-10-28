@@ -1498,6 +1498,7 @@ export function AccountDirectory({
   const [assignRole, setAssignRole] = useState<MemberRole>("member");
   const [status, setStatus] = useState<AccountStatus>();
   const [orgStatus, setOrgStatus] = useState<"active" | "suspended">();
+  const [removingOrgMembers, setRemovingOrgMembers] = useState(false);
   const [outcomes, setOutcomes] = useState<
     { label: string; result: string; failed: boolean }[]
   >([]);
@@ -1512,6 +1513,7 @@ export function AccountDirectory({
         status: "active" | "suspended";
         accountIds: string[];
       }
+    | { scope: "organization_remove"; accountIds: string[] }
   >();
   const reload = useCallback(async () => {
     setLoading(true);
@@ -1878,6 +1880,64 @@ export function AccountDirectory({
       setPending(false);
     }
   }
+  async function removeOrganizationMembers() {
+    if (!organizationId || !canManageOrganization) return;
+    const targets = selectedEntries.filter(
+      (entry) =>
+        entry.orgMemberId &&
+        entry.orgRevision !== undefined &&
+        entry.accountId !== organizationOwnerId &&
+        entry.workspaceIds.length === 0,
+    );
+    if (!targets.length || targets.length !== selectedEntries.length) return;
+    setPending(true);
+    setError("");
+    setStatusRetry(undefined);
+    try {
+      const result = await api.managementBatch(
+        {
+          items: targets.map((entry) => ({
+            key: entry.accountId,
+            commandId: "organization.member.remove",
+            input: {
+              organizationId,
+              accountId: entry.accountId,
+              expectedRevision: entry.orgRevision,
+            },
+          })),
+        },
+        `org-member-remove-${crypto.randomUUID()}`,
+      );
+      const failedIds = result.items
+        .filter((item) => item.status === "failed")
+        .map((item) => item.key);
+      setOutcomes(
+        result.items.map((item) => ({
+          label:
+            targets.find((entry) => entry.accountId === item.key)?.username ||
+            item.key,
+          result:
+            item.status === "succeeded"
+              ? t("orgMemberRemoved")
+              : (item.error?.title ?? t("failed")),
+          failed: item.status === "failed",
+        })),
+      );
+      setStatusRetry(
+        failedIds.length
+          ? { scope: "organization_remove", accountIds: failedIds }
+          : undefined,
+      );
+      setSelected(failedIds);
+      setRemovingOrgMembers(false);
+      await reload();
+      onDataChanged?.();
+    } catch (reason) {
+      setError(accountError(reason));
+    } finally {
+      setPending(false);
+    }
+  }
   async function assign() {
     const targets = selectedEntries.flatMap((entry) =>
       assignWorkspaceIds
@@ -2053,6 +2113,36 @@ export function AccountDirectory({
                 {t("orgRestore")}
               </Button>
             </>
+          ) : null}
+          {organizationId &&
+          canManageOrganization &&
+          selectedEntries.every((entry) =>
+            Boolean(
+              entry.orgMemberId &&
+                entry.orgRevision !== undefined &&
+                entry.accountId !== organizationOwnerId,
+            ),
+          ) ? (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={
+                  pending ||
+                  selectedEntries.some((entry) => entry.workspaceIds.length > 0)
+                }
+                onClick={() => setRemovingOrgMembers(true)}
+              >
+                {t("removeOrgMember")}
+              </Button>
+              {selectedEntries.some(
+                (entry) => entry.workspaceIds.length > 0,
+              ) ? (
+                <span className="text-xs text-muted-foreground">
+                  {t("orgMemberWorkspaceBlock")}
+                </span>
+              ) : null}
+            </div>
           ) : null}
           {!organizationId && viewer?.platformAdmin ? (
             <>
@@ -2312,6 +2402,8 @@ export function AccountDirectory({
                 setSelected(statusRetry.accountIds);
                 if (statusRetry.scope === "organization") {
                   setOrgStatus(statusRetry.status);
+                } else if (statusRetry.scope === "organization_remove") {
+                  setRemovingOrgMembers(true);
                 } else {
                   setStatus(statusRetry.status);
                 }
@@ -2695,6 +2787,47 @@ export function AccountDirectory({
               onClick={() => void changeOrganizationStatus()}
             >
               {pending ? t("processing") : t("confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={removingOrgMembers}
+        onOpenChange={(open) => {
+          if (!open && !pending) setRemovingOrgMembers(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("removeOrgMember")}</DialogTitle>
+            <DialogDescription>{t("removeOrgMemberHint")}</DialogDescription>
+          </DialogHeader>
+          <ul className="max-h-48 overflow-auto text-sm">
+            {selectedEntries.map((entry) => (
+              <li className="py-1" key={entry.accountId}>
+                {entry.username || entry.email}
+              </li>
+            ))}
+          </ul>
+          {error ? <AccountError message={error} /> : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={pending}
+              onClick={() => setRemovingOrgMembers(false)}
+            >
+              {t("cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={
+                pending ||
+                !selectedEntries.length ||
+                selectedEntries.some((entry) => entry.workspaceIds.length > 0)
+              }
+              onClick={() => void removeOrganizationMembers()}
+            >
+              {pending ? t("processing") : t("removeOrgMember")}
             </Button>
           </DialogFooter>
         </DialogContent>

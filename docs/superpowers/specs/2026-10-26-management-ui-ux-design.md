@@ -51,6 +51,8 @@ BugLogin — shell chung
 
 Ranh giới dữ liệu: account identity dùng chung; organization membership là một record cha độc lập có status/revision; role và grants sử dụng tài nguyên nằm ở workspace. Đình chỉ thành viên Org chặn quyền truy cập xuống workspace nhưng giữ nguyên memberships/grants con để có thể khôi phục. Thao tác này không đình chỉ tài khoản toàn cục và không biến tài khoản hiện hữu thành tài khoản thuộc sở hữu độc quyền của một Org.
 
+Gỡ một organization membership chỉ xóa quan hệ với Org, không xóa account và không được âm thầm xóa workspace membership/grant. API yêu cầu đúng revision hiện tại, từ chối gỡ Owner, và từ chối khi account còn workspace membership trong Org đó. Luồng cleanup phải xử lý workspace/member dependencies trước, sau đó mới gỡ Org membership và xóa Org; mọi mutation phải được authorize/audit/idempotency-protect ở server.
+
 Những luồng mục tiêu chưa có contract đầy đủ (ví dụ username-only, sửa định danh, tự sinh bulk, chuyển Owner, batch quota hoặc xóa Org/WS) phải được kiểm tra rồi hoàn thiện contract/backend tương ứng trước khi chấp nhận UI. Tài liệu này không xác nhận chúng đã tồn tại.
 
 ## 3. Shell và danh sách tổ chức
