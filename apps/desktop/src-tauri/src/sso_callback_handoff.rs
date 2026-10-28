@@ -27,11 +27,11 @@ const MAX_ROUTES_REMEMBERED: usize = 8;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_millis(750);
 
-pub struct SsoCallbackHandoff {
+pub struct SsoCallbackHandoff<V = NativeVault> {
     port: u16,
     secret: [u8; 32],
     listener: TcpListener,
-    vault: Arc<Mutex<NativeVault>>,
+    vault: Arc<Mutex<V>>,
     forwarded_state_keys: Mutex<Vec<String>>,
     listener_ready: AtomicBool,
 }
@@ -64,8 +64,18 @@ impl Drop for HandoffMessage {
     }
 }
 
-impl SsoCallbackHandoff {
+impl SsoCallbackHandoff<NativeVault> {
     pub fn new() -> Result<Self, Problem> {
+        Self::with_vault(NativeVault::new())
+    }
+}
+
+impl<V: OsVault + Send + 'static> SsoCallbackHandoff<V> {
+    fn with_vault(vault: V) -> Result<Self, Problem> {
+        Self::with_shared_vault(Arc::new(Mutex::new(vault)))
+    }
+
+    fn with_shared_vault(vault: Arc<Mutex<V>>) -> Result<Self, Problem> {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .map_err(|_| unavailable("desktop-sso-handoff"))?;
         let port = listener
@@ -78,7 +88,7 @@ impl SsoCallbackHandoff {
             port,
             secret,
             listener,
-            vault: Arc::new(Mutex::new(NativeVault::new())),
+            vault,
             forwarded_state_keys: Mutex::new(Vec::new()),
             listener_ready: AtomicBool::new(false),
         })
@@ -283,7 +293,7 @@ impl SsoCallbackHandoff {
     }
 }
 
-impl Drop for SsoCallbackHandoff {
+impl<V> Drop for SsoCallbackHandoff<V> {
     fn drop(&mut self) {
         self.secret.zeroize();
     }
@@ -293,7 +303,7 @@ fn receive_callback(
     stream: &mut TcpStream,
     port: u16,
     secret: &[u8; 32],
-    vault: &Arc<Mutex<NativeVault>>,
+    vault: &Arc<Mutex<impl OsVault>>,
 ) -> Result<Option<(String, String)>, Problem> {
     let mut size = [0_u8; 4];
     stream
@@ -331,7 +341,7 @@ fn receive_callback(
 }
 
 fn load_route_from_vault(
-    vault: &Arc<Mutex<NativeVault>>,
+    vault: &Arc<Mutex<impl OsVault>>,
     state: &str,
 ) -> Result<Option<RouteRecord>, Problem> {
     let key = route_key(state)?;
@@ -352,7 +362,7 @@ fn load_route_from_vault(
     Ok(Some(route))
 }
 
-fn remove_route_from_vault(vault: &Arc<Mutex<NativeVault>>, state: &str) {
+fn remove_route_from_vault(vault: &Arc<Mutex<impl OsVault>>, state: &str) {
     let Ok(key) = route_key(state) else {
         return;
     };
@@ -486,7 +496,76 @@ fn unavailable(correlation_id: &str) -> Problem {
 
 #[cfg(test)]
 mod tests {
-    use super::{callback_state, route_record_name};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex, mpsc},
+        time::Duration,
+    };
+
+    use buglogin_storage::secrets::{
+        OsVault, RotationReceipt, SecretError, SecretKey, SecretValue, SecretVersion,
+    };
+
+    use super::{SsoCallbackHandoff, callback_state, now_seconds, route_record_name};
+
+    #[derive(Default)]
+    struct FakeVault {
+        entries: BTreeMap<(String, String), (SecretValue, SecretVersion)>,
+    }
+
+    impl OsVault for FakeVault {
+        fn read(&self, key: &SecretKey) -> Result<(SecretValue, SecretVersion), SecretError> {
+            self.entries
+                .get(&(key.namespace().to_owned(), key.name().to_owned()))
+                .cloned()
+                .ok_or(SecretError::NotFound)
+        }
+
+        fn create(
+            &mut self,
+            key: &SecretKey,
+            value: SecretValue,
+        ) -> Result<SecretVersion, SecretError> {
+            let entry_key = (key.namespace().to_owned(), key.name().to_owned());
+            if self.entries.contains_key(&entry_key) {
+                return Err(SecretError::VersionConflict);
+            }
+            let version = SecretVersion::new(1).ok_or(SecretError::OperationFailed)?;
+            self.entries.insert(entry_key, (value, version));
+            Ok(version)
+        }
+
+        fn rotate(
+            &mut self,
+            key: &SecretKey,
+            expected: SecretVersion,
+            replacement: SecretValue,
+        ) -> Result<RotationReceipt, SecretError> {
+            let entry_key = (key.namespace().to_owned(), key.name().to_owned());
+            let (_, current) = self.entries.get(&entry_key).ok_or(SecretError::NotFound)?;
+            if *current != expected {
+                return Err(SecretError::VersionConflict);
+            }
+            let current = *current;
+            let next =
+                SecretVersion::new(current.generation() + 1).ok_or(SecretError::OperationFailed)?;
+            self.entries.insert(entry_key, (replacement, next));
+            Ok(RotationReceipt {
+                previous: current,
+                current: next,
+            })
+        }
+
+        fn remove(&mut self, key: &SecretKey, expected: SecretVersion) -> Result<(), SecretError> {
+            let entry_key = (key.namespace().to_owned(), key.name().to_owned());
+            let (_, current) = self.entries.get(&entry_key).ok_or(SecretError::NotFound)?;
+            if *current != expected {
+                return Err(SecretError::VersionConflict);
+            }
+            self.entries.remove(&entry_key);
+            Ok(())
+        }
+    }
 
     #[test]
     fn accepts_only_single_well_formed_buglogin_sso_callback() {
@@ -516,5 +595,29 @@ mod tests {
         let route_name = route_record_name("state-that-must-not-be-stored-as-key");
         assert_eq!(route_name.len(), 64);
         assert!(!route_name.contains("state-that-must-not-be-stored-as-key"));
+    }
+
+    #[test]
+    fn callback_routes_between_instances_and_consumes_the_shared_one_time_route() {
+        let shared_vault = Arc::new(Mutex::new(FakeVault::default()));
+        let receiver = SsoCallbackHandoff::with_shared_vault(Arc::clone(&shared_vault)).unwrap();
+        let sender = SsoCallbackHandoff::with_shared_vault(shared_vault).unwrap();
+        let state = "qa-state-with-no-device-identity";
+        let callback = format!("buglogin://sso/callback?state={state}&token=provider-token");
+        let (sent, received) = mpsc::channel();
+
+        receiver
+            .start_listener(move |url| sent.send(url).unwrap())
+            .unwrap();
+        receiver
+            .register(state, now_seconds().unwrap() + 60)
+            .unwrap();
+
+        assert!(sender.forward(&callback).unwrap());
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            callback
+        );
+        assert!(sender.load_route(state).unwrap().is_none());
     }
 }
