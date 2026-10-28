@@ -5413,41 +5413,41 @@ impl ProductionDesktopState {
             local_projection.dirty_local_generation(&profile_id, &previous)?
         };
         let proxy_refresh_required = stale_proxy_dependency || pending_proxy_assignment.is_some();
-        if preheld_stop.is_some()
-            && !browser_was_running
+        if !browser_was_running
             && dirty_local_path.is_none()
             && !proxy_refresh_required
             && rotation_recipients.is_none()
         {
-            if let Some(stopped) = preheld_stop.as_ref()
-                && stopped.was_launched
-                && let Some(lease) = stopped.lease.as_ref()
-                && let Err(error) = self
-                    .client
-                    .runtime_stopped(
-                        &profile_id,
-                        auth.actor_id(),
-                        previous.generation,
-                        &previous.root_checksum,
-                        lease,
-                        &runtime_projection_idempotency_key(&idempotency_key, "already-synced"),
-                        &correlation_id,
-                    )
+            if let Some(stopped) = preheld_stop.as_ref() {
+                if stopped.was_launched
+                    && let Some(lease) = stopped.lease.as_ref()
+                    && let Err(error) = self
+                        .client
+                        .runtime_stopped(
+                            &profile_id,
+                            auth.actor_id(),
+                            previous.generation,
+                            &previous.root_checksum,
+                            lease,
+                            &runtime_projection_idempotency_key(&idempotency_key, "already-synced"),
+                            &correlation_id,
+                        )
+                        .await
+                {
+                    crate::diagnostics::report_problem_failure(
+                        DesktopState::Production(self.clone()),
+                        "profile.runtime.stopped",
+                        error,
+                    );
+                }
+                self.profile_runtime
+                    .complete_stop_detached(profile_id.clone())
                     .await
-            {
-                crate::diagnostics::report_problem_failure(
-                    DesktopState::Production(self.clone()),
-                    "profile.runtime.stopped",
-                    error,
-                );
+                    .map_err(|mut error| {
+                        error.correlation_id = correlation_id.clone();
+                        error
+                    })?;
             }
-            self.profile_runtime
-                .complete_stop_detached(profile_id.clone())
-                .await
-                .map_err(|mut error| {
-                    error.correlation_id = correlation_id.clone();
-                    error
-                })?;
             return Ok(json!({
                 "profileId": profile_id,
                 "generation": previous.generation,
@@ -5545,12 +5545,16 @@ impl ProductionDesktopState {
             )
             .await?
         } else {
-            return Err(Problem::new(
-                "profile_not_running",
-                "Profile is not running",
-                409,
-                &correlation_id,
-            ));
+            // A recovery marker can outlive a clean profile shutdown. The
+            // manifest and local projection were verified above, so there is
+            // nothing to sync and no local process to stop.
+            return Ok(json!({
+                "profileId": profile_id,
+                "generation": previous.generation,
+                "rootChecksum": previous.root_checksum,
+                "keyRotated": false,
+                "alreadySynced": true
+            }));
         };
         self.profile_runtime
             .set_sync_attempt_active(profile_id.clone(), true)
