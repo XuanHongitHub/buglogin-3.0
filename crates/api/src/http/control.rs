@@ -9160,11 +9160,156 @@ mod tests {
         ControlAuditEntry, ControlRecordKey, ControlRecordStore, ExecuteControlCommand,
         HttpResponse, MemoryControlRecordStore, PutControlRecord,
     };
+    use buglogin_storage::remote::{ConcurrentRemoteChunkStore, RemoteChunk};
     use buglogin_sync::manifest::{
         ManifestObject, ManifestObjectReference, ManifestPayloadEncryption, ManifestTombstone,
         PayloadEncryptionAlgorithm,
     };
+    use std::sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use tower::ServiceExt;
+
+    #[derive(Clone)]
+    struct GatedRemoteChunkStore {
+        entered_put: Arc<AtomicBool>,
+        release_put: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl GatedRemoteChunkStore {
+        fn new() -> Self {
+            Self {
+                entered_put: Arc::new(AtomicBool::new(false)),
+                release_put: Arc::new((Mutex::new(false), Condvar::new())),
+            }
+        }
+
+        fn wait_until_put_enters(&self) {
+            self.entered_put.store(true, Ordering::SeqCst);
+            let (released, changed) = &*self.release_put;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+        }
+
+        fn allow_put_to_finish(&self) {
+            let (released, changed) = &*self.release_put;
+            *released.lock().unwrap() = true;
+            changed.notify_all();
+        }
+    }
+
+    impl ConcurrentRemoteChunkStore for GatedRemoteChunkStore {
+        fn readiness(&self) -> Result<(), Problem> {
+            Ok(())
+        }
+
+        fn checksum(&self, _object_key: &str) -> Result<Option<String>, Problem> {
+            Ok(None)
+        }
+
+        fn put(
+            &self,
+            _object_key: &str,
+            _bytes: &[u8],
+            _expected_checksum: &str,
+        ) -> Result<(), Problem> {
+            self.wait_until_put_enters();
+            Ok(())
+        }
+
+        fn get(&self, _object_key: &str, _expected_checksum: &str) -> Result<RemoteChunk, Problem> {
+            Err(Problem::new("not_found", "Not found", 404, "test"))
+        }
+
+        fn delete_if_checksum(
+            &self,
+            _object_key: &str,
+            _expected_checksum: &str,
+        ) -> Result<bool, Problem> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_blob_request_keeps_write_lock_until_blocking_upload_finishes() {
+        let store = std::sync::Arc::new(GatedRemoteChunkStore::new());
+        let state = ApiState::local(ProfileService::disabled())
+            .with_concurrent_remote_chunks(Box::new(store.as_ref().clone()));
+        let workspace_id = WorkspaceId::new("ws_cancelled_blob").unwrap();
+        let resource_id = ResourceId::new("res_cancelled_blob").unwrap();
+        let body = Bytes::from_static(b"cancel-safe-upload");
+        let admission = crate::http::large_transfer_body_slot(body.len() as u64)
+            .await
+            .unwrap();
+        let upload_state = state.clone();
+        let upload_workspace = workspace_id.clone();
+        let upload_resource = resource_id.clone();
+        let upload = tokio::spawn(async move {
+            upload_state
+                .put_reserved_remote_chunk_async(
+                    upload_workspace,
+                    upload_resource,
+                    "profiles/res_cancelled_blob/1/checksum/object".into(),
+                    "expected-checksum".into(),
+                    body.len() as u64,
+                    1,
+                    body,
+                    admission,
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !store.entered_put.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("blocking object-store write should start");
+
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+
+        let lock_id =
+            super::super::sync_gc_advisory_lock_id(workspace_id.as_str(), resource_id.as_str());
+        let lock_was_available_during_upload = state
+            .control_persistence
+            .try_advisory_lock(lock_id)
+            .unwrap();
+        if lock_was_available_during_upload {
+            state
+                .control_persistence
+                .release_advisory_lock(lock_id)
+                .unwrap();
+        }
+
+        store.allow_put_to_finish();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state
+                    .control_persistence
+                    .try_advisory_lock(lock_id)
+                    .unwrap()
+                {
+                    state
+                        .control_persistence
+                        .release_advisory_lock(lock_id)
+                        .unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("blocking upload must release its lock after it finishes");
+        assert!(
+            !lock_was_available_during_upload,
+            "request cancellation must not release the lock while its blocking upload is active"
+        );
+    }
 
     #[tokio::test]
     async fn organization_account_creation_membership_listing_and_suspension_are_atomic() {
