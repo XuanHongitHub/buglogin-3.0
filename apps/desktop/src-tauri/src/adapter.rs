@@ -1859,25 +1859,31 @@ impl AdapterState {
                 );
             }
         }
-        let fingerprint_cdp_port = if fingerprint_target.is_some() {
-            let port = match configure_local_cdp_args(&mut specification.args, correlation_id) {
-                Ok(port) => port,
+        let (fingerprint_cdp_port, mut fingerprint_warning) = if fingerprint_target.is_some() {
+            match configure_local_cdp_args(&mut specification.args, correlation_id).and_then(
+                |port| {
+                    clear_stale_cdp_marker(&profile_path, correlation_id)?;
+                    Ok(port)
+                },
+            ) {
+                Ok(port) => (Some(port), None),
                 Err(error) => {
-                    if let Some(bridge) = proxy_bridge.take() {
-                        let _ = bridge.stop().await;
-                    }
-                    return Err(correlate(error, correlation_id));
+                    // Fingerprint control is an optional Wayfern capability. Keep
+                    // browser access available if its local CDP setup is broken,
+                    // but remove any partially configured debug endpoint and make
+                    // the unverified identity visible to the caller.
+                    specification.args.retain(|argument| {
+                        !argument.starts_with("--remote-debugging-port=")
+                            && !argument.starts_with("--remote-debugging-address=")
+                    });
+                    (
+                        None,
+                        Some(fingerprint_unverified_warning(error, correlation_id)),
+                    )
                 }
-            };
-            if let Err(error) = clear_stale_cdp_marker(&profile_path, correlation_id) {
-                if let Some(bridge) = proxy_bridge.take() {
-                    let _ = bridge.stop().await;
-                }
-                return Err(correlate(error, correlation_id));
             }
-            Some(port)
         } else {
-            None
+            (None, None)
         };
         let runtime_version = specification.version.clone();
         let mut launching_profile = current.value;
@@ -1916,34 +1922,32 @@ impl AdapterState {
             }
         };
         if let Some(target) = fingerprint_target.as_ref() {
-            let Some(cdp_port) = fingerprint_cdp_port else {
-                if let Err(stop_error) = self.profile_runtime.stop(profile_id.clone()).await {
-                    let _ = self.persist_failed(launching, correlation_id);
-                    return Err(correlate(stop_error, correlation_id));
+            if let Some(cdp_port) = fingerprint_cdp_port {
+                match apply_wayfern_fingerprint(
+                    &profile_path,
+                    target,
+                    &runtime_version,
+                    cdp_port,
+                    correlation_id,
+                )
+                .await
+                {
+                    Ok(warning) => fingerprint_warning = warning,
+                    Err(error) => {
+                        // A provider or readback failure must not tear down an
+                        // otherwise authorized browser session. The warning is
+                        // returned through the existing fingerprint-warning UI.
+                        fingerprint_warning =
+                            Some(fingerprint_unverified_warning(error, correlation_id));
+                    }
                 }
-                self.persist_failed(launching, correlation_id)?;
-                return Err(problem(
-                    "wayfern_cdp_unavailable",
-                    "Wayfern local control port was not configured",
+            } else if fingerprint_warning.is_none() {
+                fingerprint_warning = Some(Problem::new(
+                    "wayfern_fingerprint_unverified",
+                    "Profile opened, but BugLogin could not verify its configured fingerprint",
                     503,
                     correlation_id,
                 ));
-            };
-            if let Err(error) = apply_wayfern_fingerprint(
-                &profile_path,
-                target,
-                &runtime_version,
-                cdp_port,
-                correlation_id,
-            )
-            .await
-            {
-                if let Err(stop_error) = self.profile_runtime.stop(profile_id.clone()).await {
-                    let _ = self.persist_failed(launching, correlation_id);
-                    return Err(correlate(stop_error, correlation_id));
-                }
-                self.persist_failed(launching, correlation_id)?;
-                return Err(correlate(error, correlation_id));
             }
         }
         let mut running_profile = launching.value.clone();
@@ -1965,7 +1969,8 @@ impl AdapterState {
         Ok(json!({
             "profileId": profile_id,
             "revision": updated.revision,
-            "processId": receipt.process_id
+            "processId": receipt.process_id,
+            "fingerprintWarning": fingerprint_warning
         }))
     }
 
@@ -2798,6 +2803,16 @@ fn cookie_recovery_pending(correlation_id: &str) -> Problem {
         correlation_id,
     )
     .retryable(true)
+}
+
+fn fingerprint_unverified_warning(error: Problem, correlation_id: &str) -> Problem {
+    Problem::new(
+        "wayfern_fingerprint_unverified",
+        "Profile opened, but BugLogin could not verify its configured fingerprint",
+        error.status,
+        correlation_id,
+    )
+    .with_field("causeCode", error.code)
 }
 
 #[cfg(test)]
@@ -4122,6 +4137,65 @@ mod tests {
         assert_eq!(listed.data["items"][0]["state"], "ready");
         assert_eq!(controller.launches.load(Ordering::SeqCst), 2);
         assert_eq!(controller.stops.load(Ordering::SeqCst), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wayfern_fingerprint_setup_failure_does_not_block_profile_launch() {
+        let (state, controller, root) = state("wayfern-fingerprint-optional");
+        let profile_id = create_profile(&state, "idem_wayfern_fp_create_0001").await;
+        let id = ProfileId::from_str(&profile_id).unwrap();
+        let current = state.profiles.get(&id).unwrap().unwrap();
+        let mut profile = current.value;
+        profile.runtime_config = Some(json!({
+            "schemaVersion": 1,
+            "wayfern": {
+                "fingerprintTarget": { "operatingSystem": "windows" }
+            }
+        }));
+        profile.updated_at = now("test").unwrap();
+        state.profiles.update(current.revision, profile).unwrap();
+
+        // A directory at the stale CDP marker path makes the fingerprint
+        // control setup fail before launch, while leaving the browser profile
+        // itself usable.
+        let profile_path = state
+            .runtime
+            .targets
+            .profile_path(&Runtime::Wayfern, &state.runtime.profiles_root, &id)
+            .unwrap();
+        fs::create_dir_all(profile_path.join("DevToolsActivePort")).unwrap();
+
+        let accepted = state
+            .invoke(
+                "profile_launch",
+                "cor_wayfern_fp_launch",
+                Some("idem_wayfern_fp_launch_0001"),
+                json!({ "profileId": profile_id, "headless": true }),
+            )
+            .await
+            .unwrap();
+        let operation = wait_operation(&state, &accepted.data["operationId"]).await;
+
+        assert_eq!(operation.data["status"], "completed");
+        assert_eq!(
+            operation.data["result"]["fingerprintWarning"]["code"],
+            "wayfern_fingerprint_unverified"
+        );
+        assert_eq!(controller.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.profiles.get(&id).unwrap().unwrap().value.state,
+            ProfileState::Running
+        );
+        assert!(
+            controller.specifications.lock().unwrap()[0]
+                .args
+                .iter()
+                .all(|argument| !argument.starts_with("--remote-debugging-port=")
+                    && !argument.starts_with("--remote-debugging-address="))
+        );
+
+        state.profile_runtime.stop(id).await.unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
