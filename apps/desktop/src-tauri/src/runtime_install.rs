@@ -1302,6 +1302,8 @@ mod tests {
         load_installed_targets, persist_install_record, runtime_download_request_timeout,
         runtime_download_retryable_status, runtime_operation_gate, runtime_operation_key,
     };
+    #[cfg(unix)]
+    use super::{install_record_paths, open_runtime_operation_lock_file};
     use crate::adapter::RuntimeTarget;
     use buglogin_browser::runtime::{
         RuntimeBinary,
