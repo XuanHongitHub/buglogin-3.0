@@ -481,7 +481,7 @@ export function OrganizationMembersPage({
               <div className="space-y-2">
                 <Label htmlFor="org-account-bulk">Danh sách tài khoản</Label>
                 <p className="text-xs text-muted-foreground">
-                  Mỗi dòng: username,email,mật_khẩu_ban_đầu (12–256 ký tự), tối
+                  Mỗi dòng: username,email,mật_khẩu_ban_đầu (4–256 ký tự), tối
                   đa 100 dòng.
                 </p>
                 <Textarea
@@ -493,7 +493,7 @@ export function OrganizationMembersPage({
                   onChange={(event) => setBulkText(event.target.value)}
                   disabled={isCreating}
                   placeholder={
-                    "username,email,initial-password\nnguyenan,an@example.com,at-least-12-chars"
+                    "username,email,initial-password\nnguyenan,an@example.com,1234"
                   }
                 />
                 <p className="text-xs text-muted-foreground">
