@@ -17,3 +17,10 @@ Verification update — 2026-10-27:
 - `cargo test --locked -p buglogin-browser --test independent_chromium --test runtime_contract` passes (8 independent Chromium identity tests and 2 Wayfern contract regression tests). These tests do not replace the adapter plan's native browser smoke.
 - Stop/sync lifecycle publishes `syncing` immediately after the stopped browser's lease and current manifest are confirmed, before key/proxy preflight. Idle-profile sync still publishes after acquiring its lease; already-synced cleanup retains `stopped`.
 - Desktop typecheck and Vite build pass; build emits existing source-map, `use client`, mixed-import and large-chunk warnings.
+
+Lease recovery regression fix — 2026-10-28:
+
+- The profile runtime previously detected an exited browser only when the UI requested `active_profiles`. If the UI was hidden and stopped polling, the heartbeat kept renewing the lease as though the browser were still running. That exit path also omitted `sync_started_at`, so its five-minute stopped-sync hold limit could never expire.
+- The heartbeat now reconciles process exits itself, records the stopped-sync start time, stops the proxy bridge, and lets the existing bounded hold release the lease while preserving retry intent and local files.
+- A stopped/pending-sync entry with a missing start time is treated as expired instead of renewing indefinitely.
+- Windows regression test `heartbeat_detects_closed_browser_and_bounds_its_sync_lease` passes. It closes the managed process without a UI poll, verifies the heartbeat detects it, then verifies the lease is released after the hold deadline.

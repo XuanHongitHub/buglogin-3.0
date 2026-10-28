@@ -503,27 +503,7 @@ where
                     let _ = reply.send(profiles);
                 }
                 Some(RuntimeCommand::ActiveProfiles { reply }) => {
-                    let exited = runtime.lifecycle.reconcile();
-                    let mut bridges_to_stop = Vec::new();
-                    for (path, state) in exited {
-                        if state == buglogin_browser::lifecycle::LifecycleState::Ready {
-                            if let Some((profile_id, running)) = runtime
-                                .running
-                                .iter_mut()
-                                .find(|(_, running)| running.profile_path == path)
-                            {
-                                running.process_stopped = true;
-                                running.sync_pending = true;
-                                runtime.unexpectedly_stopped.insert(profile_id.clone());
-                                if let Some(bridge) = running.proxy_bridge.take() {
-                                    bridges_to_stop.push(bridge);
-                                }
-                            }
-                        }
-                    }
-                    for bridge in bridges_to_stop {
-                        let _ = bridge.stop().await;
-                    }
+                    runtime.reconcile_exited_processes().await;
                     let candidates = runtime
                         .running
                         .iter()
@@ -581,6 +561,31 @@ where
 }
 
 impl<C: ProcessController> ProfileRuntime<C> {
+    async fn reconcile_exited_processes(&mut self) {
+        let exited = self.lifecycle.reconcile();
+        let mut bridges_to_stop = Vec::new();
+        for (path, state) in exited {
+            if state == buglogin_browser::lifecycle::LifecycleState::Ready
+                && let Some((profile_id, running)) = self
+                    .running
+                    .iter_mut()
+                    .find(|(_, running)| running.profile_path == path)
+            {
+                // A browser can exit without the Stop button or a foreground
+                // status poll. Start the bounded sync hold here so heartbeat
+                // renewal cannot keep an orphaned team lease alive forever.
+                mark_process_stopped_for_sync(running);
+                self.unexpectedly_stopped.insert(profile_id.clone());
+                if let Some(bridge) = running.proxy_bridge.take() {
+                    bridges_to_stop.push(bridge);
+                }
+            }
+        }
+        for bridge in bridges_to_stop {
+            let _ = bridge.stop().await;
+        }
+    }
+
     fn heartbeat_interval(&self) -> Duration {
         self.coordination
             .as_ref()
@@ -860,6 +865,10 @@ impl<C: ProcessController> ProfileRuntime<C> {
     }
 
     async fn renew(&mut self) {
+        // Process exit detection must run from the heartbeat itself. Previously
+        // it depended on the UI asking for `active_profiles`; a minimized app
+        // could keep renewing a dead browser's lease indefinitely.
+        self.reconcile_exited_processes().await;
         let Some(coordination) = self.coordination.clone() else {
             return;
         };
@@ -990,9 +999,15 @@ impl<C: ProcessController> ProfileRuntime<C> {
     }
 }
 
+fn mark_process_stopped_for_sync(running: &mut RunningProfile) {
+    running.process_stopped = true;
+    running.sync_pending = true;
+    running.sync_started_at.get_or_insert_with(Instant::now);
+}
+
 fn sync_hold_expired(started_at: Option<Instant>, now: Instant) -> bool {
     started_at
-        .is_some_and(|started_at| now.saturating_duration_since(started_at) >= MAX_STOP_SYNC_HOLD)
+        .is_none_or(|started_at| now.saturating_duration_since(started_at) >= MAX_STOP_SYNC_HOLD)
 }
 
 fn lease_ownership_lost(error: &Problem) -> bool {
@@ -1190,7 +1205,7 @@ mod tests {
             Some(started_at),
             started_at + MAX_STOP_SYNC_HOLD
         ));
-        assert!(!sync_hold_expired(None, started_at + MAX_STOP_SYNC_HOLD));
+        assert!(sync_hold_expired(None, started_at));
     }
 
     #[derive(Clone, Default)]
@@ -1763,6 +1778,38 @@ mod tests {
         runtime.renew().await;
 
         assert!(!runtime.running.contains_key(&profile_id));
+        assert!(runtime.unexpectedly_stopped.contains(&profile_id));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn heartbeat_detects_closed_browser_and_bounds_its_sync_lease() {
+        let path = profile_path("heartbeat-reconciles-exit");
+        let controller = TestController::default();
+        let backend = Arc::new(TestCoordination::new(controller.log.clone()));
+        let mut runtime = runtime(controller.clone(), managed_coordination(backend));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        runtime.launch(request(&path, true)).await.unwrap();
+        controller.process_exited.store(true, Ordering::SeqCst);
+
+        // No UI status poll or Stop button is needed to detect process exit.
+        runtime.renew().await;
+
+        let stopped = runtime.running.get(&profile_id).unwrap();
+        assert!(stopped.process_stopped);
+        assert!(stopped.sync_pending);
+        assert!(stopped.sync_started_at.is_some());
+        assert!(runtime.unexpectedly_stopped.contains(&profile_id));
+
+        runtime
+            .running
+            .get_mut(&profile_id)
+            .unwrap()
+            .sync_started_at = Some(Instant::now() - MAX_STOP_SYNC_HOLD);
+        runtime.renew().await;
+
+        assert!(!runtime.running.contains_key(&profile_id));
+        assert!(controller.log.lock().unwrap().contains(&"release"));
         assert!(runtime.unexpectedly_stopped.contains(&profile_id));
         fs::remove_dir_all(path).unwrap();
     }

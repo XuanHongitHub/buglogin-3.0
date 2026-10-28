@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           keychain_path="$RUNNER_TEMP/buglogin-cookie-tests.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
-          original_keychain="$(security default-keychain -d user | tr -d '\"')"
+          original_keychain="$(security default-keychain -d user | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//')"
           echo "::add-mask::$keychain_password"
           security create-keychain -p "$keychain_password" "$keychain_path"
           security set-keychain-settings -lut 3600 "$keychain_path"

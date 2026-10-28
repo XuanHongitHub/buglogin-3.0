@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::Path,
 };
 
@@ -54,17 +54,49 @@ pub fn write_verified(
             "storage",
         )
     })?;
-    fs::create_dir_all(parent)
-        .map_err(|_| Problem::new("blob_write_failed", "Blob write failed", 500, "storage"))?;
-    let temp = target.with_extension("tmp");
-    let mut file = fs::File::create(&temp)
-        .map_err(|_| Problem::new("blob_write_failed", "Blob write failed", 500, "storage"))?;
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| Problem::new("blob_write_failed", "Blob write failed", 500, "storage"))?;
-    fs::rename(&temp, &target)
-        .map_err(|_| Problem::new("blob_write_failed", "Blob write failed", 500, "storage"))?;
+    fs::create_dir_all(parent).map_err(blob_write_problem)?;
+    // Profiles can be opened from more than one desktop process. A fixed
+    // `<blob>.tmp` path lets concurrent hydrations truncate or rename each
+    // other's staging file, which surfaced as a misleading `Blob write failed`.
+    // NamedTempFile gives each writer a unique same-volume staging file and
+    // persist atomically replaces an older cache entry on Windows and Unix.
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(blob_write_problem)?;
+    staged
+        .write_all(bytes)
+        .and_then(|_| staged.as_file().sync_all())
+        .map_err(blob_write_problem)?;
+    match staged.persist(&target) {
+        Ok(_) => {}
+        Err(error) => {
+            // On Windows, two writers can race to replace the same cache path;
+            // the losing rename may receive a sharing violation even though
+            // the winner has already published the exact verified bytes.
+            // Treat that as success only after checking the published checksum.
+            if fs::read(&target).is_ok_and(|published| checksum(&published) == expected) {
+                return Ok(());
+            }
+            return Err(blob_write_problem(error.error));
+        }
+    }
     Ok(())
+}
+
+fn blob_write_problem(error: io::Error) -> Problem {
+    match error.kind() {
+        io::ErrorKind::StorageFull => Problem::new(
+            "device_storage_full",
+            "Device storage is full",
+            507,
+            "storage",
+        ),
+        io::ErrorKind::PermissionDenied => Problem::new(
+            "blob_storage_not_writable",
+            "Profile storage is not writable",
+            500,
+            "storage",
+        ),
+        _ => Problem::new("blob_write_failed", "Blob write failed", 500, "storage"),
+    }
 }
 
 pub fn read_verified(root: &Path, relative: &Path, expected: &str) -> Result<Vec<u8>, Problem> {
