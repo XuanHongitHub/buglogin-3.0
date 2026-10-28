@@ -1166,6 +1166,7 @@ impl ApiState {
         .map_err(|_| remote_chunk_worker_failed())?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn reserve_sync_blob_upload_async(
         &self,
         workspace_id: WorkspaceId,
@@ -1207,6 +1208,7 @@ impl ApiState {
         .map_err(|_| remote_chunk_worker_failed())?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn put_reserved_remote_chunk_async(
         &self,
         workspace_id: WorkspaceId,
