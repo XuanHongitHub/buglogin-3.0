@@ -440,6 +440,13 @@ impl SessionPersistence {
             return Err(corrupt());
         }
         let head_revision = current_head.as_ref().map_or(0, |(_, revision)| *revision);
+        let mut current_device_revocations = session
+            .created_at
+            .map(|now| {
+                self.device_session_revocation_puts(&session.account_id, &refresh.device_id, now)
+            })
+            .transpose()?
+            .unwrap_or_default();
         let account_put = account_revision
             .map(|revision| self.account_revision_put(&session.account_id, revision))
             .transpose()?;
@@ -504,6 +511,7 @@ impl SessionPersistence {
             puts.push(account_put);
         }
         puts.append(&mut additional_puts);
+        puts.append(&mut current_device_revocations);
         let result = self.store.execute(ExecuteControlCommand {
             tenant_id: TENANT.into(),
             command_id: "session.device.issue".into(),
@@ -542,22 +550,11 @@ impl SessionPersistence {
                     }
                 }
                 if attempt < 2 {
-                    let retry_puts = session
-                        .created_at
-                        .map(|now| {
-                            self.device_session_revocation_puts(
-                                &session.account_id,
-                                &refresh.device_id,
-                                now,
-                            )
-                        })
-                        .transpose()?
-                        .unwrap_or_default();
                     return self.create_device_session_with_revision_retry(
                         session,
                         refresh,
                         account_revision,
-                        retry_puts,
+                        Vec::new(),
                         deletes,
                         attempt + 1,
                     );
@@ -1453,6 +1450,9 @@ mod tests {
 
         let (first_session, first_refresh) = make_pair("device-head-first", 100);
         let first_family = first_session.family_id.clone().unwrap();
+        let stale_revocations = persistence
+            .device_session_revocation_puts(&account_id, device_id, 200)
+            .unwrap();
         persistence
             .create_device_session_with_account_revision_and_mutations(
                 &first_session,
@@ -1465,15 +1465,12 @@ mod tests {
 
         let (next_session, next_refresh) = make_pair("device-head-next", 200);
         let next_family = next_session.family_id.clone().unwrap();
-        let revocations = persistence
-            .device_session_revocation_puts(&account_id, device_id, 200)
-            .unwrap();
         persistence
             .create_device_session_with_account_revision_and_mutations(
                 &next_session,
                 &next_refresh,
                 None,
-                revocations,
+                stale_revocations,
                 Vec::new(),
             )
             .unwrap();
@@ -1531,17 +1528,14 @@ mod tests {
                     credential_version: None,
                     refresh_replay: None,
                 };
-                let prior_device_sessions = persistence
-                    .device_session_revocation_puts(&account_id, device_id, issued_at)
-                    .unwrap();
-                (issued.record.clone(), refresh, prior_device_sessions)
+                (issued.record.clone(), refresh)
             })
             .collect();
 
         std::thread::scope(|scope| {
             let handles: Vec<_> = pairs
                 .into_iter()
-                .map(|(session, refresh, prior_device_sessions)| {
+                .map(|(session, refresh)| {
                     let persistence = Arc::clone(&persistence);
                     let start = Arc::clone(&start);
                     scope.spawn(move || {
@@ -1550,7 +1544,7 @@ mod tests {
                             &session,
                             &refresh,
                             None,
-                            prior_device_sessions,
+                            Vec::new(),
                             Vec::new(),
                         )
                     })

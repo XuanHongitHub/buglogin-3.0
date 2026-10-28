@@ -360,21 +360,11 @@ impl AuthService {
         };
         let revision = match &self.persistence {
             Some(persistence) => {
-                let prior_device_sessions = issued_at
-                    .map(|now| {
-                        persistence.device_session_revocation_puts(
-                            &record.account_id,
-                            &device_id,
-                            now,
-                        )
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
                 persistence.create_device_session_with_account_revision_and_mutations(
                     record,
                     &refresh_record,
                     account_revision,
-                    prior_device_sessions,
+                    Vec::new(),
                     deletes,
                 )?;
                 1
