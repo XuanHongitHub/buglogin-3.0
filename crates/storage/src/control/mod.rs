@@ -1202,19 +1202,24 @@ impl ControlRecordStore for PostgresControlRecordWorker {
     }
 
     fn release_advisory_lock(&mut self, lock_id: i64) -> Result<(), Problem> {
-        let lock_client = self
+        let result = self
             .advisory_locks
             .get_mut(&lock_id)
-            .ok_or_else(unavailable)?;
-        let released: bool = lock_client
+            .ok_or_else(unavailable)?
             .query_one("SELECT pg_advisory_unlock($1)", &[&lock_id])
-            .map(|row| row.get(0))
-            .map_err(|_| unavailable())?;
-        if released {
-            self.advisory_locks.remove(&lock_id);
-            Ok(())
-        } else {
-            Err(unavailable())
+            .map(|row| row.get::<_, bool>(0));
+        match result {
+            Ok(true) => {
+                self.advisory_locks.remove(&lock_id);
+                Ok(())
+            }
+            Ok(false) | Err(_) => {
+                // The connection's lock state is now uncertain. Drop this
+                // dedicated session so PostgreSQL releases any remaining
+                // session lock, and don't retain a dead client in the worker.
+                self.advisory_locks.remove(&lock_id);
+                Err(unavailable())
+            }
         }
     }
 
@@ -1234,23 +1239,35 @@ impl ControlRecordStore for PostgresControlRecordWorker {
     }
 
     fn release_shared_advisory_lock(&mut self, lock_id: i64) -> Result<(), Problem> {
-        let clients = self
+        let result = self
             .shared_advisory_locks
             .get_mut(&lock_id)
-            .ok_or_else(unavailable)?;
-        let lock_client = clients.last_mut().ok_or_else(unavailable)?;
-        let released: bool = lock_client
+            .and_then(|clients| clients.last_mut())
+            .ok_or_else(unavailable)?
             .query_one("SELECT pg_advisory_unlock_shared($1)", &[&lock_id])
-            .map(|row| row.get(0))
-            .map_err(|_| unavailable())?;
-        if !released {
-            return Err(unavailable());
+            .map(|row| row.get::<_, bool>(0));
+        match result {
+            Ok(true) => {
+                discard_latest_shared_lock_client(&mut self.shared_advisory_locks, lock_id);
+                Ok(())
+            }
+            Ok(false) | Err(_) => {
+                // A failed/ambiguous unlock must not leave a possibly broken
+                // session cached. Dropping its dedicated connection makes
+                // PostgreSQL release any lock still owned by that session.
+                discard_latest_shared_lock_client(&mut self.shared_advisory_locks, lock_id);
+                Err(unavailable())
+            }
         }
+    }
+}
+
+fn discard_latest_shared_lock_client<T>(locks: &mut BTreeMap<i64, Vec<T>>, lock_id: i64) {
+    if let Some(clients) = locks.get_mut(&lock_id) {
         clients.pop();
         if clients.is_empty() {
-            self.shared_advisory_locks.remove(&lock_id);
+            locks.remove(&lock_id);
         }
-        Ok(())
     }
 }
 
@@ -1861,6 +1878,18 @@ mod tests {
         assert_eq!(error.code, "control_storage_overloaded");
         assert_eq!(error.status, 503);
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn dropping_uncertain_shared_lock_client_preserves_other_lock_owners() {
+        let mut locks = BTreeMap::from([(7, vec!["first", "uncertain"]), (9, vec!["other"])]);
+
+        discard_latest_shared_lock_client(&mut locks, 7);
+
+        assert_eq!(locks.get(&7), Some(&vec!["first"]));
+        assert_eq!(locks.get(&9), Some(&vec!["other"]));
+        discard_latest_shared_lock_client(&mut locks, 7);
+        assert!(!locks.contains_key(&7));
     }
 
     fn command(key: &str, allowed: bool) -> ExecuteControlCommand {
