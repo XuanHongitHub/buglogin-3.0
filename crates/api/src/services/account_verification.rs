@@ -752,7 +752,7 @@ mod tests {
         let delivery = verification.issue(&account_id, &actor, 100).unwrap();
         assert_eq!(
             verification
-                .complete(&delivery.token, "short", 101, "2026-10-23T00:01:41Z")
+                .complete(&delivery.token, "abc", 101, "2026-10-23T00:01:41Z")
                 .unwrap_err()
                 .code,
             "invalid_password"

@@ -10519,7 +10519,7 @@ mod tests {
                             "username": "scoped-invalid-password",
                             "email": "scoped-invalid-password@example.com",
                             "role": "member",
-                            "initialPassword": "too-short",
+                            "initialPassword": "abc",
                         }))
                         .unwrap(),
                     ))
