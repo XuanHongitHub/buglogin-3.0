@@ -136,6 +136,7 @@ fn every_registered_command_has_canonical_action() {
         ("organization.members.list", Action::Read),
         ("organization.account.create", Action::Create),
         ("organization.member.status.update", Action::Manage),
+        ("organization.member.remove", Action::Manage),
         ("organization.member.workspace.assign", Action::Create),
         ("organization.delete", Action::Delete),
         ("organization.owner.transfer", Action::Manage),
@@ -245,6 +246,12 @@ fn control_commands_are_schema_bound_and_mcp_discoverable() {
             "CAP-ORG-001",
             "OrganizationMemberStatusUpdateInput",
             "OrganizationMember",
+        ),
+        (
+            "organization.member.remove",
+            "CAP-ORG-001",
+            "OrganizationMemberRemoveInput",
+            "OrganizationMemberRemoveReceipt",
         ),
         (
             "organization.member.workspace.assign",
