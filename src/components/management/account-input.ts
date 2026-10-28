@@ -88,7 +88,7 @@ export function validateAccountRows(
       (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     )
       errors.push("email");
-    if (row.initialPassword.length < 12 || row.initialPassword.length > 256)
+    if (row.initialPassword.length < 4 || row.initialPassword.length > 256)
       errors.push("password");
     if ((usernameCounts.get(username.toLowerCase()) ?? 0) > 1)
       errors.push("duplicateUsername");

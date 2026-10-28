@@ -341,11 +341,9 @@ fn create_or_link_identity(
     } else {
         None
     };
-    // BugLab attests the canonical email. The legacy username is only a
-    // compatibility hint and may still point at an older account after an
-    // account rename/recovery; it must not override an exact email match.
-    // If there is no email match, the legacy mapping remains the fallback.
-    let existing = prefer_buglab_attested_email_identity(by_email, by_legacy);
+    // BugLab attests the canonical email. The legacy username may be stale or
+    // reused; only link it when the attested email independently confirms it.
+    let existing = prefer_buglab_attested_email_identity(by_email, by_legacy, email);
     let account_id = if let Some(identity) = existing {
         if identity.canonical_email != email {
             return Err(ambiguous_identity());
@@ -437,8 +435,9 @@ fn create_or_link_identity(
 fn prefer_buglab_attested_email_identity(
     by_email: Option<AccountIdentity>,
     by_legacy: Option<AccountIdentity>,
+    attested_email: &str,
 ) -> Option<AccountIdentity> {
-    by_email.or(by_legacy)
+    by_email.or_else(|| by_legacy.filter(|identity| identity.canonical_email == attested_email))
 }
 
 fn provision_buglab_identity_in_default_workspace(
@@ -858,12 +857,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            prefer_buglab_attested_email_identity(Some(by_email), Some(by_legacy))
-                .unwrap()
-                .account_id
-                .as_str(),
+            prefer_buglab_attested_email_identity(
+                Some(by_email),
+                Some(by_legacy),
+                "person@example.test",
+            )
+            .unwrap()
+            .account_id
+            .as_str(),
             "acct_email_match"
         );
+    }
+
+    #[test]
+    fn stale_legacy_username_with_different_email_does_not_block_buglab_provisioning() {
+        let stale_legacy = buglogin_domain::account::AccountIdentity::new(
+            AccountId::new("acct_stale_legacy").unwrap(),
+            "old_user",
+            "old@example.test",
+            "2026-10-28T00:00:00Z",
+        )
+        .unwrap();
+
+        assert!(prefer_buglab_attested_email_identity(
+            None,
+            Some(stale_legacy),
+            "current@example.test",
+        )
+        .is_none());
     }
 
     #[test]

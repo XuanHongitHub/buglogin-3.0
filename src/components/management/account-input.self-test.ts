@@ -12,6 +12,14 @@ assert.equal(imported.length, 2);
 assert.equal(imported[0].displayName, "Shop, US");
 assert.equal(imported[1].initialPassword, 'password,"quoted"123');
 assert.deepEqual(validateAccountRows(imported), [[], []]);
+assert.deepEqual(
+  validateAccountRows([{ ...imported[0], initialPassword: "abcd" }]),
+  [[]],
+);
+assert.deepEqual(
+  validateAccountRows([{ ...imported[0], initialPassword: "abc" }]),
+  [["password"]],
+);
 assert.equal(
   parseAccountTable(
     'username\tdisplayName\temail\tinitialPassword\nuser-1\t"Name\nTwo"\t\tlong-password123',

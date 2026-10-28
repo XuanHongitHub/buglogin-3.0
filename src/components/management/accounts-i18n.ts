@@ -41,9 +41,9 @@ const vi = {
   adminResetPasswordHint: "Đặt mật khẩu mới cho tài khoản {{account}}.",
   adminPasswordResetImpact:
     "Các phiên đăng nhập và API token hiện tại của tài khoản sẽ bị thu hồi.",
-  adminPasswordLength: "Mật khẩu phải có từ 12 đến 256 ký tự.",
+  adminPasswordLength: "Mật khẩu phải có từ 4 đến 256 ký tự.",
   adminPasswordResetDone: "Đã đổi mật khẩu và đăng xuất các phiên cũ.",
-  passwordHint: "12–256 ký tự. Mỗi tài khoản có mật khẩu riêng.",
+  passwordHint: "4–256 ký tự. Mỗi tài khoản có mật khẩu riêng.",
   optional: "Tùy chọn",
   show: "Hiện mật khẩu",
   hide: "Ẩn mật khẩu",
@@ -152,7 +152,7 @@ const vi = {
   nothingSelected: "Chọn ít nhất một dòng.",
   issue_username: "Username cần 3–64 ký tự, không có khoảng trắng hoặc @.",
   issue_email: "Email không hợp lệ.",
-  issue_password: "Mật khẩu cần 12–256 ký tự.",
+  issue_password: "Mật khẩu cần 4–256 ký tự.",
   issue_duplicateUsername: "Username trùng trong bảng.",
   issue_duplicateEmail: "Email trùng trong bảng.",
   validationHint:
@@ -303,10 +303,10 @@ const en: Record<keyof typeof vi, string> = {
   adminResetPasswordHint: "Set a new password for {{account}}.",
   adminPasswordResetImpact:
     "The account's active sign-in sessions and API tokens will be revoked.",
-  adminPasswordLength: "Password must be 12–256 characters.",
+  adminPasswordLength: "Password must be 4–256 characters.",
   adminPasswordResetDone:
     "Password changed; previous sessions were signed out.",
-  passwordHint: "12–256 characters. A separate password for each account.",
+  passwordHint: "4–256 characters. A separate password for each account.",
   optional: "Optional",
   show: "Show passwords",
   hide: "Hide passwords",
@@ -416,7 +416,7 @@ const en: Record<keyof typeof vi, string> = {
   nothingSelected: "Select at least one row.",
   issue_username: "Username must have 3–64 characters with no whitespace or @.",
   issue_email: "Invalid email.",
-  issue_password: "Password must have 12–256 characters.",
+  issue_password: "Password must have 4–256 characters.",
   issue_duplicateUsername: "Duplicate username within this table.",
   issue_duplicateEmail: "Duplicate email within this table.",
   validationHint:

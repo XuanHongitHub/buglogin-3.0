@@ -1773,7 +1773,7 @@ export function AccountDirectory({
   }
   async function resetAccountPassword() {
     if (!passwordTarget || !viewer?.platformAdmin) return;
-    if (resetPassword.length < 12 || resetPassword.length > 256) {
+    if (resetPassword.length < 4 || resetPassword.length > 256) {
       setResetPasswordError(t("adminPasswordLength"));
       return;
     }
