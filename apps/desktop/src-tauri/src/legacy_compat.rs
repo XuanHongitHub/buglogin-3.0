@@ -19,6 +19,14 @@ use crate::profile_lifecycle::canonical_dir_name;
 use crate::profile_password::{self, PasswordCheck};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const DESKTOP_OPERATION_WAIT_LIMIT: Duration = Duration::from_secs(30 * 60);
+const DESKTOP_OPERATION_POLL_INITIAL: Duration = Duration::from_millis(250);
+const DESKTOP_OPERATION_POLL_STEP: Duration = Duration::from_millis(250);
+const DESKTOP_OPERATION_POLL_MAX: Duration = Duration::from_secs(1);
+
+fn next_operation_poll_interval(current: Duration) -> Duration {
+    (current + DESKTOP_OPERATION_POLL_STEP).min(DESKTOP_OPERATION_POLL_MAX)
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LegacyParsedProxy {
@@ -1926,23 +1934,66 @@ async fn run_operation_result(
         .get("operationId")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_response(&correlation_id))?;
+    let started_at = tokio::time::Instant::now();
+    let deadline = started_at + DESKTOP_OPERATION_WAIT_LIMIT;
+    let mut poll_interval = DESKTOP_OPERATION_POLL_INITIAL;
+    let mut poll_count = 0_u32;
 
-    // Large profiles can take minutes to hydrate or upload; launch/stop are
-    // serialized per profile, so waiting longer never starts a parallel run.
-    for _ in 0..6_000 {
-        let operation = state
-            .invoke(
+    // Large profiles can take minutes to hydrate or upload. Poll with a
+    // bounded cadence so concurrent launches do not create a 10-request/sec
+    // status storm, and cap the whole wait so a slow status endpoint cannot
+    // leave the desktop command pending indefinitely.
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tauri_plugin_log::log::warn!(
+                "Desktop operation wait timed out: command={} duration_ms={} polls={}",
+                command,
+                started_at.elapsed().as_millis(),
+                poll_count
+            );
+            return Err(operation_wait_timeout(&correlation_id));
+        }
+        let operation_result = tokio::time::timeout(
+            remaining,
+            state.invoke(
                 "operation_get",
                 &correlation_id,
                 None,
                 json!({ "operationId": operation_id }),
-            )
-            .await?;
+            ),
+        )
+        .await;
+        let operation = match operation_result {
+            Ok(result) => result?,
+            Err(_) => {
+                tauri_plugin_log::log::warn!(
+                    "Desktop operation wait timed out: command={} duration_ms={} polls={}",
+                    command,
+                    started_at.elapsed().as_millis(),
+                    poll_count
+                );
+                return Err(operation_wait_timeout(&correlation_id));
+            }
+        };
+        poll_count = poll_count.saturating_add(1);
         match operation.data.get("status").and_then(Value::as_str) {
             Some("completed") => {
+                tauri_plugin_log::log::info!(
+                    "Desktop operation finished: command={} result=success duration_ms={} polls={}",
+                    command,
+                    started_at.elapsed().as_millis(),
+                    poll_count
+                );
                 return Ok(operation.data.get("result").cloned().unwrap_or(Value::Null));
             }
             Some("failed" | "cancelled") => {
+                tauri_plugin_log::log::warn!(
+                    "Desktop operation finished: command={} result=failed duration_ms={} polls={}",
+                    command,
+                    started_at.elapsed().as_millis(),
+                    poll_count
+                );
                 if let Some(error) = operation.data.get("error") {
                     if let Ok(problem) = serde_json::from_value::<Problem>(error.clone()) {
                         return Err(problem);
@@ -1955,17 +2006,22 @@ async fn run_operation_result(
                     correlation_id,
                 ));
             }
-            _ => sleep(Duration::from_millis(100)).await,
+            _ => {
+                sleep(poll_interval.min(remaining)).await;
+                poll_interval = next_operation_poll_interval(poll_interval);
+            }
         }
     }
+}
 
-    Err(Problem::new(
+fn operation_wait_timeout(correlation_id: &str) -> Problem {
+    Problem::new(
         "desktop_operation_timeout",
         "Desktop operation timed out",
         504,
         correlation_id,
     )
-    .retryable(true))
+    .retryable(true)
 }
 
 pub(crate) fn load_local_profile_settings(profile_id: &str) -> Option<Value> {
@@ -2468,6 +2524,8 @@ pub async fn remove_profile_password(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         LegacyProxyExport, choose_workspace_selection, count_profiles_for_workspace,
         legacy_profile, normalize_runtime, parse_txt_proxies, profile_argument,
@@ -2476,6 +2534,23 @@ mod tests {
     use crate::desktop_state::DesktopState;
     use buglogin_domain::errors::Problem;
     use serde_json::json;
+
+    #[test]
+    fn operation_poll_interval_backs_off_and_stays_bounded() {
+        assert_eq!(super::DESKTOP_OPERATION_POLL_INITIAL.as_millis(), 250);
+        assert_eq!(
+            super::next_operation_poll_interval(super::DESKTOP_OPERATION_POLL_INITIAL).as_millis(),
+            500
+        );
+        assert_eq!(
+            super::next_operation_poll_interval(Duration::from_millis(750)).as_millis(),
+            1_000
+        );
+        assert_eq!(
+            super::next_operation_poll_interval(Duration::from_secs(1)).as_millis(),
+            1_000
+        );
+    }
 
     #[test]
     fn canonical_profile_maps_to_donut_shape_without_fake_process_id() {
