@@ -48,13 +48,13 @@ const MAX_ENCRYPTED_OBJECT_BYTES: usize = MAX_PROFILE_SYNC_OBJECT_BYTES as usize
 const MAX_PROFILE_PLAINTEXT_BYTES: u64 =
     MAX_PROFILE_SYNC_OBJECT_BYTES - AUTHENTICATED_CHUNK_OVERHEAD_BYTES as u64;
 const MAX_IN_MEMORY_SNAPSHOT_FILE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_CONCURRENT_PROFILE_CHUNK_DOWNLOADS: usize = 4;
-static PROFILE_CHUNK_DOWNLOAD_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+const MAX_CONCURRENT_PROFILE_DOWNLOADS: usize = 4;
+static PROFILE_DOWNLOAD_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
-fn profile_chunk_download_slots() -> Arc<Semaphore> {
+fn profile_download_slots() -> Arc<Semaphore> {
     Arc::clone(
-        PROFILE_CHUNK_DOWNLOAD_SLOTS
-            .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_PROFILE_CHUNK_DOWNLOADS))),
+        PROFILE_DOWNLOAD_SLOTS
+            .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_PROFILE_DOWNLOADS))),
     )
 }
 
@@ -860,8 +860,6 @@ impl ProfileProjection {
                 "A recovery marker references incomplete local profile data; preserve it for recovery",
             ));
         }
-        let mut files = Vec::new();
-        collect_file_paths(&generation_path, &generation_path, &mut files)?;
         Ok(Some(ProjectionReceipt {
             profile_id: profile_id.clone(),
             generation: if committed_target {
@@ -893,7 +891,7 @@ impl ProfileProjection {
         match fs::remove_file(marker_path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(unavailable()),
+            Err(error) => Err(projection_marker_io_problem(error)),
         }
     }
 
@@ -1111,7 +1109,7 @@ impl ProfileProjection {
             .commit_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.advance_committed_generation_fence_locked(profile_id)?;
+        self.advance_committed_generation_fence_locked(profile_id, None)?;
         self.clear_active_session_locked(profile_id)
     }
 
@@ -1162,13 +1160,21 @@ impl ProfileProjection {
                 409,
             ));
         }
-        self.advance_committed_generation_fence_locked(profile_id)?;
+        self.advance_committed_generation_fence_locked(
+            profile_id,
+            Some((
+                session_epoch,
+                marker.generation,
+                marker.root_checksum.as_str(),
+            )),
+        )?;
         self.clear_active_session_locked(profile_id)
     }
 
     fn advance_committed_generation_fence_locked(
         &self,
         profile_id: &ProfileId,
+        active_session: Option<(&str, u64, &str)>,
     ) -> Result<(), Problem> {
         let marker_path = confined_path(
             &self.root,
@@ -1193,6 +1199,23 @@ impl ProfileProjection {
             return Err(problem(
                 "profile_sync_commit_marker_invalid",
                 "The local sync commit record has invalid identity; local profile data was preserved",
+            ));
+        }
+        if marker.session_epoch.as_deref() != active_session.map(|(epoch, _, _)| epoch) {
+            return Err(projection_state_problem(
+                "profile_sync_commit_stale",
+                "A different profile session owns the pending sync commit; preserve local profile data",
+                409,
+            ));
+        }
+        if active_session.is_some_and(|(_, generation, root_checksum)| {
+            (marker.base_generation, marker.base_root_checksum.as_str())
+                != (generation, root_checksum)
+        }) {
+            return Err(projection_state_problem(
+                "profile_sync_commit_stale",
+                "The pending sync commit does not match this profile session base; preserve local profile data",
+                409,
             ));
         }
         self.advance_session_hydration_fence(
@@ -1591,26 +1614,6 @@ impl ProfileProjection {
         }
         let clear_metadata = proxy_metadata_keys(manifest);
         let proxy_envelopes = proxy_credential_keys(manifest);
-        for object in remote_descriptor
-            .objects
-            .iter()
-            .filter(|object| clear_metadata.contains(&object.path))
-        {
-            let (bytes, _transfer_memory_permit) = download_verified_manifest_object(
-                client,
-                &manifest.workspace_id,
-                auth,
-                &manifest.resource_id,
-                manifest.generation,
-                &object.path,
-                object.size,
-                &object.checksum,
-                correlation_id,
-                repair_stale_proxy,
-            )
-            .await?;
-            download_metrics.record(bytes.len());
-        }
         let envelope_object = remote_descriptor
             .objects
             .iter()
@@ -1623,23 +1626,23 @@ impl ProfileProjection {
             })?;
         let cached_envelope = if !repair_stale_proxy {
             if let Some(client_key) = client_key {
-            let cache_scope = checksum(
-                format!(
-                    "{}/{}/{}",
-                    manifest.workspace_id.as_str(),
-                    manifest.resource_id.as_str(),
-                    checksum(client_key.as_bytes())
+                let cache_scope = checksum(
+                    format!(
+                        "{}/{}/{}",
+                        manifest.workspace_id.as_str(),
+                        manifest.resource_id.as_str(),
+                        checksum(client_key.as_bytes())
+                    )
+                    .as_bytes(),
+                );
+                read_cached_manifest_object(
+                    &self.root,
+                    &cache_scope,
+                    &encryption.resource_key_envelope,
+                    Some("resource-key-envelope.json"),
+                    correlation_id,
                 )
-                .as_bytes(),
-            );
-            read_cached_manifest_object(
-                &self.root,
-                &cache_scope,
-                &encryption.resource_key_envelope,
-                Some("resource-key-envelope.json"),
-                correlation_id,
-            )
-            .await?
+                .await?
             } else {
                 None
             }
@@ -1673,15 +1676,6 @@ impl ProfileProjection {
                     "Resource key envelope is invalid",
                 )
             })?;
-        if !matches_manifest_object(
-            &ManifestObject::new(RESOURCE_KEY_ENVELOPE_KEY, &envelope_bytes)?,
-            &encryption.resource_key_envelope,
-        ) {
-            return Err(problem(
-                "resource_key_envelope_mismatch",
-                "Resource key envelope does not match the manifest",
-            ));
-        }
         let unwrapped_key = if client_key.is_none() {
             let recovery_key = recovery_key.ok_or_else(|| {
                 problem(
@@ -1714,7 +1708,6 @@ impl ProfileProjection {
                 ));
             }
         }
-        let mut credentials = Vec::with_capacity(proxy_envelopes.len());
         let cache_scope = checksum(
             format!(
                 "{}/{}/{}",
@@ -1724,6 +1717,64 @@ impl ProfileProjection {
             )
             .as_bytes(),
         );
+        for object in remote_descriptor
+            .objects
+            .iter()
+            .filter(|object| clear_metadata.contains(&object.path))
+        {
+            let reference = ManifestObjectReference {
+                key: object.path.clone(),
+                size: object.size,
+                checksum: object.checksum.clone(),
+            };
+            let cached = if repair_stale_proxy {
+                None
+            } else {
+                read_cached_manifest_object(
+                    &self.root,
+                    &cache_scope,
+                    &reference,
+                    None,
+                    correlation_id,
+                )
+                .await?
+            };
+            if cached.is_some() {
+                continue;
+            }
+            let (bytes, permit) = download_verified_manifest_object(
+                client,
+                &manifest.workspace_id,
+                auth,
+                &manifest.resource_id,
+                manifest.generation,
+                &object.path,
+                object.size,
+                &object.checksum,
+                correlation_id,
+                repair_stale_proxy,
+            )
+            .await?;
+            download_metrics.record(bytes.len());
+            if !repair_stale_proxy {
+                if let Err(error) = cache_downloaded_manifest_object(
+                    self.root.clone(),
+                    cache_scope.clone(),
+                    object.path.clone(),
+                    bytes,
+                    permit,
+                )
+                .await
+                {
+                    tauri_plugin_log::log::warn!(
+                        "Legacy proxy metadata cache write failed: code={} status={}",
+                        error.code,
+                        error.status
+                    );
+                }
+            }
+        }
+        let mut credentials = Vec::with_capacity(proxy_envelopes.len());
         for (proxy_id, revision, reference) in &proxy_envelopes {
             let proxy_cache_alias = format!(
                 "proxy-{}-{}-envelope.json",
@@ -1762,15 +1813,6 @@ impl ProfileProjection {
                     (bytes, permit)
                 }
             };
-            if !matches_manifest_object(
-                &ManifestObject::new(reference.key.clone(), &bytes)?,
-                reference,
-            ) {
-                return Err(problem(
-                    "proxy_credential_envelope_mismatch",
-                    "Proxy credential envelope does not match the manifest",
-                ));
-            }
             let envelope: ProxyCredentialEnvelope =
                 serde_json::from_slice(&bytes).map_err(|_| {
                     problem(
@@ -1833,28 +1875,57 @@ impl ProfileProjection {
             .iter()
             .flat_map(|file| file.chunks.iter().map(|chunk| chunk.object.key.as_str()))
             .collect::<std::collections::BTreeSet<_>>();
-        for object in &remote_descriptor.objects {
-            if should_download_manifest_object(&object.path, &clear_metadata, &proxy_envelopes)
-                || chunk_object_keys.contains(object.path.as_str())
-            {
-                continue;
+        let download_slots = profile_download_slots();
+        let download_client = client.clone();
+        let download_auth = auth.clone();
+        let workspace_id = manifest.workspace_id.clone();
+        let resource_id = manifest.resource_id.clone();
+        let generation = manifest.generation;
+        let correlation_id = correlation_id.to_owned();
+        let downloadable_objects = remote_descriptor
+            .objects
+            .iter()
+            .filter(|object| {
+                !should_download_manifest_object(&object.path, &clear_metadata, &proxy_envelopes)
+                    && !chunk_object_keys.contains(object.path.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut downloaded_objects = stream::iter(downloadable_objects.into_iter().map(|object| {
+            let download_slots = Arc::clone(&download_slots);
+            let client = download_client.clone();
+            let auth = download_auth.clone();
+            let workspace_id = workspace_id.clone();
+            let resource_id = resource_id.clone();
+            let correlation_id = correlation_id.clone();
+            async move {
+                let memory_permit =
+                    profile_transfer_budget::acquire(object.size, 2, &correlation_id).await?;
+                let slot = download_slots
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| unavailable())?;
+                let bytes = client
+                    .download_blob(
+                        CoordinationScope {
+                            workspace_id: &workspace_id,
+                            auth: &auth,
+                        },
+                        &resource_id,
+                        &object.path,
+                        generation,
+                        &object.checksum,
+                        object.size,
+                        &correlation_id,
+                    )
+                    .await?;
+                Ok::<_, Problem>((object, bytes, slot, memory_permit))
             }
-            let _transfer_memory_permit =
-                profile_transfer_budget::acquire(object.size, 2, correlation_id).await?;
-            let bytes = client
-                .download_blob(
-                    CoordinationScope {
-                        workspace_id: &manifest.workspace_id,
-                        auth,
-                    },
-                    &manifest.resource_id,
-                    &object.path,
-                    manifest.generation,
-                    &object.checksum,
-                    object.size,
-                    correlation_id,
-                )
-                .await?;
+        }))
+        .buffered(MAX_CONCURRENT_PROFILE_DOWNLOADS);
+        while let Some((object, bytes, _download_slot, _memory_permit)) =
+            downloaded_objects.try_next().await?
+        {
             if bytes.len() as u64 != object.size || checksum(&bytes) != object.checksum {
                 return Err(problem(
                     "profile_object_checksum_mismatch",
@@ -1889,7 +1960,7 @@ impl ProfileProjection {
             let (mut destination, _) = staging.create_file(&file.path)?;
             let mut aggregate = Sha256::new();
             let mut total_size = 0u64;
-            let download_slots = profile_chunk_download_slots();
+            let download_slots = profile_download_slots();
             let chunks = file
                 .chunks
                 .iter()
@@ -1946,7 +2017,7 @@ impl ProfileProjection {
                     }
                 },
             ))
-            .buffered(MAX_CONCURRENT_PROFILE_CHUNK_DOWNLOADS);
+            .buffered(MAX_CONCURRENT_PROFILE_DOWNLOADS);
 
             for (expected_index, chunk) in file.chunks.iter().enumerate() {
                 if chunk.index != expected_index as u64 {
@@ -2259,6 +2330,11 @@ impl ProfileProjection {
             .iter()
             .map(|object| (object.key.as_str(), object))
             .collect();
+        let previous_file_chunks: BTreeMap<_, _> = previous
+            .file_chunks
+            .iter()
+            .map(|file| (file.path.as_str(), file))
+            .collect();
         let mut reused_sources = BTreeMap::new();
         let cache_scope = checksum(
             format!(
@@ -2306,7 +2382,9 @@ impl ProfileProjection {
                         &plaintext_chunk,
                         client_key,
                         &key_version,
-                        previous,
+                        previous.generation,
+                        &previous_file_chunks,
+                        &previous_objects,
                     )?;
                     if let Some(source_generation) = source_generation {
                         reused_sources.insert(blob.key.clone(), source_generation);
@@ -2351,7 +2429,6 @@ impl ProfileProjection {
                 )
                 .retryable(true));
             }
-            live_file_paths.insert(path.clone());
             if (plaintext.len() as u64) > MAX_PROFILE_PLAINTEXT_BYTES {
                 let file_checksum = checksum(&plaintext);
                 let mut chunks = Vec::new();
@@ -2379,10 +2456,8 @@ impl ProfileProjection {
                     let cache_name = format!("{}.bin", checksum(cache_identity.as_bytes()));
                     let cache_path =
                         PathBuf::from(format!(".sync-cache/{cache_scope}/{cache_name}"));
-                    let prior_chunk = previous
-                        .file_chunks
-                        .iter()
-                        .find(|file| file.path == path)
+                    let prior_chunk = previous_file_chunks
+                        .get(path.as_str())
                         .and_then(|file| file.chunks.get(index))
                         .filter(|chunk| {
                             chunk.index == index as u64
@@ -2401,10 +2476,18 @@ impl ProfileProjection {
                             {
                                 return None;
                             }
+                            let expected_key = format!(
+                                ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+                                checksum(path.as_bytes()),
+                                index,
+                                plaintext_checksum,
+                                checksum(&cached)
+                            );
                             let source_generation = prior_chunk
                                 .and_then(|chunk| previous_objects.get(chunk.object.key.as_str()))
                                 .filter(|object| {
-                                    object.size == cached.len() as u64
+                                    object.key == expected_key
+                                        && object.size == cached.len() as u64
                                         && object.checksum == checksum(&cached)
                                 })
                                 .map(|object| {
@@ -2708,6 +2791,11 @@ impl ProfileProjection {
             .iter()
             .map(|object| object.path.as_str())
             .collect::<std::collections::BTreeSet<_>>();
+        let live_chunked_file_paths = descriptor
+            .file_chunks
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         let now = unix_time_millis("profile_sync_snapshot")?;
         let mut tombstones = previous
             .tombstones
@@ -2723,10 +2811,7 @@ impl ProfileProjection {
         for object in &previous.objects {
             if !live_object_keys.contains(object.key.as_str())
                 && (!live_file_paths.contains(&object.key)
-                    || descriptor
-                        .file_chunks
-                        .iter()
-                        .any(|file| file.path == object.key))
+                    || live_chunked_file_paths.contains(object.key.as_str()))
             {
                 tombstones.push(ManifestTombstone::new_object(
                     object.key.clone(),
@@ -3128,21 +3213,19 @@ fn verify_decrypted_generation(
         ));
     }
     validate_local_projection_objects(generation_path, &marker.local_objects)?;
-    let mut files = Vec::new();
-    collect_file_paths(generation_path, generation_path, &mut files)?;
-    let expected_paths: std::collections::HashSet<&str> = marker
+    let mut expected_paths: std::collections::HashSet<&str> = marker
         .local_objects
         .iter()
         .map(|object| object.path.as_str())
         .collect();
-    if files
-        .iter()
-        .any(|(path, _, _)| !expected_paths.contains(path.as_str()))
-        || marker
-            .local_objects
-            .iter()
-            .any(|object| !files.iter().any(|(path, _, _)| path == &object.path))
-    {
+    let mut unexpected_file = false;
+    visit_profile_file_paths(generation_path, generation_path, &mut |path, _, _| {
+        if !expected_paths.remove(path.as_str()) {
+            unexpected_file = true;
+        }
+        Ok(())
+    })?;
+    if unexpected_file || !expected_paths.is_empty() {
         return Err(problem(
             "profile_projection_incomplete",
             "Profile projection file set does not match its verified marker",
@@ -3214,23 +3297,19 @@ fn local_generation_matches_projection_marker(
     }
     validate_local_projection_objects(generation_path, &marker.local_objects)?;
 
-    let mut files = Vec::new();
-    collect_file_paths(generation_path, generation_path, &mut files)?;
-    let actual_paths: std::collections::HashSet<&str> =
-        files.iter().map(|(path, _, _)| path.as_str()).collect();
-    let expected_paths: std::collections::HashSet<&str> = marker
+    let mut expected_paths: std::collections::HashSet<&str> = marker
         .local_objects
         .iter()
         .map(|object| object.path.as_str())
         .collect();
-    if marker
-        .local_objects
-        .iter()
-        .any(|object| !actual_paths.contains(object.path.as_str()))
-        || files
-            .iter()
-            .any(|(path, _, _)| !expected_paths.contains(path.as_str()))
-    {
+    let mut unexpected_file = false;
+    visit_profile_file_paths(generation_path, generation_path, &mut |path, _, _| {
+        if !expected_paths.remove(path.as_str()) {
+            unexpected_file = true;
+        }
+        Ok(())
+    })?;
+    if unexpected_file || !expected_paths.is_empty() {
         return Ok(false);
     }
     for object in &marker.local_objects {
@@ -3284,8 +3363,7 @@ fn local_generation_is_recoverable(
     // A valid base marker identifies the interrupted session. Its files may
     // have been edited, created, or deleted by the browser; those bytes are
     // the dirty recovery state and must not be compared with the base hashes.
-    let mut _local_files = Vec::new();
-    collect_file_paths(generation_path, generation_path, &mut _local_files)?;
+    visit_profile_file_paths(generation_path, generation_path, &mut |_, _, _| Ok(()))?;
     Ok(true)
 }
 
@@ -3686,12 +3764,6 @@ fn ensure_hydration_generation_current(
     Ok(())
 }
 
-fn matches_manifest_object(object: &ManifestObject, reference: &ManifestObjectReference) -> bool {
-    object.key == reference.key
-        && object.size == reference.size
-        && object.checksum == reference.checksum
-}
-
 fn proxy_metadata_keys(manifest: &SyncManifest) -> std::collections::BTreeSet<String> {
     manifest
         .dependencies
@@ -3722,6 +3794,10 @@ async fn download_verified_manifest_object(
     repair_stale_proxy: bool,
 ) -> Result<(Vec<u8>, tokio::sync::OwnedSemaphorePermit), Problem> {
     let memory_permit = profile_transfer_budget::acquire(size, 2, correlation_id).await?;
+    let _download_slot = profile_download_slots()
+        .acquire_owned()
+        .await
+        .map_err(|_| unavailable())?;
     let scope = CoordinationScope { workspace_id, auth };
     let bytes = if repair_stale_proxy {
         client
@@ -3759,11 +3835,36 @@ async fn read_cached_manifest_object(
     correlation_id: &str,
 ) -> Result<Option<(Vec<u8>, tokio::sync::OwnedSemaphorePermit)>, Problem> {
     let memory_permit = profile_transfer_budget::acquire(reference.size, 2, correlation_id).await?;
-    let Some(bytes) = read_cached_manifest_object_bytes(root, cache_scope, reference, legacy_alias)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some((bytes, memory_permit)))
+    let root = root.to_path_buf();
+    let cache_scope = cache_scope.to_owned();
+    let reference = reference.clone();
+    let legacy_alias = legacy_alias.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        let bytes = read_cached_manifest_object_bytes(
+            &root,
+            &cache_scope,
+            &reference,
+            legacy_alias.as_deref(),
+        )?;
+        Ok::<_, Problem>(bytes.map(|bytes| (bytes, memory_permit)))
+    })
+    .await
+    .map_err(|_| unavailable())?
+}
+
+async fn cache_downloaded_manifest_object(
+    root: PathBuf,
+    cache_scope: String,
+    key: String,
+    bytes: Vec<u8>,
+    memory_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), Problem> {
+    tokio::task::spawn_blocking(move || {
+        let _permit = memory_permit;
+        stage_snapshot_metadata(&root, &cache_scope, &key, &bytes).map(|_| ())
+    })
+    .await
+    .map_err(|_| unavailable())?
 }
 
 fn read_cached_manifest_object_bytes(
@@ -3777,35 +3878,9 @@ fn read_cached_manifest_object_bytes(
         checksum(reference.key.as_bytes()),
         reference.checksum
     );
-    let mut relative_paths = vec![PathBuf::from(format!(".sync-cache/{cache_scope}/{cache_name}"))];
-    if let Some(alias) = legacy_alias {
-        relative_paths.push(PathBuf::from(format!(".sync-cache/{cache_scope}/{alias}")));
-    }
-    for relative_path in relative_paths {
-        let path = confined_path(root, &relative_path)?;
-        let Some(bytes) = read_optional_snapshot_cache(&path, reference.size)? else {
-            continue;
-        };
-        if bytes.len() as u64 == reference.size && checksum(&bytes) == reference.checksum {
-            return Ok(Some(bytes));
-        }
-    }
-    Ok(None)
-}
-
-#[cfg(test)]
-fn read_cached_manifest_object_bytes(
-    root: &Path,
-    cache_scope: &str,
-    reference: &ManifestObjectReference,
-    legacy_alias: Option<&str>,
-) -> Result<Option<Vec<u8>>, Problem> {
-    let cache_name = format!(
-        "object-{}-{}.bin",
-        checksum(reference.key.as_bytes()),
-        reference.checksum
-    );
-    let mut relative_paths = vec![PathBuf::from(format!(".sync-cache/{cache_scope}/{cache_name}"))];
+    let mut relative_paths = vec![PathBuf::from(format!(
+        ".sync-cache/{cache_scope}/{cache_name}"
+    ))];
     if let Some(alias) = legacy_alias {
         relative_paths.push(PathBuf::from(format!(".sync-cache/{cache_scope}/{alias}")));
     }
@@ -4326,7 +4401,9 @@ fn stage_profile_file_chunk(
     plaintext: &[u8],
     client_key: &ClientKey,
     key_version: &str,
-    previous: &SyncManifest,
+    previous_generation: u64,
+    previous_file_chunks: &BTreeMap<&str, &ManifestFileChunks>,
+    previous_objects: &BTreeMap<&str, &ManifestObject>,
 ) -> Result<(SnapshotBlob, ManifestFileChunk, Option<u64>), Problem> {
     let plaintext_checksum = checksum(plaintext);
     let aad = profile_file_chunk_aad(
@@ -4356,10 +4433,8 @@ fn stage_profile_file_chunk(
             if decoded.decrypt(client_key, &aad).ok()?.as_slice() != plaintext {
                 return None;
             }
-            let prior_chunk = previous
-                .file_chunks
-                .iter()
-                .find(|file| file.path == path)
+            let prior_chunk = previous_file_chunks
+                .get(path)
                 .and_then(|file| file.chunks.get(index))
                 .filter(|chunk| {
                     chunk.index == index as u64
@@ -4367,16 +4442,20 @@ fn stage_profile_file_chunk(
                         && chunk.plaintext_checksum == plaintext_checksum
                 });
             let source_generation = prior_chunk
-                .and_then(|chunk| {
-                    previous
-                        .objects
-                        .iter()
-                        .find(|object| object.key == chunk.object.key)
-                })
+                .and_then(|chunk| previous_objects.get(chunk.object.key.as_str()).copied())
                 .filter(|object| {
-                    object.size == bytes.len() as u64 && object.checksum == checksum(&bytes)
+                    let expected_key = format!(
+                        ".buglogin/file-chunks/{}/{:016x}-{}-{}",
+                        checksum(path.as_bytes()),
+                        index,
+                        plaintext_checksum,
+                        checksum(&bytes)
+                    );
+                    object.key == expected_key
+                        && object.size == bytes.len() as u64
+                        && object.checksum == checksum(&bytes)
                 })
-                .map(|object| object.source_generation.unwrap_or(previous.generation));
+                .map(|object| object.source_generation.unwrap_or(previous_generation));
             Some((bytes, source_generation))
         })()
     } else {
@@ -4650,7 +4729,7 @@ mod tests {
     use std::{
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -4738,6 +4817,15 @@ mod tests {
         ));
         assert_eq!(marker_denied.code, "profile_marker_not_readable");
         assert!(!marker_denied.retryable);
+        let marker_remove_denied = projection_marker_io_problem(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ));
+        assert_eq!(marker_remove_denied.status, 500);
+        assert!(!marker_remove_denied.retryable);
+        let marker_remove_full =
+            projection_marker_io_problem(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert_eq!(marker_remove_full.status, 507);
+        assert!(!marker_remove_full.retryable);
         assert!(
             projection_marker_io_problem(std::io::Error::from(std::io::ErrorKind::TimedOut))
                 .retryable
@@ -4815,6 +4903,84 @@ mod tests {
     }
 
     #[test]
+    fn chunk_cache_reuse_requires_the_manifest_object_key_to_match_content() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-chunk-key-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_chunk_key").unwrap();
+        let resource = ResourceId::new("res_chunk_key").unwrap();
+        let path = "Default/Cookies";
+        let index = 0usize;
+        let plaintext = b"authenticated cached chunk";
+        let client_key = ClientKey::from_bytes([0x71; 32]);
+        let key_version = checksum(client_key.as_bytes());
+        let plaintext_checksum = checksum(plaintext);
+        let aad = profile_file_chunk_aad(
+            &workspace,
+            &resource,
+            path,
+            index as u64,
+            &plaintext_checksum,
+        );
+        let encrypted = AuthenticatedChunk::encrypt(&client_key, plaintext, &aad)
+            .unwrap()
+            .encoded();
+        let cache_scope = "test-cache-scope";
+        let cache_identity = format!(
+            "{}/{}/{}/{}/{}/{}",
+            workspace.as_str(),
+            resource.as_str(),
+            key_version,
+            path,
+            index,
+            plaintext_checksum
+        );
+        let cache_name = format!("{}.bin", checksum(cache_identity.as_bytes()));
+        let cache_path = root.join(format!(".sync-cache/{cache_scope}/{cache_name}"));
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(&cache_path, &encrypted).unwrap();
+
+        let arbitrary_key = ".buglogin/file-chunks/unrelated/forged-key";
+        let previous_object = ManifestObject::new(arbitrary_key, &encrypted).unwrap();
+        let previous_objects = BTreeMap::from([(arbitrary_key, &previous_object)]);
+        let previous_chunk = ManifestFileChunk {
+            index: index as u64,
+            plaintext_size: plaintext.len() as u64,
+            plaintext_checksum,
+            object: ManifestObjectReference::from(&previous_object),
+        };
+        let previous_file = ManifestFileChunks {
+            path: path.to_owned(),
+            plaintext_size: plaintext.len() as u64,
+            plaintext_checksum: checksum(plaintext),
+            chunks: vec![previous_chunk],
+        };
+        let previous_file_chunks = BTreeMap::from([(path, &previous_file)]);
+
+        let (_, _, source_generation) = stage_profile_file_chunk(
+            &root,
+            cache_scope,
+            &workspace,
+            &resource,
+            path,
+            index,
+            plaintext,
+            &client_key,
+            &key_version,
+            7,
+            &previous_file_chunks,
+            &previous_objects,
+        )
+        .unwrap();
+
+        assert_eq!(source_generation, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn generation_file_permissions_are_not_misreported_as_dirty_data() {
         let denied = projection_generation_io_problem(std::io::Error::from(
             std::io::ErrorKind::PermissionDenied,
@@ -4869,13 +5035,23 @@ mod tests {
             Some(expected.to_vec())
         );
         let wrong_reference = ManifestObjectReference {
-            checksum: checksum(b"different envelope"),
+            checksum: checksum(b"manifest-bound cached envelopf"),
             ..reference
         };
         assert_eq!(
-            read_cached_manifest_object_bytes(&root, scope, &wrong_reference, Some(alias))
-                .unwrap(),
+            read_cached_manifest_object_bytes(&root, scope, &wrong_reference, Some(alias)).unwrap(),
             None
+        );
+        let produced = b"verified remote legacy metadata";
+        let produced_reference = ManifestObjectReference {
+            key: ".buglogin/proxy-dependencies/proxy/1/metadata.json".to_owned(),
+            size: produced.len() as u64,
+            checksum: checksum(produced),
+        };
+        stage_snapshot_metadata(&root, scope, &produced_reference.key, produced).unwrap();
+        assert_eq!(
+            read_cached_manifest_object_bytes(&root, scope, &produced_reference, None).unwrap(),
+            Some(produced.to_vec())
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -5397,6 +5573,71 @@ mod tests {
             .prepare_sync_commit_for_epoch(&profile, &base, &target, "session-a")
             .unwrap();
 
+        let active_marker = root.join(profile.as_str()).join(ACTIVE_SESSION_MARKER);
+        let active_bytes = fs::read(&active_marker).unwrap();
+        let commit_marker = root.join(profile.as_str()).join(SYNC_COMMIT_MARKER);
+        let valid_commit_bytes = fs::read(&commit_marker).unwrap();
+        let mut stale_commit: SyncCommitMarker =
+            serde_json::from_slice(&valid_commit_bytes).unwrap();
+        stale_commit.session_epoch = Some("session-old".to_owned());
+        let stale_commit_bytes = serde_json::to_vec(&stale_commit).unwrap();
+        fs::write(&commit_marker, &stale_commit_bytes).unwrap();
+        let stale_commit_clear = projection
+            .clear_active_session_for_epoch(&profile, "session-a")
+            .unwrap_err();
+        assert_eq!(stale_commit_clear.code, "profile_sync_commit_stale");
+        assert_eq!(fs::read(&active_marker).unwrap(), active_bytes);
+        assert_eq!(fs::read(&commit_marker).unwrap(), stale_commit_bytes);
+        let fence: HydrationFenceMarker = serde_json::from_slice(
+            &fs::read(root.join(profile.as_str()).join(HYDRATION_FENCE_MARKER)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fence.generation, base.generation);
+        fs::write(&commit_marker, &valid_commit_bytes).unwrap();
+
+        let mut wrong_base: SyncCommitMarker =
+            serde_json::from_slice(&fs::read(&commit_marker).unwrap()).unwrap();
+        wrong_base.base_root_checksum = checksum(b"another session base");
+        let wrong_base_bytes = serde_json::to_vec(&wrong_base).unwrap();
+        fs::write(&commit_marker, &wrong_base_bytes).unwrap();
+        let wrong_base_clear = projection
+            .clear_active_session_for_epoch(&profile, "session-a")
+            .unwrap_err();
+        assert_eq!(wrong_base_clear.code, "profile_sync_commit_stale");
+        assert_eq!(fs::read(&active_marker).unwrap(), active_bytes);
+        assert_eq!(fs::read(&commit_marker).unwrap(), wrong_base_bytes);
+        let fence: HydrationFenceMarker = serde_json::from_slice(
+            &fs::read(root.join(profile.as_str()).join(HYDRATION_FENCE_MARKER)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fence.generation, base.generation);
+        fs::write(&commit_marker, &valid_commit_bytes).unwrap();
+
+        let mut wrong_base_generation: SyncCommitMarker =
+            serde_json::from_slice(&valid_commit_bytes).unwrap();
+        wrong_base_generation.base_generation += 1;
+        wrong_base_generation.target_generation += 1;
+        let wrong_base_generation_bytes = serde_json::to_vec(&wrong_base_generation).unwrap();
+        fs::write(&commit_marker, &wrong_base_generation_bytes).unwrap();
+        let wrong_base_generation_clear = projection
+            .clear_active_session_for_epoch(&profile, "session-a")
+            .unwrap_err();
+        assert_eq!(
+            wrong_base_generation_clear.code,
+            "profile_sync_commit_stale"
+        );
+        assert_eq!(fs::read(&active_marker).unwrap(), active_bytes);
+        assert_eq!(
+            fs::read(&commit_marker).unwrap(),
+            wrong_base_generation_bytes
+        );
+        let fence: HydrationFenceMarker = serde_json::from_slice(
+            &fs::read(root.join(profile.as_str()).join(HYDRATION_FENCE_MARKER)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fence.generation, base.generation);
+        fs::write(&commit_marker, &valid_commit_bytes).unwrap();
+
         let stale_clear = projection
             .clear_active_session_for_epoch(&profile, "session-b")
             .unwrap_err();
@@ -5413,7 +5654,6 @@ mod tests {
             )
             .unwrap();
 
-        let active_marker = root.join(profile.as_str()).join(ACTIVE_SESSION_MARKER);
         let mut malformed_state: serde_json::Value =
             serde_json::from_slice(&fs::read(&active_marker).unwrap()).unwrap();
         malformed_state["state"] = serde_json::Value::String("stale".to_owned());
@@ -6293,14 +6533,11 @@ mod tests {
             .as_ref()
             .unwrap()
             .resource_key_envelope;
-        let immutable_envelope = root
-            .join(".sync-cache")
-            .join(&cache_scope)
-            .join(format!(
-                "object-{}-{}.bin",
-                checksum(envelope_reference.key.as_bytes()),
-                envelope_reference.checksum
-            ));
+        let immutable_envelope = root.join(".sync-cache").join(&cache_scope).join(format!(
+            "object-{}-{}.bin",
+            checksum(envelope_reference.key.as_bytes()),
+            envelope_reference.checksum
+        ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let objects: BTreeMap<_, _> = encrypted_objects
@@ -6308,11 +6545,12 @@ mod tests {
             .map(|blob| (blob.key.clone(), blob.read_bytes().unwrap()))
             .collect();
         fs::remove_file(immutable_envelope).unwrap();
-        assert!(root
-            .join(".sync-cache")
-            .join(&cache_scope)
-            .join("resource-key-envelope.json")
-            .is_file());
+        assert!(
+            root.join(".sync-cache")
+                .join(&cache_scope)
+                .join("resource-key-envelope.json")
+                .is_file()
+        );
         let server = tokio::spawn(async move {
             let mut paths = Vec::new();
             loop {
@@ -6456,6 +6694,14 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let remote_objects = Arc::new(remote_objects);
+        let active_downloads = Arc::new(AtomicUsize::new(0));
+        let peak_downloads = Arc::new(AtomicUsize::new(0));
+        let active_profile_downloads = Arc::new(AtomicUsize::new(0));
+        let peak_profile_downloads = Arc::new(AtomicUsize::new(0));
+        let server_peak_downloads = Arc::clone(&peak_downloads);
+        let server_active_profile_downloads = Arc::clone(&active_profile_downloads);
+        let server_peak_profile_downloads = Arc::clone(&peak_profile_downloads);
         let server = tokio::spawn(async move {
             loop {
                 let accepted =
@@ -6463,24 +6709,43 @@ mod tests {
                 let Ok(Ok((mut stream, _))) = accepted else {
                     break;
                 };
-                let request = read_http_request(&mut stream).await;
-                let path = request
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap_or_default();
-                let object_key = remote_objects
-                    .keys()
-                    .map(String::as_str)
-                    .find(|key| path.contains(&key.replace('/', "%2F")))
-                    .unwrap_or_else(|| panic!("unexpected blob request: {path}"));
-                let body = remote_objects.get(object_key).unwrap();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-                stream.write_all(body).await.unwrap();
+                let remote_objects = Arc::clone(&remote_objects);
+                let active_downloads = Arc::clone(&active_downloads);
+                let peak_downloads = Arc::clone(&server_peak_downloads);
+                let active_profile_downloads = Arc::clone(&server_active_profile_downloads);
+                let peak_profile_downloads = Arc::clone(&server_peak_profile_downloads);
+                tokio::spawn(async move {
+                    let request = read_http_request(&mut stream).await;
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or_default();
+                    let object_key = remote_objects
+                        .keys()
+                        .map(String::as_str)
+                        .find(|key| path.contains(&key.replace('/', "%2F")))
+                        .unwrap_or_else(|| panic!("unexpected blob request: {path}"));
+                    let body = remote_objects.get(object_key).unwrap();
+                    let active = active_downloads.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak_downloads.fetch_max(active, Ordering::SeqCst);
+                    let is_profile_object = object_key != RESOURCE_KEY_ENVELOPE_KEY;
+                    if is_profile_object {
+                        let active = active_profile_downloads.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak_profile_downloads.fetch_max(active, Ordering::SeqCst);
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    stream.write_all(body).await.unwrap();
+                    active_downloads.fetch_sub(1, Ordering::SeqCst);
+                    if is_profile_object {
+                        active_profile_downloads.fetch_sub(1, Ordering::SeqCst);
+                    }
+                });
             }
         });
 
@@ -6493,8 +6758,8 @@ mod tests {
         let projection_a = ProfileProjection::open(&root.join("device-a")).unwrap();
         let projection_b = ProfileProjection::open(&root.join("device-b")).unwrap();
         let profile_id = ProfileId::new("prf_cross_device_recovery").unwrap();
-        let (receipt_a, _) = projection_a
-            .hydrate_encrypted_with_proxy_credentials(
+        let (result_a, result_b) = tokio::join!(
+            projection_a.hydrate_encrypted_with_proxy_credentials(
                 &client_a,
                 &auth_a,
                 &profile_id,
@@ -6502,11 +6767,8 @@ mod tests {
                 Some(&device_a_key),
                 Some(&device_a_recovery),
                 "cross-device-recovery-a",
-            )
-            .await
-            .unwrap();
-        let (receipt_b, _) = projection_b
-            .hydrate_encrypted_with_proxy_credentials(
+            ),
+            projection_b.hydrate_encrypted_with_proxy_credentials(
                 &client_b,
                 &auth_b,
                 &profile_id,
@@ -6515,8 +6777,9 @@ mod tests {
                 Some(&device_b_recovery),
                 "cross-device-recovery-b",
             )
-            .await
-            .unwrap();
+        );
+        let (receipt_a, _) = result_a.unwrap();
+        let (receipt_b, _) = result_b.unwrap();
 
         let restored_a = fs::read(receipt_a.path.join("Default/Preferences")).unwrap();
         let restored_b = fs::read(receipt_b.path.join("Default/Preferences")).unwrap();
@@ -6541,6 +6804,10 @@ mod tests {
         assert_eq!(receipt_a.root_checksum, receipt_b.root_checksum);
 
         server.abort();
+        assert!(peak_downloads.load(Ordering::SeqCst) >= 2);
+        assert!(peak_downloads.load(Ordering::SeqCst) <= MAX_CONCURRENT_PROFILE_DOWNLOADS);
+        assert!(peak_profile_downloads.load(Ordering::SeqCst) >= 2);
+        assert!(peak_profile_downloads.load(Ordering::SeqCst) <= MAX_CONCURRENT_PROFILE_DOWNLOADS);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -6780,6 +7047,63 @@ mod tests {
         assert_eq!(
             fs::read(receipt.path.join("Default/Preferences")).unwrap(),
             b"modified"
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clean_generation_marker_comparison_rejects_missing_and_extra_files() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-clean-file-set-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_clean_file_set").unwrap();
+        let resource = ResourceId::new("res_clean_file_set").unwrap();
+        let profile = ProfileId::new("prf_clean_file_set").unwrap();
+        let manifest = recovery_manifest(&workspace, &resource, 1, None, b"root");
+        let receipt = projection
+            .publish_decrypted(
+                &profile,
+                &manifest,
+                vec![
+                    ("Default/Preferences".to_owned(), b"prefs".to_vec()),
+                    ("Default/Cookies".to_owned(), b"cookies".to_vec()),
+                ],
+            )
+            .unwrap();
+        assert!(
+            local_generation_matches_projection_marker(
+                &profile,
+                manifest.generation,
+                &manifest.root_checksum,
+                &receipt.path,
+            )
+            .unwrap()
+        );
+
+        fs::remove_file(receipt.path.join("Default/Cookies")).unwrap();
+        assert!(
+            !local_generation_matches_projection_marker(
+                &profile,
+                manifest.generation,
+                &manifest.root_checksum,
+                &receipt.path,
+            )
+            .unwrap()
+        );
+        fs::write(receipt.path.join("Default/Cookies"), b"cookies").unwrap();
+        fs::write(receipt.path.join("Default/untracked"), b"extra").unwrap();
+        assert!(
+            !local_generation_matches_projection_marker(
+                &profile,
+                manifest.generation,
+                &manifest.root_checksum,
+                &receipt.path,
+            )
+            .unwrap()
         );
         drop(projection);
         fs::remove_dir_all(root).unwrap();
@@ -7713,6 +8037,51 @@ mod tests {
         manifest.validate().unwrap();
         descriptor.verify_manifest(&manifest).unwrap();
 
+        let (next_descriptor, next_objects, next_manifest) = projection
+            .snapshot_with_proxy_encryption(
+                &profile_path,
+                &manifest,
+                2,
+                None,
+                &client_key,
+                &recovery_key,
+            )
+            .unwrap();
+        next_descriptor.verify_manifest(&next_manifest).unwrap();
+        let (retry_descriptor, retry_objects, retry_manifest) = projection
+            .snapshot_with_proxy_encryption(
+                &profile_path,
+                &manifest,
+                2,
+                None,
+                &client_key,
+                &recovery_key,
+            )
+            .unwrap();
+        retry_descriptor.verify_manifest(&retry_manifest).unwrap();
+        assert_eq!(
+            retry_descriptor.root_checksum,
+            next_descriptor.root_checksum
+        );
+        assert!(retry_manifest.file_chunks[0].chunks.iter().all(|chunk| {
+            let retry_object = retry_manifest
+                .objects
+                .iter()
+                .find(|object| object.key == chunk.object.key)
+                .unwrap();
+            let first_object = next_manifest
+                .objects
+                .iter()
+                .find(|object| object.key == chunk.object.key)
+                .unwrap();
+            retry_object.source_generation == first_object.source_generation
+        }));
+        assert!(
+            retry_objects
+                .iter()
+                .all(|blob| next_objects.iter().any(|prior| prior.key == blob.key))
+        );
+
         let mut restored = Vec::with_capacity(plaintext.len());
         for chunk in &file.chunks {
             let encrypted = objects
@@ -7948,6 +8317,30 @@ mod tests {
         let object = files.iter().find(|blob| blob.key == reference.key).unwrap();
         let object_bytes = object.read_bytes().unwrap();
         assert_eq!(object_bytes.len() as u64, reference.size);
+        let cache_scope = checksum(
+            format!(
+                "{}/{}/{}",
+                workspace.as_str(),
+                resource.as_str(),
+                checksum(client_key.as_bytes())
+            )
+            .as_bytes(),
+        );
+        let proxy_cache_alias = format!(
+            "proxy-{}-{}-envelope.json",
+            checksum(proxy_id.as_str().as_bytes()),
+            revision
+        );
+        assert_eq!(
+            read_cached_manifest_object_bytes(
+                &root,
+                &cache_scope,
+                reference,
+                Some(&proxy_cache_alias)
+            )
+            .unwrap(),
+            Some(object_bytes.clone())
+        );
         assert!(
             !object_bytes
                 .windows(10)

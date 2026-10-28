@@ -2368,14 +2368,39 @@ impl ProductionDesktopState {
         Ok(DesktopAuthStatus::Unauthenticated)
     }
 
+    async fn defer_to_manual_login(&self, correlation_id: &str) -> Result<(), Problem> {
+        self.client.clear_token()?;
+        *self
+            .auth
+            .write()
+            .map_err(|_| desktop_state_problem(correlation_id))? = None;
+        *self
+            .auth_expires_at
+            .lock()
+            .map_err(|_| desktop_state_problem(correlation_id))? = 0;
+        self.profile_runtime.set_coordination(None).await?;
+        Ok(())
+    }
+
     pub async fn login_with_credentials(
         &self,
         mut identifier: Zeroizing<String>,
         mut password: Zeroizing<String>,
         correlation_id: &str,
     ) -> Result<DesktopAuthStatus, Problem> {
-        self.refresh_session_if_needed(correlation_id).await?;
-        if self.client.has_token()? {
+        let refresh_deferred = match self.refresh_session_if_needed(correlation_id).await {
+            Ok(()) => false,
+            Err(error) if manual_login_fallback_allowed(&error) => {
+                tauri_plugin_log::log::warn!(
+                    "Session refresh unavailable; proceeding with explicit credential login (code={}, correlation_id={})",
+                    error.code,
+                    correlation_id
+                );
+                true
+            }
+            Err(error) => return Err(error),
+        };
+        if !refresh_deferred && self.client.has_token()? {
             self.ensure_authenticated_coordination(correlation_id)
                 .await?;
             if self.client.has_token()? {
@@ -2384,9 +2409,22 @@ impl ProductionDesktopState {
             }
         }
         let _login_guard = self.auth_refresh_gate.lock().await;
-        if self.client.has_token()? {
+        if !refresh_deferred && self.client.has_token()? {
             self.ensure_device_key_registered(correlation_id).await?;
             return Ok(DesktopAuthStatus::Authenticated);
+        }
+        if refresh_deferred && self.client.has_token()? {
+            let expires_at = *self
+                .auth_expires_at
+                .lock()
+                .map_err(|_| desktop_state_problem(correlation_id))?;
+            if expires_at
+                > checked_add_seconds(unix_time_seconds(correlation_id)?, 120, correlation_id)?
+            {
+                self.ensure_device_key_registered(correlation_id).await?;
+                return Ok(DesktopAuthStatus::Authenticated);
+            }
+            self.defer_to_manual_login(correlation_id).await?;
         }
         let token = self
             .client
@@ -6804,6 +6842,10 @@ fn preserve_refresh_credentials(problem: &Problem) -> bool {
     problem.retryable && !definitive_auth_error(problem)
 }
 
+fn manual_login_fallback_allowed(problem: &Problem) -> bool {
+    preserve_refresh_credentials(problem)
+}
+
 fn ambiguous_proxy_mutation_error(problem: &Problem) -> bool {
     problem.retryable
         || matches!(
@@ -7190,12 +7232,28 @@ impl DesktopState {
 
     pub async fn restore_auth(&self, correlation_id: &str) -> Result<(), Problem> {
         if let Self::Production(state) = self {
-            state.refresh_session_if_needed(correlation_id).await?;
-            state
-                .ensure_authenticated_coordination(correlation_id)
-                .await?;
-            if state.client.has_token()? {
-                state.ensure_device_key_registered(correlation_id).await?;
+            let restore = async {
+                state.refresh_session_if_needed(correlation_id).await?;
+                state
+                    .ensure_authenticated_coordination(correlation_id)
+                    .await?;
+                if state.client.has_token()? {
+                    state.ensure_device_key_registered(correlation_id).await?;
+                }
+                Ok::<(), Problem>(())
+            }
+            .await;
+            if let Err(error) = restore {
+                if manual_login_fallback_allowed(&error) {
+                    tauri_plugin_log::log::warn!(
+                        "Session restore deferred to the login form (code={}, correlation_id={})",
+                        error.code,
+                        correlation_id
+                    );
+                    state.defer_to_manual_login(correlation_id).await?;
+                    return Ok(());
+                }
+                return Err(error);
             }
         }
         Ok(())
@@ -8063,13 +8121,25 @@ mod tests {
         let transient =
             Problem::new("api_unavailable", "API unavailable", 503, "test").retryable(true);
         assert!(super::preserve_refresh_credentials(&transient));
+        assert!(super::manual_login_fallback_allowed(&transient));
+
+        let deadline = Problem::new(
+            "api_request_deadline_exceeded",
+            "API request timed out",
+            504,
+            "test",
+        )
+        .retryable(true);
+        assert!(super::manual_login_fallback_allowed(&deadline));
 
         let permanent = Problem::new("api_unavailable", "API unavailable", 503, "test");
         assert!(!super::preserve_refresh_credentials(&permanent));
+        assert!(!super::manual_login_fallback_allowed(&permanent));
 
         let rejected =
             Problem::new("session_revoked", "Session revoked", 401, "test").retryable(true);
         assert!(!super::preserve_refresh_credentials(&rejected));
+        assert!(!super::manual_login_fallback_allowed(&rejected));
         assert!(super::definitive_auth_error(&rejected));
         assert!(!super::definitive_auth_error(&transient));
     }

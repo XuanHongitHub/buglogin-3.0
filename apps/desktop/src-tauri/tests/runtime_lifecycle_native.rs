@@ -1,7 +1,8 @@
 //! Native start/stop lifecycle checks against a real Wayfern (Chromium) binary.
 //! Opt-in: set BUGLOGIN_WAYFERN_LIFECYCLE_BINARY (and BUGLOGIN_WAYFERN_LIFECYCLE_VERSION);
 //! BUGLOGIN_WAYFERN_LIFECYCLE_STRICT=1 makes a missing binary fail instead of skip.
-//! Profiles live in a temporary directory and browsers run headless.
+//! Profiles live in a temporary directory; native lifecycle cases use headed
+//! launches where browser process identity and user-close behavior matter.
 
 use std::{
     env, fs,
@@ -499,7 +500,7 @@ async fn create_profile(state: &AdapterState, name: &str, version: &str) -> Stri
 }
 
 async fn launch(state: &AdapterState, profile_id: &str, label: &str) -> Result<Value, String> {
-    launch_with_headless(state, profile_id, label, true).await
+    launch_with_headless(state, profile_id, label, false).await
 }
 
 async fn launch_with_headless(
@@ -751,6 +752,9 @@ $buffer = New-Object System.Text.StringBuilder(1024)
 [void][BugLoginPath]::GetShortPathName($env:BUGLOGIN_TEST_PROFILE, $buffer, 1024)
 $longPath = $env:BUGLOGIN_TEST_PROFILE.ToLowerInvariant()
 $shortPath = $buffer.ToString().ToLowerInvariant()
+$extendedPrefix = '\\?\'
+if ($longPath.StartsWith($extendedPrefix)) { $longPath = $longPath.Substring($extendedPrefix.Length) }
+if ($shortPath.StartsWith($extendedPrefix)) { $shortPath = $shortPath.Substring($extendedPrefix.Length) }
 Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine.ToLowerInvariant().Contains($longPath) -or ($shortPath -and $_.CommandLine.ToLowerInvariant().Contains($shortPath))) } | Select-Object ProcessId, ParentProcessId, CommandLine | ConvertTo-Json -Compress
 "#,
             ])
