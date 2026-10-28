@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use buglogin_domain::{
     account::{AccountIdentity, IdentityVerification, canonical_email, canonical_username},
     errors::Problem,
@@ -41,18 +43,23 @@ impl IdentityPersistence {
         let Some(identity) = identity else {
             return Ok(None);
         };
-        if identity.account_id != *account_id
-            || identity.revision == 0
-            || canonical_username(&identity.username)
-                .map(|canonical| canonical != identity.canonical_username)
-                .unwrap_or(true)
-            || canonical_identity_email(&identity)
-                .map(|canonical| canonical != identity.canonical_email)
-                .unwrap_or(true)
-        {
-            return Err(corrupt());
-        }
+        validate_identity(account_id, &identity)?;
         Ok(Some(identity))
+    }
+
+    pub fn load_many(
+        &self,
+        account_ids: &[String],
+    ) -> Result<BTreeMap<String, AccountIdentity>, Problem> {
+        self.store
+            .load_many::<AccountIdentity>(TENANT, IDENTITY, account_ids)?
+            .into_iter()
+            .map(|(record_id, identity)| {
+                let account_id = AccountId::from_str(&record_id).map_err(|_| corrupt())?;
+                validate_identity(&account_id, &identity)?;
+                Ok((record_id, identity))
+            })
+            .collect()
     }
 
     pub fn find_by_username(&self, canonical: &str) -> Result<Option<AccountIdentity>, Problem> {
@@ -361,6 +368,21 @@ impl IdentityPersistence {
         }
         Ok(())
     }
+}
+
+fn validate_identity(account_id: &AccountId, identity: &AccountIdentity) -> Result<(), Problem> {
+    if identity.account_id != *account_id
+        || identity.revision == 0
+        || canonical_username(&identity.username)
+            .map(|canonical| canonical != identity.canonical_username)
+            .unwrap_or(true)
+        || canonical_identity_email(identity)
+            .map(|canonical| canonical != identity.canonical_email)
+            .unwrap_or(true)
+    {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
 fn put<T: Serialize>(record_type: &str, record_id: &str, value: &T) -> Result<ControlPut, Problem> {

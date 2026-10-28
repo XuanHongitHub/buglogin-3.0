@@ -4784,10 +4784,8 @@ async fn list_members(
         }
         Err(error) => return Err(response(error)),
     };
-    let items = members
-        .into_iter()
-        .map(|member| member_directory_view(&state, &principal, &grants, member))
-        .collect::<Result<Vec<_>, _>>()?;
+    drop(member_service);
+    let items = member_directory_views(&state, &principal, &grants, members)?;
     Ok(Json(items))
 }
 
@@ -4807,12 +4805,53 @@ struct MemberDirectoryView {
     identity: Option<MemberIdentityView>,
 }
 
-fn member_directory_view(
+fn member_directory_views(
     state: &ApiState,
     principal: &Principal,
     grants: &[buglogin_domain::permissions::Grant],
-    member: Member,
-) -> Result<MemberDirectoryView, Response> {
+    members: Vec<Member>,
+) -> Result<Vec<MemberDirectoryView>, Response> {
+    let identity_access = members
+        .iter()
+        .map(|member| can_read_member_identity(state, principal, grants, member))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut account_ids = BTreeSet::new();
+    for (member, can_read_identity) in members.iter().zip(&identity_access) {
+        if *can_read_identity {
+            account_ids.insert(member.account_id.as_str().to_owned());
+        }
+    }
+    let account_ids = account_ids.into_iter().collect::<Vec<_>>();
+    let identities = crate::services::identity_persistence::IdentityPersistence::new(
+        state.control_persistence.clone(),
+    )
+    .load_many(&account_ids)
+    .map_err(response_problem)?;
+    members
+        .into_iter()
+        .zip(identity_access)
+        .map(|(member, can_read_identity)| {
+            let identity = if can_read_identity {
+                identities
+                    .get(member.account_id.as_str())
+                    .map(|identity| MemberIdentityView {
+                        username: identity.username.clone(),
+                        email: identity.email.clone(),
+                    })
+            } else {
+                None
+            };
+            Ok(MemberDirectoryView { member, identity })
+        })
+        .collect()
+}
+
+fn can_read_member_identity(
+    state: &ApiState,
+    principal: &Principal,
+    grants: &[buglogin_domain::permissions::Grant],
+    member: &Member,
+) -> Result<bool, Response> {
     let direct_identity_access = is_allowed(
         principal,
         &Capability::new("CAP-MEM-001").map_err(|_| {
@@ -4843,20 +4882,7 @@ fn member_directory_view(
             .is_ok()
         });
     let can_read_identity = direct_identity_access || organization_owner_access;
-    let identity = if can_read_identity {
-        crate::services::identity_persistence::IdentityPersistence::new(
-            state.control_persistence.clone(),
-        )
-        .load(&member.account_id)
-        .map_err(response_problem)?
-        .map(|identity| MemberIdentityView {
-            username: identity.username,
-            email: identity.email,
-        })
-    } else {
-        None
-    };
-    Ok(MemberDirectoryView { member, identity })
+    Ok(can_read_identity)
 }
 
 async fn list_members_page(
@@ -4907,10 +4933,8 @@ async fn list_members_page(
         }
         Err(error) => return Err(response(error)),
     };
-    let items = members
-        .into_iter()
-        .map(|member| member_directory_view(&state, &principal, &grants, member))
-        .collect::<Result<Vec<_>, _>>()?;
+    drop(member_service);
+    let items = member_directory_views(&state, &principal, &grants, members)?;
     Ok(Json(CollectionPageView {
         items,
         next_cursor: next_cursor.map(|id| id.as_str().to_owned()),
@@ -6195,15 +6219,16 @@ async fn commit_resource_manifest(
         .map_err(response_problem)?;
     for object in &manifest.objects {
         let bytes = state
-            .get_remote_chunk(
-                &payload_object_key(
+            .get_remote_chunk_async(
+                payload_object_key(
                     &resource_id,
                     object_storage_generation(manifest.generation, object),
                     &object.key,
                     &object.checksum,
                 ),
-                &object.checksum,
+                object.checksum.clone(),
             )
+            .await
             .map_err(response_problem)?;
         if bytes.len() as u64 != object.size {
             return Err(response_problem(Problem::new(
@@ -7309,15 +7334,16 @@ async fn get_resource_blob(
         .await
         .map_err(response_problem)?;
     let bytes = state
-        .get_remote_chunk(
-            &payload_object_key(
+        .get_remote_chunk_async(
+            payload_object_key(
                 &resource_id,
                 object_storage_generation(generation, object),
                 &object.key,
                 &object.checksum,
             ),
-            &object.checksum,
+            object.checksum.clone(),
         )
+        .await
         .map_err(response_problem)?;
     // Keep the shared transfer slot until the HTTP body is consumed or dropped,
     // not merely until the S3 read finishes. This bounds retained response bytes.
@@ -7399,7 +7425,8 @@ async fn check_resource_blob(
     let storage_key =
         payload_object_key(&resource_id, query.generation, &query.key, &query.checksum);
     let present = match state
-        .remote_chunk_checksum(&storage_key)
+        .remote_chunk_checksum_async(storage_key)
+        .await
         .map_err(response_problem)?
     {
         Some(actual) if actual == query.checksum => true,
@@ -7516,7 +7543,10 @@ async fn put_resource_blob(
         }
         let storage_key =
             payload_object_key(&resource_id, generation, &query.key, expected_checksum);
-        match state.get_remote_chunk(&storage_key, expected_checksum) {
+        match state
+            .get_remote_chunk_async(storage_key.clone(), expected_checksum.to_owned())
+            .await
+        {
             Ok(_) => return Ok(Json(record.receipt).into_response()),
             Err(error) if error.code == "remote_chunk_not_found" => {}
             Err(error) => return Err(response_problem(error).into()),
@@ -7586,17 +7616,25 @@ async fn put_resource_blob(
         }
         Err(error) => return Err(response_problem(error).into()),
     }
-    let upload_result = (|| {
-        state.validate_sync_blob_upload(
-            &workspace_id,
-            &resource_id,
-            &storage_key,
-            expected_checksum,
-            body.len() as u64,
-            reservation_time_ms,
-        )?;
-        state.put_remote_chunk(&storage_key, &body, expected_checksum)
-    })();
+    let upload_result = match state.validate_sync_blob_upload(
+        &workspace_id,
+        &resource_id,
+        &storage_key,
+        expected_checksum,
+        body.len() as u64,
+        reservation_time_ms,
+    ) {
+        Ok(()) => {
+            state
+                .put_remote_chunk_async(
+                    storage_key.clone(),
+                    body.to_vec(),
+                    expected_checksum.to_owned(),
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
     let release_result =
         state.release_sync_object_write_lock(workspace_id.as_str(), resource_id.as_str());
     match (upload_result, release_result) {

@@ -1014,6 +1014,51 @@ impl ApiState {
         self.remote_chunks.checksum(object_key)
     }
 
+    pub(crate) async fn remote_chunk_checksum_async(
+        &self,
+        object_key: String,
+    ) -> Result<Option<String>, Problem> {
+        let permit = remote_chunk_io_slot()?;
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            state.remote_chunk_checksum(&object_key)
+        })
+        .await
+        .map_err(|_| remote_chunk_worker_failed())?
+    }
+
+    pub(crate) async fn get_remote_chunk_async(
+        &self,
+        object_key: String,
+        expected_checksum: String,
+    ) -> Result<Vec<u8>, Problem> {
+        let permit = remote_chunk_io_slot()?;
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            state.get_remote_chunk(&object_key, &expected_checksum)
+        })
+        .await
+        .map_err(|_| remote_chunk_worker_failed())?
+    }
+
+    pub(crate) async fn put_remote_chunk_async(
+        &self,
+        object_key: String,
+        bytes: Vec<u8>,
+        expected_checksum: String,
+    ) -> Result<(), Problem> {
+        let permit = remote_chunk_io_slot()?;
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            state.put_remote_chunk(&object_key, &bytes, &expected_checksum)
+        })
+        .await
+        .map_err(|_| remote_chunk_worker_failed())?
+    }
+
     fn delete_remote_chunk(
         &self,
         object_key: &str,
@@ -5129,6 +5174,15 @@ impl ApiState {
     }
 }
 
+fn remote_chunk_worker_failed() -> Problem {
+    problem(
+        "remote_chunk_worker_unavailable",
+        "Remote storage worker is unavailable; retry the request",
+        503,
+    )
+    .retryable(true)
+}
+
 impl ControlAggregate {
     pub(crate) fn mark_migrated_profile_ready_after_sync(
         &mut self,
@@ -6174,6 +6228,20 @@ async fn log_slow_requests(request: axum::extract::Request, next: Next) -> Respo
 }
 
 static LARGE_TRANSFER_BODY_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+static REMOTE_CHUNK_IO_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+fn remote_chunk_io_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Problem> {
+    Arc::clone(REMOTE_CHUNK_IO_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(8))))
+        .try_acquire_owned()
+        .map_err(|_| {
+            problem(
+                "remote_chunk_capacity_exhausted",
+                "Remote storage is busy; retry shortly",
+                503,
+            )
+            .retryable(true)
+        })
+}
 
 pub(crate) async fn large_transfer_body_slot() -> Result<tokio::sync::OwnedSemaphorePermit, Problem>
 {

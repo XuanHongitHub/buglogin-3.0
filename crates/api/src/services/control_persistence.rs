@@ -74,6 +74,27 @@ impl ControlPersistence {
             .transpose()
     }
 
+    pub fn load_many<T>(
+        &self,
+        tenant_id: &str,
+        record_type: &str,
+        record_ids: &[String],
+    ) -> Result<Vec<(String, T)>, Problem>
+    where
+        T: DeserializeOwned,
+    {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .get_many(tenant_id, record_type, record_ids)?
+            .into_iter()
+            .map(|record| {
+                let record_id = record.record_id.clone();
+                decode(record).map(|value| (record_id, value))
+            })
+            .collect()
+    }
+
     pub fn list_versioned<T>(
         &self,
         tenant_id: &str,

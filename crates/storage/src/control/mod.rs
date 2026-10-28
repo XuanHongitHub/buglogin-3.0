@@ -288,6 +288,21 @@ pub trait ControlRecordStore {
         record_type: &str,
         record_id: &str,
     ) -> Result<Option<ControlRecord>, Problem>;
+    fn get_many(
+        &mut self,
+        tenant_id: &str,
+        record_type: &str,
+        record_ids: &[String],
+    ) -> Result<Vec<ControlRecord>, Problem> {
+        validate_scope(tenant_id, record_type, "list")?;
+        let mut records = Vec::with_capacity(record_ids.len());
+        for record_id in record_ids {
+            if let Some(record) = self.get(tenant_id, record_type, record_id)? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
     fn revision(
         &mut self,
         tenant_id: &str,
@@ -864,6 +879,38 @@ impl ControlRecordStore for PostgresControlRecordWorker {
     ) -> Result<Option<ControlRecord>, Problem> {
         let key = key(tenant_id, record_type, record_id)?;
         load_record(&mut self.client, &key)
+    }
+    fn get_many(
+        &mut self,
+        tenant_id: &str,
+        record_type: &str,
+        record_ids: &[String],
+    ) -> Result<Vec<ControlRecord>, Problem> {
+        validate_scope(tenant_id, record_type, "list")?;
+        if record_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        for record_id in record_ids {
+            key(tenant_id, record_type, record_id)?;
+        }
+        self.client
+            .query(
+                "SELECT record_id, revision, checksum, value FROM buglogin_control_records WHERE tenant_id = $1 AND record_type = $2 AND record_id = ANY($3) ORDER BY record_id",
+                &[&tenant_id, &record_type, &record_ids],
+            )
+            .map_err(|_| unavailable())?
+            .into_iter()
+            .map(|row| {
+                decode_record(
+                    tenant_id,
+                    record_type,
+                    row.get(0),
+                    row.get(1),
+                    row.get(2),
+                    row.get(3),
+                )
+            })
+            .collect()
     }
     fn revision(
         &mut self,
