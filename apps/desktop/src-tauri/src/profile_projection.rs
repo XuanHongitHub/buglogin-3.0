@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -30,8 +30,10 @@ use buglogin_sync::{
     payload::{PAYLOAD_SCHEMA_VERSION, PayloadDescriptor, PayloadObject},
 };
 use fs2::FileExt;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
 
 use crate::remote_api::{RemoteApiClient, RemoteProxySyncSnapshot};
 
@@ -41,6 +43,15 @@ const SYNC_COMMIT_MARKER: &str = ".buglogin-sync-commit.json";
 const MAX_ENCRYPTED_OBJECT_BYTES: usize = MAX_PROFILE_SYNC_OBJECT_BYTES as usize;
 const MAX_PROFILE_PLAINTEXT_BYTES: u64 =
     MAX_PROFILE_SYNC_OBJECT_BYTES - AUTHENTICATED_CHUNK_OVERHEAD_BYTES as u64;
+const MAX_CONCURRENT_PROFILE_CHUNK_DOWNLOADS: usize = 4;
+static PROFILE_CHUNK_DOWNLOAD_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn profile_chunk_download_slots() -> Arc<Semaphore> {
+    Arc::clone(
+        PROFILE_CHUNK_DOWNLOAD_SLOTS
+            .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_PROFILE_CHUNK_DOWNLOADS))),
+    )
+}
 
 pub struct HydratedProxyCredential {
     pub proxy_id: buglogin_domain::ids::ProxyId,
@@ -1005,6 +1016,62 @@ impl ProfileProjection {
             let (mut destination, _) = staging.create_file(&file.path)?;
             let mut aggregate = Sha256::new();
             let mut total_size = 0u64;
+            let download_slots = profile_chunk_download_slots();
+            let chunks = file
+                .chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    (
+                        index,
+                        chunk.object.key.clone(),
+                        chunk.object.checksum.clone(),
+                        chunk.object.size,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let download_client = client.clone();
+            let download_auth = auth.clone();
+            let workspace_id = manifest.workspace_id.clone();
+            let resource_id = manifest.resource_id.clone();
+            let generation = manifest.generation;
+            let correlation_id = correlation_id.to_owned();
+            let mut downloaded_chunks = stream::iter(chunks.into_iter().map(
+                |(index, object_key, object_checksum, object_size)| {
+                    let download_slots = Arc::clone(&download_slots);
+                    let client = download_client.clone();
+                    let auth = download_auth.clone();
+                    let workspace_id = workspace_id.clone();
+                    let resource_id = resource_id.clone();
+                    let correlation_id = correlation_id.clone();
+                    async move {
+                        let permit = download_slots
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| unavailable())?;
+                        let encrypted = client
+                            .download_blob(
+                                CoordinationScope {
+                                    workspace_id: &workspace_id,
+                                    auth: &auth,
+                                },
+                                &resource_id,
+                                &object_key,
+                                generation,
+                                &object_checksum,
+                                object_size,
+                                &correlation_id,
+                            )
+                            .await?;
+                        // Keep the global slot until the ordered consumer has
+                        // authenticated and written this chunk. This bounds
+                        // buffered ciphertext memory across all profile opens.
+                        Ok::<_, Problem>((index, encrypted, permit))
+                    }
+                },
+            ))
+            .buffered(MAX_CONCURRENT_PROFILE_CHUNK_DOWNLOADS);
+
             for (expected_index, chunk) in file.chunks.iter().enumerate() {
                 if chunk.index != expected_index as u64 {
                     return Err(problem(
@@ -1012,20 +1079,19 @@ impl ProfileProjection {
                         "Chunked profile file sequence is invalid",
                     ));
                 }
-                let encrypted = client
-                    .download_blob(
-                        CoordinationScope {
-                            workspace_id: &manifest.workspace_id,
-                            auth,
-                        },
-                        &manifest.resource_id,
-                        &chunk.object.key,
-                        manifest.generation,
-                        &chunk.object.checksum,
-                        chunk.object.size,
-                        correlation_id,
-                    )
-                    .await?;
+                let (downloaded_index, encrypted, _download_permit) =
+                    downloaded_chunks.try_next().await?.ok_or_else(|| {
+                        problem(
+                            "profile_file_chunks_invalid",
+                            "Chunked profile file sequence is incomplete",
+                        )
+                    })?;
+                if downloaded_index != expected_index {
+                    return Err(problem(
+                        "profile_file_chunks_invalid",
+                        "Chunked profile file sequence is out of order",
+                    ));
+                }
                 if encrypted.len() as u64 != chunk.object.size
                     || checksum(&encrypted) != chunk.object.checksum
                 {
@@ -4259,7 +4325,17 @@ mod tests {
         }
         let _ = shutdown_server.send(());
         let requested = server.await.unwrap();
-        assert_eq!(requested.len(), manifest.objects.len() + 4);
+        for chunk in &file.chunks {
+            let encoded_key = chunk.object.key.replace('/', "%2F");
+            assert!(
+                requested
+                    .iter()
+                    .filter(|path| path.contains(&encoded_key))
+                    .count()
+                    >= 1,
+                "successful hydration must request every manifest chunk"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 
