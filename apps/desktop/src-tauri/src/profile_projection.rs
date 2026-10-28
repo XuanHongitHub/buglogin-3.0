@@ -88,6 +88,63 @@ impl ProfileProjection {
         &self.root
     }
 
+    pub fn pending_session_paths(&self) -> Result<Vec<(ProfileId, PathBuf)>, Problem> {
+        let entries = fs::read_dir(&self.root).map_err(|_| unavailable())?;
+        let mut pending = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| unavailable())?;
+            let metadata = entry.file_type().map_err(|_| unavailable())?;
+            if !metadata.is_dir() || metadata.is_symlink() {
+                continue;
+            }
+            let profile_id = match ProfileId::new(entry.file_name().to_string_lossy()) {
+                Ok(profile_id) => profile_id,
+                Err(_) => continue,
+            };
+            let profile_root = entry.path();
+            let commit_marker = profile_root.join(SYNC_COMMIT_MARKER);
+            if let Some(marker) = read_regular_file(&commit_marker)?
+                && let Ok(marker) = serde_json::from_slice::<SyncCommitMarker>(&marker)
+                && marker.profile_id == profile_id
+                && marker.target_generation > marker.base_generation
+                && valid_manifest_checksum(&marker.base_root_checksum)
+                && valid_manifest_checksum(&marker.target_root_checksum)
+            {
+                pending.push((
+                    profile_id.clone(),
+                    decrypted_generation_path_parts(
+                        &self.root,
+                        &profile_id,
+                        marker.base_generation,
+                        &marker.base_root_checksum,
+                    )?,
+                ));
+                continue;
+            }
+
+            let active_marker = profile_root.join(ACTIVE_SESSION_MARKER);
+            if let Some(marker) = read_regular_file(&active_marker)?
+                && let Ok(marker) = serde_json::from_slice::<ActiveSessionMarker>(&marker)
+                && marker.state == "active"
+                && marker.profile_id == profile_id
+                && valid_manifest_checksum(&marker.root_checksum)
+            {
+                pending.push((
+                    profile_id.clone(),
+                    decrypted_generation_path_parts(
+                        &self.root,
+                        &profile_id,
+                        marker.generation,
+                        &marker.root_checksum,
+                    )?,
+                ));
+            }
+        }
+        pending.sort_by(|left, right| left.0.cmp(&right.0));
+        pending.dedup_by(|left, right| left.0 == right.0);
+        Ok(pending)
+    }
+
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Problem> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|_| unavailable())?;
@@ -2081,6 +2138,18 @@ fn decrypted_generation_path_parts(
     confined_path(root, &relative)
 }
 
+fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>, Problem> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(unavailable()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
+        return Ok(None);
+    }
+    fs::read(path).map(Some).map_err(|_| unavailable())
+}
+
 fn valid_manifest_checksum(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -2903,6 +2972,48 @@ mod tests {
         assert_eq!(
             fs::read(recovered.join("Default/Cookies")).unwrap(),
             b"local dirty data"
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_session_paths_survive_projection_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-pending-restart-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let workspace = WorkspaceId::new("ws_pending_restart").unwrap();
+        let resource = ResourceId::new("res_pending_restart").unwrap();
+        let profile = ProfileId::new("prf_pending_restart").unwrap();
+        let base = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let target = recovery_manifest(&workspace, &resource, 2, Some(1), b"target");
+        {
+            let projection = ProfileProjection::open(&root).unwrap();
+            let receipt = projection
+                .publish_decrypted(
+                    &profile,
+                    &base,
+                    vec![("Default/Cookies".to_owned(), b"base".to_vec())],
+                )
+                .unwrap();
+            projection
+                .prepare_sync_commit(&profile, &base, &target)
+                .unwrap();
+            projection
+                .begin_active_session(&profile, base.generation, &base.root_checksum)
+                .unwrap();
+            fs::write(receipt.path.join("Default/Cookies"), b"local dirty data").unwrap();
+        }
+
+        let projection = ProfileProjection::open(&root).unwrap();
+        assert_eq!(
+            projection.pending_session_paths().unwrap(),
+            vec![(
+                profile.clone(),
+                decrypted_generation_path(&root.canonicalize().unwrap(), &profile, &base).unwrap()
+            )]
         );
         drop(projection);
         fs::remove_dir_all(root).unwrap();

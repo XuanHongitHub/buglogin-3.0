@@ -472,13 +472,16 @@ impl ProfileOperationLocks {
 #[derive(Default)]
 struct ExitReconcileBackoff {
     attempts: HashMap<ProfileId, (u32, std::time::Instant)>,
+    blocked: BTreeSet<ProfileId>,
 }
 
 impl ExitReconcileBackoff {
     fn ready(&self, profile_id: &ProfileId, now: std::time::Instant) -> bool {
-        self.attempts
-            .get(profile_id)
-            .is_none_or(|(_, next_attempt)| now >= *next_attempt)
+        !self.blocked.contains(profile_id)
+            && self
+                .attempts
+                .get(profile_id)
+                .is_none_or(|(_, next_attempt)| now >= *next_attempt)
     }
 
     fn record_attempt(&mut self, profile_id: &ProfileId, now: std::time::Instant) {
@@ -493,7 +496,28 @@ impl ExitReconcileBackoff {
     fn retain_exited(&mut self, exited: &[ProfileId]) {
         self.attempts
             .retain(|profile_id, _| exited.contains(profile_id));
+        self.blocked
+            .retain(|profile_id| exited.contains(profile_id));
     }
+
+    fn block(&mut self, profile_id: &ProfileId) {
+        self.blocked.insert(profile_id.clone());
+    }
+
+    fn reset(&mut self, profile_id: &ProfileId) {
+        self.attempts.remove(profile_id);
+        self.blocked.remove(profile_id);
+    }
+}
+
+fn profile_sync_error_should_retry(error: &Problem) -> bool {
+    if matches!(
+        error.code.as_str(),
+        "profile_local_sync_conflict" | "sync_manifest_conflict"
+    ) {
+        return false;
+    }
+    error.retryable || matches!(error.status, 408 | 425 | 429) || error.status >= 500
 }
 
 #[derive(Default)]
@@ -746,9 +770,39 @@ impl ProductionDesktopState {
         let Ok(active) = self.profile_runtime.active_profiles().await else {
             return;
         };
-        let Ok(exited) = self.profile_runtime.unexpectedly_stopped_profiles().await else {
+        let Ok(mut exited) = self.profile_runtime.unexpectedly_stopped_profiles().await else {
             return;
         };
+        match self.profile_projection("desktop-runtime-reconcile") {
+            Ok(projection) => match projection.pending_session_paths() {
+                Ok(pending) => {
+                    for (profile_id, profile_path) in pending {
+                        if active.contains(&profile_id) {
+                            continue;
+                        }
+                        if matches!(
+                            self.profile_runtime
+                                .process_state_for_path(profile_path)
+                                .await,
+                            Ok(buglogin_browser::lifecycle::LifecycleState::Ready
+                                | buglogin_browser::lifecycle::LifecycleState::Stopped)
+                        ) {
+                            exited.push(profile_id);
+                        }
+                    }
+                }
+                Err(error) => tauri_plugin_log::log::warn!(
+                    "Could not scan durable profile sync markers: code={}",
+                    error.code
+                ),
+            },
+            Err(error) => tauri_plugin_log::log::warn!(
+                "Could not open profile projection for sync recovery: code={}",
+                error.code
+            ),
+        }
+        exited.sort();
+        exited.dedup();
         if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
             backoff.retain_exited(&exited);
         }
@@ -782,14 +836,38 @@ impl ProductionDesktopState {
             let profile_key = profile_id.as_str().replace(':', "-");
             let idempotency_key = format!("runtime-reconcile-{profile_key}-{timestamp}");
             let correlation_id = format!("runtime-reconcile-{profile_key}-{timestamp}");
-            let _ = self
-                .invoke(
-                    "profile_stop",
-                    &correlation_id,
-                    Some(&idempotency_key),
-                    json!({"profileId": profile_id}),
-                )
+            let _profile_operation = self
+                .profile_operations
+                .lock_for(&profile_id)
+                .lock_owned()
                 .await;
+            if operation_busy() {
+                return;
+            }
+            if let Err(error) = self
+                .stop_profile(
+                    profile_id.clone(),
+                    idempotency_key,
+                    correlation_id,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            {
+                if !profile_sync_error_should_retry(&error)
+                    && let Ok(mut backoff) = self.exit_reconcile_backoff.lock()
+                {
+                    backoff.block(&profile_id);
+                    tauri_plugin_log::log::warn!(
+                        "Stopped profile sync requires user or access resolution: profile={} code={}",
+                        profile_id.as_str(),
+                        error.code
+                    );
+                }
+            } else if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
+                backoff.reset(&profile_id);
+            }
         }
     }
 
@@ -2907,6 +2985,9 @@ impl ProductionDesktopState {
                 let hash = payload_hash(&payload)?;
                 let input: ProfileStopInput = parse_payload(payload, correlation_id)?;
                 let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
+                if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
+                    backoff.reset(&profile_id);
+                }
                 let action_correlation = correlation_id.to_owned();
                 let sync_idempotency_key = key.to_owned();
                 let data = self
@@ -2941,6 +3022,9 @@ impl ProductionDesktopState {
                 let hash = payload_hash(&payload)?;
                 let input: ProfileKeyRotationExecuteInput = parse_payload(payload, correlation_id)?;
                 let profile_id = parse_profile_id(&input.profile_id, correlation_id)?;
+                if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
+                    backoff.reset(&profile_id);
+                }
                 let action_correlation = correlation_id.to_owned();
                 let sync_idempotency_key = key.to_owned();
                 let confirmed_recipients = input.confirmed_recipients;
@@ -4072,6 +4156,9 @@ impl ProductionDesktopState {
         idempotency_key: String,
         correlation_id: String,
     ) -> Result<Value, Problem> {
+        if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
+            backoff.reset(&profile_id);
+        }
         let local_projection = self.profile_projection(&correlation_id)?;
         let auth = self.auth(&correlation_id)?;
         let mut profile = self.client.profile(&profile_id, &correlation_id).await?;
@@ -5088,32 +5175,37 @@ impl ProductionDesktopState {
             )
             .await;
         }
-        if result
-            .as_ref()
-            .is_err_and(|error| error.code != "profile_local_sync_conflict")
+        if result.is_err()
             && self
                 .profile_runtime
                 .active_profiles()
                 .await
                 .is_ok_and(|active| !active.contains(&cleanup_profile_id))
         {
-            // A closed browser with a failed upload stays in the background
-            // reconciliation queue. Only release runtime bookkeeping when the
-            // failure happened before a stopped sync could be retried.
-            self.profile_runtime
-                .queue_sync_retry(cleanup_profile_id.clone())
-                .await;
-            // A stopped browser has no writer left. Preserve its local files
-            // and retry intent, but release the local/remote lease immediately
-            // instead of making the user wait for the five-minute safety cap.
-            let _ = self
-                .profile_runtime
-                .set_sync_attempt_active(cleanup_profile_id.clone(), false)
-                .await;
-            let _ = self
-                .profile_runtime
-                .release_stopped_for_retry(cleanup_profile_id)
-                .await;
+            let retryable = result.as_ref().is_err_and(profile_sync_error_should_retry);
+            if retryable {
+                self.profile_runtime
+                    .queue_sync_retry(cleanup_profile_id.clone())
+                    .await;
+                // The browser is stopped; preserve dirty files and retry intent,
+                // but do not hold a local runtime lock while waiting to retry.
+                let _ = self
+                    .profile_runtime
+                    .set_sync_attempt_active(cleanup_profile_id.clone(), false)
+                    .await;
+                let _ = self
+                    .profile_runtime
+                    .release_stopped_for_retry(cleanup_profile_id)
+                    .await;
+            } else {
+                // Permission denials and unresolved conflicts are not useful
+                // background work. Keep durable markers/data for an explicit
+                // later retry, but release the stopped process lease now.
+                let _ = self
+                    .profile_runtime
+                    .complete_stop_detached(cleanup_profile_id)
+                    .await;
+            }
         }
         tauri_plugin_log::log::info!(
             "Profile stop/sync attempt completed: result={} duration_ms={}",
@@ -7820,6 +7912,25 @@ mod tests {
 
         backoff.retain_exited(&[]);
         assert!(backoff.ready(&profile, start));
+    }
+
+    #[test]
+    fn exit_reconcile_blocks_permission_and_conflict_failures_until_explicit_retry() {
+        let profile = buglogin_domain::ids::ProfileId::new("prf_backoff_blocked").unwrap();
+        let now = std::time::Instant::now();
+        let mut backoff = super::ExitReconcileBackoff::default();
+        let forbidden = Problem::new("profile_forbidden", "Forbidden", 403, "test");
+        let conflict = Problem::new("sync_manifest_conflict", "Conflict", 409, "test");
+        let unavailable = Problem::new("api_unavailable", "Unavailable", 503, "test");
+
+        assert!(!super::profile_sync_error_should_retry(&forbidden));
+        assert!(!super::profile_sync_error_should_retry(&conflict));
+        assert!(super::profile_sync_error_should_retry(&unavailable));
+
+        backoff.block(&profile);
+        assert!(!backoff.ready(&profile, now + std::time::Duration::from_secs(86_400)));
+        backoff.reset(&profile);
+        assert!(backoff.ready(&profile, now));
     }
 
     #[test]

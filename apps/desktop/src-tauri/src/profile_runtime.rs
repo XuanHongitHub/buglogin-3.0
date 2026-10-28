@@ -7,7 +7,9 @@ use std::{
 };
 
 use buglogin_browser::{
-    lifecycle::LifecycleManager, process::ProcessController, runtime::LaunchSpecification,
+    lifecycle::{LifecycleManager, LifecycleState},
+    process::ProcessController,
+    runtime::LaunchSpecification,
 };
 use buglogin_domain::{
     entities::Runtime,
@@ -372,6 +374,21 @@ impl ProfileRuntimeHandle {
         response.await.map_err(|_| unavailable())
     }
 
+    pub async fn process_state_for_path(
+        &self,
+        profile_path: PathBuf,
+    ) -> Result<LifecycleState, Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::ProcessStateForPath {
+                profile_path,
+                reply,
+            })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
     pub async fn unexpectedly_stopped_profiles(&self) -> Result<Vec<ProfileId>, Problem> {
         let (reply, response) = oneshot::channel();
         self.commands
@@ -465,6 +482,10 @@ enum RuntimeCommand {
     },
     ActiveProfiles {
         reply: oneshot::Sender<Vec<ProfileId>>,
+    },
+    ProcessStateForPath {
+        profile_path: PathBuf,
+        reply: oneshot::Sender<Result<LifecycleState, Problem>>,
     },
     UnexpectedlyStoppedProfiles {
         reply: oneshot::Sender<Vec<ProfileId>>,
@@ -591,7 +612,7 @@ where
                     let _ = reply.send(profiles);
                 }
                 Some(RuntimeCommand::ActiveProfiles { reply }) => {
-                    runtime.reconcile_exited_processes().await;
+                    runtime.reconcile_exited_processes();
                     let candidates = runtime
                         .running
                         .iter()
@@ -612,6 +633,9 @@ where
                         .collect::<Vec<_>>();
                     profiles.sort();
                     let _ = reply.send(profiles);
+                }
+                Some(RuntimeCommand::ProcessStateForPath { profile_path, reply }) => {
+                    let _ = reply.send(runtime.lifecycle.reconcile_profile(&profile_path));
                 }
                 Some(RuntimeCommand::UnexpectedlyStoppedProfiles { reply }) => {
                     let _ = reply.send(runtime.unexpectedly_stopped.iter().cloned().collect());
@@ -795,7 +819,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
         }
     }
 
-    async fn reconcile_exited_processes(&mut self) {
+    fn reconcile_exited_processes(&mut self) {
         let exited = self.lifecycle.reconcile();
         let mut bridges_to_stop = Vec::new();
         for (path, state) in exited {
@@ -816,7 +840,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             }
         }
         for bridge in bridges_to_stop {
-            let _ = bridge.stop().await;
+            bridge.stop_in_background();
         }
     }
 
@@ -979,7 +1003,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             .get_mut(profile_id)
             .and_then(|running| running.proxy_bridge.take());
         if let Some(proxy_bridge) = proxy_bridge {
-            proxy_bridge.stop().await?;
+            proxy_bridge.stop_in_background();
         }
         if let Some(running) = self.running.get_mut(profile_id) {
             if !running.sync_pending {
@@ -1186,7 +1210,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
         // Process exit detection must run from the heartbeat itself. Previously
         // it depended on the UI asking for `active_profiles`; a minimized app
         // could keep renewing a dead browser's lease indefinitely.
-        self.reconcile_exited_processes().await;
+        self.reconcile_exited_processes();
         let Some(coordination) = self.coordination.clone() else {
             return;
         };

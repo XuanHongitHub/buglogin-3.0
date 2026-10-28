@@ -137,6 +137,19 @@ impl ProxyBridgeHandle {
         }
         Ok(())
     }
+
+    pub fn stop_in_background(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(task) = self.task.take() {
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = task.await {
+                    tauri_plugin_log::log::warn!("Proxy bridge shutdown task failed: {}", error);
+                }
+            });
+        }
+    }
 }
 
 pub async fn check_proxy_connectivity(spec: ProxyBridgeSpec) -> Result<u64, Problem> {
@@ -779,6 +792,29 @@ mod tests {
         assert!(!request.contains("secret"));
         bridge.stop().await.unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_in_background_signals_shutdown_without_waiting_for_task_completion() {
+        let (stop, mut stopped) = oneshot::channel();
+        let (finish, wait_for_finish) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = (&mut stopped).await;
+            let _ = wait_for_finish.await;
+        });
+        let bridge = ProxyBridgeHandle {
+            proxy_url: "http://127.0.0.1:0".into(),
+            stop: Some(stop),
+            task: Some(task),
+        };
+
+        tokio::time::timeout(Duration::from_millis(250), async move {
+            bridge.stop_in_background();
+        })
+        .await
+        .expect("bridge shutdown must not block its caller");
+
+        finish.send(()).unwrap();
     }
 
     #[tokio::test]
