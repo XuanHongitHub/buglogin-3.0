@@ -4691,9 +4691,32 @@ impl ProductionDesktopState {
                     .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
                     .await;
                 if local_recovery_receipt.is_some() {
+                    // The cloud changed between the initial manifest read and
+                    // lease acquisition. Revalidate the retained local tree
+                    // against the latest manifest and retry once. This keeps
+                    // the user's local browser usable without ever uploading
+                    // that older tree over the newer cloud generation.
+                    let recovered =
+                        local_projection.verified_local_recovery_receipt(&profile_id, &latest)?;
+                    if let Some(recovered) = recovered
+                        && attempt == 0
+                    {
+                        manifest = latest;
+                        local_recovery_receipt = Some(recovered);
+                        deferred_recovery_error = Some(
+                            Problem::new(
+                                "profile_local_sync_deferred",
+                                "Local profile changes are preserved; cloud has newer data, so sync is deferred",
+                                409,
+                                &correlation_id,
+                            )
+                            .retryable(true),
+                        );
+                        continue;
+                    }
                     return Err(Problem::new(
                         "profile_local_sync_conflict",
-                        "The profile changed remotely while local browser changes were pending. Local data was preserved; resolve the sync conflict before launching",
+                        "Local profile data is preserved, but the cloud changed repeatedly while opening. Retry after the other device finishes",
                         409,
                         &correlation_id,
                     ));

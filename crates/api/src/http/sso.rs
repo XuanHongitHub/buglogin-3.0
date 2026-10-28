@@ -341,12 +341,11 @@ fn create_or_link_identity(
     } else {
         None
     };
-    if let (Some(email_identity), Some(legacy_identity)) = (&by_email, &by_legacy)
-        && email_identity.account_id != legacy_identity.account_id
-    {
-        return Err(ambiguous_identity());
-    }
-    let existing = by_email.or(by_legacy);
+    // BugLab attests the canonical email. The legacy username is only a
+    // compatibility hint and may still point at an older account after an
+    // account rename/recovery; it must not override an exact email match.
+    // If there is no email match, the legacy mapping remains the fallback.
+    let existing = prefer_buglab_attested_email_identity(by_email, by_legacy);
     let account_id = if let Some(identity) = existing {
         if identity.canonical_email != email {
             return Err(ambiguous_identity());
@@ -433,6 +432,13 @@ fn create_or_link_identity(
         })?;
     }
     Ok(account_id)
+}
+
+fn prefer_buglab_attested_email_identity(
+    by_email: Option<AccountIdentity>,
+    by_legacy: Option<AccountIdentity>,
+) -> Option<AccountIdentity> {
+    by_email.or(by_legacy)
 }
 
 fn provision_buglab_identity_in_default_workspace(
@@ -804,7 +810,8 @@ mod tests {
     use super::{
         IdentityVerification, LinkedBugLabIdentity, SsoTransaction, SsoTransactionStatus,
         issue_sso_session, legacy_username, linked_identity_matches_subject,
-        select_default_workspace, verify_buglab_attested_identity,
+        prefer_buglab_attested_email_identity, select_default_workspace,
+        verify_buglab_attested_identity,
     };
     use crate::{
         auth::AuthService,
@@ -831,6 +838,32 @@ mod tests {
         assert_eq!(legacy_username(Some("old user")), None);
         assert_eq!(legacy_username(Some("ab")), None);
         assert_eq!(legacy_username(None), None);
+    }
+
+    #[test]
+    fn attested_email_match_wins_over_stale_legacy_account_mapping() {
+        let by_email = buglogin_domain::account::AccountIdentity::new(
+            AccountId::new("acct_email_match").unwrap(),
+            "current_user",
+            "person@example.test",
+            "2026-10-28T00:00:00Z",
+        )
+        .unwrap();
+        let by_legacy = buglogin_domain::account::AccountIdentity::new(
+            AccountId::new("acct_legacy").unwrap(),
+            "old_user",
+            "old@example.test",
+            "2026-10-28T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            prefer_buglab_attested_email_identity(Some(by_email), Some(by_legacy))
+                .unwrap()
+                .account_id
+                .as_str(),
+            "acct_email_match"
+        );
     }
 
     #[test]
