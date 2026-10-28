@@ -7,8 +7,8 @@ Provider login and exchange passed using the documented QA identity. The provide
 ## Ordered work
 
 1. **Provider contract** — real login, callback-state return, exchange, active status, and BugLogin mapping were verified on 2026-10-27. Continue tracking remaining provider questions in the design spec.
-2. **Identity and protocol contract** — SSO start/complete API and OpenAPI schemas are implemented; identity mapping remains role-neutral and ambiguity fails closed.
-3. **Backend broker** — implemented: expiring single-use state, bounded HTTPS exchange, active-status/app checks, subject mapping, session issue, and redacted audit.
+2. **Identity and protocol contract** — SSO start/complete API and OpenAPI schemas are implemented; existing ambiguous mappings fail closed. A new BugLab identity is now atomically provisioned as verified in BugMedia's common workspace with the ordinary Member role; no platform or team privileges are inferred.
+3. **Backend broker** — implemented: expiring single-use state, bounded HTTPS exchange, active-status/app checks, stable-subject mapping, session issue, and redacted audit. Provider email changes do not strand a stable linked subject or change the linked BugLogin account.
 4. **Desktop flow** — system-browser launch, strict custom-scheme callback parsing, and device-session persistence use the existing OS credential vault. Native callbacks are retained until the frontend drains them. Cross-instance callback handoff is implemented locally with a hashed state route in the OS vault, loopback HMAC envelope, strict size/query validation, one-use route removal, isolated-mode fail-fast, and pending-state cleanup if routing/browser launch fails.
 5. **Rollout gate** — implemented: API requires `BUGLAB_SSO_ENABLED=true`, app code, and callback URI; the production BugLogin API is configured for BugLab ID.
 6. **Logout** — BugLogin session revocation uses existing logout. BugLab ID logout redirect is pending exact allowlisted return URI/provider behavior.

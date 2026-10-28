@@ -97,7 +97,7 @@ async fn handle(
     State(state): State<ProductionTransportState>,
     headers: HeaderMap,
     body: Bytes,
-) -> (StatusCode, Json<JsonRpcResponse>) {
+) -> (StatusCode, HeaderMap, Json<JsonRpcResponse>) {
     let fallback_id = Value::Null;
     if !state.config.enabled {
         return response_error(
@@ -175,6 +175,7 @@ async fn handle(
     match result {
         Ok(value) => (
             StatusCode::OK,
+            HeaderMap::new(),
             Json(JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -306,10 +307,18 @@ fn validate_origin(headers: &HeaderMap) -> Result<(), Problem> {
     }
 }
 
-fn response_error(id: Value, error: Problem) -> (StatusCode, Json<JsonRpcResponse>) {
+fn response_error(id: Value, error: Problem) -> (StatusCode, HeaderMap, Json<JsonRpcResponse>) {
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut headers = HeaderMap::new();
+    if error.code == "control_authentication_overloaded" {
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("2"),
+        );
+    }
     (
         status,
+        headers,
         Json(JsonRpcResponse {
             jsonrpc: "2.0",
             id,

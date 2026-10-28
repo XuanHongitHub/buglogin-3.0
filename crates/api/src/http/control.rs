@@ -10179,7 +10179,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["account"]["id"], "acct_scoped_created_member");
-        assert_eq!(body["identity"]["verification"], "admin_provisioned");
+        assert_eq!(body["identity"]["verification"], "verified");
         assert_eq!(body["member"]["accountId"], "acct_scoped_created_member");
         assert_eq!(body["member"]["workspaceId"], owner.workspace_id.as_str());
         assert_eq!(body["member"]["role"], "member");

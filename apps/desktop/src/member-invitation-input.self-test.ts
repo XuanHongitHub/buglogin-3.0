@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   analyzeBulkAccountRows,
   analyzeBulkInvitationEmails,
+  analyzeDirectAccountRows,
   MAX_BULK_INVITATIONS,
 } from "./member-invitation-input.ts";
 
@@ -29,5 +30,14 @@ assert.deepEqual(
 );
 assert.deepEqual(accountRows.duplicateLines, [4]);
 assert.deepEqual(accountRows.invalidLines, [5]);
+
+const directRows = analyzeDirectAccountRows(
+  "alice,alice@example.com,1234\nbob,bob@example.com,123",
+);
+assert.deepEqual(
+  directRows.rows.map(({ initialPassword }) => initialPassword),
+  ["1234"],
+);
+assert.deepEqual(directRows.invalidLines, [2]);
 
 console.log("Bulk member invitation input self-test passed");

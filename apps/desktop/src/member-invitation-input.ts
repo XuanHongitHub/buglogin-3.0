@@ -145,7 +145,7 @@ export function analyzeBulkAccountRows(input: string): {
 }
 
 const EMAIL_PATTERN = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
-const MIN_INITIAL_PASSWORD_LENGTH = 12;
+const MIN_INITIAL_PASSWORD_LENGTH = 4;
 const MAX_INITIAL_PASSWORD_LENGTH = 256;
 
 export function analyzeBulkInvitationEmails(

@@ -266,7 +266,7 @@ impl CredentialService {
         password: &str,
         now: u64,
     ) -> Result<ControlPut, Problem> {
-        self.password_reset_put_with_minimum(account_id, password, now, 12)
+        self.password_reset_put_with_minimum(account_id, password, now, 4)
     }
 
     pub(crate) fn password_change_put(
@@ -694,7 +694,7 @@ fn hex_digit(value: u8) -> Option<u8> {
 }
 
 fn validate_password(password: &str) -> Result<(), Problem> {
-    validate_password_with_minimum(password, 12)
+    validate_password_with_minimum(password, 4)
 }
 
 fn validate_password_with_minimum(password: &str, minimum_length: usize) -> Result<(), Problem> {
@@ -746,9 +746,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn eight_character_minimum_is_only_for_local_admin_recovery() {
+    fn normal_passwords_accept_four_characters_and_local_admin_recovery_keeps_eight() {
+        assert!(validate_password("abcd").is_ok());
         assert_eq!(
-            validate_password("admin123").unwrap_err().code,
+            validate_password("abc").unwrap_err().code,
             "invalid_password"
         );
         assert!(validate_password_with_minimum("admin123", 8).is_ok());
@@ -756,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn self_service_password_change_accepts_four_characters_but_resets_keep_twelve() {
+    fn password_change_and_reset_accept_four_characters_and_reject_three() {
         let (identities, credentials) = service();
         let account_id = seed(&identities, &credentials);
         assert!(
@@ -771,9 +772,14 @@ mod tests {
                 .code,
             "invalid_password"
         );
-        assert_eq!(
+        assert!(
             credentials
                 .password_reset_put(&account_id, "abcd", 100)
+                .is_ok()
+        );
+        assert_eq!(
+            credentials
+                .password_reset_put(&account_id, "abc", 100)
                 .unwrap_err()
                 .code,
             "invalid_password"

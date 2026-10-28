@@ -157,8 +157,12 @@ impl AccountProvisioningService {
         email: &str,
         created_at: &str,
     ) -> Result<(PendingAccountProvisioning, Vec<ControlPut>), Problem> {
-        let identity =
-            AccountIdentity::admin_provisioned(account_id.clone(), username, email, created_at)?;
+        let identity = if email.trim().is_empty() {
+            AccountIdentity::admin_provisioned(account_id.clone(), username, email, created_at)?
+        } else {
+            AccountIdentity::new(account_id.clone(), username, email, created_at)?
+                .verify(1, created_at.to_owned())?
+        };
         let account = Account::new(account_id.clone(), created_at);
         if self
             .store
@@ -455,6 +459,25 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "invalid_credentials");
         assert_eq!(error.status, 401);
+    }
+
+    #[test]
+    fn trusted_admin_provisioning_verifies_the_supplied_email() {
+        let (_store, service, _actor) = fixture();
+        let account_id = AccountId::new("acct_verified_admin_provision").unwrap();
+        let (created, _puts) = service
+            .prepare_admin_provisioned_scoped(
+                account_id,
+                "verifiedmember",
+                "verified-member@example.com",
+                "2026-10-28T00:00:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(
+            created.identity.verification,
+            IdentityVerification::Verified
+        );
     }
 
     #[test]

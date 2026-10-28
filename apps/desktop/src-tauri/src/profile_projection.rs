@@ -202,6 +202,31 @@ impl ProfileProjection {
             if manifest.generation != marker.base_generation
                 || manifest.root_checksum != marker.base_root_checksum
             {
+                let base_path = decrypted_generation_path_parts(
+                    &self.root,
+                    profile_id,
+                    marker.base_generation,
+                    &marker.base_root_checksum,
+                )?;
+                if base_path.exists()
+                    && local_generation_matches_projection_marker(
+                        profile_id,
+                        marker.base_generation,
+                        &marker.base_root_checksum,
+                        &base_path,
+                    )?
+                {
+                    self.clear_active_session(profile_id)?;
+                    return Ok(None);
+                }
+                if local_generation_is_recoverable(
+                    profile_id,
+                    marker.base_generation,
+                    &marker.base_root_checksum,
+                    &base_path,
+                )? {
+                    return Ok(Some(base_path));
+                }
                 return Err(problem(
                     "profile_local_sync_conflict",
                     "This profile changed on another device while local browser changes were pending. Local data is preserved; resolve the sync conflict before launching",
@@ -250,6 +275,31 @@ impl ProfileProjection {
         if marker.generation != manifest.generation
             || marker.root_checksum != manifest.root_checksum
         {
+            let local_path = decrypted_generation_path_parts(
+                &self.root,
+                profile_id,
+                marker.generation,
+                &marker.root_checksum,
+            )?;
+            if local_path.exists()
+                && local_generation_matches_projection_marker(
+                    profile_id,
+                    marker.generation,
+                    &marker.root_checksum,
+                    &local_path,
+                )?
+            {
+                self.clear_active_session(profile_id)?;
+                return Ok(None);
+            }
+            if local_generation_is_recoverable(
+                profile_id,
+                marker.generation,
+                &marker.root_checksum,
+                &local_path,
+            )? {
+                return Ok(Some(local_path));
+            }
             return Err(problem(
                 "profile_local_sync_conflict",
                 "This profile changed on another device while local browser changes were pending. Local data is preserved; resolve the sync conflict before launching",
@@ -270,9 +320,64 @@ impl ProfileProjection {
         }
     }
 
-    /// Reuses the last decrypted base generation only when a pending local
-    /// commit proves that the remote manifest is still exactly its base.
-    /// The caller must separately hold the production lease before launch.
+    pub fn active_session_conflicts_with_manifest(
+        &self,
+        profile_id: &ProfileId,
+        manifest: &SyncManifest,
+    ) -> Result<bool, Problem> {
+        let commit_path = confined_path(
+            &self.root,
+            &PathBuf::from(profile_id.as_str()).join(SYNC_COMMIT_MARKER),
+        )?;
+        if let Ok(bytes) = fs::read(&commit_path) {
+            let marker: SyncCommitMarker = serde_json::from_slice(&bytes).map_err(|_| {
+                problem(
+                    "profile_sync_commit_marker_invalid",
+                    "The local sync commit record is invalid; local profile data has been preserved",
+                )
+            })?;
+            if marker.profile_id != *profile_id {
+                return Err(problem(
+                    "profile_sync_commit_marker_invalid",
+                    "The local sync commit record does not match this profile",
+                ));
+            }
+            return Ok((manifest.generation, manifest.root_checksum.as_str())
+                != (marker.base_generation, marker.base_root_checksum.as_str())
+                && (manifest.generation, manifest.root_checksum.as_str())
+                    != (
+                        marker.target_generation,
+                        marker.target_root_checksum.as_str(),
+                    ));
+        }
+        let marker_path = confined_path(
+            &self.root,
+            &PathBuf::from(profile_id.as_str()).join(ACTIVE_SESSION_MARKER),
+        )?;
+        let bytes = match fs::read(marker_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(unavailable()),
+        };
+        let marker: ActiveSessionMarker = serde_json::from_slice(&bytes).map_err(|_| {
+            problem(
+                "profile_session_marker_invalid",
+                "The local profile session marker is invalid; preserve the profile data and contact support",
+            )
+        })?;
+        if marker.state != "active" || marker.profile_id != *profile_id {
+            return Err(problem(
+                "profile_session_marker_invalid",
+                "The local profile session marker does not match this profile",
+            ));
+        }
+        Ok((manifest.generation, manifest.root_checksum.as_str())
+            != (marker.generation, marker.root_checksum.as_str()))
+    }
+
+    /// Reopens a locally retained generation after validating its projection
+    /// identity and filesystem shape. A newer cloud manifest is handled as a
+    /// sync conflict by stop; it must never be overwritten from this snapshot.
     pub fn verified_local_recovery_receipt(
         &self,
         profile_id: &ProfileId,
@@ -298,8 +403,6 @@ impl ProfileProjection {
                 || marker.target_generation <= marker.base_generation
                 || !valid_manifest_checksum(&marker.base_root_checksum)
                 || !valid_manifest_checksum(&marker.target_root_checksum)
-                || manifest.generation != marker.base_generation
-                || manifest.root_checksum != marker.base_root_checksum
             {
                 return Ok(None);
             }
@@ -325,24 +428,31 @@ impl ProfileProjection {
             })?;
             if marker.state != "active"
                 || marker.profile_id != *profile_id
-                || marker.generation != manifest.generation
-                || marker.root_checksum != manifest.root_checksum
+                || !valid_manifest_checksum(&marker.root_checksum)
             {
                 return Ok(None);
             }
-            decrypted_generation_path(&self.root, profile_id, manifest)?
+            decrypted_generation_path_parts(
+                &self.root,
+                profile_id,
+                marker.generation,
+                &marker.root_checksum,
+            )?
         };
-        if !generation_path.exists() {
-            return Ok(None);
-        }
-        let generation_metadata =
-            fs::symlink_metadata(&generation_path).map_err(|_| unavailable())?;
+        let generation_metadata = match fs::symlink_metadata(&generation_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(unavailable()),
+        };
         if !generation_metadata.is_dir() || generation_metadata.file_type().is_symlink() {
             return Ok(None);
         }
         let projection_marker_path = generation_path.join(MARKER);
-        let projection_marker_metadata =
-            fs::symlink_metadata(&projection_marker_path).map_err(|_| unavailable())?;
+        let projection_marker_metadata = match fs::symlink_metadata(&projection_marker_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(unavailable()),
+        };
         if !projection_marker_metadata.is_file()
             || projection_marker_metadata.file_type().is_symlink()
         {
@@ -351,19 +461,57 @@ impl ProfileProjection {
         let marker_bytes = fs::read(projection_marker_path).map_err(|_| unavailable())?;
         let projection_marker: EncryptedProjectionMarker =
             serde_json::from_slice(&marker_bytes).map_err(|_| unavailable())?;
-        if projection_marker.state != "complete"
-            || projection_marker.profile_id != *profile_id
-            || projection_marker.generation != manifest.generation
-            || projection_marker.remote_root_checksum != manifest.root_checksum
-        {
+        if projection_marker.state != "complete" || projection_marker.profile_id != *profile_id {
+            return Ok(None);
+        }
+        let (generation, root_checksum) = match projection_marker.generation {
+            generation
+                if generation == manifest.generation
+                    && projection_marker.remote_root_checksum == manifest.root_checksum =>
+            {
+                (generation, projection_marker.remote_root_checksum.clone())
+            }
+            _ => {
+                let commit_bytes = fs::read(&commit_path).ok();
+                if let Some(bytes) = commit_bytes {
+                    let commit: SyncCommitMarker =
+                        serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+                    if commit.profile_id != *profile_id
+                        || projection_marker.generation != commit.base_generation
+                        || projection_marker.remote_root_checksum != commit.base_root_checksum
+                    {
+                        return Ok(None);
+                    }
+                    (commit.base_generation, commit.base_root_checksum)
+                } else {
+                    let bytes = fs::read(&marker_path).map_err(|_| unavailable())?;
+                    let active: ActiveSessionMarker =
+                        serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+                    if active.state != "active"
+                        || active.profile_id != *profile_id
+                        || projection_marker.generation != active.generation
+                        || projection_marker.remote_root_checksum != active.root_checksum
+                    {
+                        return Ok(None);
+                    }
+                    (active.generation, active.root_checksum)
+                }
+            }
+        };
+        if !local_generation_is_recoverable(
+            profile_id,
+            generation,
+            &root_checksum,
+            &generation_path,
+        )? {
             return Ok(None);
         }
         let mut files = Vec::new();
         collect_file_paths(&generation_path, &generation_path, &mut files)?;
         Ok(Some(ProjectionReceipt {
             profile_id: profile_id.clone(),
-            generation: manifest.generation,
-            root_checksum: manifest.root_checksum.clone(),
+            generation,
+            root_checksum,
             path: generation_path,
         }))
     }
@@ -1789,6 +1937,97 @@ fn verify_decrypted_generation(
     })
 }
 
+fn local_generation_matches_projection_marker(
+    profile_id: &ProfileId,
+    generation: u64,
+    root_checksum: &str,
+    generation_path: &Path,
+) -> Result<bool, Problem> {
+    let generation_metadata = fs::symlink_metadata(generation_path).map_err(|_| unavailable())?;
+    if !generation_metadata.is_dir() || generation_metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let marker_bytes = fs::read(generation_path.join(MARKER)).map_err(|_| unavailable())?;
+    let marker: EncryptedProjectionMarker =
+        serde_json::from_slice(&marker_bytes).map_err(|_| {
+            problem(
+                "profile_projection_marker_invalid",
+                "Profile projection marker is invalid",
+            )
+        })?;
+    if marker.state != "complete"
+        || marker.profile_id != *profile_id
+        || marker.generation != generation
+        || marker.remote_root_checksum != root_checksum
+    {
+        return Ok(false);
+    }
+
+    let mut files = Vec::new();
+    collect_file_paths(generation_path, generation_path, &mut files)?;
+    let actual_paths: std::collections::HashSet<&str> =
+        files.iter().map(|(path, _, _)| path.as_str()).collect();
+    if marker
+        .local_objects
+        .iter()
+        .any(|object| !actual_paths.contains(object.path.as_str()))
+        || files.iter().any(|(path, _, _)| {
+            !marker
+                .local_objects
+                .iter()
+                .any(|object| object.path == *path)
+        })
+    {
+        return Ok(false);
+    }
+    for object in &marker.local_objects {
+        match verify_staged_file(generation_path, object) {
+            Ok(()) => {}
+            Err(error) if error.code == "profile_projection_file_invalid" => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn local_generation_is_recoverable(
+    profile_id: &ProfileId,
+    generation: u64,
+    root_checksum: &str,
+    generation_path: &Path,
+) -> Result<bool, Problem> {
+    let generation_metadata = match fs::symlink_metadata(generation_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(unavailable()),
+    };
+    if !generation_metadata.is_dir() || generation_metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let marker_path = generation_path.join(MARKER);
+    let marker_metadata = match fs::symlink_metadata(&marker_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(unavailable()),
+    };
+    if !marker_metadata.is_file() || marker_metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let marker: EncryptedProjectionMarker =
+        serde_json::from_slice(&fs::read(marker_path).map_err(|_| unavailable())?)
+            .map_err(|_| unavailable())?;
+    if marker.state != "complete"
+        || marker.profile_id != *profile_id
+        || marker.generation != generation
+        || marker.remote_root_checksum != root_checksum
+    {
+        return Ok(false);
+    }
+    let mut files = Vec::new();
+    collect_file_paths(generation_path, generation_path, &mut files)?;
+    Ok(true)
+}
+
 fn verify_staged_file(root: &Path, object: &PayloadObject) -> Result<(), Problem> {
     let path = confined_path(root, Path::new(&object.path))?;
     let metadata = fs::symlink_metadata(&path).map_err(|_| unavailable())?;
@@ -2649,6 +2888,22 @@ mod tests {
             b"local dirty data"
         );
         assert!(recovered.join(MARKER).exists());
+
+        let newer_remote = recovery_manifest(&workspace, &resource, 2, Some(1), b"newer");
+        let conflicted_recovery = projection
+            .active_session_recovery_path(&profile, &newer_remote)
+            .unwrap()
+            .expect("a safe local copy remains launchable after a remote update");
+        assert_eq!(conflicted_recovery, receipt.path);
+        assert!(
+            projection
+                .active_session_conflicts_with_manifest(&profile, &newer_remote)
+                .unwrap()
+        );
+        assert_eq!(
+            fs::read(recovered.join("Default/Cookies")).unwrap(),
+            b"local dirty data"
+        );
         drop(projection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -2711,11 +2966,15 @@ mod tests {
         );
 
         let newer_remote = recovery_manifest(&workspace, &resource, 3, Some(2), b"newer");
+        let conflicted_receipt = projection
+            .verified_local_recovery_receipt(&profile, &newer_remote)
+            .unwrap()
+            .expect("verified local data remains available when cloud advances");
+        assert_eq!(conflicted_receipt.path, receipt.path);
         assert!(
             projection
-                .verified_local_recovery_receipt(&profile, &newer_remote)
+                .active_session_conflicts_with_manifest(&profile, &newer_remote)
                 .unwrap()
-                .is_none()
         );
         drop(projection);
         fs::remove_dir_all(root).unwrap();
@@ -2745,14 +3004,21 @@ mod tests {
         projection
             .prepare_sync_commit(&profile, &base, &target)
             .unwrap();
+        fs::write(receipt.path.join("Default/Cookies"), b"local dirty data").unwrap();
 
         let recovery = projection
             .active_session_recovery_path(&profile, &conflict)
-            .unwrap_err();
-        assert_eq!(recovery.code, "profile_local_sync_conflict");
+            .unwrap()
+            .expect("conflicting local profile remains available for recovery");
+        assert_eq!(recovery, receipt.path);
+        assert!(
+            projection
+                .active_session_conflicts_with_manifest(&profile, &conflict)
+                .unwrap()
+        );
         assert_eq!(
             fs::read(receipt.path.join("Default/Cookies")).unwrap(),
-            b"base"
+            b"local dirty data"
         );
         assert!(receipt.path.join(MARKER).exists());
 
@@ -2785,6 +3051,7 @@ mod tests {
         let profile = ProfileId::new("prf_commit_unchanged").unwrap();
         let base = recovery_manifest(&workspace, &resource, 1, None, b"base");
         let target = recovery_manifest(&workspace, &resource, 2, Some(1), b"target");
+        let newer_remote = recovery_manifest(&workspace, &resource, 3, Some(2), b"newer");
         projection
             .publish_decrypted(
                 &profile,
@@ -2798,7 +3065,7 @@ mod tests {
 
         assert!(
             projection
-                .active_session_recovery_path(&profile, &base)
+                .active_session_recovery_path(&profile, &newer_remote)
                 .unwrap()
                 .is_none()
         );
@@ -2807,6 +3074,50 @@ mod tests {
                 .join(profile.as_str())
                 .join(SYNC_COMMIT_MARKER)
                 .exists()
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_session_recovery_clears_stale_marker_when_local_generation_is_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-active-unchanged-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_active_unchanged").unwrap();
+        let resource = ResourceId::new("res_active_unchanged").unwrap();
+        let profile = ProfileId::new("prf_active_unchanged").unwrap();
+        let base = recovery_manifest(&workspace, &resource, 1, None, b"base");
+        let newer_remote = recovery_manifest(&workspace, &resource, 2, Some(1), b"newer");
+        let receipt = projection
+            .publish_decrypted(
+                &profile,
+                &base,
+                vec![("Default/Cookies".to_owned(), b"base".to_vec())],
+            )
+            .unwrap();
+        projection
+            .begin_active_session(&profile, base.generation, &base.root_checksum)
+            .unwrap();
+
+        assert!(
+            projection
+                .active_session_recovery_path(&profile, &newer_remote)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !root
+                .join(profile.as_str())
+                .join(ACTIVE_SESSION_MARKER)
+                .exists()
+        );
+        assert_eq!(
+            fs::read(receipt.path.join("Default/Cookies")).unwrap(),
+            b"base"
         );
         drop(projection);
         fs::remove_dir_all(root).unwrap();

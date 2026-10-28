@@ -19,7 +19,7 @@ BugLogin currently issues its own device-bound sessions. Its production device a
 1. Desktop asks BugLogin API to begin an SSO transaction. API creates a random, expiring, single-use state transaction and returns the approved BugLab ID login URL with the BugLogin app code and exact callback.
 2. Desktop opens the system browser. BugLab ID authenticates the person and returns a one-time token plus state to the registered callback. The nonce is included in both the login query and callback URI because the provider preserves the callback query.
 3. Desktop forwards callback data and the transaction handle to BugLogin API. The API verifies state/expiry/single-use and calls BugLab ID exchange over TLS.
-4. API validates active status, stable provider subject, canonical verified email, and explicit BugLogin account mapping. API links only an unambiguous account; any new account is provisioned without tenant grants.
+4. API validates active status and the stable provider subject, then links only an already-provisioned BugLogin account. BugLab email may change after the stable subject is linked; that change must not remap the provider identity to another BugLogin account. An unknown BugLab identity does not create a login-only account with no workspace access. Workspace admins provision the BugLogin account and grant its workspace role before the user signs in.
 5. API issues BugLogin's normal device-bound session. Logout revokes that session and follows the approved IDP logout policy.
 
 ### Native callback routing across isolated desktop instances
@@ -33,8 +33,8 @@ The implementation expects `buglogin://sso/callback?token=...&state=...`. Produc
 - Provider subject is the stable BugLab `user_id`; email is a contact/verified attribute, not the sole durable key.
 - `all_mappings` must contain an explicit BugLogin app entry, or the provider must confirm the correct equivalent field. Do not infer it from `old_account` for another app.
 - Provider `status=active` is required. Suspended BugLogin accounts remain denied even when BugLab ID is active.
-- SSO establishes identity only. Organization/workspace membership, role, profile grants, and platform-admin status remain controlled by BugLogin's existing authorization model.
-- Ambiguous identity mappings fail closed and are resolved through a separate audited linking operation.
+- BugLab SSO may provision a previously unseen identity into the BugMedia organization and its explicitly named common workspace (or the sole workspace when there is only one). The new account is verified by the successful provider exchange and receives only the ordinary `Member` workspace role; it receives no platform-admin status, team assignment, or profile grants.
+- If BugMedia or an unambiguous common workspace is not configured, provisioning fails before creating any identity or account. Ambiguous email/legacy-account mappings to existing accounts still fail closed. A changed email on an existing stable subject is not ambiguous and must not trigger administrator review.
 
 ## Remaining provider questions
 

@@ -6,7 +6,9 @@ use buglogin_domain::{
         Account, AccountIdentity, IdentityVerification, canonical_email, canonical_username,
     },
     errors::Problem,
-    ids::{AccountId, DeviceId},
+    ids::{AccountId, DeviceId, MemberId},
+    member::{Member, MemberRole, MemberStatus},
+    permissions::{Principal, Role},
 };
 use buglogin_storage::control::{
     ControlAuditEntry, ControlPut, ControlRecordKey, ExecuteControlCommand, HttpResponse,
@@ -295,7 +297,10 @@ fn resolve_or_create_identity(
     else {
         return create_or_link_identity(state, app_code, user, &email, &subject_hash);
     };
-    if linked.subject_hash != subject_hash || linked.email != email {
+    // BugLab's stable subject is the account-link authority. Email is mutable
+    // and can change at the provider; do not strand an already-linked account
+    // or silently remap it to a different BugLogin identity by email.
+    if !linked_identity_matches_subject(&linked, &subject_hash) {
         return Err(Problem::new(
             "sso_identity_changed",
             "BugLab ID identity needs administrator review",
@@ -338,7 +343,7 @@ fn create_or_link_identity(
     };
     if by_email
         .as_ref()
-        .is_some_and(|identity| identity.verification != IdentityVerification::Verified)
+        .is_some_and(|identity| !identity_can_link_buglab(identity))
     {
         return Err(ambiguous_identity());
     }
@@ -349,7 +354,7 @@ fn create_or_link_identity(
     }
     let existing = by_email.or(by_legacy);
     let account_id = if let Some(identity) = existing {
-        if identity.verification != IdentityVerification::Verified {
+        if !identity_can_link_buglab(&identity) {
             return Err(ambiguous_identity());
         }
         if identity.canonical_email != email {
@@ -368,64 +373,7 @@ fn create_or_link_identity(
             })?;
         identity.account_id
     } else {
-        let generated_username = format!("buglab_{}", &subject_hash[..16]);
-        let candidate_username = if user.app == app_code {
-            legacy_username(user.old_account.as_deref()).unwrap_or(generated_username)
-        } else {
-            generated_username
-        };
-        if state
-            .identity_persistence
-            .find_by_username(&candidate_username)?
-            .is_some()
-        {
-            return Err(ambiguous_identity());
-        }
-        let account_id = AccountId::new(super::random_bootstrap_id("acct")?)
-            .map_err(|_| sso_mapping_invalid())?;
-        let created_at = super::migration_timestamp()?;
-        let identity = AccountIdentity::new(
-            account_id.clone(),
-            candidate_username,
-            email,
-            created_at.clone(),
-        )?
-        .verify(1, created_at.clone())?;
-        let account = Account::new(account_id.clone(), created_at);
-        let mut puts = vec![ControlPut {
-            tenant_id: "control".into(),
-            record_type: "account".into(),
-            record_id: account_id.as_str().into(),
-            expected_revision: Some(0),
-            value: serde_json::to_value(account).map_err(|_| sso_mapping_invalid())?,
-        }];
-        puts.extend(state.identity_persistence.prepare_create_puts(&identity)?);
-        let linked = linked_identity(account_id.clone(), subject_hash, email);
-        puts.push(link_record(subject_hash, &linked)?);
-        state.control_persistence.execute(ExecuteControlCommand {
-            tenant_id: SSO_TENANT.into(),
-            command_id: "identity.buglab_sso.provision".into(),
-            idempotency_key: format!("buglab-sso-provision-{subject_hash}"),
-            expected_revisions: BTreeMap::new(),
-            puts,
-            deletes: vec![],
-            audit: ControlAuditEntry {
-                tenant_id: SSO_TENANT.into(),
-                command_id: "identity.buglab_sso.provision".into(),
-                actor_id: "buglab_id_provider".into(),
-                allowed: true,
-                detail: json!({
-                    "providerSubjectHash": subject_hash,
-                    "tenantAccessGranted": false,
-                }),
-            },
-            response: HttpResponse {
-                status: 201,
-                headers: Default::default(),
-                body: json!({"accountId": account_id}),
-            },
-        })?;
-        account_id
+        return provision_buglab_identity_in_default_workspace(state, user, email, subject_hash);
     };
 
     let linked = linked_identity(account_id.clone(), subject_hash, email);
@@ -461,6 +409,175 @@ fn create_or_link_identity(
     Ok(account_id)
 }
 
+fn provision_buglab_identity_in_default_workspace(
+    state: &ApiState,
+    user: &BugLabUser,
+    email: &str,
+    subject_hash: &str,
+) -> Result<AccountId, Problem> {
+    let _mutation = state.control_mutation.lock().map_err(|_| {
+        Problem::new(
+            "control_unavailable",
+            "Control state unavailable",
+            503,
+            "identity",
+        )
+    })?;
+    state.refresh_control_aggregate_locked()?;
+    let mut aggregate = state.control_aggregate()?;
+    let platform = Principal {
+        roles: std::collections::BTreeSet::from([Role::PlatformAdmin]),
+        ..Principal::default()
+    };
+    let organizations = aggregate.workspaces.list_organizations(&platform, &[])?;
+    let organization = organizations
+        .into_iter()
+        .find(|organization| organization.name.trim().eq_ignore_ascii_case("BugMedia"))
+        .ok_or_else(|| {
+            Problem::new(
+                "sso_default_organization_missing",
+                "BugMedia organization is not configured for BugLab sign-in",
+                503,
+                "identity",
+            )
+        })?;
+    let workspaces = aggregate
+        .workspaces
+        .list_workspaces(&platform, &[], &organization.id)?;
+    let workspace = select_default_workspace(&workspaces)
+        .cloned()
+        .ok_or_else(|| {
+            Problem::new(
+                "sso_default_workspace_missing",
+                "BugMedia has no common workspace for BugLab sign-in",
+                503,
+                "identity",
+            )
+        })?;
+
+    let account_id = AccountId::new(format!("acct_bl_{}", &subject_hash[..24]))
+        .map_err(|_| sso_mapping_invalid())?;
+    let preferred_username = user
+        .old_account
+        .as_deref()
+        .and_then(|candidate| canonical_username(candidate).ok())
+        .or_else(|| {
+            email
+                .split('@')
+                .next()
+                .and_then(|candidate| canonical_username(candidate).ok())
+        });
+    let username = match preferred_username {
+        Some(candidate)
+            if state
+                .identity_persistence
+                .find_by_username(&candidate)?
+                .is_none() =>
+        {
+            candidate
+        }
+        _ => format!("bl{}", &subject_hash[..24]),
+    };
+    let now = crate::clock::rfc3339("buglab-sso-provision")?;
+    let now_unix = crate::clock::unix_time_seconds("buglab-sso-provision")?;
+    let mut identity = AccountIdentity::new(account_id.clone(), &username, email, now.clone())?
+        .verify(1, now.clone())?;
+    if let Some(name) = user.name.as_deref() {
+        if name.chars().count() > 120 || name.chars().any(char::is_control) {
+            return Err(sso_mapping_invalid());
+        }
+        identity.display_name = name.trim().to_owned();
+    }
+    // BugLab ID attests the identity. New SSO identities join only the shared
+    // BugMedia workspace, with the ordinary Member role and no elevated grants.
+    let mut puts = state.identity_persistence.prepare_create_puts(&identity)?;
+    puts.push(ControlPut {
+        tenant_id: "control".into(),
+        record_type: "account".into(),
+        record_id: account_id.as_str().into(),
+        expected_revision: Some(0),
+        value: serde_json::to_value(Account::new(account_id.clone(), now.clone()))
+            .map_err(|_| sso_mapping_invalid())?,
+    });
+
+    let member_id = MemberId::new(format!("mem_bl_{}", &subject_hash[..24]))
+        .map_err(|_| sso_mapping_invalid())?;
+    let invite_expires_at = now_unix.checked_add(600).ok_or_else(sso_mapping_invalid)?;
+    let membership = Member {
+        id: member_id.clone(),
+        account_id: account_id.clone(),
+        workspace_id: workspace.id.clone(),
+        team_id: None,
+        role: MemberRole::Member,
+        status: MemberStatus::Invited,
+        invite_expires_at: Some(invite_expires_at),
+    };
+    aggregate
+        .members
+        .invite(&platform, &[], membership, now_unix)?;
+    aggregate
+        .members
+        .activate(&platform, &[], &workspace.id, &member_id, now_unix)?;
+    aggregate
+        .organization_members
+        .create_active(organization.id.clone(), account_id.clone())?;
+
+    let identity_revision = state
+        .control_persistence
+        .revision("identity", "buglab_sso_identity", subject_hash)?
+        .unwrap_or(0);
+    if identity_revision != 0 {
+        return Err(sso_mapping_invalid());
+    }
+    let linked = linked_identity(account_id.clone(), subject_hash, email);
+    puts.push(link_record(subject_hash, &linked)?);
+    state.replace_control_aggregate(aggregate)?;
+    let result = state.persist_control_aggregate_with_puts(
+        "identity.buglab_sso.provision",
+        format!("buglab-sso-provision-{subject_hash}"),
+        "buglab_id_provider".into(),
+        true,
+        &hash_parts(&["buglab-sso-provision/v1", subject_hash]),
+        json!({"providerSubjectHash": subject_hash, "organizationId": organization.id, "workspaceId": workspace.id, "role": "member"}),
+        201,
+        json!({"accountId": account_id}),
+        puts,
+    );
+    if let Err(error) = result {
+        let _ = state.reload_control_aggregate();
+        return Err(error);
+    }
+    state.reload_control_aggregate()?;
+    Ok(account_id)
+}
+
+fn select_default_workspace(
+    workspaces: &[buglogin_domain::workspace::Workspace],
+) -> Option<&buglogin_domain::workspace::Workspace> {
+    let candidates = workspaces
+        .iter()
+        .filter(|workspace| {
+            let name = workspace.name.trim().to_ascii_lowercase();
+            [
+                "common",
+                "shared",
+                "general",
+                "default",
+                "chung",
+                "main workspace",
+            ]
+            .iter()
+            .any(|candidate| name.contains(candidate))
+        })
+        .map(|workspace| workspace.id.clone())
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [id] => workspaces.iter().find(|workspace| &workspace.id == id),
+        [] if workspaces.len() == 1 => workspaces.first(),
+        _ => None,
+    }
+}
+
 // BugLab's legacy account field is optional compatibility data, not an
 // authority for the verified SSO identity. Older provider records can contain
 // values that no longer satisfy BugLogin's username rules; they must not make
@@ -475,6 +592,17 @@ fn linked_identity(account_id: AccountId, subject_hash: &str, email: &str) -> Li
         subject_hash: subject_hash.into(),
         email: email.into(),
     }
+}
+
+fn linked_identity_matches_subject(linked: &LinkedBugLabIdentity, subject_hash: &str) -> bool {
+    linked.subject_hash == subject_hash
+}
+
+fn identity_can_link_buglab(identity: &AccountIdentity) -> bool {
+    matches!(
+        identity.verification,
+        IdentityVerification::Verified | IdentityVerification::AdminProvisioned
+    )
 }
 
 fn link_record(
@@ -641,7 +769,11 @@ mod tests {
     use buglogin_domain::ids::AccountId;
     use buglogin_storage::control::MemoryControlRecordStore;
 
-    use super::{SsoTransaction, SsoTransactionStatus, issue_sso_session, legacy_username};
+    use super::{
+        IdentityVerification, LinkedBugLabIdentity, SsoTransaction, SsoTransactionStatus,
+        identity_can_link_buglab, issue_sso_session, legacy_username,
+        linked_identity_matches_subject, select_default_workspace,
+    };
     use crate::{
         auth::AuthService,
         services::{
@@ -667,6 +799,72 @@ mod tests {
         assert_eq!(legacy_username(Some("old user")), None);
         assert_eq!(legacy_username(Some("ab")), None);
         assert_eq!(legacy_username(None), None);
+    }
+
+    #[test]
+    fn linked_buglab_subject_survives_provider_email_change_without_remapping_account() {
+        let linked = LinkedBugLabIdentity {
+            account_id: AccountId::new("acct_linked_subject").unwrap(),
+            subject_hash: "stable-subject-hash".into(),
+            email: "old@example.test".into(),
+        };
+
+        assert!(linked_identity_matches_subject(
+            &linked,
+            "stable-subject-hash"
+        ));
+        assert!(!linked_identity_matches_subject(
+            &linked,
+            "different-subject-hash"
+        ));
+    }
+
+    #[test]
+    fn trusted_admin_provisioning_does_not_need_manual_verification_before_buglab_link() {
+        let mut identity = buglogin_domain::account::AccountIdentity::admin_provisioned(
+            AccountId::new("acct_admin_link").unwrap(),
+            "adminlink",
+            "admin-link@example.test",
+            "2026-10-28T00:00:00Z",
+        )
+        .unwrap();
+        assert!(identity_can_link_buglab(&identity));
+        identity.verification = IdentityVerification::Pending;
+        assert!(!identity_can_link_buglab(&identity));
+    }
+
+    #[test]
+    fn new_buglab_identity_uses_common_workspace_or_only_unambiguous_single_workspace() {
+        use buglogin_domain::{ids::OrganizationId, workspace::WorkspacePolicy};
+
+        let make_workspace = |id: &str, name: &str| buglogin_domain::workspace::Workspace {
+            id: buglogin_domain::ids::WorkspaceId::new(id).unwrap(),
+            organization_id: OrganizationId::new("org_bugmedia").unwrap(),
+            name: name.into(),
+            policy: WorkspacePolicy {
+                max_profiles: 100,
+                max_members: 30,
+                max_storage_bytes: 1_000_000,
+                offline_entitled: false,
+                default_extension_group_id: None,
+            },
+            created_at: "2026-10-28T00:00:00Z".into(),
+        };
+        let team = make_workspace("ws_team", "Team Lam");
+        let common = make_workspace("ws_common", "Workspace chung");
+
+        assert_eq!(
+            select_default_workspace(&[team.clone(), common.clone()]).map(|ws| &ws.id),
+            Some(&common.id)
+        );
+        assert_eq!(
+            select_default_workspace(std::slice::from_ref(&team)).map(|ws| &ws.id),
+            Some(&team.id)
+        );
+        assert!(
+            select_default_workspace(&[team, common, make_workspace("ws_shared", "Shared")])
+                .is_none()
+        );
     }
 
     #[test]

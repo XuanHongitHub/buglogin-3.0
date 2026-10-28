@@ -84,6 +84,7 @@ use crate::{
 
 const MAX_CONCURRENT_PROFILE_BLOB_UPLOADS: usize = 2;
 const MAX_CONCURRENT_DESKTOP_BLOB_UPLOADS: usize = 2;
+const MAX_PROFILE_STOP_SYNC_DURATION: Duration = Duration::from_secs(180);
 static PROFILE_BLOB_UPLOAD_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const MAX_OPERATION_IDEMPOTENCY_RECORDS: usize = 1_024;
 const PROXY_MUTATION_JOURNAL_SCHEMA_VERSION: u16 = 1;
@@ -1619,7 +1620,7 @@ impl ProductionDesktopState {
             });
         let finish_source = self
             .profile_runtime
-            .complete_stop(source_profile.clone())
+            .complete_stop_detached(source_profile.clone())
             .await;
         if let Err(error) = finish_source {
             return Err(error);
@@ -2024,7 +2025,10 @@ impl ProductionDesktopState {
                         .client
                         .fail_cookie_job(&workspace_id, &job.job_id, failure, correlation_id)
                         .await;
-                    let _ = self.profile_runtime.complete_stop(profile_id.clone()).await;
+                    let _ = self
+                        .profile_runtime
+                        .complete_stop_detached(profile_id.clone())
+                        .await;
                 }
                 return Err(error);
             }
@@ -4089,29 +4093,22 @@ impl ProductionDesktopState {
                 .await?
                 .iter()
                 .any(|running| running == &profile_id);
-        let mut pending_session_sync_error = None;
-        if pending_local_session {
-            // Finish the prior session's sync/lease release before opening a
-            // new browser process for the same profile.
-            match self
-                .stop_profile(
-                    profile_id.clone(),
-                    runtime_projection_idempotency_key(&idempotency_key, "exited-session-recovery"),
-                    correlation_id.clone(),
-                    None,
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(error) if error.code == "sync_manifest_conflict" || error.retryable => {
-                    pending_session_sync_error = Some(error);
-                }
-                Err(error) => return Err(error),
-            }
-            profile = self.client.profile(&profile_id, &correlation_id).await?;
-        }
+        // A crashed browser's dirty local generation does not need to upload
+        // before it can be reopened. Stop/reconcile it locally, keep its lease
+        // receipt for safe reuse, then recheck the manifest under that lease.
+        let mut pending_stop_receipt = if pending_local_session {
+            Some(
+                self.profile_runtime
+                    .stop_for_sync(profile_id.clone())
+                    .await
+                    .map_err(|mut error| {
+                        error.correlation_id = correlation_id.clone();
+                        error
+                    })?,
+            )
+        } else {
+            None
+        };
         if !launch_state_allows_start(
             &profile.value.state,
             profile.value.archived,
@@ -4350,20 +4347,37 @@ impl ProductionDesktopState {
             .or(local_projection.dirty_local_generation(&profile_id, &manifest)?);
         let mut deferred_recovery_error = None;
         let mut local_recovery_receipt = None;
-        if recovery_path.is_some() || stale_proxy_dependency {
-            let recovery_sync = if let Some(error) = pending_session_sync_error.take() {
-                Err(error)
-            } else {
-                self.stop_profile(
+        let verified_local_recovery = if recovery_path.is_some() && !stale_proxy_dependency {
+            local_projection.verified_local_recovery_receipt(&profile_id, &manifest)?
+        } else {
+            None
+        };
+        if let Some(receipt) = verified_local_recovery {
+            // The remote base is current and the local active-session marker
+            // ties this tree to it. Open the local tree immediately; the next
+            // normal Stop performs the bounded upload. Never upload while the
+            // browser is about to become a writer.
+            local_recovery_receipt = Some(receipt);
+            deferred_recovery_error = Some(
+                Problem::new(
+                    "profile_local_sync_deferred",
+                    "Local profile changes are preserved and will sync when the profile stops",
+                    503,
+                    &correlation_id,
+                )
+                .retryable(true),
+            );
+        } else if recovery_path.is_some() || stale_proxy_dependency {
+            let recovery_sync = self
+                .stop_profile(
                     profile_id.clone(),
                     runtime_projection_idempotency_key(&idempotency_key, "local-recovery-sync"),
                     correlation_id.clone(),
                     None,
                     None,
-                    None,
+                    pending_stop_receipt.take(),
                 )
-                .await
-            };
+                .await;
             match recovery_sync {
                 Ok(_) => {
                     manifest = self
@@ -4516,15 +4530,48 @@ impl ProductionDesktopState {
                         .await?
                 };
             let lease_key = lease_idempotency_key(&idempotency_key, manifest.generation);
-            let lease = self
-                .client
-                .acquire_lease_idempotent(
-                    scope.clone(),
-                    &binding.resource_id,
-                    Duration::from_secs(60),
-                    &lease_key,
-                )
+            let held_lease = self
+                .profile_runtime
+                .take_stopped_lease_for_reopen(profile_id.clone())
                 .await?;
+            let lease = match held_lease {
+                Some(lease)
+                    if lease.workspace_id == binding.workspace_id
+                        && lease.resource_id == binding.resource_id
+                        && lease.owner_id == auth.actor_id()
+                        && lease.expires_at_ms > unix_time_millis("profile_reopen_lease")? =>
+                {
+                    lease
+                }
+                Some(lease) => {
+                    let old_scope = CoordinationScope {
+                        workspace_id: &lease.workspace_id,
+                        auth: &auth,
+                    };
+                    let _ = self
+                        .client
+                        .release_lease(old_scope, &lease.resource_id, &lease.owner_token)
+                        .await;
+                    self.client
+                        .acquire_lease_idempotent(
+                            scope.clone(),
+                            &binding.resource_id,
+                            Duration::from_secs(60),
+                            &lease_key,
+                        )
+                        .await?
+                }
+                None => {
+                    self.client
+                        .acquire_lease_idempotent(
+                            scope.clone(),
+                            &binding.resource_id,
+                            Duration::from_secs(60),
+                            &lease_key,
+                        )
+                        .await?
+                }
+            };
             let latest = match self
                 .client
                 .current_manifest(scope.clone(), &binding.resource_id)
@@ -4556,6 +4603,14 @@ impl ProductionDesktopState {
                     .client
                     .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
                     .await;
+                if local_recovery_receipt.is_some() {
+                    return Err(Problem::new(
+                        "profile_local_sync_conflict",
+                        "The profile changed remotely while local browser changes were pending. Local data was preserved; resolve the sync conflict before launching",
+                        409,
+                        &correlation_id,
+                    ));
+                }
                 if attempt == 1 {
                     return Err(Problem::new(
                         "production_manifest_changed",
@@ -4809,10 +4864,21 @@ impl ProductionDesktopState {
                 )
                 .await
             {
-                if let Err(mut cleanup_error) = self.profile_runtime.stop(profile_id.clone()).await
-                {
-                    cleanup_error.correlation_id = correlation_id.clone();
-                    return Err(cleanup_error);
+                match self.profile_runtime.stop_for_sync(profile_id.clone()).await {
+                    Ok(_) => {
+                        self.profile_runtime
+                            .complete_stop_detached(profile_id.clone())
+                            .await?;
+                    }
+                    Err(cleanup_error) if cleanup_error.code == "profile_not_running" => {
+                        self.profile_runtime
+                            .complete_stop_detached(profile_id.clone())
+                            .await?;
+                    }
+                    Err(mut cleanup_error) => {
+                        cleanup_error.correlation_id = correlation_id.clone();
+                        return Err(cleanup_error);
+                    }
                 }
                 return Err(error);
             }
@@ -4970,17 +5036,21 @@ impl ProductionDesktopState {
         preheld_stop: Option<StopReceipt>,
     ) -> Result<Value, Problem> {
         let started_at = tokio::time::Instant::now();
+        let deadline = started_at + MAX_PROFILE_STOP_SYNC_DURATION;
         let cleanup_profile_id = profile_id.clone();
-        let mut result = self
-            .stop_profile_inner(
+        let mut result = run_profile_stop_sync_with_deadline(
+            deadline,
+            &correlation_id,
+            self.stop_profile_inner(
                 profile_id.clone(),
                 idempotency_key.clone(),
                 correlation_id.clone(),
                 confirmed_recipients.clone(),
                 preacquired_lease,
                 preheld_stop,
-            )
-            .await;
+            ),
+        )
+        .await;
         if result
             .as_ref()
             .is_err_and(|error| error.code == "lease_not_found")
@@ -5004,18 +5074,23 @@ impl ProductionDesktopState {
                 .profile_runtime
                 .release_stopped_for_retry(cleanup_profile_id.clone())
                 .await;
-            result = self
-                .stop_profile_inner(
+            result = run_profile_stop_sync_with_deadline(
+                deadline,
+                &correlation_id,
+                self.stop_profile_inner(
                     profile_id,
                     runtime_projection_idempotency_key(&idempotency_key, "missing-lease-retry"),
                     format!("{correlation_id}-missing-lease-retry"),
                     confirmed_recipients,
                     None,
                     None,
-                )
-                .await;
+                ),
+            )
+            .await;
         }
-        if result.is_err()
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code != "profile_local_sync_conflict")
             && self
                 .profile_runtime
                 .active_profiles()
@@ -5057,27 +5132,14 @@ impl ProductionDesktopState {
         preacquired_lease: Option<LeaseGrant>,
         mut preheld_stop: Option<StopReceipt>,
     ) -> Result<Value, Problem> {
-        let local_projection = self.profile_projection(&correlation_id)?;
-        let binding = self
-            .client
-            .profile_binding(&profile_id, &correlation_id)
-            .await?;
-        if binding.archive_state != ProfileArchiveState::Active || binding.profile_id != profile_id
-        {
-            return Err(Problem::new(
-                "managed_profile_binding_required",
-                "Managed profile requires an active binding",
-                409,
-                correlation_id,
-            ));
-        }
-        // Authenticate and validate the managed binding first, then stop the local
-        // browser before doing manifest, key-rotation, or object-storage work.
-        // A cloud sync failure must not leave the user's browser process running.
+        // Stopping the local browser is independent of cloud availability.
+        // Close it first so a slow or unavailable API cannot leave the user's
+        // process running after an explicit Stop request. Its profile path and
+        // lease stay in the receipt for the sync/recovery phase below.
         if preheld_stop.is_none()
             && self
                 .profile_runtime
-                .running_profiles()
+                .active_profiles()
                 .await?
                 .iter()
                 .any(|running| running == &profile_id)
@@ -5092,11 +5154,21 @@ impl ProductionDesktopState {
                     })?,
             );
         }
-        if preheld_stop.is_some() {
-            self.profile_runtime
-                .set_sync_attempt_active(profile_id.clone(), true)
-                .await?;
+
+        let binding = self
+            .client
+            .profile_binding(&profile_id, &correlation_id)
+            .await?;
+        if binding.archive_state != ProfileArchiveState::Active || binding.profile_id != profile_id
+        {
+            return Err(Problem::new(
+                "managed_profile_binding_required",
+                "Managed profile requires an active binding",
+                409,
+                correlation_id,
+            ));
         }
+        let local_projection = self.profile_projection(&correlation_id)?;
         let auth = self.auth(&correlation_id)?;
         let scope = CoordinationScope {
             workspace_id: &binding.workspace_id,
@@ -5136,6 +5208,27 @@ impl ProductionDesktopState {
             }
             Err(error) => return Err(error),
         };
+        if preheld_stop
+            .as_ref()
+            .is_some_and(|stopped| stopped.was_launched)
+            && local_projection.active_session_conflicts_with_manifest(&profile_id, &previous)?
+        {
+            // This local tree belongs to an older remote base. Keep it on disk
+            // for recovery, but never snapshot it over the newer cloud manifest.
+            self.profile_runtime
+                .complete_stop_detached(profile_id.clone())
+                .await
+                .map_err(|mut error| {
+                    error.correlation_id = correlation_id.clone();
+                    error
+                })?;
+            return Err(Problem::new(
+                "profile_local_sync_conflict",
+                "Local profile data is preserved, but another device has newer cloud data. Resolve the sync conflict before syncing this local copy",
+                409,
+                &correlation_id,
+            ));
+        }
         // Finish key, proxy, and recipient preflight before publishing `syncing`.
         // Otherwise a validation failure could leave a stale amber status even
         // though no upload had started.
@@ -5234,7 +5327,7 @@ impl ProductionDesktopState {
                 );
             }
             self.profile_runtime
-                .complete_stop(profile_id.clone())
+                .complete_stop_detached(profile_id.clone())
                 .await
                 .map_err(|mut error| {
                     error.correlation_id = correlation_id.clone();
@@ -5382,7 +5475,7 @@ impl ProductionDesktopState {
                 // with that stale fence: release local runtime bookkeeping and
                 // acquire a fresh lease before reconciling the stopped tree.
                 self.profile_runtime
-                    .complete_stop(profile_id.clone())
+                    .complete_stop_detached(profile_id.clone())
                     .await?;
                 let refreshed_lease_key = lease_idempotency_key(
                     &format!("{idempotency_key}:fence-refresh:{}", previous.fencing_token),
@@ -5621,7 +5714,7 @@ impl ProductionDesktopState {
                 }
             }
             self.profile_runtime
-                .complete_stop(profile_id.clone())
+                .complete_stop_detached(profile_id.clone())
                 .await
                 .map_err(|mut error| {
                     error.correlation_id = correlation_id.clone();
@@ -7252,6 +7345,30 @@ fn local_proxy_parse(
     ))
 }
 
+async fn run_profile_stop_sync_with_deadline<F, T>(
+    deadline: tokio::time::Instant,
+    correlation_id: &str,
+    future: F,
+) -> Result<T, Problem>
+where
+    F: Future<Output = Result<T, Problem>>,
+{
+    match tokio::time::timeout_at(deadline, future).await {
+        Ok(result) => result,
+        Err(_) => Err(profile_stop_sync_deadline(correlation_id)),
+    }
+}
+
+fn profile_stop_sync_deadline(correlation_id: &str) -> Problem {
+    Problem::new(
+        "profile_sync_deadline_exceeded",
+        "Profile stopped locally; sync exceeded its time budget and was queued for retry",
+        504,
+        correlation_id,
+    )
+    .retryable(true)
+}
+
 fn unavailable(code: &'static str, correlation_id: &str) -> Problem {
     Problem::new(
         code,
@@ -7295,8 +7412,9 @@ mod tests {
     use super::{
         ConfirmedKeyRotationRecipient, DesktopState, ProxyCredentialInput, ProxyImportInput,
         WorkspaceSelectionStore, launch_state_allows_start, local_proxy_parse,
-        production_sync_not_ready, production_transport, runtime_dispatch_operation_key,
-        shutdown_idempotency_key, validate_key_rotation_confirmation,
+        production_sync_not_ready, production_transport, run_profile_stop_sync_with_deadline,
+        runtime_dispatch_operation_key, shutdown_idempotency_key,
+        validate_key_rotation_confirmation,
     };
     use buglogin_api::services::{
         device_key_directory::DeviceEncryptionKey,
@@ -7308,6 +7426,21 @@ mod tests {
     use buglogin_sync::manifest::SyncManifest;
     use serde_json::json;
     use sha2::Digest;
+
+    #[tokio::test]
+    async fn profile_stop_sync_deadline_is_retryable_and_bounded() {
+        let result = run_profile_stop_sync_with_deadline(
+            tokio::time::Instant::now() + std::time::Duration::from_millis(10),
+            "profile-stop-deadline-test",
+            std::future::pending::<Result<(), Problem>>(),
+        )
+        .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "profile_sync_deadline_exceeded");
+        assert!(error.retryable);
+        assert_eq!(error.correlation_id, "profile-stop-deadline-test");
+    }
 
     #[test]
     fn managed_key_bootstrap_applies_only_to_a_fully_empty_genesis() {

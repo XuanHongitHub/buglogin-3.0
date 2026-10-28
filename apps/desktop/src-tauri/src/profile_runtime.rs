@@ -285,10 +285,31 @@ impl ProfileRuntimeHandle {
         response.await.map_err(|_| unavailable())?
     }
 
+    pub async fn complete_stop_detached(&self, profile_id: ProfileId) -> Result<(), Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::CompleteStopDetached { profile_id, reply })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())
+    }
+
     pub async fn release_stopped_for_retry(&self, profile_id: ProfileId) -> Result<(), Problem> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(RuntimeCommand::ReleaseStoppedForRetry { profile_id, reply })
+            .await
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    pub async fn take_stopped_lease_for_reopen(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Option<LeaseGrant>, Problem> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::TakeStoppedLeaseForReopen { profile_id, reply })
             .await
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
@@ -414,9 +435,17 @@ enum RuntimeCommand {
         profile_id: ProfileId,
         reply: oneshot::Sender<Result<(), Problem>>,
     },
+    CompleteStopDetached {
+        profile_id: ProfileId,
+        reply: oneshot::Sender<()>,
+    },
     ReleaseStoppedForRetry {
         profile_id: ProfileId,
         reply: oneshot::Sender<Result<(), Problem>>,
+    },
+    TakeStoppedLeaseForReopen {
+        profile_id: ProfileId,
+        reply: oneshot::Sender<Result<Option<LeaseGrant>, Problem>>,
     },
     SetSyncAttemptActive {
         profile_id: ProfileId,
@@ -455,6 +484,11 @@ enum RuntimeCommand {
     Shutdown {
         reply: oneshot::Sender<Result<(), Problem>>,
     },
+    RenewalCompleted {
+        profile_id: ProfileId,
+        lease: LeaseGrant,
+        result: Result<LeaseGrant, Problem>,
+    },
 }
 
 struct RunningProfile {
@@ -481,6 +515,8 @@ where
         coordination,
         running: HashMap::new(),
         unexpectedly_stopped: BTreeSet::new(),
+        pending_renewals: BTreeSet::new(),
+        commands: commands.clone(),
         receiver,
     }));
     ProfileRuntimeHandle { commands }
@@ -491,6 +527,8 @@ struct ProfileRuntime<C: ProcessController> {
     coordination: Option<ManagedCoordination>,
     running: HashMap<ProfileId, RunningProfile>,
     unexpectedly_stopped: BTreeSet<ProfileId>,
+    pending_renewals: BTreeSet<ProfileId>,
+    commands: mpsc::Sender<RuntimeCommand>,
     receiver: mpsc::Receiver<RuntimeCommand>,
 }
 
@@ -526,8 +564,15 @@ where
                 Some(RuntimeCommand::CompleteStop { profile_id, reply }) => {
                     let _ = reply.send(runtime.complete_stop(&profile_id).await);
                 }
+                Some(RuntimeCommand::CompleteStopDetached { profile_id, reply }) => {
+                    runtime.complete_stop_detached(&profile_id);
+                    let _ = reply.send(());
+                }
                 Some(RuntimeCommand::ReleaseStoppedForRetry { profile_id, reply }) => {
                     let _ = reply.send(runtime.release_stopped_for_retry(&profile_id).await);
+                }
+                Some(RuntimeCommand::TakeStoppedLeaseForReopen { profile_id, reply }) => {
+                    let _ = reply.send(runtime.take_stopped_lease_for_reopen(&profile_id));
                 }
                 Some(RuntimeCommand::SetSyncAttemptActive { profile_id, active, reply }) => {
                     let _ = reply.send(runtime.set_sync_attempt_active(&profile_id, active));
@@ -596,14 +641,160 @@ where
                     let _ = reply.send(result);
                     break;
                 }
+                Some(RuntimeCommand::RenewalCompleted { profile_id, lease, result }) => {
+                    runtime.apply_renewal(profile_id, lease, result);
+                }
                 None => break,
             },
-            _ = interval.tick(), if runtime.coordination.is_some() => runtime.renew().await,
+            _ = interval.tick(), if runtime.coordination.is_some() => runtime.schedule_renewals(),
         }
     }
 }
 
 impl<C: ProcessController> ProfileRuntime<C> {
+    fn schedule_renewals(&mut self) {
+        // Reconcile processes locally before dispatching network work. Slow API
+        // renewals must not block stop, launch, or status commands in this actor.
+        let exited = self.lifecycle.reconcile();
+        let mut bridges_to_stop = Vec::new();
+        for (path, state) in exited {
+            if state == buglogin_browser::lifecycle::LifecycleState::Ready
+                && let Some((profile_id, running)) = self
+                    .running
+                    .iter_mut()
+                    .find(|(_, running)| running.profile_path == path)
+            {
+                mark_process_stopped_for_sync(running);
+                self.unexpectedly_stopped.insert(profile_id.clone());
+                if let Some(bridge) = running.proxy_bridge.take() {
+                    bridges_to_stop.push(bridge);
+                }
+            }
+        }
+        for bridge in bridges_to_stop {
+            tauri::async_runtime::spawn(async move {
+                let _ = bridge.stop().await;
+            });
+        }
+
+        let Some(coordination) = self.coordination.clone() else {
+            return;
+        };
+        let leases = self
+            .running
+            .iter()
+            .filter_map(|(profile_id, running)| {
+                running
+                    .lease
+                    .clone()
+                    .map(|lease| (profile_id.clone(), lease))
+            })
+            .collect::<Vec<_>>();
+        for (profile_id, lease) in leases {
+            if !self.pending_renewals.insert(profile_id.clone()) {
+                continue;
+            }
+            let sender = self.commands.clone();
+            let renewal_coordination = coordination.clone();
+            let release_only = self.running.get(&profile_id).is_some_and(|running| {
+                (running.process_stopped && !running.sync_pending)
+                    || (running.process_stopped
+                        && running.sync_pending
+                        && !running.sync_attempt_active
+                        && sync_hold_expired(running.sync_started_at, Instant::now()))
+            });
+            tauri::async_runtime::spawn(async move {
+                let result = if release_only {
+                    Err(lease_renewal_not_required())
+                } else {
+                    renew_lease(&renewal_coordination, &lease).await
+                };
+                let _ = sender
+                    .send(RuntimeCommand::RenewalCompleted {
+                        profile_id,
+                        lease,
+                        result,
+                    })
+                    .await;
+            });
+        }
+    }
+
+    fn apply_renewal(
+        &mut self,
+        profile_id: ProfileId,
+        lease: LeaseGrant,
+        result: Result<LeaseGrant, Problem>,
+    ) {
+        self.pending_renewals.remove(&profile_id);
+        let Some(running) = self.running.get(&profile_id) else {
+            return;
+        };
+        if running.lease.as_ref().is_none_or(|current| {
+            current.fencing_token != lease.fencing_token || current.owner_token != lease.owner_token
+        }) {
+            return;
+        }
+        let process_stopped = running.process_stopped;
+        let release_only = (running.process_stopped && !running.sync_pending)
+            || (running.process_stopped
+                && running.sync_pending
+                && !running.sync_attempt_active
+                && sync_hold_expired(running.sync_started_at, Instant::now()));
+        let Some(coordination) = self.coordination.clone() else {
+            return;
+        };
+        if release_only {
+            self.running.remove(&profile_id);
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.code == "lease_renewal_not_required")
+                && process_stopped
+            {
+                self.unexpectedly_stopped.insert(profile_id.clone());
+            }
+            tauri::async_runtime::spawn(async move {
+                let _ = release(Some(coordination), &lease).await;
+            });
+            return;
+        }
+        match result {
+            Ok(renewed) if renewed.fencing_token == lease.fencing_token => {
+                if let Some(running) = self.running.get_mut(&profile_id) {
+                    running.lease = Some(renewed);
+                }
+            }
+            Err(error)
+                if !lease_ownership_lost(&error)
+                    && lease_has_renewal_safety_window(&lease, self.heartbeat_interval()) => {}
+            Err(error) if process_stopped && lease_ownership_lost(&error) => {
+                self.running.remove(&profile_id);
+                if error.code == "lease_not_found" {
+                    self.unexpectedly_stopped.insert(profile_id);
+                } else {
+                    self.unexpectedly_stopped.remove(&profile_id);
+                }
+            }
+            _ if process_stopped => {}
+            _ => {
+                let mut bridge = None;
+                if let Some(running) = self.running.get_mut(&profile_id)
+                    && self.lifecycle.stop(&running.profile_path).is_ok()
+                {
+                    mark_process_stopped_for_sync(running);
+                    bridge = running.proxy_bridge.take();
+                    self.unexpectedly_stopped.insert(profile_id);
+                }
+                if let Some(bridge) = bridge {
+                    tauri::async_runtime::spawn(async move {
+                        let _ = bridge.stop().await;
+                    });
+                }
+            }
+        }
+    }
+
     async fn reconcile_exited_processes(&mut self) {
         let exited = self.lifecycle.reconcile();
         let mut bridges_to_stop = Vec::new();
@@ -924,17 +1115,63 @@ impl<C: ProcessController> ProfileRuntime<C> {
             return Ok(());
         }
         let running = self.running.remove(profile_id);
-        if let Some(lease) = running.and_then(|running| running.lease)
-            && let Err(error) = release(self.coordination.clone(), &lease).await
-            && !lease_ownership_lost(&error)
-        {
-            // Local runtime state is cleared even when the API cannot confirm
-            // release. The remote lease expires; durable retry intent remains.
-            self.unexpectedly_stopped.insert(profile_id.clone());
-            return Err(error);
-        }
         self.unexpectedly_stopped.insert(profile_id.clone());
+        if let Some(lease) = running.and_then(|running| running.lease) {
+            let coordination = self.coordination.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = release(coordination, &lease).await
+                    && !lease_ownership_lost(&error)
+                {
+                    tauri_plugin_log::log::warn!(
+                        "Stopped profile lease release deferred: code={}",
+                        error.code
+                    );
+                }
+            });
+        }
         Ok(())
+    }
+
+    fn complete_stop_detached(&mut self, profile_id: &ProfileId) {
+        let running = self.running.remove(profile_id);
+        self.unexpectedly_stopped.remove(profile_id);
+        let Some(lease) = running.and_then(|running| running.lease) else {
+            return;
+        };
+        let coordination = self.coordination.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = release(coordination, &lease).await
+                && !lease_ownership_lost(&error)
+            {
+                tauri_plugin_log::log::warn!(
+                    "Stopped profile lease release deferred: code={}",
+                    error.code
+                );
+            }
+        });
+    }
+
+    fn take_stopped_lease_for_reopen(
+        &mut self,
+        profile_id: &ProfileId,
+    ) -> Result<Option<LeaseGrant>, Problem> {
+        let Some(running) = self.running.get(profile_id) else {
+            return Ok(None);
+        };
+        if !running.process_stopped || !running.sync_pending || running.sync_attempt_active {
+            return Err(Problem::new(
+                "profile_sync_in_progress",
+                "Profile cannot reopen while its stopped snapshot is being synchronized",
+                409,
+                "desktop",
+            )
+            .retryable(true));
+        }
+        let Some(running) = self.running.remove(profile_id) else {
+            return Ok(None);
+        };
+        self.unexpectedly_stopped.remove(profile_id);
+        Ok(running.lease)
     }
 
     fn authority(&self, profile_id: &ProfileId) -> Option<WriteAuthority> {
@@ -944,6 +1181,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             .map(authority)
     }
 
+    #[cfg(test)]
     async fn renew(&mut self) {
         // Process exit detection must run from the heartbeat itself. Previously
         // it depended on the UI asking for `active_profiles`; a minimized app
@@ -1129,6 +1367,62 @@ fn lease_renewal_deadline_elapsed() -> Problem {
     .retryable(true)
 }
 
+fn lease_renewal_not_required() -> Problem {
+    Problem::new(
+        "lease_renewal_not_required",
+        "Lease no longer needs renewal",
+        409,
+        "desktop",
+    )
+}
+
+async fn renew_lease(
+    coordination: &ManagedCoordination,
+    lease: &LeaseGrant,
+) -> Result<LeaseGrant, Problem> {
+    let renewal_identity = format!(
+        "{}|{}|{}|{}",
+        lease.resource_id.as_str(),
+        lease.fencing_token,
+        lease.expires_at_ms,
+        lease.owner_token
+    );
+    let renewal_key = format!(
+        "lease-renew-{}",
+        crate::remote_api::sha256_hex(renewal_identity.as_bytes())
+    );
+    let renewal_timeout = lease_renewal_timeout(lease, coordination.heartbeat_interval);
+    if renewal_timeout.is_zero() {
+        return Err(lease_renewal_deadline_elapsed());
+    }
+    let renewal_deadline = tokio::time::Instant::now() + renewal_timeout;
+    let mut renewal_attempt = 0;
+    loop {
+        match tokio::time::timeout_at(
+            renewal_deadline,
+            coordination.backend.renew_lease_idempotent(
+                CoordinationScope {
+                    workspace_id: &lease.workspace_id,
+                    auth: &coordination.auth,
+                },
+                &lease.resource_id,
+                &lease.owner_token,
+                coordination.lease_ttl,
+                &renewal_key,
+            ),
+        )
+        .await
+        {
+            Err(_) => return Err(lease_renewal_deadline_elapsed()),
+            Ok(Err(error)) if error.retryable && renewal_attempt == 0 => {
+                renewal_attempt += 1;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Ok(result) => return result,
+        }
+    }
+}
+
 fn validate_preacquired(
     coordination: Option<&ManagedCoordination>,
     scope: Option<&LeaseScope>,
@@ -1274,6 +1568,7 @@ mod tests {
         },
         time::{SystemTime, UNIX_EPOCH},
     };
+    use tokio::sync::Notify;
 
     use buglogin_browser::process::{ManagedProcess, ProcessIdentity, ProcessStatus};
     use buglogin_domain::entities::Runtime;
@@ -1386,6 +1681,12 @@ mod tests {
         renewals: Arc<AtomicUsize>,
         fail_acquire: AtomicBool,
         fail_renew: AtomicBool,
+        block_renew: AtomicBool,
+        renew_started: Arc<Notify>,
+        renew_release: Arc<Notify>,
+        block_release: AtomicBool,
+        release_started: Arc<Notify>,
+        release_release: Arc<Notify>,
         renew_error_code: Mutex<Option<&'static str>>,
         lease_expires_at_ms: std::sync::atomic::AtomicU64,
         release_failures: AtomicUsize,
@@ -1400,6 +1701,12 @@ mod tests {
                 renewals: Arc::new(AtomicUsize::new(0)),
                 fail_acquire: AtomicBool::new(false),
                 fail_renew: AtomicBool::new(false),
+                block_renew: AtomicBool::new(false),
+                renew_started: Arc::new(Notify::new()),
+                renew_release: Arc::new(Notify::new()),
+                block_release: AtomicBool::new(false),
+                release_started: Arc::new(Notify::new()),
+                release_release: Arc::new(Notify::new()),
                 renew_error_code: Mutex::new(None),
                 lease_expires_at_ms: std::sync::atomic::AtomicU64::new(60_001),
                 release_failures: AtomicUsize::new(0),
@@ -1446,6 +1753,10 @@ mod tests {
             _idempotency_key: &str,
         ) -> Result<LeaseGrant, Problem> {
             self.renewals.fetch_add(1, Ordering::SeqCst);
+            if self.block_renew.load(Ordering::SeqCst) {
+                self.renew_started.notify_one();
+                self.renew_release.notified().await;
+            }
             if self.fail_renew.load(Ordering::SeqCst) {
                 self.log.lock().unwrap().push("renew");
                 return Err(match *self.renew_error_code.lock().unwrap() {
@@ -1473,6 +1784,10 @@ mod tests {
         ) -> Result<(), Problem> {
             assert_eq!(owner_token, "private-owner-token");
             self.log.lock().unwrap().push("release");
+            if self.block_release.load(Ordering::SeqCst) {
+                self.release_started.notify_one();
+                self.release_release.notified().await;
+            }
             if self
                 .release_failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -1681,12 +1996,14 @@ mod tests {
         controller: TestController,
         coordination: ManagedCoordination,
     ) -> ProfileRuntime<TestController> {
-        let (_, receiver) = mpsc::channel(1);
+        let (commands, receiver) = mpsc::channel(1);
         ProfileRuntime {
             lifecycle: LifecycleManager::new(controller),
             coordination: Some(coordination),
             running: HashMap::new(),
             unexpectedly_stopped: BTreeSet::new(),
+            pending_renewals: BTreeSet::new(),
+            commands,
             receiver,
         }
     }
@@ -1710,6 +2027,119 @@ mod tests {
             .await
             .expect("stopping an already stopped profile is idempotent");
         assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocked_lease_renewal_does_not_block_local_stop_command() {
+        let path = profile_path("renewal-does-not-block-stop");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(60)), Ordering::SeqCst);
+        backend.block_renew.store(true, Ordering::SeqCst);
+        let renew_started = backend.renew_started.clone();
+        let renew_release = backend.renew_release.clone();
+        let mut coordination = managed_coordination(backend);
+        coordination.heartbeat_interval = Duration::from_millis(10);
+        let handle = spawn_profile_runtime(controller.clone(), Some(coordination));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+
+        handle.launch(request(&path, true)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), renew_started.notified())
+            .await
+            .expect("lease renewal starts");
+
+        let stop = tokio::time::timeout(
+            Duration::from_millis(250),
+            handle.stop_for_sync(profile_id.clone()),
+        )
+        .await
+        .expect("stop is not queued behind the blocked API request")
+        .unwrap();
+        assert!(stop.was_launched);
+        assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+
+        renew_release.notify_one();
+        handle.complete_stop(profile_id).await.unwrap();
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_local_lease_can_be_reused_for_reopen_without_api_reacquire() {
+        let path = profile_path("reuse-stopped-lease");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log.clone()));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(60)), Ordering::SeqCst);
+        let handle = spawn_profile_runtime(controller.clone(), Some(managed_coordination(backend)));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+
+        handle.launch(request(&path, true)).await.unwrap();
+        handle.stop_for_sync(profile_id.clone()).await.unwrap();
+        let lease = handle
+            .take_stopped_lease_for_reopen(profile_id.clone())
+            .await
+            .unwrap()
+            .expect("stopped profile retains its lease for a safe local reopen");
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+
+        let mut reopen = request(&path, true);
+        reopen.preacquired_lease = Some(lease);
+        handle.launch(reopen).await.unwrap();
+
+        assert_eq!(controller.launches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .filter(|event| **event == "acquire")
+                .count(),
+            1,
+            "reopen reuses the lease instead of waiting for another API acquire"
+        );
+        handle.stop(profile_id).await.unwrap();
+        handle.shutdown().await.unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocked_remote_release_does_not_block_runtime_after_local_stop() {
+        let path = profile_path("detached-release");
+        let controller = TestController::default();
+        let log = controller.log.clone();
+        let backend = Arc::new(TestCoordination::new(log));
+        backend
+            .lease_expires_at_ms
+            .store(lease_valid_for(Duration::from_secs(60)), Ordering::SeqCst);
+        backend.block_release.store(true, Ordering::SeqCst);
+        let release_started = backend.release_started.clone();
+        let release_release = backend.release_release.clone();
+        let handle = spawn_profile_runtime(controller.clone(), Some(managed_coordination(backend)));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+
+        handle.launch(request(&path, true)).await.unwrap();
+        handle.stop_for_sync(profile_id.clone()).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            handle.complete_stop_detached(profile_id.clone()),
+        )
+        .await
+        .expect("local completion does not wait for remote lease release")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), release_started.notified())
+            .await
+            .expect("background release was started");
+
+        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+        release_release.notify_one();
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
     }

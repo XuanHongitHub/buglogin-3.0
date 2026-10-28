@@ -14,7 +14,7 @@ export interface OrganizationAccountBulkAnalysis {
 }
 
 const MAX_ROWS = 100;
-const MIN_PASSWORD_LENGTH = 12;
+const MIN_PASSWORD_LENGTH = 4;
 const MAX_PASSWORD_LENGTH = 256;
 const passwordLength = (value: string) => Array.from(value).length;
 const emailValid = (value: string) =>

@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Bound::{Excluded, Unbounded},
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Condvar, Mutex, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -129,8 +129,46 @@ thread_local! {
     static CONTROL_BLOCKING_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-static CONTROL_AUTHENTICATION_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+static CONTROL_AUTHENTICATION_ACTIVE: Mutex<usize> = Mutex::new(0);
+static CONTROL_AUTHENTICATION_READY: Condvar = Condvar::new();
 const MAX_CONCURRENT_CONTROL_AUTHENTICATIONS: usize = 4;
+const CONTROL_AUTHENTICATION_WAIT: Duration = Duration::from_secs(10);
+
+struct ControlAuthenticationSlot;
+
+impl ControlAuthenticationSlot {
+    fn acquire() -> Result<Self, Problem> {
+        let deadline = std::time::Instant::now() + CONTROL_AUTHENTICATION_WAIT;
+        let mut active = CONTROL_AUTHENTICATION_ACTIVE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active >= MAX_CONCURRENT_CONTROL_AUTHENTICATIONS {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(control_authentication_overloaded());
+            }
+            let (next, timeout) = CONTROL_AUTHENTICATION_READY
+                .wait_timeout(active, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            active = next;
+            if timeout.timed_out() && *active >= MAX_CONCURRENT_CONTROL_AUTHENTICATIONS {
+                return Err(control_authentication_overloaded());
+            }
+        }
+        *active += 1;
+        Ok(Self)
+    }
+}
+
+impl Drop for ControlAuthenticationSlot {
+    fn drop(&mut self) {
+        let mut active = CONTROL_AUTHENTICATION_ACTIVE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        CONTROL_AUTHENTICATION_READY.notify_one();
+    }
+}
 
 struct ControlBlockingScope;
 
@@ -5676,6 +5714,20 @@ async fn readyz(State(state): State<ApiState>) -> Result<Response, Response> {
 
 impl ApiAuthorizationAuthority {
     fn authenticate_token(&self, token: &str, now_ms: u64) -> Result<Principal, Problem> {
+        let multi_thread_runtime = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        });
+        with_control_blocking(|| {
+            let _admission = if multi_thread_runtime {
+                Some(ControlAuthenticationSlot::acquire()?)
+            } else {
+                None
+            };
+            self.authenticate_token_inner(token, now_ms)
+        })
+    }
+
+    fn authenticate_token_inner(&self, token: &str, now_ms: u64) -> Result<Principal, Problem> {
         let (account_id, token_scopes) = if token.starts_with("blapi_") {
             let (account_id, scopes) = self.api_tokens.authenticate(token, now_ms)?;
             (account_id, Some(scopes))
@@ -10626,36 +10678,16 @@ fn cookie_value(mut value: String) -> Result<HeaderValue, Response> {
 fn authenticate(state: &ApiState, headers: &HeaderMap) -> Result<Principal, Response> {
     let token = bearer_token(headers)?;
     let now_ms = request_now(headers)?;
-    let multi_thread_runtime = tokio::runtime::Handle::try_current()
-        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-    let admission = if multi_thread_runtime {
-        Some(
-            CONTROL_AUTHENTICATION_SLOTS
-                .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_CONTROL_AUTHENTICATIONS))
-                .try_acquire()
-                .map_err(|_| control_authentication_overloaded())?,
-        )
-    } else {
-        None
-    };
-    let result = with_control_blocking(|| state.authenticate_token(token, now_ms));
-    drop(admission);
-    result.map_err(response)
+    state.authenticate_token(token, now_ms).map_err(response)
 }
 
-fn control_authentication_overloaded() -> Response {
-    let mut response = response(
-        problem(
-            "control_authentication_overloaded",
-            "Authentication is busy; retry shortly",
-            503,
-        )
-        .retryable(true),
-    );
-    response
-        .headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
-    response
+fn control_authentication_overloaded() -> Problem {
+    problem(
+        "control_authentication_overloaded",
+        "Authentication is busy; retry shortly",
+        503,
+    )
+    .retryable(true)
 }
 
 fn authenticate_profile_reader(
@@ -11146,13 +11178,21 @@ fn response(mut problem: Problem) -> Response {
     if let Ok(correlation_id) = REQUEST_CORRELATION_ID.try_with(|id| id.clone()) {
         problem.correlation_id = correlation_id;
     }
+    let retry_after = (problem.code == "control_authentication_overloaded")
+        .then(|| HeaderValue::from_static("2"));
     let status = StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (
+    let mut response = (
         status,
         [(header::CONTENT_TYPE, "application/problem+json")],
         Json(problem),
     )
-        .into_response()
+        .into_response();
+    if let Some(retry_after) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, retry_after);
+    }
+    response
 }
 
 pub(super) fn canonical_problem(status: u16, value: serde_json::Value) -> Problem {

@@ -6314,7 +6314,7 @@ mod input_fixture_tests {
                 input,
             ))
             .expect("MCP scoped account creation should succeed");
-        assert_eq!(response["identity"]["verification"], "admin_provisioned");
+        assert_eq!(response["identity"]["verification"], "verified");
         assert_eq!(response["onboardingStatus"], "admin_provisioned");
         assert_eq!(response["loginEnabled"], true);
         assert!(!response.to_string().contains("mcp-atomic-password-123"));
