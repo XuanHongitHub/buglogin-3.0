@@ -65,6 +65,10 @@ import type {
 } from "../../../frontend/src/generated/command-registry";
 import { AccountDirectory, AccountProvisioning } from "./accounts";
 import {
+  resolveOrganizationDeleteBlocker,
+  resolveWorkspaceDeleteBlocker,
+} from "./delete-resolution";
+import {
   type PendingTenancyDelete,
   parseOrganizationManagementRoute,
   parsePendingTenancyDeletes,
@@ -2761,18 +2765,32 @@ function DeleteTenancy({
               ) : (
                 <div className="space-y-2">
                   <div className="space-y-1 text-sm text-muted-foreground">
-                    {workspacePreflight.blockers.map((blocker) => (
-                      <p key={blocker.code}>
-                        {t(`deleteBlocker_${blocker.code}`, {
-                          count: blocker.count,
-                        })}
-                      </p>
-                    ))}
+                    {workspacePreflight.blockers.map((blocker) => {
+                      const resolution = resolveWorkspaceDeleteBlocker(
+                        blocker.code,
+                      );
+                      return (
+                        <p key={blocker.code}>
+                          {t(
+                            resolution.kind === "unknown"
+                              ? "deleteBlocker_unknown"
+                              : `deleteBlocker_${blocker.code}`,
+                            { count: blocker.count },
+                          )}
+                        </p>
+                      );
+                    })}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {workspacePreflight.blockers.some(
-                      (item) => item.code === "workspace_has_profiles",
-                    ) ? (
+                    {workspacePreflight.blockers.some((item) => {
+                      const resolution = resolveWorkspaceDeleteBlocker(
+                        item.code,
+                      );
+                      return (
+                        resolution.kind === "navigate" &&
+                        resolution.destination === "profiles"
+                      );
+                    }) ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2782,9 +2800,15 @@ function DeleteTenancy({
                         {t("manageProfiles")}
                       </Button>
                     ) : null}
-                    {workspacePreflight.blockers.some(
-                      (item) => item.code === "workspace_has_resources",
-                    ) ? (
+                    {workspacePreflight.blockers.some((item) => {
+                      const resolution = resolveWorkspaceDeleteBlocker(
+                        item.code,
+                      );
+                      return (
+                        resolution.kind === "navigate" &&
+                        resolution.destination === "resources"
+                      );
+                    }) ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2796,9 +2820,15 @@ function DeleteTenancy({
                         {t("manageResources")}
                       </Button>
                     ) : null}
-                    {workspacePreflight.blockers.some(
-                      (item) => item.code === "workspace_has_groups",
-                    ) ? (
+                    {workspacePreflight.blockers.some((item) => {
+                      const resolution = resolveWorkspaceDeleteBlocker(
+                        item.code,
+                      );
+                      return (
+                        resolution.kind === "navigate" &&
+                        resolution.destination === "groups"
+                      );
+                    }) ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2808,11 +2838,15 @@ function DeleteTenancy({
                         {t("manageGroups")}
                       </Button>
                     ) : null}
-                    {workspacePreflight.blockers.some((item) =>
-                      ["workspace_has_teams", "workspace_has_members"].includes(
+                    {workspacePreflight.blockers.some((item) => {
+                      const resolution = resolveWorkspaceDeleteBlocker(
                         item.code,
-                      ),
-                    ) ? (
+                      );
+                      return (
+                        resolution.kind === "navigate" &&
+                        resolution.destination === "members"
+                      );
+                    }) ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2822,12 +2856,15 @@ function DeleteTenancy({
                         {t("manageMembers")}
                       </Button>
                     ) : null}
-                    {workspacePreflight.blockers.some((item) =>
-                      [
-                        "workspace_has_active_operations",
-                        "workspace_has_sync_reservations",
-                      ].includes(item.code),
-                    ) ? (
+                    {workspacePreflight.blockers.some((item) => {
+                      const resolution = resolveWorkspaceDeleteBlocker(
+                        item.code,
+                      );
+                      return (
+                        resolution.kind === "refresh" ||
+                        resolution.kind === "unknown"
+                      );
+                    }) ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2878,10 +2915,26 @@ function DeleteTenancy({
                       count: dependencyCheck.workspaceCount,
                     })}
                   </li>
+                  {dependencyCheck.blockers.map((blocker) =>
+                    resolveOrganizationDeleteBlocker(blocker.code).kind ===
+                    "unknown" ? (
+                      <li key={blocker.code}>
+                        {t("deleteBlocker_unknown", { count: blocker.count })}
+                      </li>
+                    ) : null,
+                  )}
                 </ul>
                 {blockedByDependencies ? (
                   <div className="flex flex-wrap gap-2 pt-1">
-                    {dependencyCheck.memberCount > 0 ? (
+                    {dependencyCheck.blockers.some((blocker) => {
+                      const resolution = resolveOrganizationDeleteBlocker(
+                        blocker.code,
+                      );
+                      return (
+                        resolution.kind === "navigate" &&
+                        resolution.destination === "accounts"
+                      );
+                    }) ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2891,7 +2944,15 @@ function DeleteTenancy({
                         {t("directory")}
                       </Button>
                     ) : null}
-                    {dependencyCheck.workspaceCount > 0 ? (
+                    {dependencyCheck.blockers.some((blocker) => {
+                      const resolution = resolveOrganizationDeleteBlocker(
+                        blocker.code,
+                      );
+                      return (
+                        resolution.kind === "navigate" &&
+                        resolution.destination === "workspaces"
+                      );
+                    }) ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -2899,6 +2960,20 @@ function DeleteTenancy({
                       >
                         <LuBuilding2 />
                         {t("goWorkspaces")}
+                      </Button>
+                    ) : null}
+                    {dependencyCheck.blockers.some(
+                      (blocker) =>
+                        resolveOrganizationDeleteBlocker(blocker.code).kind ===
+                        "unknown",
+                    ) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void refreshDependencies()}
+                      >
+                        <LuRefreshCw />
+                        {t("retry")}
                       </Button>
                     ) : null}
                   </div>

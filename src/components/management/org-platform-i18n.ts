@@ -151,6 +151,8 @@ const en = {
     "{{count}} pending sync upload(s) must finish or expire first.",
   deleteBlocker_workspace_has_members:
     "{{count}} workspace member(s) must be removed first.",
+  deleteBlocker_unknown:
+    "A new dependency is blocking deletion. Refresh the check for its latest resolution.",
   organizationMemberCount: "{{count}} organization members",
   organizationWorkspaceCount: "{{count}} workspaces",
   deleteWorkspaceHelp:
@@ -361,6 +363,8 @@ const vi: typeof en = {
     "Cần hoàn tất hoặc hết hạn {{count}} lượt tải đồng bộ đang chờ.",
   deleteBlocker_workspace_has_members:
     "Cần gỡ {{count}} thành viên khỏi workspace trước.",
+  deleteBlocker_unknown:
+    "Một phụ thuộc mới đang chặn thao tác xóa. Hãy kiểm tra lại để tải hướng xử lý mới nhất.",
   organizationMemberCount: "{{count}} thành viên tổ chức",
   organizationWorkspaceCount: "{{count}} workspace",
   deleteWorkspaceHelp:
