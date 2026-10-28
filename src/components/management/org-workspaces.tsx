@@ -802,12 +802,8 @@ export function OrganizationManagement({
             >
               <LuRefreshCw className={loading ? "animate-spin" : ""} />
             </Button>
-            {showOrgs ? (
-              <Button
-                size="sm"
-                onClick={() => setOrgEditor("new")}
-                disabled={!actor}
-              >
+            {showOrgs && actor?.platformAdmin ? (
+              <Button size="sm" onClick={() => setOrgEditor("new")}>
                 <LuPlus />
                 {t("createOrg")}
               </Button>
@@ -1308,7 +1304,14 @@ export function OrganizationManagement({
                             : t("noWorkspaces")
                       }
                       action={
-                        !showOrgs && contextOrg && canManageOrg(contextOrg) ? (
+                        showOrgs && actor?.platformAdmin ? (
+                          <Button size="sm" onClick={() => setOrgEditor("new")}>
+                            <LuPlus />
+                            {t("createOrg")}
+                          </Button>
+                        ) : !showOrgs &&
+                          contextOrg &&
+                          canManageOrg(contextOrg) ? (
                           <Button
                             size="sm"
                             onClick={() => setWorkspaceEditor("new")}
