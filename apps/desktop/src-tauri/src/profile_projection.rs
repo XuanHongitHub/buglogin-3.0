@@ -8167,9 +8167,14 @@ mod tests {
                     "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
                 );
-                stream.write_all(response.as_bytes()).await.unwrap();
-                stream.write_all(&body).await.unwrap();
                 paths.push(path);
+                // A failed chunk cancels sibling downloads. Their client
+                // sockets may already be closed when this fixture writes a
+                // full response, so a broken pipe is expected here too.
+                if stream.write_all(response.as_bytes()).await.is_err() {
+                    continue;
+                }
+                let _ = stream.write_all(&body).await;
             }
             paths
         });
