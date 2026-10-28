@@ -153,6 +153,18 @@ test("stable publication validates signed candidate assets and updates S3 withou
   assert.match(promotion, /candidate_run_id:/);
   assert.match(promotion, /publication_reason:/);
   assert.match(promotion, /conclusion!=="success"/);
+  assert.match(
+    promotion,
+    /actions\/runs\/\$CANDIDATE_RUN_ID\/artifacts/,
+  );
+  assert.match(
+    promotion,
+    /buglogin-\$\{sha\}-windows-x64-signed[\s\S]*?buglogin-v\$\{version\}-windows-x64-signed/,
+  );
+  assert.match(
+    promotion,
+    /buglogin-\$\{sha\}-macos-arm64-signed[\s\S]*?buglogin-v\$\{version\}-macos-arm64-signed/,
+  );
   assert.match(promotion, /provenance mismatch/);
   assert.match(promotion, /windows-x64-signed/);
   assert.match(promotion, /macos-arm64-signed/);

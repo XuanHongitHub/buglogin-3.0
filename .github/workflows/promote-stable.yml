@@ -67,8 +67,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p incoming/windows incoming/macos
-          gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-windows-x64-signed" --dir incoming/windows
-          gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "buglogin-${SOURCE_SHA}-macos-arm64-signed" --dir incoming/macos
+          ARTIFACTS_JSON="$(gh api "repos/$GH_REPO/actions/runs/$CANDIDATE_RUN_ID/artifacts")"
+          WINDOWS_ARTIFACT_NAME="$(node -e 'const [raw,sha,version]=process.argv.slice(1);const artifacts=JSON.parse(raw).artifacts.map(a=>a.name);const allowed=new Set([`buglogin-${sha}-windows-x64-signed`,`buglogin-v${version}-windows-x64-signed`]);const matches=artifacts.filter(name=>allowed.has(name));if(matches.length!==1)throw Error(`expected one signed Windows artifact for ${version}/${sha}, found ${matches.length}`);process.stdout.write(matches[0])' "$ARTIFACTS_JSON" "$SOURCE_SHA" "$VERSION")"
+          MACOS_ARTIFACT_NAME="$(node -e 'const [raw,sha,version]=process.argv.slice(1);const artifacts=JSON.parse(raw).artifacts.map(a=>a.name);const allowed=new Set([`buglogin-${sha}-macos-arm64-signed`,`buglogin-v${version}-macos-arm64-signed`]);const matches=artifacts.filter(name=>allowed.has(name));if(matches.length!==1)throw Error(`expected one signed macOS artifact for ${version}/${sha}, found ${matches.length}`);process.stdout.write(matches[0])' "$ARTIFACTS_JSON" "$SOURCE_SHA" "$VERSION")"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "$WINDOWS_ARTIFACT_NAME" --dir incoming/windows
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GH_REPO" --name "$MACOS_ARTIFACT_NAME" --dir incoming/macos
           COSIGN_IDENTITY='https://github.com/XuanHongitHub/buglogin-3.0/.github/workflows/signing.yml@refs/heads/main'
           cosign verify-blob incoming/windows/SHA256SUMS.txt --bundle incoming/windows/provenance.sigstore.json --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com
           cosign verify-blob incoming/macos/SHA256SUMS.txt --bundle incoming/macos/provenance.sigstore.json --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com
