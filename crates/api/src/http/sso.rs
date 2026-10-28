@@ -341,12 +341,6 @@ fn create_or_link_identity(
     } else {
         None
     };
-    if by_email
-        .as_ref()
-        .is_some_and(|identity| !identity_can_link_buglab(identity))
-    {
-        return Err(ambiguous_identity());
-    }
     if let (Some(email_identity), Some(legacy_identity)) = (&by_email, &by_legacy)
         && email_identity.account_id != legacy_identity.account_id
     {
@@ -354,9 +348,6 @@ fn create_or_link_identity(
     }
     let existing = by_email.or(by_legacy);
     let account_id = if let Some(identity) = existing {
-        if !identity_can_link_buglab(&identity) {
-            return Err(ambiguous_identity());
-        }
         if identity.canonical_email != email {
             return Err(ambiguous_identity());
         }
@@ -382,12 +373,47 @@ fn create_or_link_identity(
         .revision(SSO_TENANT, SSO_IDENTITY, subject_hash)?
         .unwrap_or(0);
     if revision == 0 {
+        let mut puts = vec![link_record(subject_hash, &linked)?];
+        let mut expected_revisions = BTreeMap::new();
+        expected_revisions.insert(
+            ControlRecordKey {
+                tenant_id: SSO_TENANT.into(),
+                record_type: SSO_IDENTITY.into(),
+                record_id: subject_hash.into(),
+            },
+            0,
+        );
+        let (identity, identity_revision) = state
+            .identity_persistence
+            .load_versioned(&account_id)?
+            .ok_or_else(ambiguous_identity)?;
+        if identity.canonical_email != email {
+            return Err(ambiguous_identity());
+        }
+        expected_revisions.insert(
+            ControlRecordKey {
+                tenant_id: "identity".into(),
+                record_type: "account_identity".into(),
+                record_id: account_id.as_str().into(),
+            },
+            identity_revision,
+        );
+        if identity.verification != IdentityVerification::Verified {
+            let verified = verify_buglab_attested_identity(identity, email)?;
+            puts.push(ControlPut {
+                tenant_id: "identity".into(),
+                record_type: "account_identity".into(),
+                record_id: account_id.as_str().into(),
+                expected_revision: Some(identity_revision),
+                value: serde_json::to_value(&verified).map_err(|_| sso_mapping_invalid())?,
+            });
+        }
         state.control_persistence.execute(ExecuteControlCommand {
             tenant_id: SSO_TENANT.into(),
             command_id: "identity.buglab_sso.link".into(),
             idempotency_key: format!("buglab-sso-link-{subject_hash}"),
-            expected_revisions: BTreeMap::new(),
-            puts: vec![link_record(subject_hash, &linked)?],
+            expected_revisions,
+            puts,
             deletes: vec![],
             audit: ControlAuditEntry {
                 tenant_id: SSO_TENANT.into(),
@@ -598,10 +624,16 @@ fn linked_identity_matches_subject(linked: &LinkedBugLabIdentity, subject_hash: 
     linked.subject_hash == subject_hash
 }
 
-fn identity_can_link_buglab(identity: &AccountIdentity) -> bool {
-    matches!(
-        identity.verification,
-        IdentityVerification::Verified | IdentityVerification::AdminProvisioned
+fn verify_buglab_attested_identity(
+    identity: AccountIdentity,
+    provider_email: &str,
+) -> Result<AccountIdentity, Problem> {
+    if identity.canonical_email != provider_email {
+        return Err(ambiguous_identity());
+    }
+    identity.verify(
+        identity.revision,
+        crate::clock::rfc3339("buglab-sso-verify").map_err(|_| sso_mapping_invalid())?,
     )
 }
 
@@ -771,8 +803,8 @@ mod tests {
 
     use super::{
         IdentityVerification, LinkedBugLabIdentity, SsoTransaction, SsoTransactionStatus,
-        identity_can_link_buglab, issue_sso_session, legacy_username,
-        linked_identity_matches_subject, select_default_workspace,
+        issue_sso_session, legacy_username, linked_identity_matches_subject,
+        select_default_workspace, verify_buglab_attested_identity,
     };
     use crate::{
         auth::AuthService,
@@ -820,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn trusted_admin_provisioning_does_not_need_manual_verification_before_buglab_link() {
+    fn buglab_attestation_verifies_pending_identity_and_requires_matching_email() {
         let mut identity = buglogin_domain::account::AccountIdentity::admin_provisioned(
             AccountId::new("acct_admin_link").unwrap(),
             "adminlink",
@@ -828,9 +860,19 @@ mod tests {
             "2026-10-28T00:00:00Z",
         )
         .unwrap();
-        assert!(identity_can_link_buglab(&identity));
+        let verified =
+            verify_buglab_attested_identity(identity.clone(), "admin-link@example.test").unwrap();
+        assert_eq!(verified.verification, IdentityVerification::Verified);
         identity.verification = IdentityVerification::Pending;
-        assert!(!identity_can_link_buglab(&identity));
+        let verified =
+            verify_buglab_attested_identity(identity.clone(), "admin-link@example.test").unwrap();
+        assert_eq!(verified.verification, IdentityVerification::Verified);
+        assert_eq!(
+            verify_buglab_attested_identity(identity, "different@example.test")
+                .unwrap_err()
+                .code,
+            "sso_identity_mapping_ambiguous"
+        );
     }
 
     #[test]

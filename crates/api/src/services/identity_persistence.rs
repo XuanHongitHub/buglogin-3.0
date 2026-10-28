@@ -47,6 +47,23 @@ impl IdentityPersistence {
         Ok(Some(identity))
     }
 
+    pub fn load_versioned(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<(AccountIdentity, u64)>, Problem> {
+        let Some((identity, revision)) =
+            self.store
+                .load_versioned::<AccountIdentity>(TENANT, IDENTITY, account_id.as_str())?
+        else {
+            return Ok(None);
+        };
+        validate_identity(account_id, &identity)?;
+        if identity.revision != revision {
+            return Err(corrupt());
+        }
+        Ok(Some((identity, revision)))
+    }
+
     pub fn load_many(
         &self,
         account_ids: &[String],
