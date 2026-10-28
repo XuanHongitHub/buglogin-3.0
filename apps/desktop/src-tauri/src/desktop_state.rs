@@ -100,6 +100,23 @@ async fn log_profile_launch_preflight<T>(step: &'static str, future: impl Future
     result
 }
 
+struct ProfileLaunchAttemptTimer(tokio::time::Instant);
+
+impl ProfileLaunchAttemptTimer {
+    fn start() -> Self {
+        Self(tokio::time::Instant::now())
+    }
+}
+
+impl Drop for ProfileLaunchAttemptTimer {
+    fn drop(&mut self) {
+        tauri_plugin_log::log::info!(
+            "Profile launch attempt finished: duration_ms={}",
+            self.0.elapsed().as_millis()
+        );
+    }
+}
+
 fn is_initial_empty_profile_manifest(manifest: &SyncManifest) -> bool {
     manifest.generation == 1
         && manifest.parent_generation.is_none()
@@ -504,6 +521,15 @@ impl ExitReconcileBackoff {
         self.blocked.insert(profile_id.clone());
     }
 
+    fn block_all(&mut self, profile_ids: &[ProfileId]) {
+        self.blocked.extend(profile_ids.iter().cloned());
+    }
+
+    fn reset_all(&mut self) {
+        self.attempts.clear();
+        self.blocked.clear();
+    }
+
     fn reset(&mut self, profile_id: &ProfileId) {
         self.attempts.remove(profile_id);
         self.blocked.remove(profile_id);
@@ -511,10 +537,15 @@ impl ExitReconcileBackoff {
 }
 
 fn profile_sync_error_should_retry(error: &Problem) -> bool {
-    if matches!(
-        error.code.as_str(),
-        "profile_local_sync_conflict" | "sync_manifest_conflict"
-    ) {
+    if definitive_auth_error(error)
+        || matches!(
+            error.code.as_str(),
+            "profile_forbidden"
+                | "profile_not_running"
+                | "profile_local_sync_conflict"
+                | "sync_manifest_conflict"
+        )
+    {
         return false;
     }
     error.retryable || matches!(error.status, 408 | 425 | 429) || error.status >= 500
@@ -812,7 +843,7 @@ impl ProductionDesktopState {
         let Ok(timestamp) = unix_time_seconds("desktop-runtime-reconcile") else {
             return;
         };
-        for profile_id in exited {
+        for profile_id in exited.iter().cloned() {
             if active.contains(&profile_id) || self.profile_operations.is_busy(&profile_id) {
                 continue;
             }
@@ -844,7 +875,7 @@ impl ProductionDesktopState {
             if operation_busy() {
                 return;
             }
-            if let Err(error) = self
+            let result = self
                 .stop_profile(
                     profile_id.clone(),
                     idempotency_key,
@@ -853,17 +884,25 @@ impl ProductionDesktopState {
                     None,
                     None,
                 )
-                .await
-            {
-                if !profile_sync_error_should_retry(&error)
-                    && let Ok(mut backoff) = self.exit_reconcile_backoff.lock()
-                {
-                    backoff.block(&profile_id);
+                .await;
+            if let Err(error) = result {
+                if !profile_sync_error_should_retry(&error) {
+                    if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
+                        backoff.block(&profile_id);
+                        if definitive_auth_error(&error) {
+                            backoff.block_all(&exited);
+                        }
+                    }
                     tauri_plugin_log::log::warn!(
                         "Stopped profile sync requires user or access resolution: profile={} code={}",
                         profile_id.as_str(),
                         error.code
                     );
+                }
+                if definitive_auth_error(&error) {
+                    // The same revoked session would fail every remaining
+                    // profile request; wait for authentication to be restored.
+                    break;
                 }
             } else if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
                 backoff.reset(&profile_id);
@@ -1299,6 +1338,9 @@ impl ProductionDesktopState {
             .auth
             .write()
             .map_err(|_| desktop_state_problem(correlation_id))? = Some(auth);
+        if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
+            backoff.reset_all();
+        }
         Ok(())
     }
 
@@ -4156,6 +4198,7 @@ impl ProductionDesktopState {
         idempotency_key: String,
         correlation_id: String,
     ) -> Result<Value, Problem> {
+        let _attempt_timer = ProfileLaunchAttemptTimer::start();
         if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
             backoff.reset(&profile_id);
         }
@@ -5230,9 +5273,11 @@ impl ProductionDesktopState {
                     .await;
             }
         }
+        let retryable = result.as_ref().is_err_and(profile_sync_error_should_retry);
         tauri_plugin_log::log::info!(
-            "Profile stop/sync attempt completed: result={} duration_ms={}",
-            if result.is_ok() { "success" } else { "retry" },
+            "Profile stop/sync attempt completed: result={} retryable={} duration_ms={}",
+            if result.is_ok() { "success" } else { "failed" },
+            retryable,
             started_at.elapsed().as_millis()
         );
         result
@@ -7948,16 +7993,37 @@ mod tests {
         let mut backoff = super::ExitReconcileBackoff::default();
         let forbidden = Problem::new("profile_forbidden", "Forbidden", 403, "test");
         let conflict = Problem::new("sync_manifest_conflict", "Conflict", 409, "test");
+        let revoked =
+            Problem::new("session_revoked", "Session revoked", 401, "test").retryable(true);
+        let not_running = Problem::new("profile_not_running", "Not running", 409, "test");
         let unavailable = Problem::new("api_unavailable", "Unavailable", 503, "test");
 
         assert!(!super::profile_sync_error_should_retry(&forbidden));
         assert!(!super::profile_sync_error_should_retry(&conflict));
+        assert!(!super::profile_sync_error_should_retry(&revoked));
+        assert!(!super::profile_sync_error_should_retry(&not_running));
         assert!(super::profile_sync_error_should_retry(&unavailable));
 
         backoff.block(&profile);
         assert!(!backoff.ready(&profile, now + std::time::Duration::from_secs(86_400)));
         backoff.reset(&profile);
         assert!(backoff.ready(&profile, now));
+    }
+
+    #[test]
+    fn auth_reconciliation_block_resets_after_authenticated_session_install() {
+        let first = buglogin_domain::ids::ProfileId::new("prf_auth_block_a").unwrap();
+        let second = buglogin_domain::ids::ProfileId::new("prf_auth_block_b").unwrap();
+        let now = std::time::Instant::now();
+        let mut backoff = super::ExitReconcileBackoff::default();
+
+        backoff.block_all(&[first.clone(), second.clone()]);
+        assert!(!backoff.ready(&first, now));
+        assert!(!backoff.ready(&second, now));
+
+        backoff.reset_all();
+        assert!(backoff.ready(&first, now));
+        assert!(backoff.ready(&second, now));
     }
 
     #[test]

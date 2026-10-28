@@ -145,9 +145,8 @@ import { RippleButton } from "./ui/ripple";
 import { Skeleton } from "./ui/skeleton";
 
 /**
- * The launch control's tooltip. While a launch is in flight it opens by
- * itself and names the stage the backend is in, so a multi-second launch
- * reads as progress rather than a bare spinner.
+ * The launch control's tooltip. While a launch is in flight, hovering the
+ * control shows the current backend stage without covering the profile list.
  */
 function LaunchControlTooltip({
   profileId,
@@ -165,7 +164,7 @@ function LaunchControlTooltip({
   const stage = useLaunchActivity(profileId).at(-1)?.stage;
   const live = launching && stage !== "running" && stage !== "failed";
   return (
-    <Tooltip open={live ? true : undefined}>
+    <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       {(live || content) && (
         <TooltipContent
