@@ -136,7 +136,7 @@ documentation/source:
 
 | Reference | Relevant design | Constraint for BugLogin |
 | --- | --- | --- |
-| ShardBrowser (formerly ShardX) | Chromium engine-level identity, device library, local API/MCP/SDK, profile proxy and team sync. | Its launcher is MIT, but its downloaded patched engine is closed and its published terms prohibit using it in a commercial anti-detect/fingerprint product. Do not bundle or derive from that engine without a separate written license. |
+| ShardBrowser (formerly ShardX) | The current repository describes a Chromium 156 engine, local API/MCP/SDK, profile proxy, QUIC/WebRTC relay, team sync and a device library. | Its launcher is MIT, but its downloaded patched engine is closed and its published terms prohibit embedding it in a commercial anti-detect/fingerprint product without written permission. It is a strong benchmark, not a redistributable runtime. |
 | CloakBrowser | Chromium C++ patches, persistent seeds, signed binary download, Playwright/CDP control. | Its binary terms prohibit embedding/bundling/customer control without OEM/SaaS rights. The MIT wrapper license does not grant those binary rights. |
 | Donut / Wayfern | Native in-engine fingerprinting, per-profile cookies/extensions/proxy, sync/team locks, templates and profile-level operations. | This is the existing product baseline. Preserve its Rust lifecycle, identity stability, encrypted sync, access checks, and native process ownership; a different engine must not pretend its identity is interchangeable. |
 | Camoufox | Firefox C++ patches, real-distribution personas with coherence checks, per-context identity and Playwright over Juggler. | Strong engine-level consistency reference, but it is Firefox/Juggler rather than Chromium/CDP; extension compatibility and existing Chromium profile data cannot be assumed. Keep it as a separate future engine adapter, not a drop-in Chromium replacement. |
@@ -145,6 +145,124 @@ documentation/source:
 The table records design evidence, not independent claims that any product is
 undetectable or universally compatible. Vendor detection-test claims are not an
 acceptance signal.
+
+## Recommended path to close the production gates
+
+Keep the current Fury adapter as an isolated engineering beta. Close its gates
+through BugLogin-owned runtime artifacts and existing Rust authority; do not
+embed another vendor's launcher, team server, or closed browser binary.
+
+### 1. Own the Chromium update cadence
+
+- Create a BugLogin Chromium runtime from an exact upstream Chromium revision
+  plus a small, individually reviewed set of engine patches. Fury documents its
+  patch series as separable from its AGPL launcher/server, with Chromium-derived
+  patches under BSD terms; do a component-by-component license and notice review
+  before adopting any patch. The binary must be built by BugLogin CI from
+  reviewed source, not downloaded from Fury's release CDN.
+- Track Chrome Stable on a scheduled release watcher. Chromium's four-week
+  milestone cadence means the watcher should open a source/pin update and
+  compatibility job for each milestone, while security fixes get an expedited
+  path. A new version must not reach the stable catalog until Windows and macOS
+  builds, native readback, profile restart, and compatibility checks pass.
+  Google documents the four-week Stable cadence in its [release-channel guide](https://www.chromium.org/chrome-release-channels/); Fury's [Chromium fork notes](https://github.com/furyteamtop/fury-antidetect-browser/blob/main/docs/03-chromium-fork.md)
+  describe the patch rebase work and engine build pipeline.
+- Keep the current engine available as a last-known-good version. Publish new
+  immutable runtime packages under a canary ring first, then promote the signed
+  catalog pointer after smoke evidence. Do not rewrite an installed runtime or
+  change a profile's bound engine during an ordinary app update.
+- The full Chromium build is a real infrastructure cost: Fury records one
+  measured macOS arm64 build of about 2 h 42 min and a roughly 39 GB checkout
+  plus build output. Reserve persistent, disk-sized Windows and Apple Silicon
+  builders; use the existing small CI runners for contract/smoke checks rather
+  than pretending that a clean full build is cheap.
+
+### 2. Make synced browser data portable without a manual key prompt
+
+- `profile_projection` already snapshots the profile tree recursively, removes
+  known ephemeral Chromium files, and encrypts the resulting manifest objects.
+  The identity and fingerprint files under `BugLogin/` therefore fit the current
+  encrypted resource payload. Add explicit Windows A → B tests proving those
+  files are present after restore and never appear as plaintext in API/object
+  storage or logs.
+- The missing cross-device case is Chromium cookie/login encryption. A local
+  restart test only proves that the same OS account can decrypt its own data.
+  Add an engine-level OS-crypt provider using a versioned, domain-separated
+  subkey derived from the already-authorized profile resource key. Keep the
+  resource key in the Rust OS-vault/sync-key path; pass only the derived
+  OS-crypt key to the browser through a second inherited native handle. Never
+  put it in argv, React, logs, or a plaintext profile file. This follows the
+  separate OS-crypt handle model documented by Fury, but must be implemented in
+  BugLogin-owned Chromium source and reviewed independently. The design
+  precedent and platform-key trade-offs are described in Fury's [profile sync
+  notes](https://github.com/furyteamtop/fury-antidetect-browser/blob/main/docs/06-profile-sync.md).
+- Do not create a second recovery-code workflow. The existing authenticated
+  device enrollment and wrapped resource key should unlock the derived key
+  automatically only after server ACL checks. A bearer without the profile's
+  resource-key grant remains insufficient to decrypt data.
+- Launch the engine only through the existing `ProfileRuntime` path: reconcile
+  the remote manifest, obtain/renew the fenced profile lease, launch, stop,
+  produce the encrypted snapshot, commit it, then release the lease. A team
+  profile that is not already running cannot safely start during an API outage
+  because no server lease can be acquired; an already-running profile follows
+  the existing lease-renewal safety window and must stop before ownership expires.
+- Bind identity to the exact runtime version and artifact checksum as the beta
+  does now. If a synced profile requires a different runtime version, install
+  that exact signed version before launch. A profile migration to a newer engine
+  must first create a recoverable encrypted checkpoint and remain reversible as
+  a unit; never downgrade a migrated Chromium data directory in place.
+
+### 3. Reuse BugLogin's signed runtime distribution
+
+- Extend the existing Ed25519-signed runtime catalog and verified installer to
+  publish a Bugium/Fury-family runtime. `Runtime::Bugium`, package checksum
+  verification, staged install, and rollback primitives already exist; the
+  remaining seams are runtime-catalog/config selection and profile create/launch
+  routing, which currently expose Wayfern only. This is a focused extension of
+  the existing runtime capability, not a second updater.
+- Put platform, architecture, Chromium milestone, source revision, package hash,
+  signing key ID, and minimum identity schema in the signed release record.
+  Sign macOS app/runtime artifacts with Developer ID and notarize them; sign
+  Windows artifacts with Authenticode. Keep the catalog signature/hash check as
+  the mandatory install gate, and retain the previous immutable runtime for
+  rollback. Publish SBOM, third-party notices, and build provenance beside each
+  release.
+  Use the existing [Tauri signed-updater contract](https://v2.tauri.app/plugin/updater/)
+  for app packages, [Apple Developer ID notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+  for macOS runtime bundles, and [Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/appxpkg/how-to-sign-a-package-using-signtool)
+  or the current Windows release signer for Windows binaries.
+- Keep app version and browser engine version independent. BugLogin app updates
+  can ship UI/API fixes without silently changing existing profiles' engine;
+  engine releases can be installed independently through the signed runtime
+  catalog with explicit profile compatibility status.
+
+### Required proof before changing the default
+
+1. Reproducible source pins and component license review; signed Windows x64 and
+   macOS arm64 artifacts; stable catalog verification rejects tampering,
+   wrong architecture, downgrade, and interrupted install.
+2. Two Windows devices with separate OS accounts: first device opens, edits,
+   stops and syncs; second obtains the authorized resource key, restores, opens,
+   reads existing cookies/login state, edits, syncs back, and the first reopens
+   that committed state. Server-side assertions prove ciphertext-only storage.
+3. Two-device lease tests cover active owner, denied second launch, clean handoff,
+   heartbeat loss, API outage, process crash, and stale fencing tokens. Expected
+   UI states remain `running`, `syncing`, `stopped`, or a specific actionable
+   failure; no indefinite `unknown`/orange state.
+4. Upgrade and rollback exercise real profiles and extension/proxy configuration
+   on both OSes. A failed migration restores the encrypted checkpoint and the
+   previous engine without losing the profile's cookies or identity.
+5. Re-run native surface, worker, cookie, extension, proxy, process lifecycle,
+   sync, and team-lock gates on the exact artifacts being promoted.
+
+Research boundary: [ShardBrowser](https://github.com/ProxyShard/ShardBrowser)
+currently documents Chromium 156 and useful cross-device/team workflows, but
+its engine is closed and its own terms require permission for embedding in a
+commercial anti-detect browser. [CloakBrowser](https://github.com/dmulxw/cloakbrowser)
+has a similar binary/OEM restriction. [Camoufox](https://camoufox.com/) is a
+useful Firefox engine reference, not a Chromium drop-in because its automation
+and profile format differ. These are comparison inputs, not substitutes for a
+BugLogin-owned signed runtime.
 
 ### Required parity evidence before considering default replacement
 
