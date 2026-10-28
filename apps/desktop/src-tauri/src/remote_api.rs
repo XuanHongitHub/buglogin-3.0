@@ -199,12 +199,6 @@ struct ApiTokenState {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BlobPresence {
-    present: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedProfilePage {
     items: Vec<Versioned<Profile>>,
     #[serde(default)]
@@ -1823,42 +1817,6 @@ impl RemoteApiClient {
             )
             .await?;
         Ok(())
-    }
-
-    pub async fn blob_present(
-        &self,
-        scope: CoordinationScope<'_>,
-        resource: &ResourceId,
-        key: &str,
-        generation: u64,
-        checksum: &str,
-        owner_token: &str,
-        fence: u64,
-        correlation: &str,
-    ) -> Result<bool, Problem> {
-        let path = format!(
-            "/v1/workspaces/{}/resources/{}/blobs/check?key={}&generation={generation}&checksum={checksum}",
-            scope.workspace_id.as_str(),
-            resource.as_str(),
-            urlencoding(key)
-        );
-        let extra = [
-            ("x-buglogin-owner-id", scope.auth.actor_id().to_owned()),
-            ("x-buglogin-owner-token", owner_token.to_owned()),
-            ("x-buglogin-fencing-token", fence.to_string()),
-        ];
-        let response: BlobPresence = self
-            .send(
-                Method::GET,
-                &path,
-                None,
-                correlation,
-                None,
-                Some(scope.auth),
-                &extra,
-            )
-            .await?;
-        Ok(response.present)
     }
 
     pub async fn download_blob(
@@ -5519,7 +5477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_blob_upload_is_reconciled_by_presence_check_on_retry() {
+    async fn ambiguous_blob_upload_retries_same_idempotent_put_without_presence_preflight() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let body = b"encrypted-profile-chunk".to_vec();
@@ -5527,36 +5485,54 @@ mod tests {
         let server_body = body.clone();
         let server_checksum = checksum.clone();
         let server = tokio::spawn(async move {
-            let mut put_count = 0;
             let (mut put_stream, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut put_stream).await;
             assert!(request.starts_with(
                 "PUT /v1/workspaces/ws_upload_retry/resources/res_upload_retry/blobs?key=Default%2FCookies HTTP/1.1"
             ));
-            let (headers, uploaded_body) = request.split_once("\r\n\r\n").unwrap();
-            assert_eq!(uploaded_body.as_bytes(), server_body);
+            let (first_headers, first_body) = request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(first_body.as_bytes(), server_body);
             assert!(
-                headers
+                first_headers
                     .to_ascii_lowercase()
                     .contains(&format!("x-content-sha256: {server_checksum}"))
             );
-            put_count += 1;
+            let first_idempotency = first_headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with("idempotency-key:")
+                        .then(|| line.split_once(':').unwrap().1.trim().to_owned())
+                })
+                .unwrap();
+            assert_eq!(first_body.as_bytes(), server_body);
             // Model a server that durably stored the immutable blob but lost its response.
             drop(put_stream);
 
-            let (mut check_stream, _) = listener.accept().await.unwrap();
-            let check_request = read_http_request(&mut check_stream).await;
-            assert!(check_request.starts_with(
-                "GET /v1/workspaces/ws_upload_retry/resources/res_upload_retry/blobs/check?key=Default%2FCookies&generation=2&checksum="
+            let (mut retry_stream, _) = listener.accept().await.unwrap();
+            let retry_request = read_http_request(&mut retry_stream).await;
+            assert!(retry_request.starts_with(
+                "PUT /v1/workspaces/ws_upload_retry/resources/res_upload_retry/blobs?key=Default%2FCookies HTTP/1.1"
             ));
-            let response_body = br#"{"present":true}"#;
+            let (retry_headers, retry_body) = retry_request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(retry_body.as_bytes(), server_body);
+            assert!(
+                retry_headers
+                    .to_ascii_lowercase()
+                    .contains(&format!("x-content-sha256: {server_checksum}"))
+            );
+            assert!(
+                retry_headers.lines().any(|line| line.to_ascii_lowercase()
+                    == format!("idempotency-key: {first_idempotency}"))
+            );
+            let response_body = br#"{"ok":true}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                 response_body.len()
             );
-            check_stream.write_all(response.as_bytes()).await.unwrap();
-            check_stream.write_all(response_body).await.unwrap();
-            (put_count, check_request)
+            retry_stream.write_all(response.as_bytes()).await.unwrap();
+            retry_stream.write_all(response_body).await.unwrap();
+            retry_request
         });
 
         let client =
@@ -5568,7 +5544,7 @@ mod tests {
             workspace_id: &workspace,
             auth: &auth,
         };
-        let upload = client
+        let first_upload = client
             .upload_blob(
                 scope.clone(),
                 &resource,
@@ -5578,15 +5554,14 @@ mod tests {
                 "owner-token",
                 7,
                 "upload-ambiguous-first-attempt",
-                body,
+                body.clone(),
                 "upload-retry-test",
             )
             .await;
-        assert!(upload.is_err());
-
+        assert!(first_upload.is_err());
         assert!(
             client
-                .blob_present(
+                .upload_blob(
                     scope,
                     &resource,
                     "Default/Cookies",
@@ -5594,18 +5569,16 @@ mod tests {
                     &checksum,
                     "owner-token",
                     7,
+                    "upload-ambiguous-first-attempt",
+                    body,
                     "upload-retry-test",
                 )
                 .await
-                .unwrap()
+                .is_ok()
         );
-        let (put_count, check_request) = server.await.unwrap();
-        assert_eq!(
-            put_count, 1,
-            "retry should not upload an already stored blob"
-        );
+        let retry_request = server.await.unwrap();
         assert!(
-            check_request
+            retry_request
                 .to_ascii_lowercase()
                 .contains("x-buglogin-fencing-token: 7")
         );
@@ -6076,61 +6049,6 @@ mod tests {
         assert_eq!(request_body["ownerId"], "desktop-1");
         assert_eq!(request_body["ttlSeconds"], 120);
         assert_eq!(lease, response_lease);
-    }
-
-    #[tokio::test]
-    async fn blob_presence_check_uses_resource_lease_scope_and_checksum() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut stream).await;
-            let body = br#"{"present":true}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-            stream.write_all(body).await.unwrap();
-            request
-        });
-        let client =
-            RemoteApiClient::new(&format!("http://{address}"), "device-token".to_owned()).unwrap();
-        let auth = CoordinationAuth::new("desktop-1", "lease-token").unwrap();
-        let workspace = WorkspaceId::new("ws_retry").unwrap();
-        let resource = ResourceId::new("res_retry").unwrap();
-        let present = client
-            .blob_present(
-                CoordinationScope {
-                    workspace_id: &workspace,
-                    auth: &auth,
-                },
-                &resource,
-                "Default/Preferences",
-                4,
-                &"a".repeat(64),
-                "owner-token",
-                7,
-                "blob-presence-test",
-            )
-            .await
-            .unwrap();
-        let request = server.await.unwrap();
-        let headers = request.split_once("\r\n\r\n").unwrap().0;
-        assert!(headers.starts_with(
-            "GET /v1/workspaces/ws_retry/resources/res_retry/blobs/check?key=Default%2FPreferences&generation=4&checksum="
-        ));
-        assert!(
-            headers
-                .to_ascii_lowercase()
-                .contains("x-buglogin-owner-id: desktop-1")
-        );
-        assert!(
-            headers
-                .to_ascii_lowercase()
-                .contains("x-buglogin-fencing-token: 7")
-        );
-        assert!(present);
     }
 
     #[tokio::test]

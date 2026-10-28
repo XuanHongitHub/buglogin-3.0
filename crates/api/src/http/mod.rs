@@ -470,6 +470,7 @@ pub struct ApiState {
     control_mutation: Arc<Mutex<()>>,
     pub(crate) control_snapshot_gate: Arc<tokio::sync::RwLock<()>>,
     control_snapshot_refresh: ControlSnapshotRefresh,
+    readiness_refresh: ControlSnapshotRefresh,
     materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
     platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
     local_account_provisioning: bool,
@@ -564,6 +565,54 @@ struct ApiAuthorizationAuthority {
     platform_admin_accounts: Arc<RwLock<BTreeSet<AccountId>>>,
     grants: Arc<RwLock<Vec<Grant>>>,
     materialized_member_grants: Arc<RwLock<BTreeSet<MemberId>>>,
+}
+
+struct SyncObjectWriteLockGuard {
+    state: ApiState,
+    workspace_id: String,
+    resource_id: String,
+    active: bool,
+}
+
+impl SyncObjectWriteLockGuard {
+    fn acquire(state: &ApiState, workspace_id: &str, resource_id: &str) -> Result<Self, Problem> {
+        if !state.try_sync_object_write_lock(workspace_id, resource_id)? {
+            return Err(problem(
+                "sync_object_cleanup_in_progress",
+                "Sync object cleanup is in progress; retry the upload",
+                503,
+            )
+            .retryable(true));
+        }
+        Ok(Self {
+            state: state.clone(),
+            workspace_id: workspace_id.to_owned(),
+            resource_id: resource_id.to_owned(),
+            active: true,
+        })
+    }
+
+    fn release(mut self) -> Result<(), Problem> {
+        let result = self
+            .state
+            .release_sync_object_write_lock(&self.workspace_id, &self.resource_id);
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
+    }
+}
+
+impl Drop for SyncObjectWriteLockGuard {
+    fn drop(&mut self) {
+        if self.active
+            && let Err(error) = self
+                .state
+                .release_sync_object_write_lock(&self.workspace_id, &self.resource_id)
+        {
+            eprintln!("sync_object_write_lock_release_failed code={}", error.code);
+        }
+    }
 }
 
 impl ApiState {
@@ -740,6 +789,7 @@ impl ApiState {
             control_mutation: Arc::new(Mutex::new(())),
             control_snapshot_gate: Arc::new(tokio::sync::RwLock::new(())),
             control_snapshot_refresh: Arc::new(tokio::sync::Mutex::new(None)),
+            readiness_refresh: Arc::new(tokio::sync::Mutex::new(None)),
             local_account_provisioning,
             external_object_storage: false,
             require_runtime_catalog_for_readiness: false,
@@ -851,7 +901,6 @@ impl ApiState {
     }
 
     pub async fn readiness(&self) -> Result<(), Problem> {
-        self.control_persistence.readiness()?;
         if !self.local_account_provisioning && !self.external_object_storage {
             return Err(problem(
                 "object_storage_not_configured",
@@ -878,36 +927,84 @@ impl ApiState {
                 503,
             ));
         }
-        self.remote_chunks.readiness().map_err(|_| {
-            problem(
-                "readiness_unavailable",
-                "Service readiness check failed",
-                503,
-            )
-        })?;
-        let coordination = self
-            .coordination
-            .read()
-            .map_err(|_| {
-                problem(
-                    "readiness_unavailable",
-                    "Service readiness check failed",
-                    503,
-                )
-            })?
-            .clone();
-        match coordination {
-            Some(backend) => backend.readiness().await?,
-            None if !self.local_account_provisioning => {
-                return Err(problem(
-                    "coordination_not_configured",
-                    "Redis coordination is not configured",
-                    503,
-                ));
-            }
-            None => {}
+        let mut refresh =
+            tokio::time::timeout(Duration::from_millis(250), self.readiness_refresh.lock())
+                .await
+                .map_err(|_| {
+                    problem(
+                        "readiness_busy",
+                        "Readiness dependencies are already being checked; retry shortly",
+                        503,
+                    )
+                    .retryable(true)
+                })?;
+        if let Some((refreshed_at, result)) = refresh.as_ref()
+            && refreshed_at.elapsed() < Duration::from_millis(500)
+        {
+            return result.clone();
         }
-        Ok(())
+
+        let state = self.clone();
+        let result = async move {
+            tokio::task::spawn_blocking(move || {
+                state.control_persistence.readiness()?;
+                if !state.local_account_provisioning
+                    && state
+                        .profile_key_wrapping_key
+                        .read()
+                        .map_err(|_| {
+                            problem(
+                                "readiness_unavailable",
+                                "Service readiness check failed",
+                                503,
+                            )
+                        })?
+                        .is_none()
+                {
+                    return Err(problem(
+                        "profile_key_provider_not_configured",
+                        "Profile key management is not configured",
+                        503,
+                    ));
+                }
+                state.remote_chunks.readiness().map_err(|_| {
+                    problem(
+                        "readiness_unavailable",
+                        "Service readiness check failed",
+                        503,
+                    )
+                })
+            })
+            .await
+            .map_err(|_| control_worker_failed())??;
+
+            let coordination = self
+                .coordination
+                .read()
+                .map_err(|_| {
+                    problem(
+                        "readiness_unavailable",
+                        "Service readiness check failed",
+                        503,
+                    )
+                })?
+                .clone();
+            match coordination {
+                Some(backend) => backend.readiness().await?,
+                None if !self.local_account_provisioning => {
+                    return Err(problem(
+                        "coordination_not_configured",
+                        "Redis coordination is not configured",
+                        503,
+                    ));
+                }
+                None => {}
+            }
+            Ok(())
+        }
+        .await;
+        *refresh = Some((tokio::time::Instant::now(), result.clone()));
+        result
     }
 
     pub fn with_recovery_delivery(mut self, delivery: Arc<dyn RecoveryDelivery>) -> Self {
@@ -1028,6 +1125,32 @@ impl ApiState {
         .map_err(|_| remote_chunk_worker_failed())?
     }
 
+    pub(crate) async fn reserve_sync_blob_upload_async(
+        &self,
+        workspace_id: WorkspaceId,
+        resource_id: buglogin_domain::ids::ResourceId,
+        storage_key: String,
+        checksum: String,
+        size: u64,
+        now_ms: u64,
+        actor_id: String,
+    ) -> Result<(), Problem> {
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || {
+            state.reserve_sync_blob_upload(
+                &workspace_id,
+                &resource_id,
+                &storage_key,
+                &checksum,
+                size,
+                now_ms,
+                &actor_id,
+            )
+        })
+        .await
+        .map_err(|_| control_worker_failed())?
+    }
+
     pub(crate) async fn get_remote_chunk_async(
         &self,
         object_key: String,
@@ -1043,17 +1166,43 @@ impl ApiState {
         .map_err(|_| remote_chunk_worker_failed())?
     }
 
-    pub(crate) async fn put_remote_chunk_async(
+    pub(crate) async fn put_reserved_remote_chunk_async(
         &self,
-        object_key: String,
-        bytes: Vec<u8>,
+        workspace_id: WorkspaceId,
+        resource_id: buglogin_domain::ids::ResourceId,
+        storage_key: String,
         expected_checksum: String,
+        size: u64,
+        reservation_time_ms: u64,
+        body: Bytes,
+        body_admission: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<(), Problem> {
-        let permit = remote_chunk_io_slot()?;
+        let remote_permit = remote_chunk_io_slot()?;
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            state.put_remote_chunk(&object_key, &bytes, &expected_checksum)
+            let _remote_permit = remote_permit;
+            let _body_admission = body_admission;
+            let lock = SyncObjectWriteLockGuard::acquire(
+                &state,
+                workspace_id.as_str(),
+                resource_id.as_str(),
+            )?;
+            let upload_result = state
+                .validate_sync_blob_upload(
+                    &workspace_id,
+                    &resource_id,
+                    &storage_key,
+                    &expected_checksum,
+                    size,
+                    reservation_time_ms,
+                )
+                .and_then(|()| state.put_remote_chunk(&storage_key, &body, &expected_checksum));
+            let release_result = lock.release();
+            match (upload_result, release_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), _) => Err(error),
+                (Ok(()), Err(error)) => Err(error),
+            }
         })
         .await
         .map_err(|_| remote_chunk_worker_failed())?
@@ -5178,6 +5327,15 @@ fn remote_chunk_worker_failed() -> Problem {
     problem(
         "remote_chunk_worker_unavailable",
         "Remote storage worker is unavailable; retry the request",
+        503,
+    )
+    .retryable(true)
+}
+
+fn control_worker_failed() -> Problem {
+    problem(
+        "control_worker_unavailable",
+        "Control persistence worker is unavailable; retry the request",
         503,
     )
     .retryable(true)

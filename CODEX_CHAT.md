@@ -393,3 +393,16 @@
 - Sync nền sau khi profile đóng vẫn chạy ngay; lỗi sẽ retry từ local data sau 3s, 6s, 12s... tối đa 30s giữa các lần (trước đây tối đa 5 phút). Lease được nhả giữa các retry và được gia hạn trong lúc upload thật đang hoạt động.
 - Không có ETA tổng cố định: mỗi HTTP request timeout 60s; tổng sync tùy dung lượng/object/mạng. App log ghi duration_ms và success/retry sau mỗi lần; cần build chạy thực tế để có số production.
 - `cargo fmt --check`, test backoff mục tiêu PASS, desktop typecheck PASS. Đang chuẩn bị candidate 3.0.24; chưa commit/push/release stable.
+
+## Điều phối 71: Plan chống nghẽn API và sync — phiên lập kế hoạch
+- Người dùng yêu cầu plan thật kỹ; phiên này chỉ tạo spec `docs/superpowers/specs/2026-10-28-sync-api-resilience-design.md` và plan `docs/superpowers/plans/2026-10-28-sync-api-resilience.md`, không sửa code ứng dụng hay deploy trong lượt lập plan.
+- Main vừa tiến tới `dbf7b356`; forwarding `PostgresControlRecordStore::get_many` và `member_directory_views` offload đang được phiên khác bổ sung trong shared WIP. Không viết trùng; xác minh adapter thật sau khi source chốt.
+- Release review quan trọng: `put_resource_blob` đang acquire shared advisory lock, rồi await `put_remote_chunk_async`, rồi mới explicit unlock. Nếu future bị hủy tại await, blocking task vẫn có thể tiếp tục nhưng nhánh unlock bị bỏ. Cần worker sở hữu trọn lock/work/cleanup và test cancellation; chỉ bọc S3 bằng spawn_blocking chưa đủ.
+- Các điểm còn lại: `body.to_vec()` nhân đôi buffer lớn; permit/body accounting phải sống theo task thực kể cả disconnect; readiness còn gọi DB/S3 đồng bộ; GET snapshot guard đang giữ qua handler; retry presence/transport/whole-sync có thể chồng nhau.
+- Hướng chốt trong plan: API an toàn trước và giữ route cũ; desktop bỏ GET check từng object, direct idempotent PUT, một retry budget + giới hạn upload toàn desktop. Batch resume/DB pool chỉ mở packet khi có số đo cần thiết. Không bỏ lease/ACL/checksum/GC fence để giảm tải.
+
+## Điều phối 72: Khôi phục API và nới CPU runtime tạm — 2026-10-28
+- Theo yêu cầu vận hành trực tiếp của người dùng, đã capture backlog `129/128` rồi restart riêng `buglogin3-api.service` lúc 02:41:49 UTC; PID mới `3354736`. Origin health/readiness và public health trả 200, backlog về 0. Không thay binary hoặc xóa dữ liệu.
+- Theo yêu cầu nới tải tạm cho tới release tiếp theo, dùng `systemctl set-property --runtime buglogin3-api.service CPUQuota=100%`, tăng từ 50% lên tối đa một lõi trên VPS hai lõi. PID giữ nguyên, không restart thêm; `CPUQuotaPerSecUSec=1s`, health/readiness 200, backlog 0 ở lần kiểm tra sau thay đổi.
+- Đây là override runtime; mất khi reboot nhưng có thể còn hiệu lực qua service restart/deploy. Release owner phải đối chiếu chính sách CPU đã version hóa và gỡ/khôi phục override khi deploy API sửa nghẽn. Nếu chính sách vẫn là 50%, lệnh rollback vận hành là `sudo systemctl set-property --runtime buglogin3-api.service CPUQuota=50%`; không tự đổi giới hạn RAM, TasksMax, NOFILE, DB/Redis hoặc dịch vụ BugIdea.
+- Nới CPU chỉ giảm throttling, không sửa các đường sync I/O, cancellation, queue và retry trong plan 71. Không coi đây là bản sửa production hoàn tất.

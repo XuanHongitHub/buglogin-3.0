@@ -4,7 +4,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, RwLock,
+        Arc, Mutex, MutexGuard, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -55,7 +55,7 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
@@ -82,6 +82,8 @@ use crate::{
 };
 
 const MAX_CONCURRENT_PROFILE_BLOB_UPLOADS: usize = 2;
+const MAX_CONCURRENT_DESKTOP_BLOB_UPLOADS: usize = 2;
+static PROFILE_BLOB_UPLOAD_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const MAX_OPERATION_IDEMPOTENCY_RECORDS: usize = 1_024;
 const PROXY_MUTATION_JOURNAL_SCHEMA_VERSION: u16 = 1;
 
@@ -5872,6 +5874,10 @@ impl ProductionDesktopState {
         let owner_token = owner_token.to_owned();
         let correlation_id = correlation_id.to_owned();
         let idempotency_key = idempotency_key.to_owned();
+        let global_upload_slots = Arc::clone(
+            PROFILE_BLOB_UPLOAD_SLOTS
+                .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_DESKTOP_BLOB_UPLOADS))),
+        );
         stream::iter(files.into_iter().map(|blob| {
             let client = client.clone();
             let scope = scope.clone();
@@ -5881,6 +5887,7 @@ impl ProductionDesktopState {
             let object_map = Arc::clone(&object_map);
             let reused_object_keys = Arc::clone(&reused_object_keys);
             let resource_id = resource_id.clone();
+            let global_upload_slots = Arc::clone(&global_upload_slots);
             async move {
                 if reused_object_keys.contains(&blob.key) {
                     return Ok(());
@@ -5901,33 +5908,19 @@ impl ProductionDesktopState {
                         &correlation_id,
                     ));
                 }
-                let mut presence_attempt = 0;
-                let present = loop {
-                    match client
-                        .blob_present(
-                            scope.clone(),
-                            &resource_id,
-                            &blob.key,
-                            generation,
-                            &object.checksum,
-                            &owner_token,
-                            fencing_token,
+                let _global_upload_slot = global_upload_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        Problem::new(
+                            "profile_blob_upload_capacity_unavailable",
+                            "Profile upload capacity is unavailable",
+                            503,
                             &correlation_id,
                         )
-                        .await
-                    {
-                        Ok(present) => break present,
-                        Err(problem) if problem.retryable && presence_attempt == 0 => {
-                            presence_attempt += 1;
-                            tokio::time::sleep(Duration::from_millis(250)).await;
-                        }
-                        Err(problem) => return Err(problem),
-                    }
-                };
-                if present {
-                    return Ok(());
-                }
-
+                        .retryable(true)
+                    })?;
                 let upload_idempotency_key =
                     blob_idempotency_key(&idempotency_key, &blob.key, &object.checksum);
                 let mut upload_attempt = 0;

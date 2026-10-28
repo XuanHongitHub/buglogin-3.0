@@ -4765,27 +4765,28 @@ async fn list_members(
     let principal = authenticate(&state, &headers)?;
     let grants = grants(&state)?;
     let workspace_id = WorkspaceId::from_str(&workspace_id).map_err(|_| bad_id("workspace_id"))?;
-    let member_service = state
-        .members
-        .read()
-        .map_err(|_| service_unavailable("member"))?;
-    let members = match member_service.list(&principal, &grants, &workspace_id) {
-        Ok(members) => members,
-        Err(error) if error.status == 403 => {
-            let organization = state
-                .workspaces
-                .read()
-                .map_err(|_| service_unavailable("workspace"))?
-                .managed_organization_for_workspace(&principal, &grants, &workspace_id)
-                .map_err(response_problem)?;
-            member_service
-                .list_as_org_owner(&principal, &grants, &organization, &workspace_id)
-                .map_err(response_problem)?
+    let members = {
+        let member_service = state
+            .members
+            .read()
+            .map_err(|_| service_unavailable("member"))?;
+        match member_service.list(&principal, &grants, &workspace_id) {
+            Ok(members) => members,
+            Err(error) if error.status == 403 => {
+                let organization = state
+                    .workspaces
+                    .read()
+                    .map_err(|_| service_unavailable("workspace"))?
+                    .managed_organization_for_workspace(&principal, &grants, &workspace_id)
+                    .map_err(response_problem)?;
+                member_service
+                    .list_as_org_owner(&principal, &grants, &organization, &workspace_id)
+                    .map_err(response_problem)?
+            }
+            Err(error) => return Err(response(error)),
         }
-        Err(error) => return Err(response(error)),
     };
-    drop(member_service);
-    let items = member_directory_views(&state, &principal, &grants, members)?;
+    let items = member_directory_views(state, principal, grants, members).await?;
     Ok(Json(items))
 }
 
@@ -4805,45 +4806,53 @@ struct MemberDirectoryView {
     identity: Option<MemberIdentityView>,
 }
 
-fn member_directory_views(
-    state: &ApiState,
-    principal: &Principal,
-    grants: &[buglogin_domain::permissions::Grant],
+async fn member_directory_views(
+    state: ApiState,
+    principal: Principal,
+    grants: Vec<buglogin_domain::permissions::Grant>,
     members: Vec<Member>,
 ) -> Result<Vec<MemberDirectoryView>, Response> {
-    let identity_access = members
-        .iter()
-        .map(|member| can_read_member_identity(state, principal, grants, member))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut account_ids = BTreeSet::new();
-    for (member, can_read_identity) in members.iter().zip(&identity_access) {
-        if *can_read_identity {
-            account_ids.insert(member.account_id.as_str().to_owned());
+    tokio::task::spawn_blocking(move || {
+        let identity_access = members
+            .iter()
+            .map(|member| can_read_member_identity(&state, &principal, &grants, member))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut account_ids = BTreeSet::new();
+        for (member, can_read_identity) in members.iter().zip(&identity_access) {
+            if *can_read_identity {
+                account_ids.insert(member.account_id.as_str().to_owned());
+            }
         }
-    }
-    let account_ids = account_ids.into_iter().collect::<Vec<_>>();
-    let identities = crate::services::identity_persistence::IdentityPersistence::new(
-        state.control_persistence.clone(),
-    )
-    .load_many(&account_ids)
-    .map_err(response_problem)?;
-    members
-        .into_iter()
-        .zip(identity_access)
-        .map(|(member, can_read_identity)| {
-            let identity = if can_read_identity {
-                identities
-                    .get(member.account_id.as_str())
-                    .map(|identity| MemberIdentityView {
-                        username: identity.username.clone(),
-                        email: identity.email.clone(),
-                    })
-            } else {
-                None
-            };
-            Ok(MemberDirectoryView { member, identity })
-        })
-        .collect()
+        let account_ids = account_ids.into_iter().collect::<Vec<_>>();
+        let identities = crate::services::identity_persistence::IdentityPersistence::new(
+            state.control_persistence.clone(),
+        )
+        .load_many(&account_ids)?;
+        members
+            .into_iter()
+            .zip(identity_access)
+            .map(|(member, can_read_identity)| {
+                let identity = if can_read_identity {
+                    identities
+                        .get(member.account_id.as_str())
+                        .map(|identity| MemberIdentityView {
+                            username: identity.username.clone(),
+                            email: identity.email.clone(),
+                        })
+                } else {
+                    None
+                };
+                Ok::<MemberDirectoryView, buglogin_domain::errors::Problem>(MemberDirectoryView {
+                    member,
+                    identity,
+                })
+            })
+            .collect::<Result<Vec<_>, buglogin_domain::errors::Problem>>()
+    })
+    .await
+    .map_err(|_| Response::from(service_unavailable("identity")))?
+    .map_err(response_problem)
+    .map_err(Response::from)
 }
 
 fn can_read_member_identity(
@@ -4851,15 +4860,15 @@ fn can_read_member_identity(
     principal: &Principal,
     grants: &[buglogin_domain::permissions::Grant],
     member: &Member,
-) -> Result<bool, Response> {
+) -> Result<bool, buglogin_domain::errors::Problem> {
     let direct_identity_access = is_allowed(
         principal,
         &Capability::new("CAP-MEM-001").map_err(|_| {
-            problem_response(
+            buglogin_domain::errors::Problem::new(
                 "invalid_capability",
                 "Membership capability is invalid",
                 500,
-                "member-directory".into(),
+                "member-directory",
             )
         })?,
         Action::Manage,
@@ -4869,7 +4878,14 @@ fn can_read_member_identity(
     let organization_owner_access = state
         .workspaces
         .read()
-        .map_err(|_| service_unavailable("workspace"))?
+        .map_err(|_| {
+            buglogin_domain::errors::Problem::new(
+                "workspace_unavailable",
+                "Workspace service unavailable",
+                503,
+                "workspace",
+            )
+        })?
         .managed_organization_for_workspace(principal, grants, &member.workspace_id)
         .ok()
         .is_some_and(|organization| {
@@ -4901,40 +4917,35 @@ async fn list_members_page(
         .transpose()
         .map_err(|_| bad_id("cursor"))?;
     let limit = collection_page_limit(query.limit)?;
-    let member_service = state
-        .members
-        .read()
-        .map_err(|_| service_unavailable("member"))?;
-    let (members, next_cursor) = match member_service.list_page(
-        &principal,
-        &grants,
-        &workspace_id,
-        cursor.as_ref(),
-        limit,
-    ) {
-        Ok(page) => page,
-        Err(error) if error.status == 403 => {
-            let organization = state
-                .workspaces
-                .read()
-                .map_err(|_| service_unavailable("workspace"))?
-                .managed_organization_for_workspace(&principal, &grants, &workspace_id)
-                .map_err(response_problem)?;
-            member_service
-                .list_page_as_org_owner(
-                    &principal,
-                    &grants,
-                    &organization,
-                    &workspace_id,
-                    cursor.as_ref(),
-                    limit,
-                )
-                .map_err(response_problem)?
+    let (members, next_cursor) = {
+        let member_service = state
+            .members
+            .read()
+            .map_err(|_| service_unavailable("member"))?;
+        match member_service.list_page(&principal, &grants, &workspace_id, cursor.as_ref(), limit) {
+            Ok(page) => page,
+            Err(error) if error.status == 403 => {
+                let organization = state
+                    .workspaces
+                    .read()
+                    .map_err(|_| service_unavailable("workspace"))?
+                    .managed_organization_for_workspace(&principal, &grants, &workspace_id)
+                    .map_err(response_problem)?;
+                member_service
+                    .list_page_as_org_owner(
+                        &principal,
+                        &grants,
+                        &organization,
+                        &workspace_id,
+                        cursor.as_ref(),
+                        limit,
+                    )
+                    .map_err(response_problem)?
+            }
+            Err(error) => return Err(response(error)),
         }
-        Err(error) => return Err(response(error)),
     };
-    drop(member_service);
-    let items = member_directory_views(&state, &principal, &grants, members)?;
+    let items = member_directory_views(state, principal, grants, members).await?;
     Ok(Json(CollectionPageView {
         items,
         next_cursor: next_cursor.map(|id| id.as_str().to_owned()),
@@ -7485,7 +7496,7 @@ async fn put_resource_blob(
             correlation(&headers),
         ));
     }
-    let _admission = super::large_transfer_body_slot()
+    let body_admission = super::large_transfer_body_slot()
         .await
         .map_err(response_problem)?;
     let body = axum::body::to_bytes(body, MAX_PROFILE_SYNC_OBJECT_BYTES as usize)
@@ -7498,6 +7509,7 @@ async fn put_resource_blob(
                 correlation(&headers),
             )
         })?;
+    let body_size = body.len() as u64;
     let actor_id = principal
         .account_id
         .as_ref()
@@ -7514,7 +7526,7 @@ async fn put_resource_blob(
         "key": query.key,
         "generation": generation,
         "checksum": expected_checksum,
-        "size": body.len(),
+        "size": body_size,
         "ownerId": owner_id,
         "fencingToken": fencing_token
     });
@@ -7594,60 +7606,36 @@ async fn put_resource_blob(
         .map(AccountId::as_str)
         .unwrap_or("anonymous");
     state
-        .reserve_sync_blob_upload(
-            &workspace_id,
-            &resource_id,
-            &storage_key,
-            expected_checksum,
-            body.len() as u64,
+        .reserve_sync_blob_upload_async(
+            workspace_id.clone(),
+            resource_id.clone(),
+            storage_key.clone(),
+            expected_checksum.to_owned(),
+            body_size,
             reservation_time_ms,
-            actor_id,
+            actor_id.to_owned(),
         )
+        .await
         .map_err(response_problem)?;
-    match state.try_sync_object_write_lock(workspace_id.as_str(), resource_id.as_str()) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(problem_response(
-                "sync_object_cleanup_in_progress",
-                "Sync object cleanup is in progress; retry the upload",
-                503,
-                correlation(&headers),
-            ));
-        }
-        Err(error) => return Err(response_problem(error).into()),
-    }
-    let upload_result = match state.validate_sync_blob_upload(
-        &workspace_id,
-        &resource_id,
-        &storage_key,
-        expected_checksum,
-        body.len() as u64,
-        reservation_time_ms,
-    ) {
-        Ok(()) => {
-            state
-                .put_remote_chunk_async(
-                    storage_key.clone(),
-                    body.to_vec(),
-                    expected_checksum.to_owned(),
-                )
-                .await
-        }
-        Err(error) => Err(error),
-    };
-    let release_result =
-        state.release_sync_object_write_lock(workspace_id.as_str(), resource_id.as_str());
-    match (upload_result, release_result) {
-        (Ok(()), Ok(())) => {}
-        (Err(error), _) => return Err(response_problem(error).into()),
-        (Ok(()), Err(error)) => return Err(response_problem(error).into()),
-    }
+    state
+        .put_reserved_remote_chunk_async(
+            workspace_id.clone(),
+            resource_id.clone(),
+            storage_key,
+            expected_checksum.to_owned(),
+            body_size,
+            reservation_time_ms,
+            body,
+            body_admission,
+        )
+        .await
+        .map_err(response_problem)?;
     let receipt = json!({
         "resourceId": resource_id,
         "key": query.key,
         "generation": generation,
         "checksum": expected_checksum,
-        "size": body.len()
+        "size": body_size
     });
     mutate::<serde_json::Value, _>(
         &state,
@@ -8976,7 +8964,20 @@ pub(super) struct ResponseProblem(u16, serde_json::Value);
 
 impl From<ResponseProblem> for Response {
     fn from(error: ResponseProblem) -> Self {
-        super::response(super::canonical_problem(error.0, error.1))
+        let retry_after = error.0 == 503
+            && error
+                .1
+                .get("retryable")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        let mut response = super::response(super::canonical_problem(error.0, error.1));
+        if retry_after {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("2"),
+            );
+        }
+        response
     }
 }
 pub(super) fn response_problem(error: buglogin_domain::errors::Problem) -> ResponseProblem {

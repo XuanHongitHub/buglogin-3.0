@@ -1273,6 +1273,20 @@ impl ControlRecordStore for PostgresControlRecordStore {
         self.call(move |worker| worker.get(&tenant_id, &record_type, &record_id))
     }
 
+    fn get_many(
+        &mut self,
+        tenant_id: &str,
+        record_type: &str,
+        record_ids: &[String],
+    ) -> Result<Vec<ControlRecord>, Problem> {
+        let (tenant_id, record_type, record_ids) = (
+            tenant_id.to_owned(),
+            record_type.to_owned(),
+            record_ids.to_vec(),
+        );
+        self.call(move |worker| worker.get_many(&tenant_id, &record_type, &record_ids))
+    }
+
     fn revision(
         &mut self,
         tenant_id: &str,
