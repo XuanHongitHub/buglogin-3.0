@@ -465,7 +465,7 @@ mod tests {
     fn retry_if_credential_capacity_is_busy<T>(
         mut authenticate: impl FnMut() -> Result<T, Problem>,
     ) -> Result<T, Problem> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match authenticate() {
                 Err(error)

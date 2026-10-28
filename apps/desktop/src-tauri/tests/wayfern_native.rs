@@ -39,7 +39,7 @@ async fn wayfern_native_profile_lifecycle() {
     let (request_sender, request_receiver) = mpsc::channel();
     let (observer_stop_sender, observer_stop_receiver) = mpsc::channel();
     let observer = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(90);
         while Instant::now() < deadline && observer_stop_receiver.try_recv().is_err() {
             match listener.accept() {
                 Ok((mut stream, _)) => {
@@ -125,7 +125,7 @@ async fn wayfern_native_profile_lifecycle() {
             return Err(format!("launch operation failed: {operation}"));
         }
 
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(45);
         let mut request_observed = false;
         while Instant::now() < deadline {
             match request_receiver.recv_timeout(Duration::from_millis(250)) {

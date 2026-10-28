@@ -162,15 +162,18 @@ pub fn normalize_repository_zip(bytes: &[u8], subdirectory: &str) -> Result<Vec<
         let file = zip
             .by_index(index)
             .map_err(|_| "Không đọc được ZIP entry.")?;
-        if !safe_entry(file.name())
+        let entry_name = file
+            .name()
+            .map_err(|_| "Không đọc được tên ZIP entry.")?
+            .into_owned();
+        if !safe_entry(&entry_name)
             || file
                 .unix_mode()
                 .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
             return Err("Gói tiện ích chứa đường dẫn hoặc liên kết không an toàn.".into());
         }
-        let (prefix, relative) = file
-            .name()
+        let (prefix, relative) = entry_name
             .split_once('/')
             .ok_or("ZIP repository thiếu thư mục gốc.")?;
         if root.as_ref().is_some_and(|root| root != prefix) {
@@ -307,7 +310,8 @@ pub fn install(
     let mut seen = std::collections::BTreeSet::new();
     for index in 0..zip.len() {
         let entry = zip.by_index(index).map_err(|e| e.to_string())?;
-        if !safe_entry(entry.name())
+        let entry_name = entry.name().map_err(|e| e.to_string())?.into_owned();
+        if !safe_entry(&entry_name)
             || entry
                 .unix_mode()
                 .is_some_and(|mode| mode & 0o170000 == 0o120000)
@@ -320,10 +324,10 @@ pub fn install(
         total = total
             .checked_add(entry.size())
             .ok_or("ZIP vượt giới hạn.")?;
-        if total > MAX_EXPANDED || !seen.insert(entry.name().to_owned()) {
+        if total > MAX_EXPANDED || !seen.insert(entry_name.clone()) {
             return Err("ZIP vượt giới hạn hoặc trùng đường dẫn.".into());
         }
-        let output = staging.join(entry.name());
+        let output = staging.join(&entry_name);
         std::fs::create_dir_all(output.parent().ok_or("ZIP path không hợp lệ.")?)
             .map_err(|e| e.to_string())?;
         let mut file = std::fs::OpenOptions::new()

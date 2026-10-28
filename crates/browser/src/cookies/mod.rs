@@ -593,6 +593,12 @@ impl<V: OsVault> CookieService<V> {
         Ok(report)
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn into_vault(self) -> V {
+        self.vault
+    }
+
     fn preview_batch(
         &self,
         scope: &CookieScope,
@@ -693,12 +699,6 @@ impl<V: OsVault> CookieService<V> {
         let mut report = self.apply_batch_with_authority(&destination, inputs, authority_state)?;
         report.copied = report.inserted + report.replaced + report.deduplicated;
         Ok(report)
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn into_vault(self) -> V {
-        self.vault
     }
 
     pub fn import(

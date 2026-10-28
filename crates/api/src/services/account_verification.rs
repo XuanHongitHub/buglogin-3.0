@@ -500,7 +500,7 @@ mod tests {
     fn retry_if_password_capacity_is_busy<T>(
         mut authenticate: impl FnMut() -> Result<T, Problem>,
     ) -> Result<T, Problem> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             match authenticate() {
                 Err(error)

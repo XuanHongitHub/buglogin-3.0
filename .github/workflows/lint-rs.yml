@@ -52,4 +52,4 @@ jobs:
         run: bash scripts/ci/check-rust.sh
 
       - name: Audit Rust dependencies
-        run: cargo audit --locked
+        run: cargo audit

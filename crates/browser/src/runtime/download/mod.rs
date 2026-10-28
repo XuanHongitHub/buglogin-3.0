@@ -508,9 +508,14 @@ fn extract_zip(
         let mut entry = archive
             .by_index(index)
             .map_err(|_| problem("runtime_archive_invalid", "Runtime archive invalid"))?;
-        let entry_name = entry.name().to_owned();
+        let entry_name = entry.name().map_err(|_| {
+            problem(
+                "runtime_archive_entry_invalid",
+                "Runtime archive entry invalid",
+            )
+        })?;
         let is_directory = entry.is_dir();
-        if !safe_zip_entry_name(&entry_name, is_directory) || entry.is_symlink() {
+        if !safe_zip_entry_name(entry_name.as_ref(), is_directory) || entry.is_symlink() {
             return Err(problem(
                 "runtime_archive_entry_invalid",
                 "Runtime archive entry invalid",

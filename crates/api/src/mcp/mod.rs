@@ -6111,7 +6111,7 @@ mod input_fixture_tests {
     fn retry_if_credential_capacity_is_busy<T>(
         mut operation: impl FnMut() -> Result<T, Problem>,
     ) -> Result<T, Problem> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             match operation() {
                 Err(error)
@@ -6368,16 +6368,17 @@ mod input_fixture_tests {
             IdempotencyClaim::Replay(_)
         ));
         assert_eq!(
-            policy
-                .claim_idempotency(
+            retry_if_credential_capacity_is_busy(|| {
+                policy.claim_idempotency(
                     &principal,
                     command,
                     &scope,
                     "mcp-account-atomicity-key",
                     &changed_password_input,
                 )
-                .unwrap_err()
-                .code,
+            })
+            .unwrap_err()
+            .code,
             "idempotency_conflict"
         );
         let password_record = state

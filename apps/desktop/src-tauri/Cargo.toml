@@ -33,14 +33,14 @@ base64 = "0.22"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 url = "2.5"
-zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 tokio = { version = "1.53", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "=2.5.4"
 tauri-plugin-log = "=2.10.1"
-tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["native-tls", "zip"] }
+tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["native-tls", "zip"] }
 image = "0.25"
 dirs = "6"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls", "json", "http2", "query", "stream"] }

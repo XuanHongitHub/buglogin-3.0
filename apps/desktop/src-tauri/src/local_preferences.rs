@@ -319,9 +319,6 @@ pub fn get_system_language() -> String {
         .unwrap_or_else(|| "en".to_owned())
 }
 
-#[allow(dead_code)]
-fn _preferences_document_is_json_value(_: Value) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

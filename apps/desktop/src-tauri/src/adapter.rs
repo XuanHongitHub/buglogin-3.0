@@ -56,10 +56,7 @@ use crate::profile_runtime::{
 };
 use crate::proxy_bridge::{ProxyBridgeHandle, check_proxy_connectivity};
 use crate::proxy_store::{DesktopProxyStore, ImportedProxy, ProxyImportReport};
-use crate::wayfern_fingerprint::{
-    apply_or_generate as apply_wayfern_fingerprint, clear_stale_cdp_marker,
-    configure_local_cdp_args, target_from_runtime_config,
-};
+use crate::wayfern_native_identity::{not_applied_warning, target_for_launch};
 
 pub const INVOKE_NAMESPACE: &str = "buglogin";
 const SUPPORTED_COMMANDS: &[&str] = &[
@@ -242,7 +239,9 @@ impl RuntimeTargets {
             Runtime::Wayfern => launch_with_adapter(
                 WayfernAdapter,
                 self.target(&Runtime::Wayfern, profile.runtime_version.as_deref())
-                    .ok_or_else(runtime_not_configured)?,
+                    .ok_or_else(|| {
+                        runtime_target_unavailable(profile.runtime_version.as_deref())
+                    })?,
                 profile_path,
                 headless,
             )?,
@@ -255,18 +254,6 @@ impl RuntimeTargets {
                 profile.id.as_str(),
             );
             append_wayfern_default_start_page(&mut specification.args, profile_path);
-        }
-        let fingerprint_target =
-            target_from_runtime_config(profile.runtime_config.as_ref(), "runtime")?;
-        if fingerprint_target.is_some() {
-            if profile.runtime != Runtime::Wayfern {
-                return Err(Problem::new(
-                    "fingerprint_runtime_unsupported",
-                    "Fingerprint targets are supported only by the Wayfern runtime",
-                    409,
-                    "runtime",
-                ));
-            }
         }
         Ok(specification)
     }
@@ -425,6 +412,19 @@ fn runtime_not_configured() -> Problem {
         503,
         "desktop-runtime",
     )
+}
+
+fn runtime_target_unavailable(version: Option<&str>) -> Problem {
+    match version {
+        Some(version) => Problem::new(
+            "runtime_version_not_installed",
+            "The profile's pinned browser runtime version is not installed",
+            503,
+            "desktop-runtime",
+        )
+        .with_field("runtimeVersion", version),
+        None => runtime_not_configured(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1760,14 +1760,13 @@ impl AdapterState {
             .get(profile_id)
             .map_err(|error| correlate(error, correlation_id))?
             .ok_or_else(|| profile_not_found(correlation_id))?;
-        let fingerprint_target =
-            target_from_runtime_config(current.value.runtime_config.as_ref(), correlation_id)?;
+        let (mut fingerprint_target, mut fingerprint_warning) =
+            target_for_launch(current.value.runtime_config.as_ref(), correlation_id);
         if fingerprint_target.is_some() && current.value.runtime != Runtime::Wayfern {
-            return Err(problem(
-                "fingerprint_runtime_unsupported",
-                "Fingerprint targets are supported only by the Wayfern runtime",
-                409,
+            fingerprint_target = None;
+            fingerprint_warning = Some(not_applied_warning(
                 correlation_id,
+                "fingerprint_runtime_unsupported",
             ));
         }
         if current.value.archived || current.value.state != ProfileState::Ready {
@@ -1829,6 +1828,21 @@ impl AdapterState {
                 correlation_id,
             )
         })?;
+        let runtime_version = self
+            .runtime
+            .targets
+            .target(
+                &current.value.runtime,
+                current.value.runtime_version.as_deref(),
+            )
+            .map(|target| target.binary.version.clone())
+            .ok_or_else(|| runtime_target_unavailable(current.value.runtime_version.as_deref()))?;
+        let runtime_launch_guard = crate::runtime_install::acquire_runtime_launch_guard(
+            &current.value.runtime,
+            &runtime_version,
+            correlation_id,
+        )
+        .await?;
         let mut specification = self
             .runtime
             .targets
@@ -1859,29 +1873,16 @@ impl AdapterState {
                 );
             }
         }
-        let (fingerprint_cdp_enabled, mut fingerprint_warning) = if fingerprint_target.is_some() {
-            configure_local_cdp_args(&mut specification.args);
-            match clear_stale_cdp_marker(&profile_path, correlation_id) {
-                Ok(()) => (true, None),
-                Err(error) => {
-                    // Fingerprint control is an optional Wayfern capability. Keep
-                    // browser access available if its local CDP setup is broken,
-                    // but remove any partially configured debug endpoint and make
-                    // the unverified identity visible to the caller.
-                    specification.args.retain(|argument| {
-                        !argument.starts_with("--remote-debugging-port=")
-                            && !argument.starts_with("--remote-debugging-address=")
-                    });
-                    (
-                        false,
-                        Some(fingerprint_unverified_warning(error, correlation_id)),
-                    )
-                }
-            }
+        let fingerprint_warning = if let Some(target) = fingerprint_target.as_ref() {
+            crate::wayfern_native_identity::WayfernNativeIdentityAdapter::prepare(
+                &mut specification,
+                target,
+                correlation_id,
+            )
+            .or(fingerprint_warning)
         } else {
-            (false, None)
+            fingerprint_warning
         };
-        let runtime_version = specification.version.clone();
         let mut launching_profile = current.value;
         launching_profile.state = launching_profile
             .state
@@ -1898,53 +1899,41 @@ impl AdapterState {
                 .update(current.revision, launching_profile)
                 .map_err(|error| correlate(error, correlation_id))?
         };
-        let receipt = match self
-            .profile_runtime
-            .launch(LaunchRequest {
-                profile_id: profile_id.clone(),
-                idempotency_key: idempotency_key.to_owned(),
-                profile_path: profile_path.clone(),
-                specification,
-                lease_scope,
-                preacquired_lease: None,
-                proxy_bridge,
-            })
-            .await
-        {
+        let profile_runtime = self.profile_runtime.clone();
+        let launch_profile_id = profile_id.clone();
+        let launch_idempotency_key = idempotency_key.to_owned();
+        let launch_profile_path = profile_path.clone();
+        let launch_task = tauri::async_runtime::spawn(async move {
+            let launch_result = profile_runtime
+                .launch(LaunchRequest {
+                    profile_id: launch_profile_id,
+                    idempotency_key: launch_idempotency_key,
+                    profile_path: launch_profile_path,
+                    specification,
+                    lease_scope,
+                    preacquired_lease: None,
+                    proxy_bridge,
+                })
+                .await;
+            drop(runtime_launch_guard);
+            launch_result
+        });
+        let launch_result = match launch_task.await {
+            Ok(result) => result,
+            Err(_) => Err(problem(
+                "profile_launch_worker_failed",
+                "Browser profile launch worker failed",
+                503,
+                correlation_id,
+            )),
+        };
+        let receipt = match launch_result {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.persist_failed(launching, correlation_id)?;
                 return Err(correlate(error, correlation_id));
             }
         };
-        if let Some(target) = fingerprint_target.as_ref() {
-            if fingerprint_cdp_enabled {
-                match apply_wayfern_fingerprint(
-                    &profile_path,
-                    target,
-                    &runtime_version,
-                    correlation_id,
-                )
-                .await
-                {
-                    Ok(warning) => fingerprint_warning = warning,
-                    Err(error) => {
-                        // A provider or readback failure must not tear down an
-                        // otherwise authorized browser session. The warning is
-                        // returned through the existing fingerprint-warning UI.
-                        fingerprint_warning =
-                            Some(fingerprint_unverified_warning(error, correlation_id));
-                    }
-                }
-            } else if fingerprint_warning.is_none() {
-                fingerprint_warning = Some(Problem::new(
-                    "wayfern_fingerprint_unverified",
-                    "Profile opened, but BugLogin could not verify its configured fingerprint",
-                    503,
-                    correlation_id,
-                ));
-            }
-        }
         let mut running_profile = launching.value.clone();
         running_profile.state = running_profile
             .state
@@ -2375,8 +2364,8 @@ struct ProfileListInput {
     include_archived: bool,
     limit: Option<usize>,
     cursor: Option<String>,
-    #[serde(default)]
-    workspace_id: Option<String>,
+    #[serde(default, rename = "workspaceId")]
+    _workspace_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2392,7 +2381,8 @@ struct ProfileRevisionInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkspaceListInput {
-    organization_id: String,
+    #[serde(rename = "organizationId")]
+    _organization_id: String,
 }
 
 #[derive(Deserialize)]
@@ -2401,12 +2391,6 @@ struct ProfileLaunchInput {
     profile_id: String,
     #[serde(default)]
     headless: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResourceIdInput {
-    id: String,
 }
 
 #[derive(Deserialize)]
@@ -2798,16 +2782,6 @@ fn cookie_recovery_pending(correlation_id: &str) -> Problem {
         correlation_id,
     )
     .retryable(true)
-}
-
-fn fingerprint_unverified_warning(error: Problem, correlation_id: &str) -> Problem {
-    Problem::new(
-        "wayfern_fingerprint_unverified",
-        "Profile opened, but BugLogin could not verify its configured fingerprint",
-        error.status,
-        correlation_id,
-    )
-    .with_field("causeCode", error.code)
 }
 
 #[cfg(test)]
@@ -3284,12 +3258,13 @@ mod tests {
         assert_eq!(new_launch.profile_path, old_launch.profile_path);
 
         profile.runtime_version = Some("156.0.9000.1".into());
+        let unavailable = targets
+            .launch_specification(&profile, &profile_path, false)
+            .unwrap_err();
+        assert_eq!(unavailable.code, "runtime_version_not_installed");
         assert_eq!(
-            targets
-                .launch_specification(&profile, &profile_path, false)
-                .unwrap_err()
-                .code,
-            "runtime_not_configured"
+            unavailable.fields.get("runtimeVersion"),
+            Some(&json!("156.0.9000.1"))
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -4136,31 +4111,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wayfern_fingerprint_setup_failure_does_not_block_profile_launch() {
+    async fn invalid_optional_fingerprint_config_does_not_block_profile_launch() {
         let (state, controller, root) = state("wayfern-fingerprint-optional");
         let profile_id = create_profile(&state, "idem_wayfern_fp_create_0001").await;
         let id = ProfileId::from_str(&profile_id).unwrap();
         let current = state.profiles.get(&id).unwrap().unwrap();
         let mut profile = current.value;
+        let host_os = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        };
         profile.runtime_config = Some(json!({
-            "schemaVersion": 1,
-            "wayfern": {
-                "fingerprintTarget": { "operatingSystem": "windows" }
-            }
+            "schemaVersion": 2,
+            "wayfern": { "fingerprintTarget": { "operatingSystem": host_os } }
         }));
         profile.updated_at = now("test").unwrap();
         state.profiles.update(current.revision, profile).unwrap();
 
-        // A directory at the stale CDP marker path makes the fingerprint
-        // control setup fail before launch, while leaving the browser profile
-        // itself usable.
-        let profile_path = state
-            .runtime
-            .targets
-            .profile_path(&Runtime::Wayfern, &state.runtime.profiles_root, &id)
-            .unwrap();
-        fs::create_dir_all(profile_path.join("DevToolsActivePort")).unwrap();
-
+        // Invalid optional fingerprint settings must fall back to Wayfern's
+        // native identity without blocking the authorized profile launch.
         let accepted = state
             .invoke(
                 "profile_launch",
@@ -4177,6 +4149,10 @@ mod tests {
             operation.data["result"]["fingerprintWarning"]["code"],
             "wayfern_fingerprint_unverified"
         );
+        assert_eq!(
+            operation.data["result"]["fingerprintWarning"]["fields"]["causeCode"],
+            "profile_runtime_config_version_unsupported"
+        );
         assert_eq!(controller.launches.load(Ordering::SeqCst), 1);
         assert_eq!(
             state.profiles.get(&id).unwrap().unwrap().value.state,
@@ -4187,7 +4163,8 @@ mod tests {
                 .args
                 .iter()
                 .all(|argument| !argument.starts_with("--remote-debugging-port=")
-                    && !argument.starts_with("--remote-debugging-address="))
+                    && !argument.starts_with("--remote-debugging-address=")
+                    && !argument.starts_with("--wayfern-identity-file="))
         );
 
         state.profile_runtime.stop(id).await.unwrap();

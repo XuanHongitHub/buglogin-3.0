@@ -3,7 +3,9 @@ use buglogin_browser::{
     process::{ApprovedExecutable, ProcessController, ProcessStatus, SystemProcessController},
     runtime::{
         RuntimeAdapter, RuntimeBinary,
-        independent_chromium::fury::{FuryChromiumAdapter, FuryIdentity, FuryProcessController},
+        independent_chromium::fury::{
+            FuryCoreProcessController, FuryCoreRuntimeAdapter, FuryIdentity,
+        },
         independent_chromium::{ChromiumIdentity, IndependentChromiumAdapter},
     },
 };
@@ -50,8 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?,
             };
             (
-                Box::new(FuryChromiumAdapter::new(identity)?),
-                Box::new(FuryProcessController::new([approved])),
+                Box::new(FuryCoreRuntimeAdapter::new(identity)?),
+                Box::new(FuryCoreProcessController::new([approved])),
             )
         } else {
             let identity = match ChromiumIdentity::load(&profile_path)? {

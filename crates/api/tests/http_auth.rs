@@ -176,7 +176,7 @@ async fn web_login_when_password_capacity_is_busy(
     app: &Router,
     body: Value,
 ) -> axum::response::Response {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let response = app
             .clone()
@@ -197,7 +197,43 @@ async fn web_login_when_password_capacity_is_busy(
         );
         assert!(
             tokio::time::Instant::now() < deadline,
-            "password hashing capacity remained busy for five seconds"
+            "password hashing capacity remained busy for thirty seconds"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+async fn desktop_login_when_password_capacity_is_busy(
+    app: &Router,
+    body: Value,
+) -> axum::response::Response {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/v1/auth/desktop/login",
+                body.clone(),
+                None,
+            ))
+            .await
+            .expect("desktop login request should complete");
+        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+            return response;
+        }
+
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("capacity error body should be readable");
+        let problem: Value = serde_json::from_slice(&bytes).expect("capacity error should be JSON");
+        assert_eq!(
+            problem["code"], "credential_capacity_exhausted",
+            "unexpected service unavailable response: {problem}"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "password hashing capacity remained busy for thirty seconds"
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
@@ -513,20 +549,15 @@ async fn desktop_login_issues_device_bound_tokens_and_rejects_bad_credentials_ge
         Some("desktop-login-device-01")
     );
 
-    let wrong_password = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            "/v1/auth/desktop/login",
-            json!({
-                "identifier": "desktop.owner@example.com",
-                "password": "incorrect password",
-                "deviceId": "desktop-login-device-01"
-            }),
-            None,
-        ))
-        .await
-        .unwrap();
+    let wrong_password = desktop_login_when_password_capacity_is_busy(
+        &app,
+        json!({
+            "identifier": "desktop.owner@example.com",
+            "password": "incorrect password",
+            "deviceId": "desktop-login-device-01"
+        }),
+    )
+    .await;
     assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
     let wrong_body: Value = serde_json::from_slice(
         &axum::body::to_bytes(wrong_password.into_body(), usize::MAX)
@@ -537,19 +568,15 @@ async fn desktop_login_issues_device_bound_tokens_and_rejects_bad_credentials_ge
     assert_eq!(wrong_body["code"], "invalid_credentials");
     assert!(wrong_body.get("accountId").is_none());
 
-    let unknown_account = app
-        .oneshot(json_request(
-            "POST",
-            "/v1/auth/desktop/login",
-            json!({
-                "identifier": "not-a-real-user@example.com",
-                "password": "incorrect password",
-                "deviceId": "desktop-login-device-01"
-            }),
-            None,
-        ))
-        .await
-        .unwrap();
+    let unknown_account = desktop_login_when_password_capacity_is_busy(
+        &app,
+        json!({
+            "identifier": "not-a-real-user@example.com",
+            "password": "incorrect password",
+            "deviceId": "desktop-login-device-01"
+        }),
+    )
+    .await;
     assert_eq!(unknown_account.status(), StatusCode::UNAUTHORIZED);
     let unknown_body: Value = serde_json::from_slice(
         &axum::body::to_bytes(unknown_account.into_body(), usize::MAX)

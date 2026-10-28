@@ -459,18 +459,18 @@ fn write_new(destination: &Path, bytes: &[u8]) -> Result<(), Problem> {
 }
 
 #[derive(Clone, Debug)]
-pub struct FuryChromiumAdapter {
+pub struct FuryCoreRuntimeAdapter {
     identity: FuryIdentity,
 }
 
-impl FuryChromiumAdapter {
+impl FuryCoreRuntimeAdapter {
     pub fn new(identity: FuryIdentity) -> Result<Self, Problem> {
         identity.validate()?;
         Ok(Self { identity })
     }
 }
 
-impl RuntimeAdapter for FuryChromiumAdapter {
+impl RuntimeAdapter for FuryCoreRuntimeAdapter {
     fn runtime(&self) -> Runtime {
         Runtime::Bugium
     }
@@ -560,12 +560,13 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Used only with a Fury adapter; ordinary SystemProcessController stays intact.
-pub struct FuryProcessController {
+/// Process controller for the standalone Fury Chromium core. It does not use
+/// Fury's desktop app, agent, team server, or authentication service.
+pub struct FuryCoreProcessController {
     inner: SystemProcessController,
 }
 
-impl FuryProcessController {
+impl FuryCoreProcessController {
     pub fn new(approved: impl IntoIterator<Item = ApprovedExecutable>) -> Self {
         Self {
             inner: SystemProcessController::new(approved),
@@ -573,7 +574,7 @@ impl FuryProcessController {
     }
 }
 
-impl ProcessController for FuryProcessController {
+impl ProcessController for FuryCoreProcessController {
     fn launch(
         &self,
         specification: &LaunchSpecification,

@@ -70,22 +70,22 @@ use crate::{
     },
     proxy_bridge::{ProxyBridgeHandle, ProxyBridgeSpec},
     proxy_credential_vault::ProxyCredentialVault,
-    proxy_store::{ImportedProxy, ProxyImportReport},
     remote_api::{
         ApiTokenPage, BugLabSsoStartResponse, CreatedApiToken, DeviceSessionTokens,
         FeedbackReceipt, FeedbackSubmission, RemoteApiClient,
     },
     sync_key_vault::SyncKeyVault,
-    wayfern_fingerprint::{
-        apply_or_generate as apply_wayfern_fingerprint, clear_stale_cdp_marker,
-        configure_local_cdp_args, target_from_runtime_config,
-    },
+    wayfern_native_identity::{not_applied_warning, target_for_launch},
 };
 
 const MAX_CONCURRENT_PROFILE_BLOB_UPLOADS: usize = 2;
-const MAX_CONCURRENT_DESKTOP_BLOB_UPLOADS: usize = 2;
+const MAX_CONCURRENT_DESKTOP_BLOB_UPLOADS: usize = 4;
+const MAX_CONCURRENT_DESKTOP_PROFILE_SYNCS: usize = 2;
+const MAX_FAST_EXIT_RECONCILE_ATTEMPTS: u32 = 8;
+const EXIT_RECONCILE_PROBE_INTERVAL: Duration = Duration::from_secs(300);
 const MAX_PROFILE_STOP_SYNC_DURATION: Duration = Duration::from_secs(180);
 static PROFILE_BLOB_UPLOAD_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static PROFILE_SYNC_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const MAX_OPERATION_IDEMPOTENCY_RECORDS: usize = 1_024;
 const PROXY_MUTATION_JOURNAL_SCHEMA_VERSION: u16 = 1;
 
@@ -183,6 +183,7 @@ impl WorkspaceSelectionStore {
         }
     }
 
+    #[cfg(test)]
     fn resolve_for_account(
         &mut self,
         account_id: &str,
@@ -502,12 +503,27 @@ impl ExitReconcileBackoff {
     }
 
     fn record_attempt(&mut self, profile_id: &ProfileId, now: std::time::Instant) {
-        let attempts = self.attempts.get(profile_id).map_or(0, |(count, _)| *count) + 1;
-        let delay = Duration::from_secs(3)
-            .saturating_mul(1 << attempts.saturating_sub(1).min(16))
-            .min(Duration::from_secs(30));
+        let attempts = self
+            .attempts
+            .get(profile_id)
+            .map_or(0, |(count, _)| *count)
+            .saturating_add(1);
+        let delay = exit_reconcile_backoff_delay(profile_id, attempts);
         self.attempts
             .insert(profile_id.clone(), (attempts, now + delay));
+    }
+
+    fn respect_retry_after(
+        &mut self,
+        profile_id: &ProfileId,
+        now: std::time::Instant,
+        retry_after_seconds: u64,
+    ) {
+        let Some((_, next_attempt)) = self.attempts.get_mut(profile_id) else {
+            return;
+        };
+        let server_delay = Duration::from_secs(retry_after_seconds.min(300));
+        *next_attempt = (*next_attempt).max(now + server_delay);
     }
 
     fn retain_exited(&mut self, exited: &[ProfileId]) {
@@ -534,6 +550,131 @@ impl ExitReconcileBackoff {
         self.attempts.remove(profile_id);
         self.blocked.remove(profile_id);
     }
+}
+
+fn exit_reconcile_backoff_delay(profile_id: &ProfileId, attempt: u32) -> Duration {
+    if attempt > MAX_FAST_EXIT_RECONCILE_ATTEMPTS {
+        let jittered_probe =
+            jittered_exit_reconcile_delay(profile_id, attempt, EXIT_RECONCILE_PROBE_INTERVAL);
+        return jittered_probe.min(EXIT_RECONCILE_PROBE_INTERVAL);
+    }
+    let base_ms = 3_000_u64
+        .saturating_mul(1_u64 << attempt.saturating_sub(1).min(16))
+        .min(30_000);
+    jittered_exit_reconcile_delay(profile_id, attempt, Duration::from_millis(base_ms))
+}
+
+fn jittered_exit_reconcile_delay(profile_id: &ProfileId, attempt: u32, base: Duration) -> Duration {
+    let mut material = b"buglogin-profile-sync-retry-v1\0".to_vec();
+    material.extend_from_slice(profile_id.as_str().as_bytes());
+    material.extend_from_slice(&attempt.to_be_bytes());
+    let digest = Sha256::digest(material);
+    let sample = u16::from_be_bytes([digest[0], digest[1]]) as u64;
+    let factor_permille = 800 + sample % 401;
+    Duration::from_millis(base.as_millis() as u64 * factor_permille / 1_000)
+}
+
+fn try_acquire_profile_blob_upload_slot(
+    slots: &Arc<Semaphore>,
+    correlation_id: &str,
+) -> Result<tokio::sync::OwnedSemaphorePermit, Problem> {
+    slots.clone().try_acquire_owned().map_err(|_| {
+        Problem::new(
+            "profile_blob_upload_capacity_exhausted",
+            "Profile upload capacity is busy; the stopped profile is queued for sync retry",
+            503,
+            correlation_id,
+        )
+        .retryable(true)
+    })
+}
+
+fn try_acquire_profile_sync_slot(
+    slots: &Arc<Semaphore>,
+    correlation_id: &str,
+) -> Result<tokio::sync::OwnedSemaphorePermit, Problem> {
+    slots.clone().try_acquire_owned().map_err(|_| {
+        Problem::new(
+            "profile_sync_capacity_exhausted",
+            "Profile sync capacity is busy; the stopped profile is queued for sync retry",
+            503,
+            correlation_id,
+        )
+        .retryable(true)
+    })
+}
+
+async fn read_profile_snapshot_blob<F>(
+    upload_slot: tokio::sync::OwnedSemaphorePermit,
+    memory_slot: tokio::sync::OwnedSemaphorePermit,
+    correlation_id: &str,
+    read: F,
+) -> Result<
+    (
+        Vec<u8>,
+        tokio::sync::OwnedSemaphorePermit,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    Problem,
+>
+where
+    F: FnOnce() -> Result<Vec<u8>, Problem> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || read().map(|bytes| (bytes, upload_slot, memory_slot)))
+        .await
+        .map_err(|_| {
+            Problem::new(
+                "profile_snapshot_reader_unavailable",
+                "The staged profile snapshot reader stopped unexpectedly",
+                503,
+                correlation_id,
+            )
+            .retryable(true)
+        })?
+}
+
+async fn run_profile_projection_blocking<T, F>(
+    correlation_id: &str,
+    action: F,
+) -> Result<T, Problem>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, Problem> + Send + 'static,
+{
+    tokio::task::spawn_blocking(action).await.map_err(|_| {
+        Problem::new(
+            "profile_projection_worker_unavailable",
+            "The local profile projection worker stopped unexpectedly",
+            503,
+            correlation_id,
+        )
+        .retryable(true)
+    })?
+}
+
+async fn build_profile_snapshot_blocking<T, F>(
+    memory_permit: tokio::sync::OwnedSemaphorePermit,
+    correlation_id: &str,
+    build: F,
+) -> Result<T, Problem>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, Problem> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _memory_permit = memory_permit;
+        build()
+    })
+    .await
+    .map_err(|_| {
+        Problem::new(
+            "profile_snapshot_builder_unavailable",
+            "The profile snapshot builder stopped unexpectedly",
+            503,
+            correlation_id,
+        )
+        .retryable(true)
+    })?
 }
 
 fn profile_sync_error_should_retry(error: &Problem) -> bool {
@@ -886,6 +1027,19 @@ impl ProductionDesktopState {
                 )
                 .await;
             if let Err(error) = result {
+                if profile_sync_error_should_retry(&error)
+                    && let Some(retry_after_seconds) = error
+                        .fields
+                        .get("retryAfterSeconds")
+                        .and_then(serde_json::Value::as_u64)
+                    && let Ok(mut backoff) = self.exit_reconcile_backoff.lock()
+                {
+                    backoff.respect_retry_after(
+                        &profile_id,
+                        std::time::Instant::now(),
+                        retry_after_seconds,
+                    );
+                }
                 if !profile_sync_error_should_retry(&error) {
                     if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
                         backoff.block(&profile_id);
@@ -3004,11 +3158,17 @@ impl ProductionDesktopState {
                         &hash,
                         correlation_id,
                         move |state| async move {
+                            let _attempt_timer = ProfileLaunchAttemptTimer::start();
+                            let lock_wait_started = tokio::time::Instant::now();
                             let _profile_operation = state
                                 .profile_operations
                                 .lock_for(&profile_id)
                                 .lock_owned()
                                 .await;
+                            tauri_plugin_log::log::info!(
+                                "Profile launch queue wait completed: duration_ms={}",
+                                lock_wait_started.elapsed().as_millis()
+                            );
                             state
                                 .launch_profile(
                                     profile_id,
@@ -4022,6 +4182,12 @@ impl ProductionDesktopState {
                         correlation_id,
                     )
                 })?;
+            let _transfer_memory_permit = crate::profile_transfer_budget::acquire(
+                encryption.resource_key_envelope.size,
+                2,
+                correlation_id,
+            )
+            .await?;
             let envelope_bytes = self
                 .client
                 .download_blob(
@@ -4116,6 +4282,12 @@ impl ProductionDesktopState {
                 correlation_id,
             )
         })?;
+        let _transfer_memory_permit = crate::profile_transfer_budget::acquire(
+            encryption.resource_key_envelope.size,
+            2,
+            correlation_id,
+        )
+        .await?;
         let envelope_bytes = self
             .client
             .download_blob(
@@ -4198,7 +4370,6 @@ impl ProductionDesktopState {
         idempotency_key: String,
         correlation_id: String,
     ) -> Result<Value, Problem> {
-        let _attempt_timer = ProfileLaunchAttemptTimer::start();
         if let Ok(mut backoff) = self.exit_reconcile_backoff.lock() {
             backoff.reset(&profile_id);
         }
@@ -4257,16 +4428,15 @@ impl ProductionDesktopState {
             .with_field("profileState", format!("{:?}", profile.value.state))
             .with_field("archived", profile.value.archived));
         }
-        let mut fingerprint_target =
-            target_from_runtime_config(profile.value.runtime_config.as_ref(), &correlation_id)?;
+        let (mut fingerprint_target, mut fingerprint_config_warning) =
+            target_for_launch(profile.value.runtime_config.as_ref(), &correlation_id);
         if fingerprint_target.is_some()
             && profile.value.runtime != buglogin_domain::entities::Runtime::Wayfern
         {
-            return Err(Problem::new(
-                "fingerprint_runtime_unsupported",
-                "Fingerprint targets are supported only by the Wayfern runtime",
-                409,
+            fingerprint_target = None;
+            fingerprint_config_warning = Some(not_applied_warning(
                 &correlation_id,
+                "fingerprint_runtime_unsupported",
             ));
         }
         let runtime_supported = self
@@ -4472,13 +4642,28 @@ impl ProductionDesktopState {
             Err(error) => return Err(error),
         }
         let stale_proxy_dependency = manifest_proxy_stale || pending_proxy_assignment.is_some();
-        let recovery_path = local_projection
-            .active_session_recovery_path(&profile_id, &manifest)?
-            .or(local_projection.dirty_local_generation(&profile_id, &manifest)?);
+        let recovery_projection = local_projection.clone();
+        let recovery_profile = profile_id.clone();
+        let recovery_manifest = manifest.clone();
+        let recovery_path = run_profile_projection_blocking(&correlation_id, move || {
+            let active_session = recovery_projection
+                .active_session_recovery_path(&recovery_profile, &recovery_manifest)?;
+            let dirty_generation = recovery_projection
+                .dirty_local_generation(&recovery_profile, &recovery_manifest)?;
+            Ok(active_session.or(dirty_generation))
+        })
+        .await?;
         let mut deferred_recovery_error = None;
         let mut local_recovery_receipt = None;
         let verified_local_recovery = if recovery_path.is_some() && !stale_proxy_dependency {
-            local_projection.verified_local_recovery_receipt(&profile_id, &manifest)?
+            let recovery_projection = local_projection.clone();
+            let recovery_profile = profile_id.clone();
+            let recovery_manifest = manifest.clone();
+            run_profile_projection_blocking(&correlation_id, move || {
+                recovery_projection
+                    .verified_local_recovery_receipt(&recovery_profile, &recovery_manifest)
+            })
+            .await?
         } else {
             None
         };
@@ -4554,8 +4739,17 @@ impl ProductionDesktopState {
                     if current != manifest {
                         return Err(error);
                     }
+                    let recovery_projection = local_projection.clone();
+                    let recovery_profile = profile_id.clone();
+                    let recovery_manifest = current.clone();
                     local_recovery_receipt =
-                        local_projection.verified_local_recovery_receipt(&profile_id, &current)?;
+                        run_profile_projection_blocking(&correlation_id, move || {
+                            recovery_projection.verified_local_recovery_receipt(
+                                &recovery_profile,
+                                &recovery_manifest,
+                            )
+                        })
+                        .await?;
                     let Some(_) = local_recovery_receipt else {
                         return Err(error);
                     };
@@ -4570,16 +4764,15 @@ impl ProductionDesktopState {
                 Err(error) => return Err(error),
             }
             profile = self.client.profile(&profile_id, &correlation_id).await?;
-            fingerprint_target =
-                target_from_runtime_config(profile.value.runtime_config.as_ref(), &correlation_id)?;
+            (fingerprint_target, fingerprint_config_warning) =
+                target_for_launch(profile.value.runtime_config.as_ref(), &correlation_id);
             if fingerprint_target.is_some()
                 && profile.value.runtime != buglogin_domain::entities::Runtime::Wayfern
             {
-                return Err(Problem::new(
-                    "fingerprint_runtime_unsupported",
-                    "Fingerprint targets are supported only by the Wayfern runtime",
-                    409,
+                fingerprint_target = None;
+                fingerprint_config_warning = Some(not_applied_warning(
                     &correlation_id,
+                    "fingerprint_runtime_unsupported",
                 ));
             }
         }
@@ -4739,8 +4932,14 @@ impl ProductionDesktopState {
                     // against the latest manifest and retry once. This keeps
                     // the user's local browser usable without ever uploading
                     // that older tree over the newer cloud generation.
-                    let recovered =
-                        local_projection.verified_local_recovery_receipt(&profile_id, &latest)?;
+                    let recovery_projection = local_projection.clone();
+                    let recovery_profile = profile_id.clone();
+                    let recovery_manifest = latest.clone();
+                    let recovered = run_profile_projection_blocking(&correlation_id, move || {
+                        recovery_projection
+                            .verified_local_recovery_receipt(&recovery_profile, &recovery_manifest)
+                    })
+                    .await?;
                     if let Some(recovered) = recovered
                         && attempt == 0
                     {
@@ -4893,39 +5092,21 @@ impl ProductionDesktopState {
                     );
                 }
             }
+            let fingerprint_setup_warning = if let Some(target) = fingerprint_target.as_ref() {
+                crate::wayfern_native_identity::WayfernNativeIdentityAdapter::prepare(
+                    &mut specification,
+                    target,
+                    &correlation_id,
+                )
+                .or(fingerprint_config_warning)
+            } else {
+                fingerprint_config_warning
+            };
             let generation = projection.generation;
             let root_checksum = projection.root_checksum.clone();
             let profile_path = projection.path.clone();
-            let (fingerprint_cdp_enabled, fingerprint_setup_warning) =
-                if fingerprint_target.is_some() {
-                    configure_local_cdp_args(&mut specification.args);
-                    match clear_stale_cdp_marker(&profile_path, &correlation_id) {
-                        Ok(()) => (true, None),
-                        Err(error) => {
-                            specification.args.retain(|argument| {
-                                !argument.starts_with("--remote-debugging-port=")
-                                    && !argument.starts_with("--remote-debugging-address=")
-                            });
-                            (false, Some(error))
-                        }
-                    }
-                } else {
-                    (false, None)
-                };
             let runtime_key = runtime_projection_idempotency_key(&idempotency_key, "started");
             let lease_for_projection = lease.clone();
-            if let Err(error) =
-                local_projection.begin_active_session(&profile_id, generation, &root_checksum)
-            {
-                if let Some(bridge) = proxy_bridge.take() {
-                    let _ = bridge.stop().await;
-                }
-                let _ = self
-                    .client
-                    .release_lease(scope.clone(), &binding.resource_id, &lease.owner_token)
-                    .await;
-                return Err(error);
-            }
             let receipt = match self
                 .profile_runtime
                 .launch(LaunchRequest {
@@ -4944,66 +5125,43 @@ impl ProductionDesktopState {
             {
                 Ok(receipt) => receipt,
                 Err(mut error) => {
-                    let _ = local_projection.clear_active_session_marker(&profile_id);
                     error.correlation_id = correlation_id.clone();
                     return Err(error);
                 }
             };
-            let mut fingerprint_warning = fingerprint_setup_warning.clone();
-            if let Some(warning) = fingerprint_setup_warning {
+            let session_epoch = receipt.session_epoch.to_string();
+            if let Err(error) = local_projection.begin_active_session_for_epoch(
+                &profile_id,
+                generation,
+                &root_checksum,
+                &session_epoch,
+            ) {
+                match self
+                    .profile_runtime
+                    .stop_for_session(profile_id.clone(), receipt.session_epoch)
+                    .await
+                {
+                    Ok(stopped) => {
+                        self.profile_runtime
+                            .complete_stop_for_session(profile_id.clone(), stopped.session_epoch)
+                            .await?;
+                    }
+                    Err(mut cleanup_error) => {
+                        cleanup_error.correlation_id = correlation_id.clone();
+                        return Err(cleanup_error);
+                    }
+                }
+                return Err(error);
+            }
+            if let Some(warning) = fingerprint_setup_warning.as_ref() {
                 crate::diagnostics::report_problem_failure(
                     DesktopState::Production(self.clone()),
                     "profile.fingerprint.setup_unavailable",
-                    warning,
+                    warning.clone(),
                 );
             }
-            if let Some(target) = fingerprint_target.as_ref() {
-                if fingerprint_cdp_enabled {
-                    match apply_wayfern_fingerprint(
-                        &profile_path,
-                        target,
-                        profile.value.runtime_version.as_deref().unwrap_or_default(),
-                        &correlation_id,
-                    )
-                    .await
-                    {
-                        Ok(warning) => {
-                            if let Some(warning) = warning {
-                                crate::diagnostics::report_problem_failure(
-                                    DesktopState::Production(self.clone()),
-                                    "profile.fingerprint.default",
-                                    warning.clone(),
-                                );
-                                fingerprint_warning = Some(warning);
-                            }
-                        }
-                        Err(error) => {
-                            // Fingerprint generation/application is an optional
-                            // runtime capability. Keep the authorized browser
-                            // session available and surface the failed check;
-                            // never report the configured fingerprint as verified.
-                            crate::diagnostics::report_problem_failure(
-                                DesktopState::Production(self.clone()),
-                                "profile.fingerprint.unverified",
-                                error.clone(),
-                            );
-                            fingerprint_warning = Some(Problem::new(
-                                "wayfern_fingerprint_unverified",
-                                "Profile opened, but BugLogin could not verify its configured fingerprint",
-                                error.status,
-                                &correlation_id,
-                            ));
-                        }
-                    }
-                } else if fingerprint_warning.is_none() {
-                    fingerprint_warning = Some(Problem::new(
-                        "wayfern_fingerprint_unverified",
-                        "Profile opened, but BugLogin could not verify its configured fingerprint",
-                        409,
-                        &correlation_id,
-                    ));
-                }
-            }
+            let mut runtime_projection_pending = false;
+            let mut runtime_projection_warning = None;
             if let Err(error) = self
                 .client
                 .runtime_started(
@@ -5017,23 +5175,45 @@ impl ProductionDesktopState {
                 )
                 .await
             {
-                match self.profile_runtime.stop_for_sync(profile_id.clone()).await {
-                    Ok(_) => {
-                        self.profile_runtime
-                            .complete_stop_detached(profile_id.clone())
-                            .await?;
+                if runtime_projection_failure_requires_stop(&error) {
+                    match self
+                        .profile_runtime
+                        .stop_for_session(profile_id.clone(), receipt.session_epoch)
+                        .await
+                    {
+                        Ok(_) => {
+                            self.profile_runtime
+                                .complete_stop_for_session(
+                                    profile_id.clone(),
+                                    receipt.session_epoch,
+                                )
+                                .await?;
+                            let _ = local_projection
+                                .clear_active_session_for_epoch(&profile_id, &session_epoch);
+                        }
+                        Err(cleanup_error) if cleanup_error.code == "profile_not_running" => {
+                            self.profile_runtime
+                                .complete_stop_for_session(
+                                    profile_id.clone(),
+                                    receipt.session_epoch,
+                                )
+                                .await?;
+                            let _ = local_projection
+                                .clear_active_session_for_epoch(&profile_id, &session_epoch);
+                        }
+                        Err(mut cleanup_error) => {
+                            cleanup_error.correlation_id = correlation_id.clone();
+                            return Err(cleanup_error);
+                        }
                     }
-                    Err(cleanup_error) if cleanup_error.code == "profile_not_running" => {
-                        self.profile_runtime
-                            .complete_stop_detached(profile_id.clone())
-                            .await?;
-                    }
-                    Err(mut cleanup_error) => {
-                        cleanup_error.correlation_id = correlation_id.clone();
-                        return Err(cleanup_error);
-                    }
+                    return Err(error);
                 }
-                return Err(error);
+                runtime_projection_pending = true;
+                runtime_projection_warning = Some(error.code.clone());
+                tauri_plugin_log::log::warn!(
+                    "Profile launched; runtime projection update is pending: code={}",
+                    error.code
+                );
             }
             return Ok(json!({
                 "profileId": profile_id,
@@ -5043,7 +5223,9 @@ impl ProductionDesktopState {
                 "syncDeferred": deferred_recovery_error.is_some(),
                 "extensionWarnings": prepared_extensions.warnings,
                 "extensionCount": prepared_extensions.paths.len(),
-                "fingerprintWarning": fingerprint_warning
+                "fingerprintWarning": fingerprint_setup_warning,
+                "runtimeProjectionPending": runtime_projection_pending,
+                "runtimeProjectionWarning": runtime_projection_warning
             }));
         }
         unreachable!()
@@ -5315,6 +5497,15 @@ impl ProductionDesktopState {
             );
         }
 
+        // Stop locally first, then admit a bounded number of full cloud sync
+        // attempts. Bursts stay in the runtime retry set instead of flooding
+        // manifest and lease APIs.
+        let sync_slots = Arc::clone(
+            PROFILE_SYNC_SLOTS
+                .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_DESKTOP_PROFILE_SYNCS))),
+        );
+        let _profile_sync_slot = try_acquire_profile_sync_slot(&sync_slots, &correlation_id)?;
+
         let binding = self
             .client
             .profile_binding(&profile_id, &correlation_id)
@@ -5368,11 +5559,22 @@ impl ProductionDesktopState {
             }
             Err(error) => return Err(error),
         };
-        if preheld_stop
+        let active_session_conflict = if preheld_stop
             .as_ref()
             .is_some_and(|stopped| stopped.was_launched)
-            && local_projection.active_session_conflicts_with_manifest(&profile_id, &previous)?
         {
+            let conflict_projection = local_projection.clone();
+            let conflict_profile = profile_id.clone();
+            let conflict_manifest = previous.clone();
+            run_profile_projection_blocking(&correlation_id, move || {
+                conflict_projection
+                    .active_session_conflicts_with_manifest(&conflict_profile, &conflict_manifest)
+            })
+            .await?
+        } else {
+            false
+        };
+        if active_session_conflict {
             // This local tree belongs to an older remote base. Keep it on disk
             // for recovery, but never snapshot it over the newer cloud manifest.
             self.profile_runtime
@@ -5455,7 +5657,13 @@ impl ProductionDesktopState {
         let dirty_local_path = if browser_was_running {
             None
         } else {
-            local_projection.dirty_local_generation(&profile_id, &previous)?
+            let dirty_projection = local_projection.clone();
+            let dirty_profile = profile_id.clone();
+            let dirty_manifest = previous.clone();
+            run_profile_projection_blocking(&correlation_id, move || {
+                dirty_projection.dirty_local_generation(&dirty_profile, &dirty_manifest)
+            })
+            .await?
         };
         let proxy_refresh_required = stale_proxy_dependency || pending_proxy_assignment.is_some();
         if !browser_was_running
@@ -5492,6 +5700,10 @@ impl ProductionDesktopState {
                         error.correlation_id = correlation_id.clone();
                         error
                     })?;
+                local_projection.clear_active_session_for_epoch(
+                    &profile_id,
+                    &stopped.session_epoch.to_string(),
+                )?;
             }
             return Ok(json!({
                 "profileId": profile_id,
@@ -5601,6 +5813,19 @@ impl ProductionDesktopState {
                 "alreadySynced": true
             }));
         };
+        let stopped_session_epoch = stopped.session_epoch.to_string();
+        if let Err(error) = local_projection.begin_active_session_for_epoch(
+            &profile_id,
+            previous.generation,
+            &previous.root_checksum,
+            &stopped_session_epoch,
+        ) {
+            let _ = self
+                .profile_runtime
+                .complete_stop_for_session(profile_id.clone(), stopped.session_epoch)
+                .await;
+            return Err(error);
+        }
         self.profile_runtime
             .set_sync_attempt_active(profile_id.clone(), true)
             .await?;
@@ -5776,14 +6001,49 @@ impl ProductionDesktopState {
                     &correlation_id,
                 )
                 .await?;
-            let (descriptor, files, manifest) = local_projection.snapshot_with_proxy_encryption(
-                &stopped.profile_path,
-                &previous,
-                lease.fencing_token,
-                proxy_snapshot,
-                &keys_for_snapshot.client,
-                &keys_for_snapshot.recovery,
-            )?;
+            let estimate_projection = local_projection.clone();
+            let estimate_path = stopped.profile_path.clone();
+            let snapshot_memory_bytes = tokio::task::spawn_blocking(move || {
+                estimate_projection.snapshot_memory_charge_bytes(&estimate_path)
+            })
+            .await
+            .map_err(|_| {
+                Problem::new(
+                    "profile_snapshot_estimator_unavailable",
+                    "The profile snapshot estimator stopped unexpectedly",
+                    503,
+                    &correlation_id,
+                )
+                .retryable(true)
+            })??;
+            let snapshot_memory_permit =
+                crate::profile_transfer_budget::acquire(snapshot_memory_bytes, 1, &correlation_id)
+                    .await?;
+            let client_key_bytes = Zeroizing::new(*keys_for_snapshot.client.as_bytes());
+            let recovery_key_bytes = Zeroizing::new(*keys_for_snapshot.recovery.as_bytes());
+            let snapshot_projection = local_projection.clone();
+            let snapshot_path = stopped.profile_path.clone();
+            let snapshot_previous = previous.clone();
+            let snapshot_fencing_token = lease.fencing_token;
+            let (descriptor, files, manifest) = build_profile_snapshot_blocking(
+                snapshot_memory_permit,
+                &correlation_id,
+                move || {
+                    let client_key =
+                        buglogin_sync::crypto::ClientKey::from_bytes(*client_key_bytes);
+                    let recovery_key =
+                        buglogin_sync::crypto::RecoveryKey::from_bytes(*recovery_key_bytes);
+                    snapshot_projection.snapshot_with_proxy_encryption(
+                        &snapshot_path,
+                        &snapshot_previous,
+                        snapshot_fencing_token,
+                        proxy_snapshot,
+                        &client_key,
+                        &recovery_key,
+                    )
+                },
+            )
+            .await?;
             self.upload_profile_snapshot(
                 scope.clone(),
                 &binding.resource_id,
@@ -5796,7 +6056,12 @@ impl ProductionDesktopState {
                 &correlation_id,
             )
             .await?;
-            local_projection.prepare_sync_commit(&profile_id, &previous, &manifest)?;
+            local_projection.prepare_sync_commit_for_epoch(
+                &profile_id,
+                &previous,
+                &manifest,
+                &stopped_session_epoch,
+            )?;
             if let Some(envelopes) = rotation_envelopes.as_ref() {
                 self.client
                     .commit_manifest_with_key_rotation_reconciliation(
@@ -5840,7 +6105,7 @@ impl ProductionDesktopState {
                     &correlation_id,
                 ));
             }
-            local_projection.clear_active_session(&profile_id)?;
+            local_projection.clear_active_session_for_epoch(&profile_id, &stopped_session_epoch)?;
             let key_rotation_error = if rotation_envelopes.is_some() {
                 if rotation_keys.is_some() {
                     self.sync_key_vault
@@ -6175,6 +6440,15 @@ impl ProductionDesktopState {
                 .map(|object| object.key.clone())
                 .collect(),
         );
+        let uploaded_objects = files
+            .iter()
+            .filter(|blob| !reused_object_keys.contains(&blob.key))
+            .count();
+        let reused_objects = files.len().saturating_sub(uploaded_objects);
+        let uploaded_bytes = files
+            .iter()
+            .filter(|blob| !reused_object_keys.contains(&blob.key))
+            .fold(0u64, |total, blob| total.saturating_add(blob.size));
         let client = self.client.clone();
         let resource_id = resource_id.clone();
         let generation = manifest.generation;
@@ -6185,7 +6459,7 @@ impl ProductionDesktopState {
             PROFILE_BLOB_UPLOAD_SLOTS
                 .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_DESKTOP_BLOB_UPLOADS))),
         );
-        stream::iter(files.into_iter().map(|blob| {
+        let upload_result = stream::iter(files.into_iter().map(|blob| {
             let client = client.clone();
             let scope = scope.clone();
             let owner_token = owner_token.clone();
@@ -6215,69 +6489,52 @@ impl ProductionDesktopState {
                         &correlation_id,
                     ));
                 }
-                let _global_upload_slot = global_upload_slots
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| {
-                        Problem::new(
-                            "profile_blob_upload_capacity_unavailable",
-                            "Profile upload capacity is unavailable",
-                            503,
-                            &correlation_id,
-                        )
-                        .retryable(true)
-                    })?;
+                let global_upload_slot =
+                    try_acquire_profile_blob_upload_slot(&global_upload_slots, &correlation_id)?;
+                let transfer_memory_slot =
+                    crate::profile_transfer_budget::try_acquire(blob.size, 1, &correlation_id)?;
                 let upload_idempotency_key =
                     blob_idempotency_key(&idempotency_key, &blob.key, &object.checksum);
-                let mut upload_attempt = 0;
-                loop {
-                    let bytes = blob.read_bytes()?;
-                    match client
-                        .upload_blob(
-                            scope.clone(),
-                            &resource_id,
-                            &blob.key,
-                            generation,
-                            &object.checksum,
-                            &owner_token,
-                            fencing_token,
-                            &upload_idempotency_key,
-                            bytes,
-                            &correlation_id,
-                        )
-                        .await
-                    {
-                        Ok(()) => return Ok(()),
-                        Err(problem)
-                            if problem.retryable
-                                && upload_attempt
-                                    < match problem.code.as_str() {
-                                        "sync_object_cleanup_in_progress" => 5,
-                                        "large_transfer_capacity_exhausted" => 6,
-                                        _ => 1,
-                                    } =>
-                        {
-                            let delay_ms = if matches!(
-                                problem.code.as_str(),
-                                "sync_object_cleanup_in_progress"
-                                    | "large_transfer_capacity_exhausted"
-                            ) {
-                                250_u64.saturating_mul(1_u64 << upload_attempt.min(4))
-                            } else {
-                                250
-                            };
-                            upload_attempt += 1;
-                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        }
-                        Err(problem) => return Err(problem),
-                    }
-                }
+                let blob_key = blob.key.clone();
+                let (bytes, _global_upload_slot, _transfer_memory_slot) =
+                    read_profile_snapshot_blob(
+                        global_upload_slot,
+                        transfer_memory_slot,
+                        &correlation_id,
+                        move || blob.read_bytes(),
+                    )
+                    .await?;
+                client
+                    .upload_blob(
+                        scope.clone(),
+                        &resource_id,
+                        &blob_key,
+                        generation,
+                        &object.checksum,
+                        &owner_token,
+                        fencing_token,
+                        &upload_idempotency_key,
+                        bytes,
+                        &correlation_id,
+                    )
+                    .await
             }
         }))
         .buffer_unordered(MAX_CONCURRENT_PROFILE_BLOB_UPLOADS)
         .try_collect::<Vec<()>>()
-        .await?;
+        .await;
+        tauri_plugin_log::log::info!(
+            "Profile sync transfer attempt: outcome={} changed_objects={} reused_objects={} upload_bytes={} blob_precheck_requests=0 per_object_transport_retry_attempts=0",
+            if upload_result.is_ok() {
+                "uploaded"
+            } else {
+                "failed"
+            },
+            uploaded_objects,
+            reused_objects,
+            uploaded_bytes
+        );
+        upload_result?;
         Ok(())
     }
 
@@ -6526,6 +6783,21 @@ fn definitive_auth_error(problem: &Problem) -> bool {
         problem.code.as_str(),
         "invalid_session" | "session_expired" | "session_revoked"
     )
+}
+
+fn runtime_projection_failure_requires_stop(problem: &Problem) -> bool {
+    definitive_auth_error(problem)
+        || matches!(
+            problem.code.as_str(),
+            "profile_forbidden"
+                | "lease_not_found"
+                | "lease_expired"
+                | "stale_fencing_token"
+                | "lease_owner_mismatch"
+                | "profile_not_found"
+                | "binding_not_found"
+        )
+        || !problem.retryable
 }
 
 fn preserve_refresh_credentials(problem: &Problem) -> bool {
@@ -7104,37 +7376,6 @@ impl DesktopState {
         }
     }
 
-    pub fn list_proxies(&self) -> Result<Vec<ImportedProxy>, Problem> {
-        match self {
-            Self::Local(state) => state.list_proxies(),
-            Self::Production(_) => Err(production_sync_not_ready()),
-            Self::Unavailable(problem) => Err(problem.clone()),
-        }
-    }
-
-    pub fn import_proxies(
-        &self,
-        rows: Vec<ProxyRow>,
-        name_prefix: Option<&str>,
-    ) -> Result<ProxyImportReport, Problem> {
-        match self {
-            Self::Local(state) => state.import_proxies(rows, name_prefix),
-            Self::Production(_) => Err(production_sync_not_ready()),
-            Self::Unavailable(problem) => Err(problem.clone()),
-        }
-    }
-
-    pub fn import_named_proxies(
-        &self,
-        rows: Vec<(ProxyRow, String)>,
-    ) -> Result<ProxyImportReport, Problem> {
-        match self {
-            Self::Local(state) => state.import_named_proxies(rows),
-            Self::Production(_) => Err(production_sync_not_ready()),
-            Self::Unavailable(problem) => Err(problem.clone()),
-        }
-    }
-
     pub async fn shutdown(&self) -> Result<(), Problem> {
         match self {
             Self::Local(state) => state.shutdown().await,
@@ -7142,13 +7383,6 @@ impl DesktopState {
             Self::Unavailable(_) => Ok(()),
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ConfirmedDeviceFingerprint {
-    device_id: String,
-    fingerprint: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -7370,18 +7604,6 @@ fn operation_id(command_id: &str, idempotency_key: &str) -> String {
     format!("op_{}", &digest[..24])
 }
 
-fn manifest_has_profile_data(manifest: &buglogin_sync::manifest::SyncManifest) -> bool {
-    manifest.payload_encryption.is_some()
-        && (manifest
-            .file_chunks
-            .iter()
-            .any(|file| !file.path.starts_with(".buglogin/"))
-            || manifest
-                .objects
-                .iter()
-                .any(|object| !object.key.starts_with(".buglogin/")))
-}
-
 fn lease_idempotency_key(idempotency_key: &str, generation: u64) -> String {
     let digest = format!(
         "{:x}",
@@ -7561,24 +7783,16 @@ fn invalid_input(field: &'static str, correlation_id: &str) -> Problem {
     .with_field("field", field)
 }
 
-fn production_sync_not_ready() -> Problem {
-    Problem::new(
-        "production_data_sync_not_ready",
-        "Production data sync is not ready",
-        503,
-        "desktop-production",
-    )
-    .retryable(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         ConfirmedKeyRotationRecipient, DesktopState, ProxyCredentialInput, ProxyImportInput,
-        WorkspaceSelectionStore, launch_state_allows_start, local_proxy_parse,
-        production_sync_not_ready, production_transport, run_profile_stop_sync_with_deadline,
-        runtime_dispatch_operation_key, shutdown_idempotency_key,
-        validate_key_rotation_confirmation,
+        WorkspaceSelectionStore, build_profile_snapshot_blocking, exit_reconcile_backoff_delay,
+        launch_state_allows_start, local_proxy_parse, production_transport,
+        read_profile_snapshot_blob, run_profile_stop_sync_with_deadline,
+        runtime_dispatch_operation_key, runtime_projection_failure_requires_stop,
+        shutdown_idempotency_key, try_acquire_profile_blob_upload_slot,
+        try_acquire_profile_sync_slot, validate_key_rotation_confirmation,
     };
     use buglogin_api::services::{
         device_key_directory::DeviceEncryptionKey,
@@ -7590,6 +7804,23 @@ mod tests {
     use buglogin_sync::manifest::SyncManifest;
     use serde_json::json;
     use sha2::Digest;
+
+    #[test]
+    fn transient_runtime_projection_error_keeps_launched_profile_running() {
+        let transient =
+            Problem::new("api_unavailable", "API unavailable", 503, "launch").retryable(true);
+        let revoked =
+            Problem::new("session_revoked", "Session revoked", 401, "launch").retryable(true);
+        let lost_lease =
+            Problem::new("lease_not_found", "Lease not found", 404, "launch").retryable(true);
+        let permanent = Problem::new("runtime_projection_invalid", "Invalid state", 400, "launch")
+            .retryable(false);
+
+        assert!(!runtime_projection_failure_requires_stop(&transient));
+        assert!(runtime_projection_failure_requires_stop(&revoked));
+        assert!(runtime_projection_failure_requires_stop(&lost_lease));
+        assert!(runtime_projection_failure_requires_stop(&permanent));
+    }
 
     #[tokio::test]
     async fn profile_stop_sync_deadline_is_retryable_and_bounded() {
@@ -7856,7 +8087,6 @@ mod tests {
             .await
             .expect_err("unavailable desktop must not execute commands");
         assert_eq!(error.code, "runtime_not_configured");
-        assert!(state.list_proxies().is_err());
         state
             .shutdown()
             .await
@@ -7867,15 +8097,6 @@ mod tests {
     fn production_transport_allows_desktop_login_without_token() {
         let (_, auth) = production_transport("http://127.0.0.1:1", None).unwrap();
         assert!(auth.is_none());
-    }
-
-    #[test]
-    fn production_proxy_sync_fails_closed_without_an_exact_remote_contract() {
-        let error = production_sync_not_ready();
-        assert_eq!(error.code, "production_data_sync_not_ready");
-        assert_eq!(error.status, 503);
-        assert!(error.retryable);
-        assert_eq!(error.correlation_id, "desktop-production");
     }
 
     #[test]
@@ -7972,18 +8193,175 @@ mod tests {
 
         assert!(backoff.ready(&profile, start));
         backoff.record_attempt(&profile, start);
-        assert!(!backoff.ready(&profile, start + std::time::Duration::from_secs(2)));
-        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(3)));
+        let first_delay = exit_reconcile_backoff_delay(&profile, 1);
+        assert!((2400..=3600).contains(&first_delay.as_millis()));
+        assert!(!backoff.ready(
+            &profile,
+            start + first_delay - std::time::Duration::from_millis(1)
+        ));
+        assert!(backoff.ready(&profile, start + first_delay));
         backoff.record_attempt(&profile, start + std::time::Duration::from_secs(3));
-        assert!(!backoff.ready(&profile, start + std::time::Duration::from_secs(8)));
-        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(9)));
+        let second_delay = exit_reconcile_backoff_delay(&profile, 2);
+        assert!((4800..=7200).contains(&second_delay.as_millis()));
+        assert!(!backoff.ready(
+            &profile,
+            start + std::time::Duration::from_secs(3) + second_delay
+                - std::time::Duration::from_millis(1)
+        ));
+        assert!(backoff.ready(
+            &profile,
+            start + std::time::Duration::from_secs(3) + second_delay
+        ));
         for attempt in 0..20 {
             backoff.record_attempt(&profile, start + std::time::Duration::from_secs(attempt));
         }
-        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(19 + 30)));
+        assert!(!backoff.ready(&profile, start + std::time::Duration::from_secs(19 + 239)));
+        assert!(backoff.ready(&profile, start + std::time::Duration::from_secs(19 + 300)));
 
         backoff.retain_exited(&[]);
         assert!(backoff.ready(&profile, start));
+    }
+
+    #[test]
+    fn profile_blob_upload_admission_fails_fast_when_full() {
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let held = slots.clone().try_acquire_owned().unwrap();
+        let error =
+            try_acquire_profile_blob_upload_slot(&slots, "upload-capacity-test").unwrap_err();
+        assert_eq!(error.code, "profile_blob_upload_capacity_exhausted");
+        assert_eq!(error.status, 503);
+        assert!(error.retryable);
+        drop(held);
+        assert!(try_acquire_profile_blob_upload_slot(&slots, "upload-capacity-test").is_ok());
+    }
+
+    #[test]
+    fn profile_sync_admission_fails_fast_when_full() {
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
+        let held = [
+            slots.clone().try_acquire_owned().unwrap(),
+            slots.clone().try_acquire_owned().unwrap(),
+        ];
+        let error =
+            try_acquire_profile_sync_slot(&slots, "profile-sync-capacity-test").unwrap_err();
+        assert_eq!(error.code, "profile_sync_capacity_exhausted");
+        assert_eq!(error.status, 503);
+        assert!(error.retryable);
+        drop(held);
+        assert!(try_acquire_profile_sync_slot(&slots, "profile-sync-capacity-test").is_ok());
+    }
+
+    #[tokio::test]
+    async fn canceled_snapshot_reader_keeps_upload_admission_until_disk_read_finishes() {
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let upload_slot = slots.clone().try_acquire_owned().unwrap();
+        let memory_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let memory_slot = memory_slots.clone().try_acquire_owned().unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let reader_gate = gate.clone();
+        let reader = tokio::spawn(async move {
+            read_profile_snapshot_blob(
+                upload_slot,
+                memory_slot,
+                "snapshot-reader-cancel-test",
+                move || {
+                    let _ = entered_tx.send(());
+                    let (released, changed) = &*reader_gate;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                    Ok(Vec::new())
+                },
+            )
+            .await
+        });
+
+        entered_rx.await.unwrap();
+        reader.abort();
+        assert!(reader.await.unwrap_err().is_cancelled());
+        assert_eq!(slots.available_permits(), 0);
+        assert_eq!(memory_slots.available_permits(), 0);
+
+        let (released, changed) = &*gate;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while slots.available_permits() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the blocking reader should release upload admission on completion");
+        assert_eq!(memory_slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn canceled_snapshot_builder_keeps_memory_admission_until_worker_finishes() {
+        let memory_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let memory_permit = memory_slots.clone().try_acquire_owned().unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let builder_gate = gate.clone();
+        let builder = tokio::spawn(async move {
+            build_profile_snapshot_blocking(
+                memory_permit,
+                "snapshot-builder-cancel-test",
+                move || {
+                    let _ = entered_tx.send(());
+                    let (released, changed) = &*builder_gate;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        entered_rx.await.unwrap();
+        builder.abort();
+        assert!(builder.await.unwrap_err().is_cancelled());
+        assert_eq!(memory_slots.available_permits(), 0);
+
+        let (released, changed) = &*gate;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while memory_slots.available_permits() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the blocking snapshot worker should release memory admission on completion");
+    }
+
+    #[test]
+    fn exit_reconcile_honors_retry_after_without_shortening_backoff() {
+        let profile = buglogin_domain::ids::ProfileId::new("prf_retry_after").unwrap();
+        let now = std::time::Instant::now();
+        let mut backoff = super::ExitReconcileBackoff::default();
+
+        backoff.record_attempt(&profile, now);
+        backoff.respect_retry_after(&profile, now, 60);
+        assert!(!backoff.ready(&profile, now + std::time::Duration::from_secs(59)));
+        assert!(backoff.ready(&profile, now + std::time::Duration::from_secs(60)));
+
+        backoff.record_attempt(&profile, now);
+        let normal_delay = super::exit_reconcile_backoff_delay(&profile, 2);
+        backoff.respect_retry_after(&profile, now, 1);
+        assert!(!backoff.ready(
+            &profile,
+            now + normal_delay - std::time::Duration::from_millis(1)
+        ));
+        assert!(backoff.ready(&profile, now + normal_delay));
+
+        backoff.record_attempt(&profile, now);
+        backoff.respect_retry_after(&profile, now, u64::MAX);
+        assert!(!backoff.ready(&profile, now + std::time::Duration::from_secs(299)));
+        assert!(backoff.ready(&profile, now + std::time::Duration::from_secs(300)));
     }
 
     #[test]

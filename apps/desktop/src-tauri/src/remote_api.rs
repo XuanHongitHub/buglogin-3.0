@@ -39,6 +39,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MAX_RUNTIME_CATALOG_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AUTH_RESPONSE_BYTES: usize = 16 * 1024;
+const MAX_API_PROBLEM_RESPONSE_BYTES: usize = 64 * 1024;
+const API_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const API_METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const API_TRANSFER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const API_RETRY_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 enum AuthResponseBodyError {
     TooLarge,
@@ -70,6 +75,31 @@ async fn read_bounded_auth_response(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+async fn read_bounded_problem_response(response: reqwest::Response) -> Option<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_API_PROBLEM_RESPONSE_BYTES as u64)
+    {
+        return None;
+    }
+
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_API_PROBLEM_RESPONSE_BYTES as u64) as usize,
+    );
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > MAX_API_PROBLEM_RESPONSE_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 #[derive(Clone)]
@@ -142,29 +172,6 @@ pub struct ApiTokenPage {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FeedbackReceipt {
     pub id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileViewerTicket {
-    pub ticket: String,
-    pub expires_in: u64,
-}
-
-impl std::fmt::Debug for ProfileViewerTicket {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProfileViewerTicket")
-            .field("ticket", &"[REDACTED]")
-            .field("expires_in", &self.expires_in)
-            .finish()
-    }
-}
-
-impl Drop for ProfileViewerTicket {
-    fn drop(&mut self) {
-        self.ticket.zeroize();
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -598,7 +605,22 @@ impl RemoteApiClient {
                 .query(&[("after", after)])
                 .header("last-event-id", after);
         }
-        let response = request.send().await.map_err(|error| {
+        let event_deadline = tokio::time::Instant::now() + API_CONTROL_REQUEST_TIMEOUT;
+        let response = tokio::time::timeout(
+            event_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            request.send(),
+        )
+        .await
+        .map_err(|_| {
+            Problem::new(
+                "api_unavailable",
+                "BugLogin event stream connection timed out",
+                504,
+                correlation,
+            )
+            .retryable(true)
+        })?
+        .map_err(|error| {
             Problem::new(
                 "api_unavailable",
                 "BugLogin event stream is unavailable",
@@ -608,7 +630,16 @@ impl RemoteApiClient {
             .retryable(error.is_connect() || error.is_timeout())
         })?;
         if !response.status().is_success() {
-            return Err(read_problem(response, correlation, true).await);
+            let remaining = event_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(api_request_deadline_problem(correlation, true));
+            }
+            return match tokio::time::timeout(remaining, read_problem(response, correlation, true))
+                .await
+            {
+                Ok(problem) => Err(problem),
+                Err(_) => Err(api_request_deadline_problem(correlation, true)),
+            };
         }
         Ok(response)
     }
@@ -627,10 +658,22 @@ impl RemoteApiClient {
             .base_url
             .join(path.trim_start_matches('/'))
             .map_err(|_| client_problem("api_url_invalid", 400))?;
-        let retry_safe = request_retry_safe(&method, path, idempotency.is_some());
+        let has_idempotency_key = idempotency.is_some_and(valid_idempotency_key);
+        if idempotency.is_some() && !has_idempotency_key {
+            return Err(Problem::new(
+                "api_idempotency_key_invalid",
+                "Idempotency key must not be empty",
+                400,
+                correlation,
+            ));
+        }
+        let retry_safe = request_retry_safe(&method, path, has_idempotency_key);
+        let request_timeout = api_request_timeout(&method, path);
+        let retry_deadline = tokio::time::Instant::now() + API_RETRY_TOTAL_TIMEOUT;
         let mut request = self
             .http
             .request(method, url)
+            .timeout(request_timeout)
             .header("x-correlation-id", correlation);
         let token = self.preferred_token()?;
         let token = match (token, auth) {
@@ -652,41 +695,101 @@ impl RemoteApiClient {
         }
         let mut attempt = 0;
         let response = loop {
+            let remaining = retry_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break Err(Problem::new(
+                    "api_request_deadline_exceeded",
+                    "BugLogin API request exceeded its total deadline",
+                    504,
+                    correlation,
+                )
+                .retryable(retry_safe));
+            }
             let next = request
                 .try_clone()
                 .ok_or_else(|| client_problem("api_request_invalid", 400))?;
-            match next.send().await {
-                Ok(response)
-                    if retry_safe
-                        && attempt == 0
-                        && matches!(response.status().as_u16(), 502 | 503 | 504) =>
-                {
-                    attempt += 1;
-                    let retry_delay = api_retry_delay(&response, correlation);
-                    drop(response);
-                    tokio::time::sleep(retry_delay).await;
+            match tokio::time::timeout(remaining, next.send()).await {
+                Err(_) => {
+                    break Err(Problem::new(
+                        "api_request_deadline_exceeded",
+                        "BugLogin API request exceeded its total deadline",
+                        504,
+                        correlation,
+                    )
+                    .retryable(retry_safe));
                 }
-                Err(error)
+                Ok(Err(error))
                     if retry_safe && attempt == 0 && (error.is_connect() || error.is_timeout()) =>
                 {
                     attempt += 1;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if tokio::time::timeout(
+                        remaining,
+                        tokio::time::sleep(api_transport_retry_delay(correlation)),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break Err(api_request_deadline_problem(correlation, retry_safe));
+                    }
                 }
-                outcome => break outcome,
+                Ok(Err(error)) => {
+                    break Err(Problem::new(
+                        "api_unavailable",
+                        "BugLogin API is unavailable",
+                        503,
+                        correlation,
+                    )
+                    .retryable(retry_safe && (error.is_connect() || error.is_timeout())));
+                }
+                Ok(Ok(response))
+                    if retry_safe
+                        && attempt == 0
+                        && (matches!(response.status().as_u16(), 502 | 503 | 504)
+                            || matches!(
+                                response.status(),
+                                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                            )) =>
+                {
+                    let problem = match tokio::time::timeout(
+                        remaining,
+                        read_problem(response, correlation, retry_safe),
+                    )
+                    .await
+                    {
+                        Ok(problem) => problem,
+                        Err(_) => break Err(api_request_deadline_problem(correlation, retry_safe)),
+                    };
+                    if !problem.retryable {
+                        break Err(problem);
+                    }
+                    attempt += 1;
+                    let retry_delay = api_retry_delay_for_problem(&problem, correlation);
+                    if tokio::time::timeout(remaining, tokio::time::sleep(retry_delay))
+                        .await
+                        .is_err()
+                    {
+                        break Err(api_request_deadline_problem(correlation, retry_safe));
+                    }
+                }
+                Ok(Ok(response)) => break Ok(response),
             }
-        }
-        .map_err(|error| {
-            Problem::new(
-                "api_unavailable",
-                "BugLogin API is unavailable",
-                503,
-                correlation,
-            )
-            .retryable(error.is_connect() || (retry_safe && error.is_timeout()))
-        })?;
+        }?;
         let status = response.status();
+        let response_remaining =
+            retry_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if response_remaining.is_zero() {
+            return Err(api_request_deadline_problem(correlation, retry_safe));
+        }
         if !status.is_success() {
-            let mut problem = read_problem(response, correlation, retry_safe).await;
+            let mut problem = match tokio::time::timeout(
+                response_remaining,
+                read_problem(response, correlation, retry_safe),
+            )
+            .await
+            {
+                Ok(problem) => problem,
+                Err(_) => return Err(api_request_deadline_problem(correlation, retry_safe)),
+            };
             if status == StatusCode::NOT_FOUND {
                 problem = problem.with_field("apiRoute", api_route_template(path));
             }
@@ -696,15 +799,17 @@ impl RemoteApiClient {
             return serde_json::from_value(Value::Null)
                 .map_err(|_| client_problem("api_response_invalid", 502));
         }
-        response.json().await.map_err(|error| {
-            Problem::new(
+        match tokio::time::timeout(response_remaining, response.json()).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(Problem::new(
                 "api_response_invalid",
                 "BugLogin API response is incomplete or invalid",
                 502,
                 correlation,
             )
-            .retryable(retry_safe && (error.is_body() || error.is_timeout() || error.is_decode()))
-        })
+            .retryable(retry_safe && (error.is_body() || error.is_timeout() || error.is_decode()))),
+            Err(_) => Err(api_request_deadline_problem(correlation, retry_safe)),
+        }
     }
 
     async fn send_bytes(
@@ -717,6 +822,14 @@ impl RemoteApiClient {
         auth: &CoordinationAuth,
         extra: &[(&str, String)],
     ) -> Result<Value, Problem> {
+        if !valid_idempotency_key(idempotency) {
+            return Err(Problem::new(
+                "api_idempotency_key_invalid",
+                "Idempotency key must not be empty",
+                400,
+                correlation,
+            ));
+        }
         let url = self
             .base_url
             .join(path.trim_start_matches('/'))
@@ -735,23 +848,11 @@ impl RemoteApiClient {
             request = request.header(*name, value);
         }
         request = request.body(bytes);
-        let retry_request = request.try_clone();
-        let response = request.send().await.map_err(|error| {
-            Problem::new(
-                "api_unavailable",
-                "BugLogin API is unavailable",
-                503,
-                correlation,
-            )
-            .retryable(error.is_connect() || error.is_timeout())
-        })?;
-        let response = if matches!(response.status().as_u16(), 502 | 503 | 504)
-            && let Some(retry_request) = retry_request
-        {
-            let retry_delay = api_retry_delay(&response, correlation);
-            drop(response);
-            tokio::time::sleep(retry_delay).await;
-            retry_request.send().await.map_err(|error| {
+        let response = request
+            .timeout(API_TRANSFER_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| {
                 Problem::new(
                     "api_unavailable",
                     "BugLogin API is unavailable",
@@ -759,10 +860,7 @@ impl RemoteApiClient {
                     correlation,
                 )
                 .retryable(error.is_connect() || error.is_timeout())
-            })?
-        } else {
-            response
-        };
+            })?;
         let status = response.status();
         if !status.is_success() {
             let mut problem = read_problem(response, correlation, true).await;
@@ -796,6 +894,7 @@ impl RemoteApiClient {
         let response = self
             .http
             .post(url)
+            .timeout(API_CONTROL_REQUEST_TIMEOUT)
             .bearer_auth(token.as_str())
             .header("x-correlation-id", correlation)
             .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -809,7 +908,7 @@ impl RemoteApiClient {
                     503,
                     correlation,
                 )
-                .retryable(error.is_connect())
+                .retryable(error.is_connect() || error.is_timeout())
             })?;
         parse_response(response, correlation).await
     }
@@ -849,6 +948,7 @@ impl RemoteApiClient {
         let response = self
             .http
             .get(url)
+            .timeout(API_METADATA_REQUEST_TIMEOUT)
             .header("x-correlation-id", correlation)
             .send()
             .await
@@ -945,18 +1045,19 @@ impl RemoteApiClient {
         let response = self
             .http
             .post(url)
+            .timeout(API_CONTROL_REQUEST_TIMEOUT)
             .header("x-correlation-id", correlation)
             .json(&request)
             .send()
             .await
-            .map_err(|error| {
+            .map_err(|_| {
                 Problem::new(
                     "api_unavailable",
                     "BugLogin API is unavailable",
                     503,
                     correlation,
                 )
-                .retryable(error.is_connect() || error.is_timeout())
+                .retryable(false)
             })?;
         drop(request);
         if !response.status().is_success() {
@@ -1014,18 +1115,19 @@ impl RemoteApiClient {
         let response = self
             .http
             .post(url)
+            .timeout(API_CONTROL_REQUEST_TIMEOUT)
             .header("x-correlation-id", correlation)
             .json(&BugLabSsoStartRequest { device_id })
             .send()
             .await
-            .map_err(|error| {
+            .map_err(|_| {
                 Problem::new(
                     "api_unavailable",
                     "BugLogin API is unavailable",
                     503,
                     correlation,
                 )
-                .retryable(error.is_connect() || error.is_timeout())
+                .retryable(false)
             })?;
         if !response.status().is_success() {
             return Err(read_problem(response, correlation, false).await);
@@ -1069,18 +1171,19 @@ impl RemoteApiClient {
         let response = self
             .http
             .post(url)
+            .timeout(API_CONTROL_REQUEST_TIMEOUT)
             .header("x-correlation-id", correlation)
             .json(&BugLabSsoCompleteRequest { state, token })
             .send()
             .await
-            .map_err(|error| {
+            .map_err(|_| {
                 Problem::new(
                     "api_unavailable",
                     "BugLogin API is unavailable",
                     503,
                     correlation,
                 )
-                .retryable(error.is_connect() || error.is_timeout())
+                .retryable(false)
             })?;
         if !response.status().is_success() {
             return Err(read_problem(response, correlation, false).await);
@@ -1157,18 +1260,37 @@ impl RemoteApiClient {
         let body = json!({"refreshToken":refresh_token,"deviceId":device_id});
         let mut response_body = None;
         let mut last_problem = None;
+        let refresh_deadline = tokio::time::Instant::now() + API_RETRY_TOTAL_TIMEOUT;
         for attempt in 0..2 {
-            let response = match self
+            let remaining = refresh_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                last_problem = Some(api_request_deadline_problem(correlation, true));
+                break;
+            }
+            let response = self
                 .http
                 .post(url.clone())
+                .timeout(API_CONTROL_REQUEST_TIMEOUT)
                 .header("x-correlation-id", correlation)
                 .header("idempotency-key", &idempotency_key)
                 .json(&body)
-                .send()
-                .await
-            {
-                Ok(value) => value,
+                .send();
+            let response = match tokio::time::timeout(remaining, response).await {
+                Ok(Ok(value)) => value,
                 Err(_) => {
+                    last_problem = Some(api_request_deadline_problem(correlation, true));
+                    if attempt == 0
+                        && sleep_before_deadline(
+                            refresh_deadline,
+                            api_transport_retry_delay(correlation),
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+                    break;
+                }
+                Ok(Err(error)) if error.is_connect() || error.is_timeout() => {
                     last_problem = Some(
                         Problem::new(
                             "api_unavailable",
@@ -1178,50 +1300,114 @@ impl RemoteApiClient {
                         )
                         .retryable(true),
                     );
-                    continue;
+                    if attempt == 0
+                        && sleep_before_deadline(
+                            refresh_deadline,
+                            api_transport_retry_delay(correlation),
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+                    break;
+                }
+                Ok(Err(_)) => {
+                    // The request may have reached the server before its
+                    // response was lost. Refresh uses a stable idempotency
+                    // key, so replaying the same credential is safe.
+                    last_problem = Some(
+                        Problem::new(
+                            "api_unavailable",
+                            "BugLogin API is unavailable",
+                            503,
+                            correlation,
+                        )
+                        .retryable(true),
+                    );
+                    if attempt == 0
+                        && sleep_before_deadline(
+                            refresh_deadline,
+                            api_transport_retry_delay(correlation),
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+                    break;
                 }
             };
             if !response.status().is_success() {
-                let retryable_server_error = response.status().is_server_error();
-                let retryable_refresh_response = retryable_server_error
+                let retryable_refresh_response = response.status().is_server_error()
                     || matches!(
                         response.status(),
                         StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT
                     );
-                let mut problem = read_problem(response, correlation, false).await;
-                if retryable_refresh_response {
+                let retry_delay =
+                    retryable_refresh_response.then(|| api_retry_delay(&response, correlation));
+                let response_remaining =
+                    refresh_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if response_remaining.is_zero() {
+                    last_problem = Some(api_request_deadline_problem(correlation, true));
+                    break;
+                }
+                let problem = match tokio::time::timeout(
+                    response_remaining,
+                    read_problem(response, correlation, true),
+                )
+                .await
+                {
+                    Ok(problem) => problem,
+                    Err(_) => {
+                        last_problem = Some(api_request_deadline_problem(correlation, true));
+                        break;
+                    }
+                };
+                if retryable_refresh_response && problem.retryable && attempt == 0 {
                     // The server may have committed rotation before the
                     // response failed. The stable idempotency key makes a
-                    // same-token retry safe and lets the desktop preserve
-                    // its vault credentials.
-                    problem.retryable = true;
-                }
-                if retryable_server_error && attempt == 0 {
+                    // same-token retry safe; the server's explicit
+                    // retryable=false still takes precedence.
                     last_problem = Some(problem);
-                    continue;
+                    if sleep_before_deadline(
+                        refresh_deadline,
+                        retry_delay.unwrap_or(Duration::from_millis(250)),
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                    last_problem = Some(api_request_deadline_problem(correlation, true));
+                    break;
                 }
                 return Err(problem);
             }
-            match read_bounded_auth_response(response).await {
-                Ok(bytes) => {
+            let response_remaining =
+                refresh_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if response_remaining.is_zero() {
+                last_problem = Some(api_request_deadline_problem(correlation, true));
+                break;
+            }
+            let body_result =
+                tokio::time::timeout(response_remaining, read_bounded_auth_response(response))
+                    .await;
+            match body_result {
+                Err(_) => {
+                    last_problem = Some(api_request_deadline_problem(correlation, true));
+                    break;
+                }
+                Ok(Ok(bytes)) => {
                     response_body = Some(bytes);
                     break;
                 }
-                Err(AuthResponseBodyError::TooLarge) => {
-                    let problem = Problem::new(
+                Ok(Err(AuthResponseBodyError::TooLarge)) => {
+                    return Err(Problem::new(
                         "api_auth_response_invalid",
                         "BugLogin returned an oversized refreshed device session",
                         502,
                         correlation,
-                    )
-                    .retryable(true);
-                    if attempt == 0 {
-                        last_problem = Some(problem);
-                        continue;
-                    }
-                    return Err(problem);
+                    ));
                 }
-                Err(AuthResponseBodyError::Interrupted) => {
+                Ok(Err(AuthResponseBodyError::Interrupted)) => {
                     last_problem = Some(
                         Problem::new(
                             "api_unavailable",
@@ -1231,6 +1417,16 @@ impl RemoteApiClient {
                         )
                         .retryable(true),
                     );
+                    if attempt == 0
+                        && sleep_before_deadline(
+                            refresh_deadline,
+                            api_transport_retry_delay(correlation),
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+                    break;
                 }
             }
         }
@@ -1249,7 +1445,7 @@ impl RemoteApiClient {
             })
         })?;
         let token: DeviceSessionTokens = serde_json::from_slice(&response_body)
-            .map_err(|_| client_problem("api_response_invalid", 502).retryable(true))?;
+            .map_err(|_| client_problem("api_auth_response_invalid", 502))?;
         let now = unix_time_seconds(correlation)?;
         if token.access_token.is_empty()
             || token.refresh_token.is_empty()
@@ -1261,8 +1457,7 @@ impl RemoteApiClient {
                 "BugLogin returned an invalid refreshed device session",
                 502,
                 correlation,
-            )
-            .retryable(true));
+            ));
         }
         Ok(token)
     }
@@ -1310,6 +1505,7 @@ impl RemoteApiClient {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn cookie_job_inbox(
         &self,
         workspace: &WorkspaceId,
@@ -1564,6 +1760,7 @@ impl RemoteApiClient {
         .await
     }
 
+    #[cfg(test)]
     pub async fn cancel_cookie_job(
         &self,
         workspace: &WorkspaceId,
@@ -1593,23 +1790,6 @@ impl RemoteApiClient {
     ) -> Result<Versioned<Profile>, Problem> {
         self.get(&format!("/v1/profiles/{}", id.as_str()), correlation)
             .await
-    }
-
-    pub async fn issue_profile_viewer_ticket(
-        &self,
-        id: &ProfileId,
-        correlation: &str,
-    ) -> Result<ProfileViewerTicket, Problem> {
-        self.send(
-            Method::POST,
-            &format!("/v1/profiles/{}/viewer-tickets", id.as_str()),
-            Some(json!({})),
-            correlation,
-            None,
-            None,
-            &[],
-        )
-        .await
     }
 
     pub async fn profile_binding(
@@ -1663,23 +1843,6 @@ impl RemoteApiClient {
     ) -> Result<ManagedProfileKey, Problem> {
         self.get(
             &format!("/v1/profiles/{}/managed-key-envelope", id.as_str()),
-            correlation,
-        )
-        .await
-    }
-
-    pub async fn profile_share_recipient_device_keys(
-        &self,
-        profile_id: &ProfileId,
-        member_id: &buglogin_domain::ids::MemberId,
-        correlation: &str,
-    ) -> Result<Vec<DeviceEncryptionKey>, Problem> {
-        self.get(
-            &format!(
-                "/v1/profiles/{}/shares/{}/device-keys",
-                profile_id.as_str(),
-                member_id.as_str()
-            ),
             correlation,
         )
         .await
@@ -1918,6 +2081,7 @@ impl RemoteApiClient {
         let response = self
             .http
             .get(url)
+            .timeout(API_TRANSFER_REQUEST_TIMEOUT)
             .bearer_auth(scope.auth.bearer_token())
             .header("x-correlation-id", correlation)
             .header("x-buglogin-actor-id", scope.auth.actor_id())
@@ -1925,14 +2089,14 @@ impl RemoteApiClient {
             .header("x-content-sha256", checksum)
             .send()
             .await
-            .map_err(|_| {
+            .map_err(|error| {
                 Problem::new(
                     "api_unavailable",
                     "BugLogin API is unavailable",
                     503,
                     correlation,
                 )
-                .retryable(true)
+                .retryable(error.is_connect() || error.is_timeout())
             })?;
         if !response.status().is_success() {
             return Err(read_problem(response, correlation, true).await);
@@ -1951,14 +2115,14 @@ impl RemoteApiClient {
             .map_err(|_| client_problem("api_blob_capacity_exceeded", 503))?;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| {
+            let chunk = chunk.map_err(|error| {
                 Problem::new(
                     "api_response_invalid",
                     "BugLogin API response is incomplete or invalid",
                     502,
                     correlation,
                 )
-                .retryable(true)
+                .retryable(error.is_connect() || error.is_timeout() || error.is_body())
             })?;
             let new_len = bytes
                 .len()
@@ -3706,31 +3870,87 @@ fn manifest_commit_idempotency_key(
 
 async fn read_problem(response: reqwest::Response, correlation: &str, retry_safe: bool) -> Problem {
     let status = response.status().as_u16();
-    match response.json::<ApiProblem>().await {
-        Ok(value) => Problem {
-            problem_type: value
-                .problem_type
-                .filter(|problem_type| !problem_type.is_empty())
-                .unwrap_or_else(|| format!("https://buglogin.local/problems/{}", value.code)),
-            title: value.title,
-            status: value.status,
-            code: value.code,
-            detail: value.detail,
-            instance: value.instance,
-            correlation_id: value
-                .correlation_id
-                .unwrap_or_else(|| correlation.to_owned()),
-            retryable: retry_safe && value.retryable.unwrap_or(status >= 500 || status == 429),
-            fields: value.fields.unwrap_or_default(),
-        },
-        Err(_) => Problem::new(
-            "api_request_failed",
-            "BugLogin API request failed",
-            status,
-            correlation,
-        )
-        .retryable(retry_safe && (status >= 500 || status == 429)),
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(parse_retry_after)
+        .map(|delay| delay.min(Duration::from_secs(5)).as_secs().max(1));
+    let parsed = read_bounded_problem_response(response)
+        .await
+        .and_then(|body| serde_json::from_slice::<ApiProblem>(&body).ok());
+    match parsed {
+        Some(value) => {
+            let mut problem = Problem {
+                problem_type: value
+                    .problem_type
+                    .filter(|problem_type| !problem_type.is_empty())
+                    .unwrap_or_else(|| format!("https://buglogin.local/problems/{}", value.code)),
+                title: value.title,
+                status: value.status,
+                code: value.code,
+                detail: value.detail,
+                instance: value.instance,
+                correlation_id: value
+                    .correlation_id
+                    .unwrap_or_else(|| correlation.to_owned()),
+                retryable: problem_retryable(status, retry_safe, value.retryable),
+                fields: value.fields.unwrap_or_default(),
+            };
+            if let Some(seconds) = retry_after {
+                problem
+                    .fields
+                    .insert("retryAfterSeconds".into(), serde_json::json!(seconds));
+            } else if let Some(seconds) = problem
+                .fields
+                .get("retryAfterSeconds")
+                .and_then(Value::as_u64)
+            {
+                problem.fields.insert(
+                    "retryAfterSeconds".into(),
+                    serde_json::json!(seconds.min(5)),
+                );
+            }
+            problem
+        }
+        None => {
+            let mut problem = Problem::new(
+                "api_request_failed",
+                "BugLogin API request failed",
+                status,
+                correlation,
+            )
+            .retryable(problem_retryable(status, retry_safe, None));
+            if let Some(seconds) = retry_after {
+                problem
+                    .fields
+                    .insert("retryAfterSeconds".into(), serde_json::json!(seconds));
+            } else if let Some(seconds) = problem
+                .fields
+                .get("retryAfterSeconds")
+                .and_then(Value::as_u64)
+            {
+                problem.fields.insert(
+                    "retryAfterSeconds".into(),
+                    serde_json::json!(seconds.min(5)),
+                );
+            }
+            problem
+        }
     }
+}
+
+fn problem_retryable(status: u16, retry_safe: bool, declared: Option<bool>) -> bool {
+    retry_safe
+        && !matches!(status, 401 | 403 | 404)
+        && declared.unwrap_or(
+            status >= 500
+                || status == StatusCode::REQUEST_TIMEOUT.as_u16()
+                || status == StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        )
+}
+
+fn valid_idempotency_key(key: &str) -> bool {
+    !key.trim().is_empty()
 }
 
 fn request_retry_safe(method: &Method, path: &str, has_idempotency_key: bool) -> bool {
@@ -3741,17 +3961,80 @@ fn request_retry_safe(method: &Method, path: &str, has_idempotency_key: bool) ->
         || matches!(path, "/v1/auth/device/token" | "/v1/proxies/parse")
 }
 
+fn api_request_timeout(method: &Method, path: &str) -> Duration {
+    let path = path.trim_start_matches('/');
+    if path.contains("/blobs") {
+        API_TRANSFER_REQUEST_TIMEOUT
+    } else if path == "v1/runtime/catalog" {
+        API_METADATA_REQUEST_TIMEOUT
+    } else if path.contains("/lease")
+        || path.contains("/runtime/")
+        || path.contains("profile-runtime-status")
+        || path == "v1/events"
+        || path == "v1/health"
+    {
+        API_CONTROL_REQUEST_TIMEOUT
+    } else if *method == Method::GET || *method == Method::HEAD {
+        API_METADATA_REQUEST_TIMEOUT
+    } else {
+        API_CONTROL_REQUEST_TIMEOUT
+    }
+}
+
+fn api_request_deadline_problem(correlation: &str, retry_safe: bool) -> Problem {
+    Problem::new(
+        "api_request_deadline_exceeded",
+        "BugLogin API request exceeded its total deadline",
+        504,
+        correlation,
+    )
+    .retryable(retry_safe)
+}
+
+async fn sleep_before_deadline(deadline: tokio::time::Instant, delay: Duration) -> bool {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    !remaining.is_zero()
+        && tokio::time::timeout(remaining, tokio::time::sleep(delay))
+            .await
+            .is_ok()
+}
+
 fn api_retry_delay(response: &reqwest::Response, correlation: &str) -> Duration {
     let server_delay = response
         .headers()
         .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(parse_retry_after)
+        .map(|delay| delay.min(Duration::from_secs(5)))
+        .unwrap_or_else(|| Duration::from_millis(250))
+        .max(Duration::from_millis(250));
+    let jitter_ms = Sha256::digest(correlation.as_bytes())[0] as u64 % 501;
+    server_delay + Duration::from_millis(jitter_ms)
+}
+
+fn api_transport_retry_delay(correlation: &str) -> Duration {
+    let jitter_ms = Sha256::digest(correlation.as_bytes())[0] as u64 % 501;
+    Duration::from_millis(250 + jitter_ms)
+}
+
+fn api_retry_delay_for_problem(problem: &Problem, correlation: &str) -> Duration {
+    let server_delay = problem
+        .fields
+        .get("retryAfterSeconds")
+        .and_then(Value::as_u64)
         .map(|seconds| Duration::from_secs(seconds.min(5)))
         .unwrap_or_else(|| Duration::from_millis(250))
         .max(Duration::from_millis(250));
     let jitter_ms = Sha256::digest(correlation.as_bytes())[0] as u64 % 501;
     server_delay + Duration::from_millis(jitter_ms)
+}
+
+fn parse_retry_after(value: &header::HeaderValue) -> Option<Duration> {
+    let value = value.to_str().ok()?;
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    retry_at.duration_since(std::time::SystemTime::now()).ok()
 }
 
 fn api_route_template(path: &str) -> String {
@@ -4139,7 +4422,8 @@ mod tests {
     use super::{
         FeedbackSubmission, MAX_AUTH_RESPONSE_BYTES, RemoteApiClient, api_route_template,
         canonical_workspace_update, legacy_workspace_update, manifest_commit_idempotency_key,
-        optional_bool, optional_cursor, optional_page_limit, request_retry_safe,
+        optional_bool, optional_cursor, optional_page_limit, problem_retryable, request_retry_safe,
+        valid_idempotency_key,
     };
     use crate::clock::unix_time_seconds_at;
     use crate::profile_runtime::DesktopSyncBackend;
@@ -4551,6 +4835,25 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn retry_classification_matches_safe_transport_statuses() {
+        assert!(problem_retryable(408, true, None));
+        assert!(problem_retryable(429, true, None));
+        assert!(problem_retryable(503, true, None));
+        assert!(!problem_retryable(408, false, None));
+        assert!(!problem_retryable(401, true, Some(true)));
+        assert!(!problem_retryable(403, true, Some(true)));
+        assert!(!problem_retryable(404, true, Some(true)));
+        assert!(!problem_retryable(408, true, Some(false)));
+    }
+
+    #[test]
+    fn idempotency_keys_must_be_nonblank_before_upload_retry_is_allowed() {
+        assert!(valid_idempotency_key("upload-key-1"));
+        assert!(!valid_idempotency_key(""));
+        assert!(!valid_idempotency_key("  \t  "));
+    }
+
     #[tokio::test]
     async fn transport_retries_transient_safe_requests_without_replaying_unsafe_posts() {
         for (method, key, expected_requests) in [
@@ -4599,6 +4902,45 @@ mod tests {
             }
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn transport_does_not_override_explicit_nonretryable_problem_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let body = r#"{"code":"maintenance_window","title":"Maintenance","status":503,"retryable":false}"#;
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/problem+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            drop(stream);
+            let extra_request =
+                tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                    .await;
+            (request, extra_request.is_ok())
+        });
+        let client = RemoteApiClient::new_unauthenticated(&format!("http://{address}")).unwrap();
+        let error = client
+            .send::<Value>(
+                reqwest::Method::GET,
+                "/v1/profiles",
+                None,
+                "cor_explicit_nonretryable",
+                None,
+                None,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "maintenance_window");
+        assert!(!error.retryable);
+        let (request, retried) = server.await.unwrap();
+        assert!(request.starts_with("GET /v1/profiles HTTP/1.1"));
+        assert!(!retried, "explicit retryable=false must prevent a replay");
     }
 
     #[tokio::test]
@@ -5682,20 +6024,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_refresh_keeps_server_errors_retryable_after_same_key_retry() {
+    async fn device_refresh_retries_declared_transient_errors_with_same_key() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
+            let mut first_idempotency_key: Option<String> = None;
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request = read_http_request(&mut stream).await;
                 assert!(request.starts_with("POST /v1/auth/device/refresh HTTP/1.1"));
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("idempotency-key: device-refresh-")
-                );
-                let body = br#"{"code":"temporary_failure","title":"Temporary failure","status":503,"retryable":false}"#;
+                let idempotency_key = request
+                    .lines()
+                    .find(|line| line.to_ascii_lowercase().starts_with("idempotency-key:"))
+                    .and_then(|line| line.split_once(':').map(|(_, value)| value.trim()))
+                    .expect("refresh request must carry an idempotency key");
+                assert!(idempotency_key.starts_with("device-refresh-"));
+                if let Some(first) = first_idempotency_key.as_ref() {
+                    assert_eq!(
+                        idempotency_key,
+                        first.as_str(),
+                        "refresh retry must reuse its key"
+                    );
+                } else {
+                    first_idempotency_key = Some(idempotency_key.to_owned());
+                }
+                let body = br#"{"code":"temporary_failure","title":"Temporary failure","status":503,"retryable":true}"#;
                 let response = format!(
                     "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/problem+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -5716,43 +6069,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_refresh_bounds_declared_and_streamed_response_bodies() {
+    async fn device_refresh_does_not_override_explicit_nonretryable_response() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let mut idempotency_key = None;
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request = read_http_request(&mut stream).await;
-                let header = request
-                    .lines()
-                    .find(|line| line.to_ascii_lowercase().starts_with("idempotency-key:"))
-                    .expect("refresh request has an idempotency key")
-                    .to_owned();
-                if let Some(previous) = &idempotency_key {
-                    assert_eq!(&header, previous);
-                } else {
-                    idempotency_key = Some(header);
-                }
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /v1/auth/device/refresh HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("idempotency-key: device-refresh-")
+            );
+            let body = br#"{"code":"maintenance_window","title":"Maintenance","status":503,"retryable":false}"#;
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/problem+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                .await
+                .is_err()
+        });
+        let client = RemoteApiClient::new_unauthenticated(&format!("http://{address}")).unwrap();
 
-                if attempt == 0 {
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                        MAX_AUTH_RESPONSE_BYTES + 1
-                    );
-                    stream.write_all(response.as_bytes()).await.unwrap();
-                    continue;
-                }
+        let error = client
+            .device_session_refresh(
+                &"c".repeat(64),
+                "desktop-device",
+                "refresh-503-explicit-false",
+            )
+            .await
+            .unwrap_err();
 
-                let oversized = vec![b'x'; MAX_AUTH_RESPONSE_BYTES + 1];
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:X}\r\n",
-                    oversized.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-                stream.write_all(&oversized).await.unwrap();
-                stream.write_all(b"\r\n0\r\n\r\n").await.unwrap();
-            }
+        assert_eq!(error.code, "maintenance_window");
+        assert!(!error.retryable);
+        assert_eq!(error.correlation_id, "refresh-503-explicit-false");
+        assert!(
+            server.await.unwrap(),
+            "retryable=false must prevent refresh replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_refresh_rejects_declared_oversized_response_bodies() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /v1/auth/device/refresh HTTP/1.1"));
+            assert!(request.to_ascii_lowercase().contains("idempotency-key:"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                MAX_AUTH_RESPONSE_BYTES + 1
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
         });
         let client = RemoteApiClient::new_unauthenticated(&format!("http://{address}")).unwrap();
 
@@ -5762,7 +6135,40 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, "api_auth_response_invalid");
-        assert!(error.retryable);
+        assert!(!error.retryable);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_refresh_rejects_streamed_oversized_response_bodies() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /v1/auth/device/refresh HTTP/1.1"));
+            let oversized = vec![b'x'; MAX_AUTH_RESPONSE_BYTES + 1];
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:X}\r\n",
+                oversized.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&oversized).await.unwrap();
+            stream.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+        });
+        let client = RemoteApiClient::new_unauthenticated(&format!("http://{address}")).unwrap();
+
+        let error = client
+            .device_session_refresh(
+                &"c".repeat(64),
+                "desktop-device",
+                "refresh-streamed-oversized",
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "api_auth_response_invalid");
+        assert!(!error.retryable);
         server.await.unwrap();
     }
 
@@ -6546,5 +6952,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn upload_capacity_503_is_not_retried_and_preserves_retry_after() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let body = br#"{"type":"about:blank","title":"Busy","status":503,"code":"large_transfer_capacity_exhausted","correlationId":"upload-capacity-test","retryable":true}"#;
+            let headers = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/problem+json\r\nretry-after: 2\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            drop(stream);
+            let extra_request =
+                tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                    .await;
+            (request, extra_request.is_ok())
+        });
+
+        let client =
+            RemoteApiClient::new(&format!("http://{address}"), "device-token".into()).unwrap();
+        let auth = CoordinationAuth::new("desktop-upload-capacity", "lease-token").unwrap();
+        let error = client
+            .send_bytes(
+                reqwest::Method::PUT,
+                "/v1/workspaces/ws_test/resources/res_test/blobs",
+                b"blob".to_vec(),
+                "upload-capacity-test",
+                "upload-capacity-idempotency",
+                &auth,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "large_transfer_capacity_exhausted");
+        assert_eq!(error.fields.get("retryAfterSeconds"), Some(&json!(2)));
+        let (request, retried) = server.await.unwrap();
+        assert!(request.starts_with("PUT "));
+        assert!(
+            !retried,
+            "a 503 upload response must be handed to the sync retry owner"
+        );
     }
 }

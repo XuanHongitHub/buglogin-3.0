@@ -21,6 +21,7 @@ mod profile_lifecycle;
 mod profile_password;
 mod profile_projection;
 pub mod profile_runtime;
+mod profile_transfer_budget;
 mod proxy_bridge;
 mod proxy_credential_vault;
 mod proxy_store;
@@ -31,7 +32,7 @@ mod sso_callback_handoff;
 mod sync_features;
 mod sync_key_vault;
 mod system_features;
-mod wayfern_fingerprint;
+mod wayfern_native_identity;
 mod wayfern_terms;
 
 use adapter::AdapterState;

@@ -439,6 +439,7 @@ pub(crate) fn is_production_api_host(host: &str) -> bool {
     host == "api3.buglogin.com"
 }
 
+#[cfg(test)]
 pub(crate) fn is_production_device_verification_url(
     api_host: &str,
     verification: &reqwest::Url,

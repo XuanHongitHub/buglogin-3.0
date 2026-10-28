@@ -236,6 +236,7 @@ fn safe_identifier(value: &str, max_len: usize) -> String {
     }
 }
 
+#[cfg(test)]
 fn operational_diagnostic(
     operation: &str,
     error_code: &str,

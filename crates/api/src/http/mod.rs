@@ -11178,8 +11178,13 @@ fn response(mut problem: Problem) -> Response {
     if let Ok(correlation_id) = REQUEST_CORRELATION_ID.try_with(|id| id.clone()) {
         problem.correlation_id = correlation_id;
     }
-    let retry_after = (problem.code == "control_authentication_overloaded")
-        .then(|| HeaderValue::from_static("2"));
+    let retry_after = match problem.code.as_str() {
+        "control_authentication_overloaded" => Some(HeaderValue::from_static("2")),
+        "large_transfer_capacity_exhausted"
+        | "remote_chunk_capacity_exhausted"
+        | "sync_object_cleanup_in_progress" => Some(HeaderValue::from_static("2")),
+        _ => None,
+    };
     let status = StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut response = (
         status,
@@ -11193,6 +11198,30 @@ fn response(mut problem: Problem) -> Response {
             .insert(header::RETRY_AFTER, retry_after);
     }
     response
+}
+
+#[cfg(test)]
+mod response_retry_after_tests {
+    use super::{Problem, large_transfer_capacity_exhausted, response};
+    use axum::http::header;
+
+    #[test]
+    fn bulk_capacity_responses_advertise_retry_after() {
+        let capacity = response(large_transfer_capacity_exhausted("Busy"));
+        assert_eq!(
+            capacity.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(capacity.headers().get(header::RETRY_AFTER).unwrap(), "2");
+
+        let cleanup = response(Problem::new(
+            "sync_object_cleanup_in_progress",
+            "Cleanup in progress",
+            503,
+            "test",
+        ));
+        assert_eq!(cleanup.headers().get(header::RETRY_AFTER).unwrap(), "2");
+    }
 }
 
 pub(super) fn canonical_problem(status: u16, value: serde_json::Value) -> Problem {
@@ -13708,6 +13737,7 @@ mod persistence_tests {
         inner: MemoryRemoteChunkStore,
         active: Arc<AtomicUsize>,
         maximum: Arc<AtomicUsize>,
+        overlap_gate: Arc<(Mutex<usize>, Condvar)>,
     }
 
     impl ConcurrentRemoteChunkStore for OverlapProbeStore {
@@ -13727,7 +13757,23 @@ mod persistence_tests {
         ) -> Result<(), Problem> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.maximum.fetch_max(active, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(80));
+            let (arrivals, changed) = self.overlap_gate.as_ref();
+            let mut arrivals = arrivals.lock().unwrap();
+            *arrivals += 1;
+            changed.notify_all();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while *arrivals < 2 {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let (next, timeout) = changed.wait_timeout(arrivals, remaining).unwrap();
+                arrivals = next;
+                if timeout.timed_out() {
+                    break;
+                }
+            }
+            drop(arrivals);
             let result =
                 ConcurrentRemoteChunkStore::put(&self.inner, object_key, bytes, expected_checksum);
             self.active.fetch_sub(1, Ordering::SeqCst);
@@ -13791,11 +13837,13 @@ mod persistence_tests {
     fn concurrent_storage_adapter_does_not_serialize_distinct_blob_puts() {
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
+        let overlap_gate = Arc::new((Mutex::new(0), Condvar::new()));
         let state = ApiState::local(ProfileService::disabled()).with_concurrent_remote_chunks(
             Box::new(OverlapProbeStore {
                 inner: MemoryRemoteChunkStore::default(),
                 active,
                 maximum: Arc::clone(&maximum),
+                overlap_gate,
             }),
         );
         let workers: Vec<_> = (0..2)

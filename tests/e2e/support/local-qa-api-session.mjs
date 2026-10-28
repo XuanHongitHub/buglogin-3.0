@@ -60,6 +60,7 @@ const qaAccountId = `acct_qa_${runId}`;
 const qaPassword = `Qa!${randomBytes(40).toString("base64url")}`;
 const ownerDeviceId = `local-qa-owner-${runId}`;
 const qaDeviceId = `local-qa-member-${runId}`;
+const profileKeyEncryptionKeyHex = randomBytes(32).toString("hex");
 let dataRoot;
 let api;
 let stagedApiBinary;
@@ -362,7 +363,10 @@ async function waitForApi() {
 async function startApi() {
   api = spawn(stagedApiBinary, [], {
     cwd: root,
-    env: isolatedEnv({ BUGLOGIN_API_BIND: `127.0.0.1:${port}` }),
+    env: isolatedEnv({
+      BUGLOGIN_API_BIND: `127.0.0.1:${port}`,
+      BUGLOGIN_PROFILE_KEY_ENCRYPTION_KEY_HEX: profileKeyEncryptionKeyHex,
+    }),
     stdio: "ignore",
   });
   apiExit = new Promise((resolve) => api.once("exit", resolve));

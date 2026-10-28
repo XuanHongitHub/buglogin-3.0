@@ -188,6 +188,7 @@ pub struct WriteAuthority {
 pub struct LaunchReceipt {
     pub process_id: u32,
     pub write_authority: Option<WriteAuthority>,
+    pub session_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -195,6 +196,7 @@ pub struct StopReceipt {
     pub(crate) profile_path: PathBuf,
     pub(crate) lease: Option<LeaseGrant>,
     pub(crate) was_launched: bool,
+    pub(crate) session_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -223,9 +225,30 @@ impl ProfileRuntimeHandle {
     }
 
     pub async fn stop_for_sync(&self, profile_id: ProfileId) -> Result<StopReceipt, Problem> {
+        self.send_stop_for_session(profile_id, None).await
+    }
+
+    pub async fn stop_for_session(
+        &self,
+        profile_id: ProfileId,
+        session_epoch: u64,
+    ) -> Result<StopReceipt, Problem> {
+        self.send_stop_for_session(profile_id, Some(session_epoch))
+            .await
+    }
+
+    async fn send_stop_for_session(
+        &self,
+        profile_id: ProfileId,
+        session_epoch: Option<u64>,
+    ) -> Result<StopReceipt, Problem> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(RuntimeCommand::StopForSync { profile_id, reply })
+            .send(RuntimeCommand::StopForSync {
+                profile_id,
+                session_epoch,
+                reply,
+            })
             .await
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
@@ -279,18 +302,61 @@ impl ProfileRuntimeHandle {
     }
 
     pub async fn complete_stop(&self, profile_id: ProfileId) -> Result<(), Problem> {
+        self.send_complete_stop_for_session(profile_id, None).await
+    }
+
+    pub async fn complete_stop_for_session(
+        &self,
+        profile_id: ProfileId,
+        session_epoch: u64,
+    ) -> Result<(), Problem> {
+        self.send_complete_stop_for_session(profile_id, Some(session_epoch))
+            .await
+    }
+
+    async fn send_complete_stop_for_session(
+        &self,
+        profile_id: ProfileId,
+        session_epoch: Option<u64>,
+    ) -> Result<(), Problem> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(RuntimeCommand::CompleteStop { profile_id, reply })
+            .send(RuntimeCommand::CompleteStop {
+                profile_id,
+                session_epoch,
+                reply,
+            })
             .await
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
     }
 
     pub async fn complete_stop_detached(&self, profile_id: ProfileId) -> Result<(), Problem> {
+        self.send_complete_stop_detached_for_session(profile_id, None)
+            .await
+    }
+
+    pub async fn complete_stop_detached_for_session(
+        &self,
+        profile_id: ProfileId,
+        session_epoch: u64,
+    ) -> Result<(), Problem> {
+        self.send_complete_stop_detached_for_session(profile_id, Some(session_epoch))
+            .await
+    }
+
+    async fn send_complete_stop_detached_for_session(
+        &self,
+        profile_id: ProfileId,
+        session_epoch: Option<u64>,
+    ) -> Result<(), Problem> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(RuntimeCommand::CompleteStopDetached { profile_id, reply })
+            .send(RuntimeCommand::CompleteStopDetached {
+                profile_id,
+                session_epoch,
+                reply,
+            })
             .await
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())
@@ -437,8 +503,22 @@ enum RuntimeCommand {
         request: LaunchRequest,
         reply: oneshot::Sender<Result<LaunchReceipt, Problem>>,
     },
+    LaunchAcquired {
+        request: LaunchRequest,
+        session_epoch: u64,
+        lease_result: Result<Option<LeaseGrant>, Problem>,
+        coordination: Option<ManagedCoordination>,
+        reply: oneshot::Sender<Result<LaunchReceipt, Problem>>,
+    },
+    LaunchCleanupComplete {
+        profile_id: ProfileId,
+        session_epoch: u64,
+        error: Problem,
+        reply: oneshot::Sender<Result<LaunchReceipt, Problem>>,
+    },
     StopForSync {
         profile_id: ProfileId,
+        session_epoch: Option<u64>,
         reply: oneshot::Sender<Result<StopReceipt, Problem>>,
     },
     HoldIdleProfileForSync {
@@ -450,10 +530,12 @@ enum RuntimeCommand {
     },
     CompleteStop {
         profile_id: ProfileId,
+        session_epoch: Option<u64>,
         reply: oneshot::Sender<Result<(), Problem>>,
     },
     CompleteStopDetached {
         profile_id: ProfileId,
+        session_epoch: Option<u64>,
         reply: oneshot::Sender<()>,
     },
     ReleaseStoppedForRetry {
@@ -507,6 +589,7 @@ enum RuntimeCommand {
     },
     RenewalCompleted {
         profile_id: ProfileId,
+        session_epoch: u64,
         lease: LeaseGrant,
         result: Result<LeaseGrant, Problem>,
     },
@@ -514,6 +597,7 @@ enum RuntimeCommand {
 
 struct RunningProfile {
     profile_path: PathBuf,
+    session_epoch: u64,
     lease: Option<LeaseGrant>,
     was_launched: bool,
     process_stopped: bool,
@@ -536,7 +620,10 @@ where
         coordination,
         running: HashMap::new(),
         unexpectedly_stopped: BTreeSet::new(),
-        pending_renewals: BTreeSet::new(),
+        pending_renewals: HashMap::new(),
+        launching: HashMap::new(),
+        cancelled_launches: BTreeSet::new(),
+        next_session_epoch: 1,
         commands: commands.clone(),
         receiver,
     }));
@@ -548,7 +635,10 @@ struct ProfileRuntime<C: ProcessController> {
     coordination: Option<ManagedCoordination>,
     running: HashMap<ProfileId, RunningProfile>,
     unexpectedly_stopped: BTreeSet<ProfileId>,
-    pending_renewals: BTreeSet<ProfileId>,
+    pending_renewals: HashMap<ProfileId, (u64, u64, String)>,
+    launching: HashMap<ProfileId, u64>,
+    cancelled_launches: BTreeSet<(ProfileId, u64)>,
+    next_session_epoch: u64,
     commands: mpsc::Sender<RuntimeCommand>,
     receiver: mpsc::Receiver<RuntimeCommand>,
 }
@@ -563,10 +653,149 @@ where
         tokio::select! {
             command = runtime.receiver.recv() => match command {
                 Some(RuntimeCommand::Launch { request, reply }) => {
-                    let _ = reply.send(runtime.launch(request).await);
+                    let session_epoch = match runtime.reserve_launch(&request.profile_id) {
+                        Ok(session_epoch) => session_epoch,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
+                    };
+                    let coordination = runtime.coordination.clone();
+                    let sender = runtime.commands.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let mut request = request;
+                        let lease_result = match request.preacquired_lease.take() {
+                            Some(lease) => validate_preacquired(
+                                coordination.as_ref(),
+                                request.lease_scope.as_ref(),
+                                &lease,
+                            )
+                            .map(|()| Some(lease)),
+                            None => {
+                                acquire(
+                                    coordination.clone(),
+                                    request.lease_scope.as_ref(),
+                                    &request.idempotency_key,
+                                )
+                                .await
+                            }
+                        };
+                        let command = RuntimeCommand::LaunchAcquired {
+                            request,
+                            session_epoch,
+                            lease_result,
+                            coordination,
+                            reply,
+                        };
+                        if let Err(error) = sender.send(command).await {
+                            if let RuntimeCommand::LaunchAcquired {
+                                mut request,
+                                session_epoch: _,
+                                lease_result,
+                                coordination,
+                                ..
+                            } = error.0
+                            {
+                                if let Some(bridge) = request.proxy_bridge.take() {
+                                    let _ = bridge.stop().await;
+                                }
+                                if let Ok(Some(lease)) = lease_result {
+                                    let _ = release(coordination, &lease).await;
+                                }
+                            }
+                        }
+                    });
                 }
-                Some(RuntimeCommand::StopForSync { profile_id, reply }) => {
-                    let _ = reply.send(runtime.stop_for_sync(&profile_id).await);
+                Some(RuntimeCommand::LaunchAcquired {
+                    request,
+                    session_epoch,
+                    lease_result,
+                    coordination,
+                    reply,
+                }) => {
+                    let launch_is_current = runtime.launching.get(&request.profile_id)
+                        == Some(&session_epoch);
+                    let launch_profile_id = request.profile_id.clone();
+                    let launch_was_cancelled = runtime
+                        .cancelled_launches
+                        .remove(&(request.profile_id.clone(), session_epoch));
+                    let result = match (launch_is_current, launch_was_cancelled, lease_result) {
+                        (true, false, Ok(lease)) => {
+                            runtime.launch_process(request, lease, session_epoch)
+                        }
+                        (true, false, Err(error)) => Err((request, None, error)),
+                        (true, true, lease_result) => Err((
+                            request,
+                            lease_result.ok().flatten(),
+                            Problem::new(
+                                "profile_launch_cancelled",
+                                "Profile launch was cancelled before the browser started",
+                                409,
+                                "desktop",
+                            ),
+                        )),
+                        (false, _, lease_result) => Err((
+                            request,
+                            lease_result.ok().flatten(),
+                            Problem::new(
+                                "profile_launch_superseded",
+                                "Profile launch was superseded by a newer runtime session",
+                                409,
+                                "desktop",
+                            ),
+                        )),
+                    };
+                    match result {
+                        Ok(receipt) => {
+                            if runtime.launching.get(&launch_profile_id) == Some(&session_epoch) {
+                                runtime.launching.remove(&launch_profile_id);
+                            }
+                            let _ = reply.send(Ok(receipt));
+                        }
+                        Err((mut request, lease, error)) => {
+                            let profile_id = request.profile_id.clone();
+                            let sender = runtime.commands.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(bridge) = request.proxy_bridge.take() {
+                                    let _ = bridge.stop().await;
+                                }
+                                if let Some(lease) = lease.as_ref() {
+                                    let _ = release(coordination, lease).await;
+                                }
+                                let _ = sender
+                                    .send(RuntimeCommand::LaunchCleanupComplete {
+                                        profile_id,
+                                        session_epoch,
+                                        error,
+                                        reply,
+                                    })
+                                    .await;
+                            });
+                        }
+                    }
+                }
+                Some(RuntimeCommand::LaunchCleanupComplete {
+                    profile_id,
+                    session_epoch,
+                    error,
+                    reply,
+                }) => {
+                    if runtime.launching.get(&profile_id) == Some(&session_epoch) {
+                        runtime.launching.remove(&profile_id);
+                        runtime.cancelled_launches.remove(&(profile_id, session_epoch));
+                    }
+                    let _ = reply.send(Err(error));
+                }
+                Some(RuntimeCommand::StopForSync {
+                    profile_id,
+                    session_epoch,
+                    reply,
+                }) => {
+                    let _ = reply.send(
+                        runtime
+                            .stop_for_session(&profile_id, session_epoch)
+                            .await,
+                    );
                 }
                 Some(RuntimeCommand::HoldIdleProfileForSync {
                     profile_id,
@@ -582,11 +811,36 @@ where
                         lease,
                     ));
                 }
-                Some(RuntimeCommand::CompleteStop { profile_id, reply }) => {
-                    let _ = reply.send(runtime.complete_stop(&profile_id).await);
+                Some(RuntimeCommand::CompleteStop {
+                    profile_id,
+                    session_epoch,
+                    reply,
+                }) => {
+                    match runtime.begin_complete_stop(&profile_id, session_epoch) {
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                        Ok(None) => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        Ok(Some(lease)) => {
+                            let coordination = runtime.coordination.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let result = match release(coordination, &lease).await {
+                                    Err(error) if !lease_ownership_lost(&error) => Err(error),
+                                    _ => Ok(()),
+                                };
+                                let _ = reply.send(result);
+                            });
+                        }
+                    }
                 }
-                Some(RuntimeCommand::CompleteStopDetached { profile_id, reply }) => {
-                    runtime.complete_stop_detached(&profile_id);
+                Some(RuntimeCommand::CompleteStopDetached {
+                    profile_id,
+                    session_epoch,
+                    reply,
+                }) => {
+                    runtime.complete_stop_detached(&profile_id, session_epoch);
                     let _ = reply.send(());
                 }
                 Some(RuntimeCommand::ReleaseStoppedForRetry { profile_id, reply }) => {
@@ -665,12 +919,28 @@ where
                     let _ = reply.send(runtime.lifecycle.approve_executable(&path));
                 }
                 Some(RuntimeCommand::Shutdown { reply }) => {
-                    let result = runtime.shutdown().await;
-                    let _ = reply.send(result);
+                    let (mut result, leases) = runtime.shutdown().await;
+                    let coordination = runtime.coordination.clone();
+                    tauri::async_runtime::spawn(async move {
+                        for lease in leases {
+                            if let Err(error) = release(coordination.clone(), &lease).await
+                                && !lease_ownership_lost(&error)
+                                && result.is_ok()
+                            {
+                                result = Err(error);
+                            }
+                        }
+                        let _ = reply.send(result);
+                    });
                     break;
                 }
-                Some(RuntimeCommand::RenewalCompleted { profile_id, lease, result }) => {
-                    runtime.apply_renewal(profile_id, lease, result);
+                Some(RuntimeCommand::RenewalCompleted {
+                    profile_id,
+                    session_epoch,
+                    lease,
+                    result,
+                }) => {
+                    runtime.apply_renewal(profile_id, session_epoch, lease, result);
                 }
                 None => break,
             },
@@ -715,13 +985,24 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 running
                     .lease
                     .clone()
-                    .map(|lease| (profile_id.clone(), lease))
+                    .map(|lease| (profile_id.clone(), running.session_epoch, lease))
             })
             .collect::<Vec<_>>();
-        for (profile_id, lease) in leases {
-            if !self.pending_renewals.insert(profile_id.clone()) {
+        for (profile_id, session_epoch, lease) in leases {
+            let renewal_identity = (
+                session_epoch,
+                lease.fencing_token,
+                lease.owner_token.clone(),
+            );
+            if self
+                .pending_renewals
+                .get(&profile_id)
+                .is_some_and(|pending| pending == &renewal_identity)
+            {
                 continue;
             }
+            self.pending_renewals
+                .insert(profile_id.clone(), renewal_identity);
             let sender = self.commands.clone();
             let renewal_coordination = coordination.clone();
             let release_only = self.running.get(&profile_id).is_some_and(|running| {
@@ -740,6 +1021,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 let _ = sender
                     .send(RuntimeCommand::RenewalCompleted {
                         profile_id,
+                        session_epoch,
                         lease,
                         result,
                     })
@@ -751,16 +1033,27 @@ impl<C: ProcessController> ProfileRuntime<C> {
     fn apply_renewal(
         &mut self,
         profile_id: ProfileId,
+        session_epoch: u64,
         lease: LeaseGrant,
         result: Result<LeaseGrant, Problem>,
     ) {
-        self.pending_renewals.remove(&profile_id);
+        let renewal_identity = (
+            session_epoch,
+            lease.fencing_token,
+            lease.owner_token.clone(),
+        );
+        if self.pending_renewals.get(&profile_id) == Some(&renewal_identity) {
+            self.pending_renewals.remove(&profile_id);
+        }
         let Some(running) = self.running.get(&profile_id) else {
             return;
         };
-        if running.lease.as_ref().is_none_or(|current| {
-            current.fencing_token != lease.fencing_token || current.owner_token != lease.owner_token
-        }) {
+        if running.session_epoch != session_epoch
+            || running.lease.as_ref().is_none_or(|current| {
+                current.fencing_token != lease.fencing_token
+                    || current.owner_token != lease.owner_token
+            })
+        {
             return;
         }
         let process_stopped = running.process_stopped;
@@ -859,7 +1152,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
         &mut self,
         coordination: Option<ManagedCoordination>,
     ) -> Result<(), Problem> {
-        let same_actor_refresh = self.running.is_empty()
+        let same_actor_refresh = (self.running.is_empty() && self.launching.is_empty())
             || self
                 .coordination
                 .as_ref()
@@ -877,8 +1170,8 @@ impl<C: ProcessController> ProfileRuntime<C> {
         Ok(())
     }
 
-    async fn launch(&mut self, request: LaunchRequest) -> Result<LaunchReceipt, Problem> {
-        if self.running.contains_key(&request.profile_id) {
+    fn reserve_launch(&mut self, profile_id: &ProfileId) -> Result<u64, Problem> {
+        if self.running.contains_key(profile_id) {
             return Err(Problem::new(
                 "profile_already_running",
                 "Profile is already running",
@@ -886,25 +1179,87 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 "desktop",
             ));
         }
-        let lease = match request.preacquired_lease {
+        if self.launching.contains_key(profile_id) {
+            return Err(Problem::new(
+                "profile_launch_in_progress",
+                "Profile launch is already in progress",
+                409,
+                "desktop",
+            ));
+        }
+        let session_epoch = self.allocate_session_epoch()?;
+        self.launching.insert(profile_id.clone(), session_epoch);
+        Ok(session_epoch)
+    }
+
+    fn allocate_session_epoch(&mut self) -> Result<u64, Problem> {
+        let session_epoch = self.next_session_epoch;
+        self.next_session_epoch = session_epoch.checked_add(1).ok_or_else(|| {
+            Problem::new(
+                "runtime_session_epoch_exhausted",
+                "Runtime session generation is exhausted",
+                500,
+                "desktop",
+            )
+        })?;
+        Ok(session_epoch)
+    }
+
+    #[cfg(test)]
+    async fn launch(&mut self, mut request: LaunchRequest) -> Result<LaunchReceipt, Problem> {
+        let session_epoch = self.reserve_launch(&request.profile_id)?;
+        let coordination = self.coordination.clone();
+        let lease_result = match request.preacquired_lease.take() {
             Some(lease) => {
-                validate_preacquired(
-                    self.coordination.as_ref(),
-                    request.lease_scope.as_ref(),
-                    &lease,
-                )?;
-                Some(lease)
+                validate_preacquired(coordination.as_ref(), request.lease_scope.as_ref(), &lease)
+                    .map(|()| Some(lease))
             }
             None => {
                 acquire(
-                    self.coordination.clone(),
+                    coordination.clone(),
                     request.lease_scope.as_ref(),
                     &request.idempotency_key,
                 )
-                .await?
+                .await
             }
         };
-        let mut proxy_bridge = request.proxy_bridge;
+        self.launching.remove(&request.profile_id);
+        let result = match lease_result {
+            Ok(lease) => self.launch_process(request, lease, session_epoch),
+            Err(error) => Err((request, None, error)),
+        };
+        match result {
+            Ok(receipt) => Ok(receipt),
+            Err((mut request, lease, error)) => {
+                if let Some(bridge) = request.proxy_bridge.take() {
+                    let _ = bridge.stop().await;
+                }
+                if let Some(lease) = lease.as_ref() {
+                    let _ = release(coordination, lease).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn launch_process(
+        &mut self,
+        request: LaunchRequest,
+        lease: Option<LeaseGrant>,
+        session_epoch: u64,
+    ) -> Result<LaunchReceipt, (LaunchRequest, Option<LeaseGrant>, Problem)> {
+        if self.running.contains_key(&request.profile_id) {
+            return Err((
+                request,
+                lease,
+                Problem::new(
+                    "profile_already_running",
+                    "Profile is already running",
+                    409,
+                    "desktop",
+                ),
+            ));
+        };
         if request.specification.runtime == Runtime::Wayfern {
             let no_live_process = matches!(
                 self.lifecycle.reconcile_profile(&request.profile_path),
@@ -922,13 +1277,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                 )
             });
             if let Err(error) = prepared {
-                if let Some(bridge) = proxy_bridge.take() {
-                    let _ = bridge.stop().await;
-                }
-                if let Some(lease) = lease.as_ref() {
-                    let _ = release(self.coordination.clone(), lease).await;
-                }
-                return Err(error);
+                return Err((request, lease, error));
             }
         }
         let identity = match self
@@ -936,36 +1285,31 @@ impl<C: ProcessController> ProfileRuntime<C> {
             .launch(&request.profile_path, &request.specification)
         {
             Ok(identity) => identity,
-            Err(error) => {
-                if let Some(bridge) = proxy_bridge.take() {
-                    let _ = bridge.stop().await;
-                }
-                if let Some(lease) = lease.as_ref() {
-                    let _ = release(self.coordination.clone(), lease).await;
-                }
-                return Err(error);
-            }
+            Err(error) => return Err((request, lease, error)),
         };
         let write_authority = lease.as_ref().map(authority);
         self.running.insert(
             request.profile_id,
             RunningProfile {
                 profile_path: request.profile_path,
+                session_epoch,
                 lease,
                 was_launched: true,
                 process_stopped: false,
                 sync_pending: false,
                 sync_attempt_active: false,
                 sync_started_at: None,
-                proxy_bridge,
+                proxy_bridge: request.proxy_bridge,
             },
         );
         Ok(LaunchReceipt {
             process_id: identity.pid,
             write_authority,
+            session_epoch,
         })
     }
 
+    #[cfg(test)]
     async fn stop(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
         match self.stop_for_sync(profile_id).await {
             Ok(_) => self.complete_stop(profile_id).await,
@@ -977,7 +1321,36 @@ impl<C: ProcessController> ProfileRuntime<C> {
     }
 
     async fn stop_for_sync(&mut self, profile_id: &ProfileId) -> Result<StopReceipt, Problem> {
-        let (profile_path, lease, process_stopped, was_launched) = self
+        self.stop_for_session(profile_id, None).await
+    }
+
+    async fn stop_for_session(
+        &mut self,
+        profile_id: &ProfileId,
+        expected_session_epoch: Option<u64>,
+    ) -> Result<StopReceipt, Problem> {
+        if !self.running.contains_key(profile_id) {
+            if let Some(launch_epoch) = self.launching.get(profile_id).copied() {
+                if expected_session_epoch.is_some_and(|expected| expected != launch_epoch) {
+                    return Err(Problem::new(
+                        "profile_session_changed",
+                        "Profile runtime session changed before the stop request was handled",
+                        409,
+                        "desktop",
+                    )
+                    .retryable(true));
+                }
+                self.cancelled_launches
+                    .insert((profile_id.clone(), launch_epoch));
+            }
+            return Err(Problem::new(
+                "profile_not_running",
+                "Profile is not running",
+                409,
+                "desktop",
+            ));
+        }
+        let (profile_path, lease, process_stopped, was_launched, session_epoch) = self
             .running
             .get(profile_id)
             .map(|running| {
@@ -986,6 +1359,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                     running.lease.clone(),
                     running.process_stopped,
                     running.was_launched,
+                    running.session_epoch,
                 )
             })
             .ok_or_else(|| {
@@ -996,6 +1370,15 @@ impl<C: ProcessController> ProfileRuntime<C> {
                     "desktop",
                 )
             })?;
+        if expected_session_epoch.is_some_and(|expected| expected != session_epoch) {
+            return Err(Problem::new(
+                "profile_session_changed",
+                "Profile runtime session changed before the stop request was handled",
+                409,
+                "desktop",
+            )
+            .retryable(true));
+        }
         if !process_stopped {
             self.lifecycle.stop(&profile_path)?;
             if let Some(running) = self.running.get_mut(profile_id) {
@@ -1020,6 +1403,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
             profile_path,
             lease,
             was_launched,
+            session_epoch,
         })
     }
 
@@ -1051,6 +1435,7 @@ impl<C: ProcessController> ProfileRuntime<C> {
                         profile_path: running.profile_path.clone(),
                         lease: Some(held_lease.clone()),
                         was_launched: false,
+                        session_epoch: running.session_epoch,
                     });
                 }
             }
@@ -1062,15 +1447,18 @@ impl<C: ProcessController> ProfileRuntime<C> {
             ));
         }
         validate_preacquired(self.coordination.as_ref(), Some(&lease_scope), &lease)?;
+        let session_epoch = self.allocate_session_epoch()?;
         let receipt = StopReceipt {
             profile_path: profile_path.clone(),
             lease: Some(lease.clone()),
             was_launched: false,
+            session_epoch,
         };
         self.running.insert(
             profile_id,
             RunningProfile {
                 profile_path,
+                session_epoch,
                 lease: Some(lease),
                 was_launched: false,
                 process_stopped: true,
@@ -1083,10 +1471,27 @@ impl<C: ProcessController> ProfileRuntime<C> {
         Ok(receipt)
     }
 
-    async fn complete_stop(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
+    fn begin_complete_stop(
+        &mut self,
+        profile_id: &ProfileId,
+        expected_session_epoch: Option<u64>,
+    ) -> Result<Option<LeaseGrant>, Problem> {
+        if let Some(running) = self.running.get(profile_id) {
+            if expected_session_epoch.is_some_and(|expected| expected != running.session_epoch)
+                || !running.process_stopped
+                || !running.sync_pending
+            {
+                return Ok(None);
+            }
+        }
         let running = self.running.remove(profile_id);
         self.unexpectedly_stopped.remove(profile_id);
-        let Some(lease) = running.and_then(|running| running.lease) else {
+        Ok(running.and_then(|running| running.lease))
+    }
+
+    #[cfg(test)]
+    async fn complete_stop(&mut self, profile_id: &ProfileId) -> Result<(), Problem> {
+        let Some(lease) = self.begin_complete_stop(profile_id, None)? else {
             return Ok(());
         };
         if let Err(error) = release(self.coordination.clone(), &lease).await
@@ -1160,10 +1565,12 @@ impl<C: ProcessController> ProfileRuntime<C> {
         Ok(())
     }
 
-    fn complete_stop_detached(&mut self, profile_id: &ProfileId) {
-        let running = self.running.remove(profile_id);
-        self.unexpectedly_stopped.remove(profile_id);
-        let Some(lease) = running.and_then(|running| running.lease) else {
+    fn complete_stop_detached(
+        &mut self,
+        profile_id: &ProfileId,
+        expected_session_epoch: Option<u64>,
+    ) {
+        let Ok(Some(lease)) = self.begin_complete_stop(profile_id, expected_session_epoch) else {
             return;
         };
         let coordination = self.coordination.clone();
@@ -1337,20 +1744,25 @@ impl<C: ProcessController> ProfileRuntime<C> {
         }
     }
 
-    async fn shutdown(&mut self) -> Result<(), Problem> {
+    async fn shutdown(&mut self) -> (Result<(), Problem>, Vec<LeaseGrant>) {
         let profiles = self.running.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
+        let mut leases = Vec::new();
         for profile_id in profiles {
-            if let Err(error) = self.stop(&profile_id).await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+            match self.stop_for_sync(&profile_id).await {
+                Ok(receipt) => {
+                    match self.begin_complete_stop(&profile_id, Some(receipt.session_epoch)) {
+                        Ok(Some(lease)) => leases.push(lease),
+                        Ok(None) => {}
+                        Err(error) if first_error.is_none() => first_error = Some(error),
+                        Err(_) => {}
+                    }
+                }
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
             }
         }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Ok(())
+        (first_error.map_or(Ok(()), Err), leases)
     }
 }
 
@@ -1713,6 +2125,9 @@ mod tests {
         log: Arc<Mutex<Vec<&'static str>>>,
         renewals: Arc<AtomicUsize>,
         fail_acquire: AtomicBool,
+        block_acquire: AtomicBool,
+        acquire_started: Arc<Notify>,
+        acquire_release: Arc<Notify>,
         fail_renew: AtomicBool,
         block_renew: AtomicBool,
         renew_started: Arc<Notify>,
@@ -1733,6 +2148,9 @@ mod tests {
                 log,
                 renewals: Arc::new(AtomicUsize::new(0)),
                 fail_acquire: AtomicBool::new(false),
+                block_acquire: AtomicBool::new(false),
+                acquire_started: Arc::new(Notify::new()),
+                acquire_release: Arc::new(Notify::new()),
                 fail_renew: AtomicBool::new(false),
                 block_renew: AtomicBool::new(false),
                 renew_started: Arc::new(Notify::new()),
@@ -1741,7 +2159,9 @@ mod tests {
                 release_started: Arc::new(Notify::new()),
                 release_release: Arc::new(Notify::new()),
                 renew_error_code: Mutex::new(None),
-                lease_expires_at_ms: std::sync::atomic::AtomicU64::new(60_001),
+                lease_expires_at_ms: std::sync::atomic::AtomicU64::new(lease_valid_for(
+                    Duration::from_secs(60),
+                )),
                 release_failures: AtomicUsize::new(0),
                 release_error_code: Mutex::new(None),
                 manifests: Mutex::new(BTreeMap::new()),
@@ -1765,6 +2185,10 @@ mod tests {
             self.log.lock().unwrap().push("acquire");
             if self.fail_acquire.load(Ordering::SeqCst) {
                 return Err(unavailable());
+            }
+            if self.block_acquire.load(Ordering::SeqCst) {
+                self.acquire_started.notify_one();
+                self.acquire_release.notified().await;
             }
             Ok(LeaseGrant {
                 resource_id: resource_id.clone(),
@@ -2035,7 +2459,10 @@ mod tests {
             coordination: Some(coordination),
             running: HashMap::new(),
             unexpectedly_stopped: BTreeSet::new(),
-            pending_renewals: BTreeSet::new(),
+            pending_renewals: HashMap::new(),
+            launching: HashMap::new(),
+            cancelled_launches: BTreeSet::new(),
+            next_session_epoch: 1,
             commands,
             receiver,
         }
@@ -2087,7 +2514,7 @@ mod tests {
             .expect("lease renewal starts");
 
         let stop = tokio::time::timeout(
-            Duration::from_millis(250),
+            Duration::from_secs(2),
             handle.stop_for_sync(profile_id.clone()),
         )
         .await
@@ -2103,6 +2530,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocked_lease_acquire_does_not_block_other_runtime_commands() {
+        let existing_path = profile_path("acquire-head-of-line-existing");
+        let waiting_path = profile_path("acquire-head-of-line-waiting");
+        let controller = TestController::default();
+        let backend = Arc::new(TestCoordination::new(controller.log.clone()));
+        backend.block_acquire.store(true, Ordering::SeqCst);
+        let acquire_started = backend.acquire_started.clone();
+        let acquire_release = backend.acquire_release.clone();
+        let handle = spawn_profile_runtime(controller, Some(managed_coordination(backend)));
+        let existing_id = ProfileId::from_str("prf_local_existing").unwrap();
+        let waiting_id = ProfileId::from_str("prf_waiting_for_lease").unwrap();
+
+        handle
+            .launch(request_for(&existing_path, "prf_local_existing", false))
+            .await
+            .unwrap();
+        let waiting_handle = handle.clone();
+        let waiting_path_for_launch = waiting_path.clone();
+        let waiting_launch = tokio::spawn(async move {
+            waiting_handle
+                .launch(request_for(
+                    &waiting_path_for_launch,
+                    "prf_waiting_for_lease",
+                    true,
+                ))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), acquire_started.notified())
+            .await
+            .expect("lease acquire should start in its own task");
+
+        let stop_result =
+            tokio::time::timeout(Duration::from_secs(2), handle.stop(existing_id)).await;
+        acquire_release.notify_one();
+        waiting_launch.await.unwrap().unwrap();
+        handle.stop(waiting_id).await.unwrap();
+        handle.shutdown().await.unwrap();
+
+        assert!(
+            stop_result.is_ok(),
+            "runtime stop was blocked by lease acquire"
+        );
+        fs::remove_dir_all(existing_path).unwrap();
+        fs::remove_dir_all(waiting_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_during_lease_acquire_cancels_launch_before_process_start() {
+        let path = profile_path("cancel-launch-during-acquire");
+        let controller = TestController::default();
+        let backend = Arc::new(TestCoordination::new(controller.log.clone()));
+        backend.block_acquire.store(true, Ordering::SeqCst);
+        let acquire_started = backend.acquire_started.clone();
+        let acquire_release = backend.acquire_release.clone();
+        let handle = spawn_profile_runtime(controller.clone(), Some(managed_coordination(backend)));
+        let profile_id = ProfileId::from_str("prf_cancelled_launch").unwrap();
+
+        let launch_handle = handle.clone();
+        let launch_path = path.clone();
+        let launch = tokio::spawn(async move {
+            launch_handle
+                .launch(request_for(&launch_path, "prf_cancelled_launch", true))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), acquire_started.notified())
+            .await
+            .expect("lease acquire should start in its own task");
+
+        handle.stop(profile_id).await.unwrap();
+        acquire_release.notify_one();
+        let launch_error = launch.await.unwrap().unwrap_err();
+        handle.shutdown().await.unwrap();
+
+        assert_eq!(launch_error.code, "profile_launch_cancelled");
+        assert_eq!(controller.launches.load(Ordering::SeqCst), 0);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn stopped_local_lease_can_be_reused_for_reopen_without_api_reacquire() {
         let path = profile_path("reuse-stopped-lease");
         let controller = TestController::default();
@@ -2114,7 +2620,7 @@ mod tests {
         let handle = spawn_profile_runtime(controller.clone(), Some(managed_coordination(backend)));
         let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
 
-        handle.launch(request(&path, true)).await.unwrap();
+        let first_launch = handle.launch(request(&path, true)).await.unwrap();
         handle.stop_for_sync(profile_id.clone()).await.unwrap();
         let lease = handle
             .take_stopped_lease_for_reopen(profile_id.clone())
@@ -2125,7 +2631,39 @@ mod tests {
 
         let mut reopen = request(&path, true);
         reopen.preacquired_lease = Some(lease);
-        handle.launch(reopen).await.unwrap();
+        let second_launch = handle.launch(reopen).await.unwrap();
+        assert_ne!(first_launch.session_epoch, second_launch.session_epoch);
+
+        let stale_stop = match handle
+            .stop_for_session(profile_id.clone(), first_launch.session_epoch)
+            .await
+        {
+            Ok(_) => panic!("stale stop unexpectedly affected the reopened session"),
+            Err(error) => error,
+        };
+        assert_eq!(stale_stop.code, "profile_session_changed");
+        assert_eq!(
+            handle.active_profiles().await.unwrap(),
+            vec![profile_id.clone()]
+        );
+
+        handle
+            .stop_for_session(profile_id.clone(), second_launch.session_epoch)
+            .await
+            .unwrap();
+        handle
+            .complete_stop_for_session(profile_id.clone(), first_launch.session_epoch)
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![profile_id.clone()],
+            "a stale completion must not remove the newer stopped session"
+        );
+        handle
+            .complete_stop_for_session(profile_id.clone(), second_launch.session_epoch)
+            .await
+            .unwrap();
 
         assert_eq!(controller.launches.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -2145,6 +2683,7 @@ mod tests {
     #[tokio::test]
     async fn blocked_remote_release_does_not_block_runtime_after_local_stop() {
         let path = profile_path("detached-release");
+        let other_path = profile_path("release-does-not-block-other-profile");
         let controller = TestController::default();
         let log = controller.log.clone();
         let backend = Arc::new(TestCoordination::new(log));
@@ -2156,25 +2695,36 @@ mod tests {
         let release_release = backend.release_release.clone();
         let handle = spawn_profile_runtime(controller.clone(), Some(managed_coordination(backend)));
         let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        let other_id = ProfileId::from_str("prf_local_other").unwrap();
 
         handle.launch(request(&path, true)).await.unwrap();
+        handle
+            .launch(request_for(&other_path, "prf_local_other", false))
+            .await
+            .unwrap();
         handle.stop_for_sync(profile_id.clone()).await.unwrap();
-        tokio::time::timeout(
-            Duration::from_millis(250),
-            handle.complete_stop_detached(profile_id.clone()),
-        )
-        .await
-        .expect("local completion does not wait for remote lease release")
-        .unwrap();
+        let completion_handle = handle.clone();
+        let completion =
+            tokio::spawn(async move { completion_handle.complete_stop(profile_id).await });
         tokio::time::timeout(Duration::from_secs(2), release_started.notified())
             .await
             .expect("background release was started");
 
-        assert!(handle.running_profiles().await.unwrap().is_empty());
+        assert_eq!(
+            handle.running_profiles().await.unwrap(),
+            vec![other_id.clone()]
+        );
         assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+        let other_stop = tokio::time::timeout(Duration::from_secs(2), handle.stop(other_id)).await;
         release_release.notify_one();
+        completion.await.unwrap().unwrap();
+        assert!(
+            other_stop.is_ok(),
+            "remote release blocked another profile stop"
+        );
         handle.shutdown().await.unwrap();
         fs::remove_dir_all(path).unwrap();
+        fs::remove_dir_all(other_path).unwrap();
     }
 
     #[tokio::test]
@@ -2316,6 +2866,8 @@ mod tests {
             .finish_sync_result(profile_id.clone(), Err(injected))
             .await;
         assert_eq!(result.unwrap_err().code, "injected_sync_failure");
+        handle.queue_sync_retry(profile_id.clone()).await;
+        handle.queue_sync_retry(profile_id.clone()).await;
         assert!(handle.running_profiles().await.unwrap().is_empty());
         assert!(handle.active_profiles().await.unwrap().is_empty());
         assert_eq!(
@@ -2901,6 +3453,53 @@ mod tests {
         runtime.renew().await;
 
         assert!(log.lock().unwrap().contains(&"stop"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_renewal_completion_does_not_clear_current_lease_pending_state() {
+        let path = profile_path("stale-renewal-completion");
+        let controller = TestController::default();
+        let backend = Arc::new(TestCoordination::new(controller.log.clone()));
+        let mut runtime = runtime(controller, managed_coordination(backend));
+        let profile_id = ProfileId::from_str("prf_runtime_1").unwrap();
+        runtime.launch(request(&path, true)).await.unwrap();
+
+        let old_session_epoch = runtime.running[&profile_id].session_epoch;
+        runtime.stop_for_sync(&profile_id).await.unwrap();
+        let reused_lease = runtime
+            .take_stopped_lease_for_reopen(&profile_id)
+            .unwrap()
+            .unwrap();
+        let mut reopen = request(&path, true);
+        reopen.preacquired_lease = Some(reused_lease.clone());
+        runtime.launch(reopen).await.unwrap();
+
+        let current = runtime.running.get(&profile_id).unwrap();
+        let current_session_epoch = current.session_epoch;
+        assert_ne!(old_session_epoch, current_session_epoch);
+        let pending_identity = (
+            current_session_epoch,
+            reused_lease.fencing_token,
+            reused_lease.owner_token.clone(),
+        );
+        runtime
+            .pending_renewals
+            .insert(profile_id.clone(), pending_identity.clone());
+
+        runtime.apply_renewal(
+            profile_id.clone(),
+            old_session_epoch,
+            reused_lease,
+            Err(Problem::new("temporary_failure", "retry", 503, "test").retryable(true)),
+        );
+
+        assert_eq!(
+            runtime.pending_renewals.get(&profile_id),
+            Some(&pending_identity)
+        );
+        assert!(!runtime.running[&profile_id].process_stopped);
+        runtime.stop(&profile_id).await.unwrap();
         fs::remove_dir_all(path).unwrap();
     }
 

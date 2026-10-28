@@ -9,6 +9,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const NAMESPACE: &str = "buglogin-auth";
 
+#[cfg(test)]
 pub struct StoredBearer {
     bearer: String,
     version: SecretVersion,
@@ -64,6 +65,7 @@ impl Drop for StoredAuthSession {
     }
 }
 
+#[cfg(test)]
 impl Drop for StoredBearer {
     fn drop(&mut self) {
         self.bearer.zeroize();
@@ -71,6 +73,7 @@ impl Drop for StoredBearer {
 }
 
 impl StoredAuthSession {
+    #[cfg(test)]
     pub fn access_token(&self) -> &str {
         &self.access_token
     }
@@ -112,16 +115,15 @@ impl std::fmt::Debug for StoredAuthSession {
     }
 }
 
+#[cfg(test)]
 impl StoredBearer {
+    #[cfg(test)]
     pub fn bearer(&self) -> &str {
         &self.bearer
     }
-
-    pub const fn version(&self) -> SecretVersion {
-        self.version
-    }
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for StoredBearer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -145,6 +147,7 @@ impl AuthVault<NativeVault> {
 }
 
 impl<V: OsVault> AuthVault<V> {
+    #[cfg(test)]
     pub const fn new(vault: V) -> Self {
         Self { vault }
     }
@@ -356,6 +359,7 @@ impl<V: OsVault> AuthVault<V> {
         Ok(current)
     }
 
+    #[cfg(test)]
     pub fn load_bearer(
         &self,
         device_id: &str,
@@ -382,6 +386,7 @@ impl<V: OsVault> AuthVault<V> {
         }
     }
 
+    #[cfg(test)]
     pub fn store_bearer(
         &mut self,
         device_id: &str,
@@ -395,6 +400,7 @@ impl<V: OsVault> AuthVault<V> {
             .map_err(|error| vault_problem(error, "Unable to store bearer", correlation_id))
     }
 
+    #[cfg(test)]
     pub fn replace_bearer(
         &mut self,
         device_id: &str,
@@ -574,6 +580,7 @@ pub(crate) fn pending_sso_matches(
     !expected_state.is_empty() && expires_at > now && expected_state == callback_state
 }
 
+#[cfg(test)]
 fn secret_value(bearer: &str, correlation_id: &str) -> Result<SecretValue, Problem> {
     SecretValue::new(bearer.as_bytes().to_vec())
         .map_err(|error| vault_problem(error, "Bearer is invalid", correlation_id))

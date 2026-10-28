@@ -230,7 +230,7 @@ public static class BugLoginJob {
 '@
 $null = [BugLoginJob]::Create()
 $launchArguments = $env:BUGLOGIN_ARGUMENTS
-if ($env:BUGLOGIN_APPLY_WINDOW_IDENTITY -eq '1' -and $launchArguments -notmatch '(^|\s)--headless(?:\s|$)') {
+if ($env:BUGLOGIN_APPLY_WINDOW_IDENTITY -eq '1' -and $launchArguments -notmatch '(^|\s)--headless(?:=\S+)?(?:\s|$)') {
     $launchArguments += ' --start-maximized'
 }
 $process = Start-Process -FilePath $env:BUGLOGIN_EXECUTABLE -ArgumentList $launchArguments -PassThru

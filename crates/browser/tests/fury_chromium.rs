@@ -3,7 +3,7 @@
 use buglogin_browser::process::{ApprovedExecutable, ProcessController};
 use buglogin_browser::runtime::{
     RuntimeAdapter, RuntimeBinary,
-    independent_chromium::fury::{FuryChromiumAdapter, FuryIdentity},
+    independent_chromium::fury::{FuryCoreRuntimeAdapter, FuryIdentity},
 };
 use buglogin_domain::entities::{FingerprintOperatingSystem, ProfileFingerprintTarget};
 use serde_json::Value;
@@ -77,7 +77,7 @@ fn identity() -> FuryIdentity {
 fn native_identity_persists_and_does_not_expose_its_config_in_argv() {
     let fixture = Fixture::new();
     let original = identity();
-    let adapter = FuryChromiumAdapter::new(original.clone()).unwrap();
+    let adapter = FuryCoreRuntimeAdapter::new(original.clone()).unwrap();
     let binary = adapter.validate_binary(&fixture.binary()).unwrap();
     let spec = adapter
         .launch_specification(&binary, &fixture.0, &["--headless=new".into()])
@@ -119,7 +119,7 @@ fn native_identity_persists_and_does_not_expose_its_config_in_argv() {
 #[test]
 fn artifact_replacement_after_validation_is_rejected_at_process_launch() {
     let fixture = Fixture::new();
-    let adapter = FuryChromiumAdapter::new(identity()).unwrap();
+    let adapter = FuryCoreRuntimeAdapter::new(identity()).unwrap();
     let binary = adapter.validate_binary(&fixture.binary()).unwrap();
     let specification = adapter
         .launch_specification(&binary, &fixture.0, &[])
@@ -128,7 +128,7 @@ fn artifact_replacement_after_validation_is_rejected_at_process_launch() {
 
     let approved = ApprovedExecutable::new(&fixture.0.join("browser")).unwrap();
     let controller =
-        buglogin_browser::runtime::independent_chromium::fury::FuryProcessController::new([
+        buglogin_browser::runtime::independent_chromium::fury::FuryCoreProcessController::new([
             approved,
         ]);
     assert_eq!(
@@ -140,12 +140,12 @@ fn artifact_replacement_after_validation_is_rejected_at_process_launch() {
 #[test]
 fn conflicting_or_modified_identity_never_silently_regenerates() {
     let fixture = Fixture::new();
-    let adapter = FuryChromiumAdapter::new(identity()).unwrap();
+    let adapter = FuryCoreRuntimeAdapter::new(identity()).unwrap();
     let binary = adapter.validate_binary(&fixture.binary()).unwrap();
     adapter
         .launch_specification(&binary, &fixture.0, &[])
         .unwrap();
-    let other = FuryChromiumAdapter::new(identity()).unwrap();
+    let other = FuryCoreRuntimeAdapter::new(identity()).unwrap();
     assert_eq!(
         other
             .launch_specification(&binary, &fixture.0, &[])
@@ -166,7 +166,7 @@ fn conflicting_or_modified_identity_never_silently_regenerates() {
 #[test]
 fn transport_and_identity_switches_cannot_be_injected() {
     let fixture = Fixture::new();
-    let adapter = FuryChromiumAdapter::new(identity()).unwrap();
+    let adapter = FuryCoreRuntimeAdapter::new(identity()).unwrap();
     let binary = adapter.validate_binary(&fixture.binary()).unwrap();
     for argument in [
         "--fury-fp-fd=3",
@@ -190,7 +190,7 @@ fn transport_and_identity_switches_cannot_be_injected() {
 #[test]
 fn foreign_profiles_are_untouched_and_invalid_configs_rejected() {
     let fixture = Fixture::new();
-    let adapter = FuryChromiumAdapter::new(identity()).unwrap();
+    let adapter = FuryCoreRuntimeAdapter::new(identity()).unwrap();
     let binary = adapter.validate_binary(&fixture.binary()).unwrap();
     fs::write(fixture.0.join("Local State"), b"existing-data").unwrap();
     assert_eq!(
@@ -230,7 +230,7 @@ fn foreign_profiles_are_untouched_and_invalid_configs_rejected() {
 #[test]
 fn pinned_core_contract_is_required_and_profile_noise_is_stable() {
     let fixture = Fixture::new();
-    let adapter = FuryChromiumAdapter::new(identity()).unwrap();
+    let adapter = FuryCoreRuntimeAdapter::new(identity()).unwrap();
     let binary = adapter.validate_binary(&fixture.binary()).unwrap();
     adapter
         .launch_specification(&binary, &fixture.0, &[])

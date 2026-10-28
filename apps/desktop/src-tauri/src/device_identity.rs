@@ -7,6 +7,7 @@ use buglogin_storage::{
 };
 use getrandom::fill;
 
+#[cfg(test)]
 const NAMESPACE: &str = "buglogin-device-identity";
 const RECORD_NAME: &str = "stable-id";
 
@@ -23,12 +24,14 @@ impl DeviceIdentityVault<NativeVault> {
 }
 
 impl<V: OsVault> DeviceIdentityVault<V> {
+    #[cfg(test)]
     pub const fn new(vault: V) -> Self {
         Self {
             vault: Mutex::new(vault),
         }
     }
 
+    #[cfg(test)]
     pub fn load_or_create(&self, correlation_id: &str) -> Result<String, Problem> {
         self.load_or_create_in_namespace(NAMESPACE, correlation_id)
     }

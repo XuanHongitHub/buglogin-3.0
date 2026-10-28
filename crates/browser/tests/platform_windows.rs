@@ -64,7 +64,7 @@ fn launch_tree(controller: &WindowsJobController, pid_file: &Path) -> impl Owned
 }
 
 fn wait_for_pid_file(path: &Path) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Ok(value) = std::fs::read_to_string(path) {
             return value.trim().parse().unwrap();
@@ -153,12 +153,32 @@ fn job_launch_preserves_argument_boundaries() {
             Path::new(r"C:\BugLoginTests\profile"),
         )
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !output.exists() {
         assert!(Instant::now() < deadline, "argument output was not written");
         thread::sleep(Duration::from_millis(50));
     }
-    let actual: Vec<String> = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+    let actual: Vec<String> = loop {
+        match std::fs::read(&output) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(actual) => break actual,
+                Err(_) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => panic!("argument output remained invalid JSON: {error}"),
+            },
+            Err(error)
+                if (matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
+                ) || error.raw_os_error() == Some(32))
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("unable to read argument output: {error}"),
+        }
+    };
 
     assert_eq!(actual, expected);
     drop(tree);

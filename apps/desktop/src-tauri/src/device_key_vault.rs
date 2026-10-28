@@ -24,6 +24,7 @@ impl DeviceKeyVault<NativeVault> {
 }
 
 impl<V: OsVault> DeviceKeyVault<V> {
+    #[cfg(test)]
     pub const fn new(vault: V) -> Self {
         Self {
             vault: Mutex::new(vault),
