@@ -23,8 +23,16 @@ use zeroize::Zeroizing;
 
 const MAX_INLINE_RUNTIME_CONFIG_BYTES: usize = 24 * 1024;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .max_blocking_threads(32)
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let production = production_mode()?;
     if production && env::var_os("BUGLOGIN_DATA_ROOT").is_some() {
         return Err("BUGLOGIN_DATA_ROOT is forbidden in production".into());
