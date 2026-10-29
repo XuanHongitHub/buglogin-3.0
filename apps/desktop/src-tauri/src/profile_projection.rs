@@ -3213,6 +3213,7 @@ fn verify_decrypted_generation(
         ));
     }
     validate_local_projection_objects(generation_path, &marker.local_objects)?;
+    validate_local_projection_paths_for_manifest(manifest, &marker.local_objects)?;
     let mut expected_paths: std::collections::HashSet<&str> = marker
         .local_objects
         .iter()
@@ -3240,6 +3241,39 @@ fn verify_decrypted_generation(
         root_checksum: manifest.root_checksum.clone(),
         path: generation_path.to_path_buf(),
     })
+}
+
+fn validate_local_projection_paths_for_manifest(
+    manifest: &SyncManifest,
+    local_objects: &[PayloadObject],
+) -> Result<(), Problem> {
+    let clear_metadata = proxy_metadata_keys(manifest);
+    let proxy_envelopes = proxy_credential_keys(manifest);
+    let chunk_object_keys = manifest
+        .file_chunks
+        .iter()
+        .flat_map(|file| file.chunks.iter().map(|chunk| chunk.object.key.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut expected = std::collections::BTreeSet::new();
+    for object in &manifest.objects {
+        if !should_download_manifest_object(&object.key, &clear_metadata, &proxy_envelopes)
+            && !chunk_object_keys.contains(object.key.as_str())
+        {
+            expected.insert(object.key.as_str());
+        }
+    }
+    expected.extend(manifest.file_chunks.iter().map(|file| file.path.as_str()));
+    let actual = local_objects
+        .iter()
+        .map(|object| object.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if actual != expected {
+        return Err(problem(
+            "profile_projection_marker_invalid",
+            "Profile projection marker paths do not match the manifest payload",
+        ));
+    }
+    Ok(())
 }
 
 fn local_generation_directory_exists(path: &Path) -> Result<bool, Problem> {
@@ -7000,6 +7034,43 @@ mod tests {
         assert_eq!(
             fs::read(receipt.path.join("Default/untracked")).unwrap(),
             b"local data"
+        );
+        drop(projection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_generation_rejects_marker_paths_that_disagree_with_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "buglogin-projection-marker-manifest-paths-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let projection = ProfileProjection::open(&root).unwrap();
+        let workspace = WorkspaceId::new("ws_marker_manifest_paths").unwrap();
+        let resource = ResourceId::new("res_marker_manifest_paths").unwrap();
+        let profile = ProfileId::new("prf_marker_manifest_paths").unwrap();
+        let manifest = recovery_manifest(&workspace, &resource, 1, None, b"manifest bytes");
+        let receipt = projection
+            .publish_decrypted(
+                &profile,
+                &manifest,
+                vec![("Default/Cookies".to_owned(), b"manifest bytes".to_vec())],
+            )
+            .unwrap();
+        let marker_path = receipt.path.join(MARKER);
+        let mut marker: EncryptedProjectionMarker =
+            serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+        marker.local_objects[0] = PayloadObject::new("Default/Local", b"local bytes").unwrap();
+        fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+
+        let error = verify_decrypted_generation(&profile, &manifest, &receipt.path).unwrap_err();
+
+        assert_eq!(error.code, "profile_projection_marker_invalid");
+        assert!(!error.retryable);
+        assert_eq!(
+            fs::read(receipt.path.join("Default/Cookies")).unwrap(),
+            b"manifest bytes"
         );
         drop(projection);
         fs::remove_dir_all(root).unwrap();

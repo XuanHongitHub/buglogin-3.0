@@ -1,1 +1,4 @@
 jobs = 2
+target-dir = "G:/buglogin-target-clean"
+
+# Build policy: keep one disposable Cargo target on G:; do not use D: or E: targets.

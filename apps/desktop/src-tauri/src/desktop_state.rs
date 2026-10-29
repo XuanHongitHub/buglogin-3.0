@@ -2557,7 +2557,14 @@ impl ProductionDesktopState {
         token: DeviceSessionTokens,
         correlation_id: &str,
     ) -> Result<DesktopAuthStatus, Problem> {
-        self.persist_session(&token, correlation_id)?;
+        if crate::runtime_config::qa_session_in_memory_only() {
+            tauri_plugin_log::log::info!(
+                "Local QA auth session persistence skipped; session remains in memory only (correlation_id={})",
+                correlation_id
+            );
+        } else {
+            self.persist_session(&token, correlation_id)?;
+        }
         self.client
             .replace_refreshed_token(token.access_token.clone())?;
         *self

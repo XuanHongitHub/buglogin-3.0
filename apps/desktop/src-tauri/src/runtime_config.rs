@@ -12,6 +12,7 @@ use crate::app_instance::AppInstance;
 use crate::device_identity::DeviceIdentityVault;
 
 const PRODUCTION_API_BASE_URL: &str = "https://api3.buglogin.com";
+const QA_DEVICE_ID_ENV: &str = "BUGLOGIN_QA_DEVICE_ID";
 const EMBEDDED_RUNTIME_TRUST_KEYS_JSON: &str = include_str!("../runtime-trust-keys.json");
 const EMBEDDED_RUNTIME_CATALOG_JSON: &str = include_str!("../runtime-catalog.json");
 
@@ -255,8 +256,15 @@ pub fn open() -> Result<DesktopBootstrap, Problem> {
                 } else {
                     "buglogin-device-identity"
                 });
-            let device_id = identity_vault
-                .load_or_create_in_namespace(&identity_namespace, "desktop-bootstrap")?;
+            let device_id = match qa_device_id_override(
+                Some(&api_base_url),
+                cfg!(debug_assertions),
+                env::var(QA_DEVICE_ID_ENV).ok(),
+            )? {
+                Some(device_id) => device_id,
+                None => identity_vault
+                    .load_or_create_in_namespace(&identity_namespace, "desktop-bootstrap")?,
+            };
             (
                 None,
                 cache_root,
@@ -318,6 +326,35 @@ fn runtime_environment_overrides_allowed(
 ) -> bool {
     debug_build
         && (mode == DeploymentMode::Local || api_base_url.is_some_and(is_local_development_api_url))
+}
+
+fn qa_device_id_override(
+    api_base_url: Option<&str>,
+    debug_build: bool,
+    override_value: Option<String>,
+) -> Result<Option<String>, Problem> {
+    let Some(value) = override_value else {
+        return Ok(None);
+    };
+    if !debug_build || !api_base_url.is_some_and(is_local_development_api_url) {
+        return Err(problem(
+            "qa_device_id_override_forbidden",
+            "QA device identity overrides are allowed only with a local API in debug builds",
+            503,
+        ));
+    }
+    buglogin_domain::ids::DeviceId::new(value.clone())
+        .map_err(|_| problem("qa_device_id_invalid", "QA device identity is invalid", 400))?;
+    Ok(Some(value))
+}
+
+pub(crate) fn qa_session_in_memory_only() -> bool {
+    qa_device_id_override(
+        env::var("BUGLOGIN_API_BASE_URL").ok().as_deref(),
+        cfg!(debug_assertions),
+        env::var(QA_DEVICE_ID_ENV).ok(),
+    )
+    .is_ok_and(|device_id| device_id.is_some())
 }
 
 fn runtime_target(
@@ -476,7 +513,8 @@ mod tests {
     use super::{
         DeploymentMode, fallback_runtime_catalog, is_local_development_api_url,
         is_production_device_verification_url, optional_api_token, pinned_runtime_verifier,
-        runtime_environment_overrides_allowed, valid_checksum, validate_production_api_url,
+        qa_device_id_override, runtime_environment_overrides_allowed, valid_checksum,
+        validate_production_api_url,
     };
 
     #[test]
@@ -605,6 +643,49 @@ mod tests {
         assert_eq!(
             optional_api_token(Some("session-token".to_owned())),
             Some("session-token".to_owned())
+        );
+    }
+
+    #[test]
+    fn qa_device_identity_override_is_limited_to_debug_local_api() {
+        assert_eq!(
+            qa_device_id_override(
+                Some("http://127.0.0.1:12345"),
+                true,
+                Some("qa-device-a".to_owned())
+            )
+            .unwrap(),
+            Some("qa-device-a".to_owned())
+        );
+        assert_eq!(
+            qa_device_id_override(
+                Some("https://api3.buglogin.com"),
+                true,
+                Some("qa-device-a".to_owned())
+            )
+            .unwrap_err()
+            .code,
+            "qa_device_id_override_forbidden"
+        );
+        assert_eq!(
+            qa_device_id_override(
+                Some("http://127.0.0.1:12345"),
+                false,
+                Some("qa-device-a".to_owned())
+            )
+            .unwrap_err()
+            .code,
+            "qa_device_id_override_forbidden"
+        );
+        assert_eq!(
+            qa_device_id_override(
+                Some("http://127.0.0.1:12345"),
+                true,
+                Some("bad id".to_owned())
+            )
+            .unwrap_err()
+            .code,
+            "qa_device_id_invalid"
         );
     }
 

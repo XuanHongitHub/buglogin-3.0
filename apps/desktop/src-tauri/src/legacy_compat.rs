@@ -1026,10 +1026,7 @@ async fn count_profiles_for_workspace(state: &DesktopState, workspace_id: &str) 
         if let Some(ref c) = cursor {
             payload["cursor"] = json!(c);
         }
-        match state
-            .invoke("profile_list", &correlation_id, None, payload)
-            .await
-        {
+        match Box::pin(state.invoke("profile_list", &correlation_id, None, payload)).await {
             Ok(p_resp) => {
                 let items = p_resp.data.get("items")?.as_array()?;
                 total = total.checked_add(items.len())?;
@@ -1056,9 +1053,9 @@ async fn get_available_workspace_records(
 ) -> Result<(Option<String>, Vec<Value>), Problem> {
     let account_id = match state.auth_status()? {
         DesktopAuthStatus::Authenticated => {
-            let result = state
-                .invoke("account_get", &request_id("account-get"), None, json!({}))
-                .await?;
+            let result =
+                Box::pin(state.invoke("account_get", &request_id("account-get"), None, json!({})))
+                    .await?;
             let account_id = result
                 .data
                 .get("accountId")
@@ -1113,14 +1110,13 @@ async fn get_available_workspace_records(
     let workspace_pages: Vec<Result<(String, String, Option<String>, Vec<Value>), Problem>> =
         stream::iter(organization_rows.into_iter().map(
             |(org_id, org_name, owner_id)| async move {
-                let response = state
-                    .invoke(
-                        "workspace_list",
-                        &request_id("workspace-list"),
-                        None,
-                        json!({ "organizationId": org_id }),
-                    )
-                    .await?;
+                let response = Box::pin(state.invoke(
+                    "workspace_list",
+                    &request_id("workspace-list"),
+                    None,
+                    json!({ "organizationId": org_id }),
+                ))
+                .await?;
                 let items = response
                     .data
                     .get("items")
@@ -1163,29 +1159,28 @@ async fn get_available_workspace_records(
                     if is_org_owner || workspace_id.is_empty() {
                         return None;
                     }
-                    state
-                        .invoke(
-                            "member_list",
-                            &request_id("member-list"),
-                            None,
-                            json!({ "workspaceId": workspace_id }),
-                        )
-                        .await
-                        .ok()
-                        .and_then(|response| response.data.get("items")?.as_array().cloned())
-                        .and_then(|members| {
-                            members.into_iter().find_map(|member| {
-                                (member.get("accountId").and_then(Value::as_str)
-                                    == account_id.as_deref())
-                                .then(|| {
-                                    member
-                                        .get("role")
-                                        .and_then(Value::as_str)
-                                        .map(str::to_owned)
-                                })
-                                .flatten()
+                    Box::pin(state.invoke(
+                        "member_list",
+                        &request_id("member-list"),
+                        None,
+                        json!({ "workspaceId": workspace_id }),
+                    ))
+                    .await
+                    .ok()
+                    .and_then(|response| response.data.get("items")?.as_array().cloned())
+                    .and_then(|members| {
+                        members.into_iter().find_map(|member| {
+                            (member.get("accountId").and_then(Value::as_str)
+                                == account_id.as_deref())
+                            .then(|| {
+                                member
+                                    .get("role")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
                             })
+                            .flatten()
                         })
+                    })
                 };
                 let count_future = async {
                     if workspace_id.is_empty() {
@@ -2116,6 +2111,15 @@ fn local_profile_settings_base() -> Option<PathBuf> {
 }
 
 fn legacy_profile(profile: &Value) -> Value {
+    // Canonical profile list responses wrap each record in `value` together
+    // with its schema revision.  The legacy Donut surface consumes the value
+    // object directly, so unwrap it before projecting fields such as runtime
+    // and runtimeVersion.  Keeping the flat fallback preserves compatibility
+    // with older command responses and local fixtures.
+    let profile = profile
+        .get("value")
+        .filter(|value| value.is_object())
+        .unwrap_or(profile);
     let state = profile.get("state").cloned().unwrap_or(Value::Null);
     let runtime = profile.get("runtime").cloned().unwrap_or(Value::Null);
     let version = profile
@@ -2570,6 +2574,25 @@ mod tests {
         assert_eq!(profile["group_id"], "group:1");
         assert_eq!(profile["sync_mode"], "Regular");
         assert!(profile.get("process_id").is_none());
+    }
+
+    #[test]
+    fn wrapped_canonical_profile_maps_runtime_for_launch() {
+        let profile = legacy_profile(&json!({
+            "schemaVersion": 2,
+            "revision": 3,
+            "value": {
+                "id": "profile:wrapped",
+                "name": "Wrapped",
+                "runtime": "wayfern",
+                "runtimeVersion": "155.0.8059.79",
+                "state": "ready",
+                "syncMode": "managed"
+            }
+        }));
+        assert_eq!(profile["browser"], "wayfern");
+        assert_eq!(profile["version"], "155.0.8059.79");
+        assert_eq!(profile["state"], "ready");
     }
 
     #[test]

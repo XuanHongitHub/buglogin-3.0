@@ -59,6 +59,7 @@ foreach ($instanceId in @($InstanceA, $InstanceB)) {
         BUGLOGIN_API_BASE_URL = $ApiBaseUrl.TrimEnd('/')
         BUGLOGIN_DEPLOYMENT_MODE = 'production'
         BUGLOGIN_PROFILE_CACHE_ROOT = $qaProfileCacheRoot
+        BUGLOGIN_QA_DEVICE_ID = "qa-$instanceId"
         WEBVIEW2_USER_DATA_FOLDER = (Join-Path $env:TEMP "buglogin-qa-webview\$instanceId")
     }
     $webViewPort = $null
